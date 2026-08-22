@@ -129,13 +129,31 @@ sudo docker push ghcr.io/ccny-glasslab/glasslab-agent-api:0.1.0
 sudo docker push ghcr.io/ccny-glasslab/glasslab-titanic-runner:0.1.0
 ```
 
-2. Copy the example secret manifest and replace the placeholder values.
+2. Create the ignored live Secret manifest from the documentation-only
+   contract.
 
 ```bash
 cd /home/glasslab/cluster-config
-cp kubeadm/agent-stack/12-agent-secrets.example.yaml kubeadm/agent-stack/12-agent-secrets.yaml
+install -m 600 /dev/null kubeadm/agent-stack/12-agent-secrets.yaml
 vi kubeadm/agent-stack/12-agent-secrets.yaml
 ```
+
+The tracked `12-agent-secrets.example.yaml` file records the required resource
+identity and key names, but is deliberately not a Kubernetes manifest and must
+not be copied or applied. The live file must be a single `v1` `Secret` named
+`glasslab-agent-secrets` in the `glasslab-agents` namespace and must provide a
+non-placeholder `VLLM_API_KEY` along with the other keys listed by the contract.
+
+The default ignored path above is used automatically. To use another live
+manifest, set its path explicitly:
+
+```bash
+export GLASSLAB_VLLM_SECRET_FILE=/secure/path/agent-secrets.local.yaml
+```
+
+Both deployment helpers also accept the exact pre-existing cluster Secret when
+its `VLLM_API_KEY` contains a non-placeholder value. They validate the local or
+cluster source before applying any workload resources.
 
 3. Confirm the dataset PVC plan and populate the Titanic files after the claim binds.
 

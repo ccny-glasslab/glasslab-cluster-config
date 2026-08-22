@@ -9,6 +9,21 @@ if [[ "$VLLM_API_KEY" == *$'\n'* || "$VLLM_API_KEY" == *$'\r'* ]]; then
   exit 1
 fi
 
+if ! printf '%s' "$VLLM_API_KEY" | python3 -c '
+import sys
+
+normalized = sys.stdin.read().strip().lower()
+if not normalized or normalized.startswith("change-me") or normalized in {
+    "redacted",
+    "<redacted>",
+    "replace-me",
+}:
+    raise SystemExit(1)
+'; then
+  printf 'VLLM_API_KEY must contain a non-placeholder value\n' >&2
+  exit 1
+fi
+
 umask 077
 CURL_CONFIG="$(mktemp)"
 cleanup() {

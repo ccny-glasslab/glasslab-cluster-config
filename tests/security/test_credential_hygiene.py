@@ -331,6 +331,7 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
         / "research-orchestrator"
         / "11-secret.example.yaml",
     )
+    AGENT_STACK_DEPLOY_SCRIPT = REPOSITORY_ROOT / "scripts" / "deploy-agent-stack.sh"
     VLLM_DEPLOY_SCRIPT = REPOSITORY_ROOT / "scripts" / "deploy-vllm.sh"
     VLLM_TEST_SCRIPT = REPOSITORY_ROOT / "scripts" / "test-vllm.sh"
     GPU_RUNNER_DIR = REPOSITORY_ROOT / "kubeadm" / "glasslab-v2" / "gpu-runner"
@@ -350,8 +351,10 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
     def run_vllm_deploy(
         self,
         *,
+        deploy_script: Path | None = None,
         secret_file: Path | None = None,
         cluster_secret_exists: bool = False,
+        cluster_secret_value: str | None = None,
         applied_secret_has_key: bool = True,
     ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         with tempfile.TemporaryDirectory() as directory:
@@ -361,7 +364,8 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
             calls_path = fixture_root / "kubectl-calls"
             live_key_path = fixture_root / "live-secret-key"
             if cluster_secret_exists:
-                live_key_path.touch()
+                value = cluster_secret_value if cluster_secret_value is not None else "fixture-live-key"
+                live_key_path.write_text(encoded(value), encoding="utf-8")
             kubectl = bin_dir / "kubectl"
             kubectl.write_text(
                 "#!/usr/bin/env bash\n"
@@ -369,11 +373,11 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
                 "if [[ \"${1-}\" == get && \"${2-}\" == secret ]]; then\n"
                 "  [[ \"${3-}\" == glasslab-agent-secrets && \"${4-}\" == -n && \"${5-}\" == glasslab-agents ]] || exit 1\n"
                 "  [[ -f \"$FAKE_LIVE_SECRET_KEY\" ]] || exit 1\n"
-                "  printf 'Zml4dHVyZQ=='\n"
+                "  cat \"$FAKE_LIVE_SECRET_KEY\"\n"
                 "  exit 0\n"
                 "fi\n"
                 "if [[ \"${1-}\" == apply && \"${FAKE_APPLIED_SECRET_HAS_KEY:-0}\" == 1 ]]; then\n"
-                "  case \"${3-}\" in *agent-secrets*) touch \"$FAKE_LIVE_SECRET_KEY\" ;; esac\n"
+                "  case \"${3-}\" in *agent-secrets*) printf 'Zml4dHVyZS1saXZlLWtleQ==' > \"$FAKE_LIVE_SECRET_KEY\" ;; esac\n"
                 "fi\n",
                 encoding="utf-8",
             )
@@ -389,7 +393,7 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
                 environment["GLASSLAB_VLLM_SECRET_FILE"] = str(secret_file)
 
             result = subprocess.run(
-                ["bash", str(self.VLLM_DEPLOY_SCRIPT)],
+                ["bash", str(deploy_script or self.VLLM_DEPLOY_SCRIPT)],
                 cwd=REPOSITORY_ROOT,
                 env=environment,
                 check=False,
@@ -492,6 +496,17 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
         )
         self.assertTrue(any(call.endswith("/11-vllm-deployment.yaml") for call in calls), calls)
 
+    def test_vllm_deploy_rejects_placeholder_in_preexisting_cluster_secret(self):
+        """A non-empty but placeholder live Secret key must block deployment."""
+        result, calls = self.run_vllm_deploy(
+            cluster_secret_exists=True,
+            cluster_secret_value="change-me",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+        self.assertNotIn("change-me", result.stdout + result.stderr)
+
     def test_vllm_deploy_applies_explicit_live_secret_before_workload(self):
         """A valid explicit local Secret remains usable and precedes the workload."""
         with tempfile.TemporaryDirectory() as directory:
@@ -524,6 +539,14 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(argv, "")
 
+    def test_vllm_test_rejects_explicit_placeholder_api_key(self):
+        """An explicit placeholder key must stop before curl runs."""
+        result, argv, _, _, _ = self.run_vllm_test("change-me")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(argv, "")
+        self.assertNotIn("change-me", result.stdout + result.stderr)
+
     def test_vllm_test_keeps_api_key_out_of_argv_and_removes_private_config(self):
         """A real key must reach curl only through a temporary private config file."""
         api_key = "vllm-fixture-secret"
@@ -534,6 +557,41 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
         self.assertIn(f"Authorization: Bearer {api_key}", config_copy)
         self.assertEqual(config_modes, ["600", "600"])
         self.assertEqual(len(removed_paths), 2)
+
+    def test_agent_stack_deploy_exits_before_apply_when_secret_is_absent(self):
+        """Missing agent credentials must prevent every stack mutation."""
+        result, calls = self.run_vllm_deploy(deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+
+    def test_agent_stack_deploy_accepts_preexisting_named_cluster_secret(self):
+        """The full stack must remain deployable with the exact live Secret/key."""
+        result, calls = self.run_vllm_deploy(
+            deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT,
+            cluster_secret_exists=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            calls[0],
+            "get secret glasslab-agent-secrets -n glasslab-agents -o jsonpath={.data.VLLM_API_KEY}",
+        )
+        self.assertTrue(any(call.endswith("/21-agent-api-deployment.yaml") for call in calls), calls)
+
+    def test_agent_stack_deploy_accepts_explicit_live_secret(self):
+        """The full stack must retain the explicit local live Secret path."""
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = Path(directory) / "agent-secrets.local.yaml"
+            secret_path.write_text(self.vllm_secret_manifest("fixture-live-key"), encoding="utf-8")
+            result, calls = self.run_vllm_deploy(
+                deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT,
+                secret_file=secret_path,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"apply -f {secret_path}", calls)
+        self.assertTrue(any(call.endswith("/21-agent-api-deployment.yaml") for call in calls), calls)
 
     def run_gpu_deploy(
         self,

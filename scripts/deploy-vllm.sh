@@ -58,8 +58,32 @@ PY
 }
 
 confirm_live_secret() {
-  kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" \
-    -o "jsonpath={.data.${SECRET_KEY}}" 2>/dev/null | grep -q '[^[:space:]]'
+  local encoded_key
+  if ! encoded_key="$(
+    kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" \
+      -o "jsonpath={.data.${SECRET_KEY}}" 2>/dev/null
+  )"; then
+    return 1
+  fi
+
+  printf '%s' "$encoded_key" | python3 -c '
+import base64
+import binascii
+import sys
+
+try:
+    value = base64.b64decode(sys.stdin.buffer.read(), validate=True).decode("utf-8")
+except (binascii.Error, UnicodeDecodeError):
+    raise SystemExit(1)
+
+normalized = value.strip().lower()
+if not normalized or normalized.startswith("change-me") or normalized in {
+    "redacted",
+    "<redacted>",
+    "replace-me",
+}:
+    raise SystemExit(1)
+'
 }
 
 APPLY_LOCAL_SECRET=false
