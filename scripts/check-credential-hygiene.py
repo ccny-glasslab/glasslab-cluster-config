@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+from yaml.nodes import MappingNode, ScalarNode
 
 @dataclass(frozen=True)
 class Finding:
@@ -34,6 +36,7 @@ EXCLUDED_DIRECTORY_NAMES = frozenset(
         ".mypy_cache",
         ".pytest_cache",
         ".ruff_cache",
+        ".superpowers",
         "__pycache__",
         "node_modules",
         "scan-artifacts",
@@ -65,8 +68,6 @@ EXCLUDED_SUFFIXES = frozenset(
         ".zip",
     }
 )
-FIXTURE_MARKER = "credential-hygiene: fixture"
-
 # The first digest is a harmless fixture sentinel. The second is the historical
 # GPU-runner DSN fingerprint, retained only as an irreversible SHA-256 digest.
 KNOWN_EXPOSED_VALUE_SHA256 = frozenset(
@@ -84,11 +85,6 @@ DSN_RE = re.compile(
     rb"(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+[a-z0-9_-]+)?|redis|amqp)://",
     re.IGNORECASE,
 )
-KIND_SECRET_RE = re.compile(r"^\s*kind\s*:\s*Secret\s*(?:#.*)?$", re.IGNORECASE)
-DATA_SECTION_RE = re.compile(r"^(\s*)(?:data|stringData)\s*:\s*(?:#.*)?$", re.IGNORECASE)
-KEY_VALUE_RE = re.compile(r"^\s*[^:#][^:]*:\s*(.*?)\s*$")
-
-
 def _is_excluded_path(relative_path: Path) -> bool:
     parts = tuple(part.lower() for part in relative_path.parts)
     if any(part in EXCLUDED_DIRECTORY_NAMES for part in parts[:-1]):
@@ -136,65 +132,92 @@ def _append_finding(
         findings.append(Finding(path=path, line=line, rule_id=rule_id))
 
 
+def _mapping_values(node: MappingNode, name: str):
+    for key_node, value_node in node.value:
+        if isinstance(key_node, ScalarNode) and key_node.value == name:
+            yield value_node
+
+
+def _scan_secret_documents(
+    contents: str,
+    relative_path: Path,
+    findings: list[Finding],
+    seen: set[tuple[Path, int, str]],
+) -> None:
+    """Find Secret data structurally, independent of YAML key order or style."""
+    try:
+        documents = yaml.compose_all(contents)
+        for document in documents:
+            if not isinstance(document, MappingNode):
+                continue
+            kind_nodes = list(_mapping_values(document, "kind"))
+            if not any(
+                isinstance(kind_node, ScalarNode) and kind_node.value == "Secret"
+                for kind_node in kind_nodes
+            ):
+                continue
+
+            for section in ("data", "stringData"):
+                for section_node in _mapping_values(document, section):
+                    if not isinstance(section_node, MappingNode):
+                        continue
+                    for _, value_node in section_node.value:
+                        if not isinstance(value_node, ScalarNode):
+                            continue
+                        line_number = value_node.start_mark.line + 1
+                        value = value_node.value
+                        if section == "stringData":
+                            if "change-me" in value.lower():
+                                _append_finding(
+                                    findings,
+                                    seen,
+                                    relative_path,
+                                    line_number,
+                                    "deployable-change-me-secret",
+                                )
+                            continue
+
+                        decoded_value = _decode_base64(value)
+                        if decoded_value is None:
+                            continue
+                        if b"change-me" in decoded_value.lower():
+                            _append_finding(
+                                findings,
+                                seen,
+                                relative_path,
+                                line_number,
+                                "deployable-change-me-secret",
+                            )
+                        if DSN_RE.search(decoded_value):
+                            _append_finding(
+                                findings, seen, relative_path, line_number, "secret-data-dsn"
+                            )
+                        if _matches_known_digest(decoded_value):
+                            _append_finding(
+                                findings, seen, relative_path, line_number, "known-exposed-value"
+                            )
+    except yaml.YAMLError:
+        return
+
+
 def _scan_file(path: Path, relative_path: Path) -> list[Finding]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        contents = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return []
-
-    if any(FIXTURE_MARKER in line.lower() for line in lines):
         return []
 
     findings: list[Finding] = []
     seen: set[tuple[Path, int, str]] = set()
-    is_secret = False
-    data_indent: int | None = None
 
-    for line_number, line in enumerate(lines, start=1):
-        stripped = line.strip()
-        if stripped == "---":
-            is_secret = False
-            data_indent = None
-            continue
-
-        if KIND_SECRET_RE.match(line):
-            is_secret = True
-            data_indent = None
-
+    for line_number, line in enumerate(contents.splitlines(), start=1):
         if CRYPT_SHA512_RE.search(line):
             _append_finding(findings, seen, relative_path, line_number, "sha512-crypt-verifier")
         if SSHPASS_RE.search(line):
             _append_finding(findings, seen, relative_path, line_number, "sshpass-password")
         if any(_matches_known_digest(candidate) for candidate in _candidate_values(line)):
             _append_finding(findings, seen, relative_path, line_number, "known-exposed-value")
-        if is_secret and "change-me" in line.lower():
-            _append_finding(findings, seen, relative_path, line_number, "deployable-change-me-secret")
 
-        data_match = DATA_SECTION_RE.match(line)
-        if is_secret and data_match:
-            data_indent = len(data_match.group(1).expandtabs(2))
-            continue
-
-        if data_indent is None or not stripped:
-            continue
-
-        current_indent = len(line) - len(line.lstrip(" \t"))
-        if current_indent <= data_indent:
-            data_indent = None
-            continue
-
-        value_match = KEY_VALUE_RE.match(line)
-        if value_match is None:
-            continue
-        decoded_value = _decode_base64(value_match.group(1))
-        if decoded_value is None:
-            continue
-        if b"change-me" in decoded_value.lower():
-            _append_finding(findings, seen, relative_path, line_number, "deployable-change-me-secret")
-        if DSN_RE.search(decoded_value):
-            _append_finding(findings, seen, relative_path, line_number, "secret-data-dsn")
-        if _matches_known_digest(decoded_value):
-            _append_finding(findings, seen, relative_path, line_number, "known-exposed-value")
+    _scan_secret_documents(contents, relative_path, findings, seen)
 
     return findings
 

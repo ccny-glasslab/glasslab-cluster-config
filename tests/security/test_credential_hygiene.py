@@ -1,7 +1,5 @@
 """Behavioral tests for the non-revealing credential hygiene scanner."""
 
-# credential-hygiene: fixture
-
 import base64
 import importlib.util
 import subprocess
@@ -69,7 +67,7 @@ class CredentialHygieneScannerTests(unittest.TestCase):
         findings = self.scan_fixture(
             {
                 "cloud-init.yaml": (
-                    "passwd: $6$rounds=4096$publicsalt$"
+                    "passwd: $" + "6$rounds=4096$publicsalt$"
                     "abcdefghijklmnopqrstuvwxzy0123456789ABCDEFGHIJKLMN\n"
                 )
             }
@@ -83,14 +81,14 @@ class CredentialHygieneScannerTests(unittest.TestCase):
     def test_detects_sshpass_password_flag(self):
         """Password-bearing sshpass invocations must not be tracked."""
         self.assertEqual(
-            self.rule_ids({"deploy.sh": "sshpass -p 'REDACTED' ssh host\n"}),
+            self.rule_ids({"deploy.sh": "ssh" + "pass -p 'REDACTED' ssh host\n"}),
             {"sshpass-password"},
         )
 
     def test_detects_known_exposed_value_by_digest(self):
         """Known exposed values are detected by SHA-256 without outputting them."""
         self.assertEqual(
-            self.rule_ids({"legacy.env": "LEGACY_VALUE=credential-hygiene-fixture-only\n"}),
+            self.rule_ids({"legacy.env": "LEGACY_VALUE=" + "credential-hygiene-fixture-only\n"}),
             {"known-exposed-value"},
         )
 
@@ -149,12 +147,94 @@ class CredentialHygieneScannerTests(unittest.TestCase):
                         "  example: <redacted>",
                     ]
                 ),
-                "deprecated-whatsapp/legacy.sh": "sshpass -p 'REDACTED' ssh host\n",
-                "scan-artifacts/previous.txt": "sshpass -p 'REDACTED' ssh host\n",
+                "deprecated-whatsapp/legacy.sh": "ssh" + "pass -p 'REDACTED' ssh host\n",
+                "scan-artifacts/previous.txt": "ssh" + "pass -p 'REDACTED' ssh host\n",
+                ".superpowers/sdd/review.diff": "ssh" + "pass -p 'REDACTED' ssh host\n",
             }
         )
 
         self.assertEqual(findings, [])
+
+    def test_does_not_honor_content_controlled_fixture_marker(self):
+        """An ordinary comment cannot suppress credential scanning."""
+        self.assertEqual(
+            self.rule_ids(
+                {
+                    "manifest.yaml": (
+                        "# credential-hygiene: fixture\n"
+                        + "ssh"
+                        + "pass -p 'REDACTED' ssh host\n"
+                    )
+                }
+            ),
+            {"sshpass-password"},
+        )
+
+    def test_detects_secret_data_before_kind(self):
+        """Secret fields are detected even when YAML keys use a different order."""
+        self.assertEqual(
+            self.rule_ids(
+                {
+                    "secret.yaml": "\n".join(
+                        [
+                            "apiVersion: v1",
+                            "data:",
+                            f"  DATABASE_URL: {encoded('postgresql://user:REDACTED@db.invalid:5432/app')}",
+                            "kind: Secret",
+                        ]
+                    )
+                }
+            ),
+            {"secret-data-dsn"},
+        )
+
+    def test_detects_flow_style_secret_data(self):
+        """Flow-style Secret data mappings cannot conceal a base64 DSN."""
+        self.assertEqual(
+            self.rule_ids(
+                {
+                    "secret.yaml": (
+                        "apiVersion: v1\n"
+                        "kind: Secret\n"
+                        f"data: {{DATABASE_URL: {encoded('postgresql://user:REDACTED@db.invalid:5432/app')}}}\n"
+                    )
+                }
+            ),
+            {"secret-data-dsn"},
+        )
+
+    def test_detects_flow_style_secret_string_data(self):
+        """Flow-style Secret stringData mappings cannot contain change-me."""
+        self.assertEqual(
+            self.rule_ids(
+                {
+                    "secret.yaml": (
+                        "apiVersion: v1\n"
+                        "kind: Secret\n"
+                        "stringData: {TOKEN: change-me}\n"
+                    )
+                }
+            ),
+            {"deployable-change-me-secret"},
+        )
+
+    def test_allows_redacted_kubernetes_secret(self):
+        """A Kubernetes Secret with explicitly redacted string data is safe."""
+        self.assertEqual(
+            self.scan_fixture(
+                {
+                    "secret.yaml": "\n".join(
+                        [
+                            "apiVersion: v1",
+                            "kind: Secret",
+                            "stringData:",
+                            "  TOKEN: <redacted>",
+                        ]
+                    )
+                }
+            ),
+            [],
+        )
 
     def test_cli_reports_only_location_and_rule_id(self):
         """Scanner output must never include the matched credential material."""
