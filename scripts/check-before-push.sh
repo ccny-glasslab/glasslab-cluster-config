@@ -67,6 +67,7 @@ run_secret_boundary_tests() {
   python3 -m unittest \
     tests.security.test_secret_process_boundaries \
     tests.security.test_secret_backup_restore \
+    tests.security.test_lab_security_agent \
     -v
 }
 
@@ -80,6 +81,7 @@ run_shell() {
   bash -n \
     scripts/check-before-push.sh \
     scripts/glasslab-opencode.sh \
+    scripts/lab-security-agent \
     scripts/research-session-cli.sh \
     scripts/smoke-test-research-orchestrator.sh \
     scripts/submit-learning-task.sh \

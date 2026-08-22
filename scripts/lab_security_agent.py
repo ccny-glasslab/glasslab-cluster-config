@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Sequence
 from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 
 class DispatchError(RuntimeError):
@@ -78,7 +81,7 @@ def parse_args(argv: Sequence[str]) -> DispatchConfig:
     ):
         raise DispatchError("invalid API base URL")
     assignment = Path(args.assignment)
-    if assignment.exists() and (not assignment.is_file() or assignment.is_symlink()):
+    if not assignment.is_file() or assignment.is_symlink():
         raise DispatchError("assignment must be a regular non-symlink file")
     return DispatchConfig(
         repo_root=Path.cwd().resolve(),
@@ -199,6 +202,197 @@ def cleanup_run(
     shutil.rmtree(paths.run_root)
 
 
+def assemble_assignment(config: DispatchConfig, paths: RunPaths) -> str:
+    methodology, schema = load_contract(config.repo_root, config.mode)
+    agents_path = config.repo_root / "AGENTS.md"
+    agents = agents_path.read_text() if agents_path.is_file() else ""
+    scope = config.assignment_path.read_text()
+    mode_rule = (
+        "You may experiment only inside this disposable worktree; do not commit."
+        if config.mode == "discover"
+        else f"Change only files necessary to remediate finding {config.finding_id}; do not commit."
+    )
+    return "\n".join([
+        "You are an untrusted lab security worker in a disposable worktree.",
+        mode_rule,
+        "Do not access external directories, credentials, networks, Git remotes, or live systems.",
+        f"MODE={config.mode}",
+        f"BASE_COMMIT={paths.base_commit}",
+        f"FINDING_ID={config.finding_id or ''}",
+        "\n--- REPOSITORY AGENTS.md ---\n", agents,
+        "\n--- SECURITY METHODOLOGY ---\n", methodology,
+        "\n--- ASSIGNMENT ---\n", scope,
+        "\n--- RESULT SCHEMA ---\n", json.dumps(schema, sort_keys=True),
+        "Return the result as exactly one fenced JSON document matching the schema, followed by a Markdown summary.",
+    ])
+
+
+def extract_final_answer(event_stream: str) -> str:
+    texts: list[str] = []
+    for line_number, line in enumerate(event_stream.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise DispatchError(f"invalid OpenCode JSON event at line {line_number}") from exc
+        if event.get("type") == "text":
+            part = event.get("part", {})
+            text = part.get("text") if isinstance(part, dict) else None
+            if isinstance(text, str):
+                texts.append(text)
+    if not texts:
+        raise DispatchError("OpenCode event stream contained no final text")
+    return "".join(texts)
+
+
+def parse_model_answer(answer: str) -> tuple[dict[str, Any], str]:
+    matches = re.findall(r"```json\s*\n(.*?)\n```", answer, flags=re.DOTALL)
+    if len(matches) != 1:
+        raise DispatchError("model answer must contain exactly one fenced JSON document")
+    try:
+        result = json.loads(matches[0])
+    except json.JSONDecodeError as exc:
+        raise DispatchError("model result is not valid JSON") from exc
+    fence = re.search(r"```json\s*\n.*?\n```", answer, flags=re.DOTALL)
+    assert fence is not None
+    summary = (answer[:fence.start()] + answer[fence.end():]).strip()
+    return result, summary
+
+
+def validate_schema(value: Any, schema: dict[str, Any], path: str = "$") -> None:
+    if "const" in schema and value != schema["const"]:
+        raise DispatchError(f"result schema violation at {path}: wrong constant")
+    if "enum" in schema and value not in schema["enum"]:
+        raise DispatchError(f"result schema violation at {path}: invalid enum")
+    kind = schema.get("type")
+    valid_type = {
+        "object": lambda item: isinstance(item, dict),
+        "array": lambda item: isinstance(item, list),
+        "string": lambda item: isinstance(item, str),
+        "integer": lambda item: isinstance(item, int) and not isinstance(item, bool),
+    }.get(kind)
+    if valid_type and not valid_type(value):
+        raise DispatchError(f"result schema violation at {path}: expected {kind}")
+    if kind == "object":
+        properties = schema.get("properties", {})
+        missing = [key for key in schema.get("required", []) if key not in value]
+        if missing:
+            raise DispatchError(f"result schema violation at {path}: missing {', '.join(missing)}")
+        if schema.get("additionalProperties") is False:
+            extras = set(value) - set(properties)
+            if extras:
+                raise DispatchError(f"result schema violation at {path}: extra properties")
+        for key, child in value.items():
+            if key in properties:
+                validate_schema(child, properties[key], f"{path}.{key}")
+    if kind == "array":
+        item_schema = schema.get("items", {})
+        for index, item in enumerate(value):
+            validate_schema(item, item_schema, f"{path}[{index}]")
+
+
+def check_exo_health(config: DispatchConfig) -> None:
+    request = Request(f"{config.api_base}/v1/models", method="GET")
+    try:
+        with urlopen(request, timeout=10) as response:
+            if response.status != 200:
+                raise DispatchError(f"exo health check returned HTTP {response.status}")
+            json.loads(response.read())
+    except DispatchError:
+        raise
+    except Exception as exc:
+        raise DispatchError("exo health check failed") from exc
+
+
+def run_worker(config: DispatchConfig, paths: RunPaths) -> tuple[dict[str, Any], str]:
+    env = build_worker_environment(config, paths.runtime)
+    for name in ("home", "config", "data", "state", "cache"):
+        (paths.runtime / name).mkdir(parents=True, exist_ok=True)
+    opencode_root = paths.runtime / "config" / "opencode"
+    opencode_root.mkdir(parents=True)
+    (opencode_root / "opencode.json").write_text(
+        json.dumps(build_opencode_config(config), indent=2, sort_keys=True) + "\n"
+    )
+    prompt = assemble_assignment(config, paths)
+    try:
+        completed = subprocess.run(
+            [
+                config.opencode_bin, "run", "--pure", "--format", "json",
+                "-m", f"exo/{config.model}", prompt,
+            ],
+            cwd=paths.worktree,
+            env=env,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=config.timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DispatchError("OpenCode worker timed out") from exc
+    safe_stderr = completed.stderr.replace(config.api_base, "<EXO_API>")
+    paths.log.write_text(safe_stderr[-131072:])
+    if completed.returncode:
+        raise DispatchError(f"OpenCode worker exited with status {completed.returncode}")
+    answer = extract_final_answer(completed.stdout)
+    return parse_model_answer(answer)
+
+
+def dispatch(config: DispatchConfig) -> RunPaths:
+    check_exo_health(config)
+    paths = prepare_run(config)
+    result, summary = run_worker(config, paths)
+    _, schema = load_contract(config.repo_root, config.mode)
+    validate_schema(result, schema)
+    if result.get("base_commit") != paths.base_commit:
+        raise DispatchError("result base commit does not match worktree")
+    if config.mode == "repair" and result.get("finding_id") != config.finding_id:
+        raise DispatchError("result finding id does not match assignment")
+    diff = capture_worktree_diff(paths)
+    diff_sha256 = hashlib.sha256(diff.encode()).hexdigest()
+    if config.mode == "repair" and result.get("diff_sha256") != diff_sha256:
+        raise DispatchError("repair result diff digest does not match worktree")
+    paths.result_json.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    paths.summary_md.write_text(summary + "\n")
+    (paths.runtime / "worktree.diff").write_text(diff)
+    metadata = json.loads(paths.metadata.read_text())
+    metadata.update({"status": "complete", "diff_sha256": diff_sha256})
+    paths.metadata.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+    return paths
+
+
+def _usage() -> str:
+    return """Usage:
+  lab-security-agent discover RUN --assignment FILE [options]
+  lab-security-agent repair RUN --assignment FILE --finding-id ID [options]
+
+Runs an untrusted lab model in a disposable worktree. The command never commits, pushes, or merges.
+"""
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args or args[0] in {"-h", "--help"}:
+        print(_usage())
+        return 0
+    try:
+        config = parse_args(args)
+        paths = dispatch(config)
+    except DispatchError as exc:
+        print(f"lab-security-agent: {exc}", file=sys.stderr)
+        return 1
+    print(f"base_commit={paths.base_commit}")
+    print(f"worktree={paths.worktree}")
+    print(f"result={paths.result_json}")
+    print(f"summary={paths.summary_md}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
 def build_worker_environment(
     config: DispatchConfig, runtime_root: Path
 ) -> dict[str, str]:
@@ -218,7 +412,10 @@ def build_worker_environment(
 
 def build_opencode_config(config: DispatchConfig) -> dict[str, Any]:
     denied = {
+        "*": "allow",
+        "doom_loop": "deny",
         "external_directory": "deny",
+        "lsp": "deny",
         "task": "deny",
         "skill": "deny",
         "webfetch": "deny",
