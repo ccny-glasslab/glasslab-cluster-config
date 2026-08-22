@@ -27,15 +27,6 @@ data:
   GLASSLAB_RUNNER_AUGMENTATION: "RandomResizedCrop+ColorJitter+RandomHorizontalFlip"
 ---
 apiVersion: v1
-kind: Secret
-metadata:
-  name: glasslab-v2-runner
-  namespace: glasslab-v2
-type: Opaque
-data:
-  GLASSLAB_RUNNER_STORE_POSTGRES_DSN: cG9zdGdyZXM6Ly9ncmFzc2xhYjogZ3Jhc3NsYWJwYXNzQHBvc3RncmVzLnNsLWdyYXNzbGFiLXYyLnN2Yy5jbHVzdGVyLmxvY2FsOjU0MzIvZ2xhc3NsYWJfZGF0YQ==
----
-apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: runner-model-cache

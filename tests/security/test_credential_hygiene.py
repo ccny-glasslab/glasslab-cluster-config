@@ -2,11 +2,14 @@
 
 import base64
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import yaml
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -312,6 +315,138 @@ class CredentialHygieneScannerTests(unittest.TestCase):
         self.assertIn("secret.yaml:4:secret-data-dsn", result.stdout)
         self.assertNotIn(dsn, result.stdout)
         self.assertNotIn(encoded(dsn), result.stdout)
+
+
+class RepositoryCredentialPolicyTests(unittest.TestCase):
+    """Repository deployment artifacts must fail closed around live credentials."""
+
+    GPU_RUNNER_DIR = REPOSITORY_ROOT / "kubeadm" / "glasslab-v2" / "gpu-runner"
+    GPU_DEPLOY_SCRIPT = REPOSITORY_ROOT / "scripts" / "deploy-gpu-runner.sh"
+    PXE_ROOT = (
+        REPOSITORY_ROOT
+        / "live-config"
+        / "provisioner"
+        / "var"
+        / "www"
+        / "html"
+        / "pxe"
+        / "cloud-init"
+    )
+    PXE_PROFILES = ("default", "node02", "node03", "node04", "node05", "node48", "node49")
+
+    def run_gpu_deploy(
+        self,
+        *,
+        secret_file: Path | None = None,
+        cluster_secret_exists: bool = False,
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_root = Path(directory)
+            bin_dir = fixture_root / "bin"
+            bin_dir.mkdir()
+            calls_path = fixture_root / "kubectl-calls"
+            kubectl = bin_dir / "kubectl"
+            kubectl.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$*\" >> \"$KUBECTL_CALLS\"\n"
+                "if [[ \"${1-}\" == get && \"${2-}\" == secret ]]; then\n"
+                "  [[ \"${FAKE_CLUSTER_SECRET_EXISTS:-0}\" == 1 ]]\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            kubectl.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
+            environment["KUBECTL_CALLS"] = str(calls_path)
+            environment["FAKE_CLUSTER_SECRET_EXISTS"] = "1" if cluster_secret_exists else "0"
+            if secret_file is None:
+                environment.pop("GLASSLAB_GPU_RUNNER_SECRET_FILE", None)
+            else:
+                environment["GLASSLAB_GPU_RUNNER_SECRET_FILE"] = str(secret_file)
+
+            result = subprocess.run(
+                ["bash", str(self.GPU_DEPLOY_SCRIPT), "--apply"],
+                cwd=REPOSITORY_ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            calls = calls_path.read_text(encoding="utf-8").splitlines() if calls_path.exists() else []
+            return result, calls
+
+    def test_gpu_aggregate_contains_no_secret_resource(self):
+        """Reintroducing a deployable Secret into the aggregate must fail."""
+        documents = yaml.safe_load_all((self.GPU_RUNNER_DIR / "00-all.yaml").read_text(encoding="utf-8"))
+
+        self.assertNotIn("Secret", {document.get("kind") for document in documents if isinstance(document, dict)})
+
+    def test_gpu_secret_example_is_not_a_deployable_secret(self):
+        """Copy-pasting the tracked example must not create a Kubernetes Secret."""
+        example_path = self.GPU_RUNNER_DIR / "40-secret.example.yaml"
+
+        self.assertTrue(example_path.is_file(), "tracked GPU Secret schema example is missing")
+        documents = yaml.safe_load_all(example_path.read_text(encoding="utf-8"))
+        self.assertNotIn("Secret", {document.get("kind") for document in documents if isinstance(document, dict)})
+
+    def test_gpu_deploy_exits_before_apply_when_live_secret_is_absent(self):
+        """An absent local or cluster Secret must prevent workload deployment."""
+        result, calls = self.run_gpu_deploy()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+
+    def test_gpu_deploy_rejects_secret_file_without_local_yaml_suffix(self):
+        """A tracked-looking Secret filename must be rejected before kubectl runs."""
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = Path(directory) / "40-secret.yaml"
+            secret_path.write_text("apiVersion: v1\nkind: Secret\n", encoding="utf-8")
+            result, calls = self.run_gpu_deploy(secret_file=secret_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
+
+    def test_gpu_deploy_applies_explicit_local_secret_before_workload(self):
+        """An explicit local Secret must be installed before dependent resources."""
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = Path(directory) / "gpu-runner-secret.local.yaml"
+            secret_path.write_text("apiVersion: v1\nkind: Secret\n", encoding="utf-8")
+            result, calls = self.run_gpu_deploy(secret_file=secret_path)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls[0], f"apply -f {secret_path}")
+        self.assertEqual(calls[1], f"apply -f {self.GPU_RUNNER_DIR / '00-all.yaml'}")
+
+    def test_gpu_deploy_accepts_preexisting_named_cluster_secret(self):
+        """A pre-existing named cluster Secret satisfies the deployment precondition."""
+        result, calls = self.run_gpu_deploy(cluster_secret_exists=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls[0], "get secret glasslab-v2-runner -n glasslab-v2")
+        self.assertEqual(calls[1], f"apply -f {self.GPU_RUNNER_DIR / '00-all.yaml'}")
+
+    def test_pxe_profiles_lock_passwords_and_retain_key_only_ssh(self):
+        """Removing password verifiers must never remove the provisioner key or SSH hardening."""
+        for profile in self.PXE_PROFILES:
+            with self.subTest(profile=profile):
+                document = yaml.safe_load((self.PXE_ROOT / profile / "user-data").read_text(encoding="utf-8"))
+                autoinstall = document["autoinstall"]
+                identity = autoinstall["identity"]
+                ssh = autoinstall["ssh"]
+                user_data = autoinstall["user-data"]
+                authorized_keys = ssh["authorized-keys"]
+                hardening = "\n".join(
+                    item.get("content", "") for item in user_data["write_files"] if isinstance(item, dict)
+                )
+
+                self.assertEqual(identity["password"], "!")
+                self.assertIs(ssh["allow-pw"], False)
+                self.assertTrue(authorized_keys)
+                self.assertTrue(all(isinstance(key, str) and key.strip() for key in authorized_keys))
+                self.assertIs(user_data["ssh_pwauth"], False)
+                self.assertIn("PasswordAuthentication no", hardening)
+                self.assertIn("KbdInteractiveAuthentication no", hardening)
+                self.assertIn("PubkeyAuthentication yes", hardening)
 
 
 if __name__ == "__main__":

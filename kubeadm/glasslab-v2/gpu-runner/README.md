@@ -11,20 +11,25 @@ This directory contains Kubernetes manifests for deploying the GPU runner with c
 
 ## Deployment
 
+The aggregate manifest intentionally contains no `Secret`. Either create the
+named `glasslab-v2-runner` Secret in the `glasslab-v2` namespace before
+deployment, or create an ignored local manifest ending in `.local.yaml` from
+the documentation-only schema in `40-secret.example.yaml`.
+
 ```bash
-kubectl apply -f /path/to/kubeadm/glasslab-v2/gpu-runner/00-all.yaml
+export GLASSLAB_GPU_RUNNER_SECRET_FILE=/secure/path/gpu-runner-secret.local.yaml
+./scripts/deploy-gpu-runner.sh --apply
 ```
 
-Or apply individually:
+If the named Secret already exists in the cluster, omit the environment
+variable:
 
 ```bash
-kubectl apply -f 10-deployment.yaml
-kubectl apply -f 20-pvc.yaml
-kubectl apply -f 30-configmap.yaml
-kubectl apply -f 40-secret.yaml
-kubectl apply -f 50-service.yaml
-kubectl apply -f 60-serviceaccount.yaml
+./scripts/deploy-gpu-runner.sh --apply
 ```
+
+The deploy script fails before applying the workload when neither source is
+available. Local Secret manifests must remain untracked.
 
 ## Configuration
 

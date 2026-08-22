@@ -4,7 +4,7 @@ autoinstall:
   identity:
     hostname: bootstrap-node
     username: clusteradmin
-    password: $6$4fT.UzwSm7c29CqH$j0rPbWnLYstfWlPNcuKi/eKJOqsJHB5fErlnuiAKIV356yydCLdeVx4Z2SZnK7ReNc/Z2MbivrJkqgXNLdb4z/
+    password: '!'
   ssh:
     install-server: true
     allow-pw: false
