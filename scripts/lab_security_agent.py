@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -204,8 +205,6 @@ def cleanup_run(
 
 def assemble_assignment(config: DispatchConfig, paths: RunPaths) -> str:
     methodology, schema = load_contract(config.repo_root, config.mode)
-    agents_path = config.repo_root / "AGENTS.md"
-    agents = agents_path.read_text() if agents_path.is_file() else ""
     scope = config.assignment_path.read_text()
     mode_rule = (
         "You may experiment only inside this disposable worktree; do not commit."
@@ -219,7 +218,6 @@ def assemble_assignment(config: DispatchConfig, paths: RunPaths) -> str:
         f"MODE={config.mode}",
         f"BASE_COMMIT={paths.base_commit}",
         f"FINDING_ID={config.finding_id or ''}",
-        "\n--- REPOSITORY AGENTS.md ---\n", agents,
         "\n--- SECURITY METHODOLOGY ---\n", methodology,
         "\n--- ASSIGNMENT ---\n", scope,
         "\n--- RESULT SCHEMA ---\n", json.dumps(schema, sort_keys=True),
@@ -322,6 +320,28 @@ def resolve_executable(name: str) -> Path:
     return resolved.resolve()
 
 
+class _WorkerInterrupted(Exception):
+    def __init__(self, signum: int):
+        self.signum = signum
+
+
+def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate(timeout=5)
+
+
 def run_worker(config: DispatchConfig, paths: RunPaths) -> tuple[dict[str, Any], str]:
     opencode_bin = resolve_executable(config.opencode_bin)
     env = build_worker_environment(config, paths.runtime)
@@ -333,29 +353,51 @@ def run_worker(config: DispatchConfig, paths: RunPaths) -> tuple[dict[str, Any],
         json.dumps(build_opencode_config(config), indent=2, sort_keys=True) + "\n"
     )
     prompt = assemble_assignment(config, paths)
+    prompt_path = paths.runtime / "assignment.md"
+    prompt_path.write_text(prompt)
+    process: subprocess.Popen[str] | None = None
+    previous_handlers: dict[int, Any] = {}
+
+    def interrupt(signum: int, _frame: Any) -> None:
+        raise _WorkerInterrupted(signum)
+
     try:
-        completed = subprocess.run(
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, interrupt)
+        process = subprocess.Popen(
             [
                 str(opencode_bin), "run", "--pure", "--format", "json",
-                "-m", f"exo/{config.model}", prompt,
+                "-m", f"exo/{config.model}", "--file", str(prompt_path),
+                "Complete the attached bounded security assignment.",
             ],
             cwd=paths.worktree,
             env=env,
-            check=False,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=config.timeout_seconds,
+            start_new_session=True,
         )
+        stdout, stderr = process.communicate(timeout=config.timeout_seconds)
     except subprocess.TimeoutExpired as exc:
+        if process is not None:
+            _terminate_process_group(process)
         raise DispatchError("OpenCode worker timed out") from exc
+    except _WorkerInterrupted as exc:
+        if process is not None:
+            _terminate_process_group(process)
+        raise DispatchError(f"OpenCode worker interrupted by signal {exc.signum}") from exc
     except OSError as exc:
         raise DispatchError("OpenCode worker could not start") from exc
-    safe_stderr = completed.stderr.replace(config.api_base, "<EXO_API>")
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+    safe_stderr = stderr.replace(config.api_base, "<EXO_API>")
     paths.log.write_text(safe_stderr[-131072:])
-    if completed.returncode:
-        raise DispatchError(f"OpenCode worker exited with status {completed.returncode}")
-    answer = extract_final_answer(completed.stdout)
+    assert process is not None
+    if process.returncode:
+        raise DispatchError(f"OpenCode worker exited with status {process.returncode}")
+    answer = extract_final_answer(stdout)
     return parse_model_answer(answer)
 
 

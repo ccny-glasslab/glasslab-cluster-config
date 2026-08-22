@@ -25,6 +25,7 @@ from scripts.lab_security_agent import (
     parse_args,
     prepare_run,
     resolve_executable,
+    run_worker,
     validate_schema,
 )
 
@@ -185,10 +186,12 @@ class ExecutionContractTests(unittest.TestCase):
             )
             paths = prepare_run(config)
             prompt = assemble_assignment(config, paths)
-            self.assertIn("Do not expose secrets.", prompt)
             self.assertIn("Inspect tracked.txt.", prompt)
             self.assertIn("exactly one fenced JSON", prompt)
             self.assertIn("disposable worktree", prompt)
+            self.assertNotIn("Do not expose secrets.", prompt)
+            self.assertNotIn("# Glasslab Agent Handoff", prompt)
+            self.assertLess(len(prompt), 8_000)
 
     def test_extracts_final_text_from_json_events(self) -> None:
         events = "\n".join([
@@ -236,6 +239,32 @@ class ExecutionContractTests(unittest.TestCase):
             self.assertEqual(result["findings"], [])
             self.assertEqual(result["base_commit"], paths.base_commit)
             self.assertEqual(paths.summary_md.read_text(), "No candidate findings.\n")
+            argv = json.loads((paths.worktree / ".fake-argv.json").read_text())
+            self.assertNotIn("SECURITY METHODOLOGY", " ".join(argv))
+            self.assertIn("--file", argv)
+
+    def test_timeout_terminates_entire_worker_process_group(self) -> None:
+        with TemporaryDirectory() as raw:
+            repo = WorktreeTests().make_repo(Path(raw))
+            shutil.copytree(
+                REPO_ROOT / "security" / "lab-agent",
+                repo / "security" / "lab-agent",
+            )
+            (repo / "scope.md").write_text("Inspect tracked.txt.\n")
+            git(repo, "add", ".")
+            git(repo, "commit", "-m", "contracts")
+            config = replace(
+                DispatchConfig.for_test(repo, mode="discover"),
+                assignment_path=repo / "scope.md",
+                opencode_bin=str(REPO_ROOT / "tests/security/fixtures/fake-opencode-hangs.py"),
+                timeout_seconds=1,
+            )
+            paths = prepare_run(config)
+            with self.assertRaisesRegex(DispatchError, "timed out"):
+                run_worker(config, paths)
+            child_pid = int((paths.worktree / ".fake-child-pid").read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child_pid, 0)
 
 
 class CliTests(unittest.TestCase):
