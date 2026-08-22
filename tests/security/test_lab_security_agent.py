@@ -24,6 +24,7 @@ from scripts.lab_security_agent import (
     parse_model_answer,
     parse_args,
     prepare_run,
+    resolve_executable,
     validate_schema,
 )
 
@@ -57,6 +58,11 @@ class ContractTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_resolves_opencode_before_worker_environment_is_sanitized(self) -> None:
+        resolved = resolve_executable("opencode")
+        self.assertTrue(resolved.is_absolute())
+        self.assertTrue(resolved.is_file())
+
     def test_run_name_rejects_path_syntax(self) -> None:
         with self.assertRaisesRegex(DispatchError, "run name"):
             parse_args(["discover", "../escape", "--assignment", "scope.md"])

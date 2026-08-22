@@ -305,7 +305,25 @@ def check_exo_health(config: DispatchConfig) -> None:
         raise DispatchError("exo health check failed") from exc
 
 
+def resolve_executable(name: str) -> Path:
+    candidate = Path(name)
+    if candidate.is_absolute():
+        resolved = candidate
+    else:
+        found = shutil.which(name)
+        if not found and name == "opencode":
+            fallback = Path.home() / ".npm-global" / "bin" / "opencode"
+            found = str(fallback) if fallback.is_file() else None
+        if not found:
+            raise DispatchError(f"OpenCode executable was not found: {name}")
+        resolved = Path(found)
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise DispatchError(f"OpenCode executable is not executable: {resolved}")
+    return resolved.resolve()
+
+
 def run_worker(config: DispatchConfig, paths: RunPaths) -> tuple[dict[str, Any], str]:
+    opencode_bin = resolve_executable(config.opencode_bin)
     env = build_worker_environment(config, paths.runtime)
     for name in ("home", "config", "data", "state", "cache"):
         (paths.runtime / name).mkdir(parents=True, exist_ok=True)
@@ -318,7 +336,7 @@ def run_worker(config: DispatchConfig, paths: RunPaths) -> tuple[dict[str, Any],
     try:
         completed = subprocess.run(
             [
-                config.opencode_bin, "run", "--pure", "--format", "json",
+                str(opencode_bin), "run", "--pure", "--format", "json",
                 "-m", f"exo/{config.model}", prompt,
             ],
             cwd=paths.worktree,
@@ -331,6 +349,8 @@ def run_worker(config: DispatchConfig, paths: RunPaths) -> tuple[dict[str, Any],
         )
     except subprocess.TimeoutExpired as exc:
         raise DispatchError("OpenCode worker timed out") from exc
+    except OSError as exc:
+        raise DispatchError("OpenCode worker could not start") from exc
     safe_stderr = completed.stderr.replace(config.api_base, "<EXO_API>")
     paths.log.write_text(safe_stderr[-131072:])
     if completed.returncode:
