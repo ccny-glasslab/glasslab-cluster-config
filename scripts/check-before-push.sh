@@ -57,6 +57,11 @@ run_configs() {
   python3 scripts/validate-configs.py
 }
 
+run_credential_hygiene() {
+  printf '[check-before-push] scanning credential hygiene\n'
+  python3 scripts/check-credential-hygiene.py .
+}
+
 run_docs() {
   printf '[check-before-push] checking Markdown links\n'
   python3 scripts/check-doc-links.py
@@ -139,6 +144,7 @@ run_workflow_api_tests() {
 case "$MODE" in
   default)
     run_configs
+    run_credential_hygiene
     run_docs
     run_shell
     run_python_syntax

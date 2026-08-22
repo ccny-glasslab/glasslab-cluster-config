@@ -12,6 +12,8 @@ on:
       - "**/*.yml"
       - "**/*.yaml"
       - "scripts/validate-configs.py"
+      - "scripts/check-credential-hygiene.py"
+      - "tests/security/**"
   workflow_dispatch:
 
 permissions:
@@ -40,6 +42,12 @@ jobs:
 
       - name: Validate YAML and JSON syntax
         run: python scripts/validate-configs.py
+
+      - name: Run credential hygiene fixture tests
+        run: python -m unittest tests.security.test_credential_hygiene -v
+
+      - name: Scan repository credential hygiene
+        run: python scripts/check-credential-hygiene.py .
 
       - name: Validate Ansible inventory and playbooks
         working-directory: ansible
