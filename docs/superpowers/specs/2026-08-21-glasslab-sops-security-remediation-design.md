@@ -184,15 +184,18 @@ as loss of machine access.
 5. Import every current local secret into the encrypted vault and verify that
    each of the three operators can perform a controlled apply.
 6. Back up the encrypted vault off-host and perform a recovery drill.
-7. Lock collaborator passwords in separate reviewed changes only after their
-   key-only tests pass.
+7. Lock collaborator passwords in a reviewed change once live logs demonstrate
+   successful public-key authentication. Treat any resulting access report as
+   an SSH-client configuration problem; do not re-enable passwords as the
+   default remedy.
 8. Remove plaintext handoff references, rotate the shared provisioner and exo
    passwords, and store the replacements only as encrypted break-glass values.
 9. Remove the legacy shared account from normal workflows after confirming that
    two personal administrators can recover every access plane.
 
-A failed check pauses only the affected person's retirement step. It does not
-block other safe remediation work and never triggers bulk password locking.
+A failed check pauses shared-account retirement and credential rotation. It
+does not block other safe remediation work. Personal password authentication
+is not restored merely because one client is misconfigured.
 
 ## Application and Cluster Hardening
 
@@ -307,9 +310,10 @@ Live acceptance from the canonical provisioner requires:
 7. A final repository scan finds no plaintext passwords, deployable example
    secrets, published password verifiers, or secret-bearing command examples.
 
-No live password is rotated until acceptance items 1 through 4 pass for at
-least two administrators. Denise's and Tristan's individual password-lock
-changes remain separate and require their own recorded confirmations.
+No shared or break-glass password is rotated until acceptance items 1 through
+4 pass for at least two administrators. Denise's and Tristan's personal Linux
+passwords may be locked earlier because live provisioner logs already establish
+successful public-key authentication for both accounts.
 
 ## Delivery Order
 
