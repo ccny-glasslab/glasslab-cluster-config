@@ -8,6 +8,8 @@ already-encrypted SOPS YAML documents plus non-secret recovery metadata.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import ctypes
 import datetime as dt
 import errno
@@ -23,7 +25,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterable
 
@@ -41,6 +43,19 @@ MAX_MEMBERS = 10_000
 SHA256_LINE = re.compile(r"^([0-9a-f]{64})  ([^\x00\r\n]+)$")
 STAMP = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 FINGERPRINT = re.compile(r"^[0-9A-Fa-f]{40}$")
+ENC_ENVELOPE = re.compile(
+    r"^ENC\[AES256_GCM,data:([A-Za-z0-9+/]+={0,2}),"
+    r"iv:([A-Za-z0-9+/]+={0,2}),tag:([A-Za-z0-9+/]+={0,2}),type:str\]$"
+)
+SOPS_CREATED_AT = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
+)
+PGP_MESSAGE_BEGIN = "-----BEGIN PGP MESSAGE-----"
+PGP_MESSAGE_END = "-----END PGP MESSAGE-----"
+PGP_BODY_LINE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+PGP_CRC_LINE = re.compile(r"^=[A-Za-z0-9+/]{4}$")
+UNSUPPORTED_RECIPIENT_KEYS = ("age", "kms", "gcp_kms", "azure_kv", "hc_vault")
+TRUSTED_TAR_PATH = Path("/usr/bin/tar")
 
 
 class ArchiveBoundaryError(RuntimeError):
@@ -66,6 +81,41 @@ class ManualRecoveryRequired(ArchiveBoundaryError):
 class InventoryRecord:
     name: str
     relative_path: str
+
+
+@dataclass
+class SignalState:
+    """Distinguish pre-commit interruption from a signal observed after commit."""
+
+    critical_section: bool = False
+    restore_committed: bool = False
+    deferred_signals: list[int] = field(default_factory=list)
+
+
+class UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate mappings instead of hiding data."""
+
+
+def _construct_unique_mapping(
+    loader: UniqueKeySafeLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[object, object]:
+    loader.flatten_mapping(node)
+    mapping: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as exc:
+            raise yaml.YAMLError("unhashable YAML mapping key") from exc
+        if duplicate:
+            raise yaml.YAMLError("duplicate YAML mapping key")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping
+)
 
 
 def _safe_relative_path(value: object, *, suffix: str | None = None) -> str:
@@ -108,7 +158,7 @@ def _read_regular_file(path: Path, *, maximum: int = MAX_METADATA_BYTES) -> byte
 def _load_yaml_bytes(contents: bytes, *, label: str) -> object:
     try:
         text = contents.decode("utf-8")
-        return yaml.safe_load(text)
+        return yaml.load(text, Loader=UniqueKeySafeLoader)
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
         raise ArchiveBoundaryError(f"invalid YAML in {label}") from exc
 
@@ -149,7 +199,13 @@ def _load_inventory_bytes(contents: bytes) -> list[InventoryRecord]:
 
 def _walk_vault_sops_files(vault: Path) -> set[str]:
     discovered: set[str] = set()
-    for directory, directory_names, file_names in os.walk(vault, followlinks=False):
+
+    def traversal_failed(exc: OSError) -> None:
+        raise ArchiveBoundaryError("vault traversal failed before inventory coverage was complete") from exc
+
+    for directory, directory_names, file_names in os.walk(
+        vault, followlinks=False, onerror=traversal_failed
+    ):
         current = Path(directory)
         for name in [*directory_names, *file_names]:
             candidate = current / name
@@ -166,14 +222,62 @@ def _walk_vault_sops_files(vault: Path) -> set[str]:
     return discovered
 
 
-def _contains_encrypted_value(value: object) -> bool:
-    if isinstance(value, str):
-        return value.startswith("ENC[")
-    if isinstance(value, dict):
-        return any(_contains_encrypted_value(item) for item in value.values())
-    if isinstance(value, list):
-        return any(_contains_encrypted_value(item) for item in value)
-    return False
+def _is_sops_envelope(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    match = ENC_ENVELOPE.fullmatch(value)
+    if match is None:
+        return False
+    try:
+        decoded = [base64.b64decode(field, validate=True) for field in match.groups()]
+    except (binascii.Error, ValueError):
+        return False
+    return all(decoded)
+
+
+def _is_openpgp_recipient(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    fingerprint = value.get("fp")
+    created_at = value.get("created_at")
+    encrypted_key = value.get("enc")
+    if not isinstance(fingerprint, str) or FINGERPRINT.fullmatch(fingerprint) is None:
+        return False
+    if not isinstance(created_at, str) or SOPS_CREATED_AT.fullmatch(created_at) is None:
+        return False
+    try:
+        parsed_time = dt.datetime.fromisoformat(created_at[:-1] + "+00:00")
+    except ValueError:
+        return False
+    if parsed_time.utcoffset() != dt.timedelta(0):
+        return False
+    if not isinstance(encrypted_key, str):
+        return False
+    prefix = PGP_MESSAGE_BEGIN + "\n\n"
+    suffix = "\n" + PGP_MESSAGE_END
+    if not encrypted_key.startswith(prefix) or not encrypted_key.endswith(suffix):
+        return False
+    body_lines = encrypted_key[len(prefix) : -len(suffix)].splitlines()
+    if not body_lines or "\x00" in encrypted_key:
+        return False
+    if PGP_CRC_LINE.fullmatch(body_lines[-1]):
+        body_lines = body_lines[:-1]
+    if not body_lines or any(PGP_BODY_LINE.fullmatch(line) is None for line in body_lines):
+        return False
+    try:
+        decoded_body = base64.b64decode("".join(body_lines), validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return bool(decoded_body)
+
+
+def _policy_pgp_fingerprints(value: object) -> list[str]:
+    if not isinstance(value, str) or not value.strip():
+        raise ArchiveBoundaryError("SOPS policy has invalid OpenPGP recipients")
+    fingerprints = [item.strip() for item in value.split(",")]
+    if any(not item or FINGERPRINT.fullmatch(item) is None for item in fingerprints):
+        raise ArchiveBoundaryError("SOPS policy has invalid OpenPGP recipients")
+    return fingerprints
 
 
 def _validate_sops_document(contents: bytes, *, label: str) -> None:
@@ -184,32 +288,40 @@ def _validate_sops_document(contents: bytes, *, label: str) -> None:
     if not isinstance(metadata, dict):
         raise ArchiveBoundaryError(f"encrypted document lacks SOPS metadata: {label}")
     mac = metadata.get("mac")
-    if not isinstance(mac, str) or not mac.startswith("ENC["):
+    if not _is_sops_envelope(mac):
         raise ArchiveBoundaryError(f"encrypted document has invalid SOPS MAC metadata: {label}")
 
-    has_recipient = False
     pgp = metadata.get("pgp")
-    if isinstance(pgp, list) and pgp:
-        has_recipient = all(
-            isinstance(item, dict)
-            and isinstance(item.get("fp"), str)
-            and FINGERPRINT.fullmatch(item["fp"])
-            and isinstance(item.get("enc"), str)
-            and bool(item["enc"].strip())
-            for item in pgp
+    if not isinstance(pgp, list) or not pgp or not all(
+        _is_openpgp_recipient(item) for item in pgp
+    ):
+        raise ArchiveBoundaryError(
+            f"encrypted document has invalid OpenPGP recipient metadata: {label}"
         )
-        if not has_recipient:
-            raise ArchiveBoundaryError(f"encrypted document has invalid SOPS recipient metadata: {label}")
-    for key in ("age", "kms", "gcp_kms", "azure_kv", "hc_vault"):
-        value = metadata.get(key)
-        if isinstance(value, list) and value:
-            has_recipient = True
-    if not has_recipient:
-        raise ArchiveBoundaryError(f"encrypted document has no SOPS recipients: {label}")
+    if any(metadata.get(key) not in (None, []) for key in UNSUPPORTED_RECIPIENT_KEYS):
+        raise ArchiveBoundaryError(
+            f"encrypted document uses unsupported recipient metadata: {label}"
+        )
 
-    payload = {key: value for key, value in document.items() if key != "sops"}
-    if not _contains_encrypted_value(payload):
-        raise ArchiveBoundaryError(f"encrypted document contains no SOPS ciphertext: {label}")
+    payload_count = 0
+    for field in ("data", "stringData"):
+        if field not in document:
+            continue
+        payload = document[field]
+        if not isinstance(payload, dict):
+            raise ArchiveBoundaryError(
+                f"encrypted document has malformed secret payload metadata: {label}"
+            )
+        for key, value in payload.items():
+            if not isinstance(key, str) or not key or not _is_sops_envelope(value):
+                raise ArchiveBoundaryError(
+                    f"encrypted document contains a non-ciphertext secret payload: {label}"
+                )
+            payload_count += 1
+    if payload_count == 0:
+        raise ArchiveBoundaryError(
+            f"encrypted document contains no encrypted secret payload: {label}"
+        )
 
 
 def _validate_policy(contents: bytes) -> None:
@@ -222,9 +334,9 @@ def _validate_policy(contents: bytes) -> None:
     for rule in rules:
         if not isinstance(rule, dict):
             raise ArchiveBoundaryError("SOPS policy contains a malformed creation rule")
-        if any(rule.get(key) for key in ("pgp", "age", "kms", "gcp_kms", "azure_kv", "hc_vault")):
-            return
-    raise ArchiveBoundaryError("SOPS policy creation rules contain no recipients")
+        if any(rule.get(key) not in (None, [], "") for key in UNSUPPORTED_RECIPIENT_KEYS):
+            raise ArchiveBoundaryError("SOPS policy uses unsupported recipients")
+        _policy_pgp_fingerprints(rule.get("pgp"))
 
 
 def _sha256(contents: bytes) -> str:
@@ -266,6 +378,29 @@ def _write_archive(path: Path, files: dict[str, bytes]) -> None:
             contents = files[name]
             bundle.addfile(_archive_info(name, contents), io.BytesIO(contents))
     path.chmod(0o600)
+
+
+def _remove_owned_publication(source: Path, destination: Path) -> None:
+    """Remove destination only when it is the hard link made from source."""
+    try:
+        source_stat = source.lstat()
+        destination_stat = destination.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    if (
+        stat.S_ISREG(source_stat.st_mode)
+        and stat.S_ISREG(destination_stat.st_mode)
+        and source_stat.st_dev == destination_stat.st_dev
+        and source_stat.st_ino == destination_stat.st_ino
+    ):
+        try:
+            destination.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
 
 def create_backup(*, vault: Path, policy: Path, output: Path) -> Path:
@@ -317,12 +452,14 @@ def create_backup(*, vault: Path, policy: Path, output: Path) -> Path:
         try:
             os.link(temporary_archive, output)
             os.link(temporary_checksum, checksum_output)
-        except OSError as exc:
-            try:
-                output.unlink()
-            except FileNotFoundError:
-                pass
-            raise ArchiveBoundaryError("could not publish the completed backup atomically") from exc
+        except BaseException as exc:
+            _remove_owned_publication(temporary_checksum, checksum_output)
+            _remove_owned_publication(temporary_archive, output)
+            if isinstance(exc, OSError):
+                raise ArchiveBoundaryError(
+                    "could not publish the completed backup atomically"
+                ) from exc
+            raise
     return output
 
 
@@ -432,21 +569,34 @@ def _preflight_archive(path: Path) -> set[str]:
 
 def _walk_extracted_files(workspace: Path) -> set[str]:
     actual: set[str] = set()
-    for directory, directory_names, file_names in os.walk(workspace, followlinks=False):
+
+    def traversal_failed(exc: OSError) -> None:
+        raise ArchiveBoundaryError("extracted archive traversal failed") from exc
+
+    for directory, directory_names, file_names in os.walk(
+        workspace, followlinks=False, onerror=traversal_failed
+    ):
         current = Path(directory)
-        current.chmod(0o700)
-        for name in directory_names:
-            candidate = current / name
-            candidate_stat = candidate.lstat()
-            if not stat.S_ISDIR(candidate_stat.st_mode) or stat.S_ISLNK(candidate_stat.st_mode):
-                raise ArchiveBoundaryError("extracted archive contains a non-directory path component")
-        for name in file_names:
-            candidate = current / name
-            candidate_stat = candidate.lstat()
-            if not stat.S_ISREG(candidate_stat.st_mode) or stat.S_ISLNK(candidate_stat.st_mode):
-                raise ArchiveBoundaryError("extracted archive contains a non-regular file")
-            candidate.chmod(0o600)
-            actual.add(candidate.relative_to(workspace).as_posix())
+        try:
+            current.chmod(0o700)
+            for name in directory_names:
+                candidate = current / name
+                candidate_stat = candidate.lstat()
+                if not stat.S_ISDIR(candidate_stat.st_mode) or stat.S_ISLNK(candidate_stat.st_mode):
+                    raise ArchiveBoundaryError(
+                        "extracted archive contains a non-directory path component"
+                    )
+            for name in file_names:
+                candidate = current / name
+                candidate_stat = candidate.lstat()
+                if not stat.S_ISREG(candidate_stat.st_mode) or stat.S_ISLNK(candidate_stat.st_mode):
+                    raise ArchiveBoundaryError(
+                        "extracted archive contains a non-regular file"
+                    )
+                candidate.chmod(0o600)
+                actual.add(candidate.relative_to(workspace).as_posix())
+        except OSError as exc:
+            raise ArchiveBoundaryError("extracted archive metadata could not be verified") from exc
     return actual
 
 
@@ -559,6 +709,30 @@ def _replace_vault_atomically(staged_vault: Path, vault: Path) -> Path | None:
     return rollback
 
 
+def _select_tar_binary() -> str:
+    test_mode = os.environ.get("GLASSLAB_SECRET_TEST_MODE") == "1"
+    candidate = TRUSTED_TAR_PATH
+    if test_mode and os.environ.get("TAR_BIN"):
+        candidate = Path(os.environ["TAR_BIN"])
+    if not candidate.is_absolute():
+        raise ArchiveBoundaryError("tar executable path must be absolute")
+    try:
+        candidate_stat = candidate.lstat()
+    except OSError as exc:
+        raise ArchiveBoundaryError("trusted tar executable is unavailable") from exc
+    if (
+        not stat.S_ISREG(candidate_stat.st_mode)
+        or stat.S_ISLNK(candidate_stat.st_mode)
+        or not os.access(candidate, os.X_OK)
+    ):
+        raise ArchiveBoundaryError("tar executable is not an executable regular file")
+    if not test_mode and (
+        candidate_stat.st_uid != 0 or stat.S_IMODE(candidate_stat.st_mode) & 0o022
+    ):
+        raise ArchiveBoundaryError("trusted tar executable ownership or mode is unsafe")
+    return str(candidate)
+
+
 def restore_backup(
     *,
     archive: Path,
@@ -566,6 +740,7 @@ def restore_backup(
     vault: Path,
     confirmed: bool,
     tar_bin: str,
+    signal_state: SignalState | None = None,
 ) -> Path | None:
     parent = vault.parent
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -616,13 +791,21 @@ def restore_backup(
 
         blocked = {signal.SIGINT, signal.SIGTERM}
         previous_mask = None
-        if hasattr(signal, "pthread_sigmask"):
-            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+        if signal_state is not None:
+            signal_state.critical_section = True
         try:
-            rollback = _replace_vault_atomically(staged_vault, vault)
+            if hasattr(signal, "pthread_sigmask"):
+                previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+            try:
+                rollback = _replace_vault_atomically(staged_vault, vault)
+                if signal_state is not None:
+                    signal_state.restore_committed = True
+            finally:
+                if previous_mask is not None:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         finally:
-            if previous_mask is not None:
-                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            if signal_state is not None:
+                signal_state.critical_section = False
         return rollback
     except ManualRecoveryRequired:
         preserve_workspace = True
@@ -632,10 +815,13 @@ def restore_backup(
             shutil.rmtree(workspace, ignore_errors=True)
 
 
-def _install_signal_handlers() -> dict[signal.Signals, object]:
+def _install_signal_handlers(state: SignalState) -> dict[signal.Signals, object]:
     previous: dict[signal.Signals, object] = {}
 
     def interrupt(signum, _frame):
+        if state.critical_section or state.restore_committed:
+            state.deferred_signals.append(signum)
+            return
         raise OperationInterrupted(f"operation interrupted by signal {signum}")
 
     for handled in (signal.SIGINT, signal.SIGTERM):
@@ -675,7 +861,8 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Iterable[str] | None = None) -> int:
     os.umask(0o077)
     arguments = _build_parser().parse_args(argv)
-    previous_handlers = _install_signal_handlers()
+    signal_state = SignalState()
+    previous_handlers = _install_signal_handlers(signal_state)
     try:
         if arguments.operation == "backup":
             output = create_backup(
@@ -702,11 +889,18 @@ def main(argv: Iterable[str] | None = None) -> int:
             checksum=checksum,
             vault=arguments.vault_dir,
             confirmed=arguments.yes,
-            tar_bin=os.environ.get("TAR_BIN", "tar"),
+            tar_bin=_select_tar_binary(),
+            signal_state=signal_state,
         )
         print(f"Validated encrypted vault restored to {arguments.vault_dir}")
         if rollback is not None:
             print(f"Previous vault preserved at {rollback}")
+        if signal_state.deferred_signals:
+            print(
+                "Restore commit completed before a termination signal was observed; "
+                "the active vault and rollback status above are authoritative.",
+                file=sys.stderr,
+            )
         return 0
     except OperationInterrupted:
         print("Secret archive operation interrupted; active vault was not partially replaced.", file=sys.stderr)

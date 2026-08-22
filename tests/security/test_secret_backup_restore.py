@@ -27,7 +27,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_HELPER = REPOSITORY_ROOT / "scripts" / "backup-glasslab-secrets.sh"
 RESTORE_HELPER = REPOSITORY_ROOT / "scripts" / "restore-glasslab-secrets.sh"
 PULL_HELPER = REPOSITORY_ROOT / "scripts" / "pull-glasslab-secrets-backup.sh"
-SENTINEL = "secret-backup-stdout-sentinel"
+SENTINEL = "c2VjcmV0LWJhY2t1cC1zdGRvdXQtc2VudGluZWw="
 FINGERPRINT = "A" * 40
 
 
@@ -43,26 +43,31 @@ def load_archive_boundary():
 
 
 def encrypted_document(*, sentinel: str = SENTINEL) -> str:
+    envelope = (
+        "ENC[AES256_GCM,data:Y2lwaGVydGV4dA==,"
+        "iv:aXYtaXYtaXYtaXY=,tag:dGFnLXRhZw==,type:str]"
+    )
     return yaml.safe_dump(
         {
             "apiVersion": "v1",
             "kind": "Secret",
             "stringData": {
-                "TOKEN": (
-                    "ENC[AES256_GCM,data:"
-                    + sentinel
-                    + ",iv:fixture,tag:fixture,type:str]"
-                )
+                "TOKEN": envelope.replace("Y2lwaGVydGV4dA==", sentinel),
             },
             "sops": {
                 "pgp": [
                     {
                         "created_at": "2026-08-21T00:00:00Z",
-                        "enc": "-----BEGIN PGP MESSAGE-----\nfixture\n-----END PGP MESSAGE-----",
+                        "enc": (
+                            "-----BEGIN PGP MESSAGE-----\n"
+                            "\n"
+                            "Zml4dHVyZQ==\n"
+                            "-----END PGP MESSAGE-----"
+                        ),
                         "fp": FINGERPRINT,
                     }
                 ],
-                "mac": "ENC[AES256_GCM,data:mac,iv:fixture,tag:fixture,type:str]",
+                "mac": envelope,
                 "version": "3.9.0",
             },
         },
@@ -292,6 +297,196 @@ class SecretBackupRestoreTests(unittest.TestCase):
         self.assertFalse(self.archive_path().exists())
         self.assert_sentinel_absent(result)
 
+    def test_backup_fails_closed_when_an_unlisted_subtree_cannot_be_traversed(self):
+        """A privileged test must still prove unreadable subtrees cannot be omitted."""
+        blocked = self.vault / "unreadable"
+        blocked.mkdir(mode=0o700)
+        hidden = blocked / "unlisted.sops.yaml"
+        hidden.write_text(encrypted_document(), encoding="utf-8")
+        boundary = load_archive_boundary()
+        real_scandir = os.scandir
+
+        def unreadable_scandir(path):
+            if not isinstance(path, int) and Path(path) == blocked:
+                raise PermissionError("controlled unreadable subtree")
+            return real_scandir(path)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(boundary.os, "scandir", side_effect=unreadable_scandir):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = boundary.main(
+                    [
+                        "backup",
+                        "--vault-dir",
+                        str(self.vault),
+                        "--policy",
+                        str(self.policy),
+                        "--output",
+                        str(self.archive_path()),
+                    ]
+                )
+
+        self.assertNotEqual(result, 0)
+        self.assertFalse(self.archive_path().exists())
+        self.assertNotIn(SENTINEL, stdout.getvalue() + stderr.getvalue())
+
+    def test_extracted_validation_fails_closed_when_a_subtree_cannot_be_traversed(self):
+        """Post-extraction traversal errors must not make an incomplete tree look exact."""
+        workspace = self.root / "extracted"
+        blocked = workspace / "unreadable"
+        blocked.mkdir(mode=0o700, parents=True)
+        (blocked / "hidden.sops.yaml").write_text(encrypted_document(), encoding="utf-8")
+        boundary = load_archive_boundary()
+        real_scandir = os.scandir
+
+        def unreadable_scandir(path):
+            if not isinstance(path, int) and Path(path) == blocked:
+                raise PermissionError("controlled unreadable extracted subtree")
+            return real_scandir(path)
+
+        with mock.patch.object(boundary.os, "scandir", side_effect=unreadable_scandir):
+            with self.assertRaises(boundary.ArchiveBoundaryError):
+                boundary._walk_extracted_files(workspace)
+
+    def test_backup_interruption_after_first_publish_removes_pair_and_allows_retry(self):
+        """A signal between hard links must not strand a one-file backup stamp."""
+        boundary = load_archive_boundary()
+        output = self.archive_path()
+        real_link = os.link
+        link_count = 0
+
+        def interrupt_after_link(source, destination):
+            nonlocal link_count
+            real_link(source, destination)
+            link_count += 1
+            if link_count == 1:
+                raise boundary.OperationInterrupted("controlled publication interruption")
+
+        with mock.patch.object(boundary.os, "link", side_effect=interrupt_after_link):
+            with self.assertRaises(boundary.OperationInterrupted):
+                boundary.create_backup(vault=self.vault, policy=self.policy, output=output)
+
+        self.assertFalse(output.exists())
+        self.assertFalse(output.with_name(output.name + ".sha256").exists())
+        boundary.create_backup(vault=self.vault, policy=self.policy, output=output)
+        self.assertTrue(output.is_file())
+        self.assertTrue(output.with_name(output.name + ".sha256").is_file())
+
+    def test_backup_publication_race_preserves_file_not_linked_from_its_stage(self):
+        """Rollback must never delete a no-clobber destination created by another actor."""
+        boundary = load_archive_boundary()
+        output = self.archive_path()
+        output.parent.mkdir(mode=0o700, parents=True)
+        preexisting = b"preexisting-artifact"
+
+        def lose_publication_race(_source, destination):
+            Path(destination).write_bytes(preexisting)
+            raise FileExistsError("controlled no-clobber race")
+
+        with mock.patch.object(boundary.os, "link", side_effect=lose_publication_race):
+            with self.assertRaises(boundary.ArchiveBoundaryError):
+                boundary.create_backup(vault=self.vault, policy=self.policy, output=output)
+
+        self.assertEqual(output.read_bytes(), preexisting)
+        self.assertFalse(output.with_name(output.name + ".sha256").exists())
+
+    def test_backup_rejects_mixed_plaintext_secret_payload_without_echoing_it(self):
+        """One encrypted key must not hide another plaintext data or stringData key."""
+        document_path = self.vault / self.relative_secret
+        document = yaml.safe_load(document_path.read_text(encoding="utf-8"))
+        document["stringData"]["PLAINTEXT"] = SENTINEL
+        document_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+        result = self.run_backup()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive_path().exists())
+        self.assert_sentinel_absent(result)
+
+    def test_backup_rejects_malformed_sops_envelope_beside_valid_ciphertext(self):
+        """A string beginning with ENC is not ciphertext unless the full envelope is valid."""
+        document_path = self.vault / self.relative_secret
+        document = yaml.safe_load(document_path.read_text(encoding="utf-8"))
+        document["data"] = {"BROKEN": "ENC[not-a-sops-envelope]"}
+        document_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+        result = self.run_backup()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive_path().exists())
+        self.assert_sentinel_absent(result)
+
+    def test_backup_rejects_non_pgp_recipient_metadata(self):
+        """Unsupported recipient lists must not satisfy the approved OpenPGP boundary."""
+        document_path = self.vault / self.relative_secret
+        document = yaml.safe_load(document_path.read_text(encoding="utf-8"))
+        document["sops"]["pgp"] = []
+        document["sops"]["age"] = ["malformed-age-recipient"]
+        document_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+        result = self.run_backup()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive_path().exists())
+        self.assert_sentinel_absent(result)
+
+    def test_backup_rejects_malformed_openpgp_recipient_record(self):
+        """A recipient needs a fingerprint, timestamp, and armored encrypted data key."""
+        document_path = self.vault / self.relative_secret
+        document = yaml.safe_load(document_path.read_text(encoding="utf-8"))
+        document["sops"]["pgp"][0]["enc"] = "not-an-armored-message"
+        document_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+        result = self.run_backup()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive_path().exists())
+        self.assert_sentinel_absent(result)
+
+    def test_backup_rejects_armored_openpgp_record_with_invalid_body(self):
+        """Armor markers alone must not make malformed OpenPGP payload data valid."""
+        document_path = self.vault / self.relative_secret
+        document = yaml.safe_load(document_path.read_text(encoding="utf-8"))
+        document["sops"]["pgp"][0]["enc"] = (
+            "-----BEGIN PGP MESSAGE-----\n\nnot-base64!\n-----END PGP MESSAGE-----"
+        )
+        document_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+        result = self.run_backup()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive_path().exists())
+        self.assert_sentinel_absent(result)
+
+    def test_backup_rejects_duplicate_yaml_key_hiding_plaintext_payload(self):
+        """A later encrypted duplicate must not hide earlier plaintext in the file."""
+        document_path = self.vault / self.relative_secret
+        duplicated = encrypted_document().replace(
+            "stringData:\n",
+            f"stringData:\n  PLAINTEXT: {SENTINEL}\nstringData:\n",
+            1,
+        )
+        document_path.write_text(duplicated, encoding="utf-8")
+
+        result = self.run_backup()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive_path().exists())
+        self.assert_sentinel_absent(result)
+
+    def test_backup_rejects_malformed_policy_pgp_fingerprint(self):
+        """A truthy policy value is not a usable approved OpenPGP recipient."""
+        malformed_policy = yaml.safe_load(self.policy.read_text(encoding="utf-8"))
+        malformed_policy["creation_rules"][0]["pgp"] = "not-a-fingerprint"
+        self.policy.write_text(yaml.safe_dump(malformed_policy), encoding="utf-8")
+
+        result = self.run_backup()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive_path().exists())
+        self.assert_sentinel_absent(result)
+
     def test_restore_rejects_corrupted_internal_checksum_before_replacement(self):
         """A modified encrypted document must not replace the active vault."""
         self.assertEqual(self.run_backup().returncode, 0)
@@ -454,6 +649,7 @@ while True:
         fake_tar.chmod(0o755)
         environment = os.environ.copy()
         environment["TAR_BIN"] = str(fake_tar)
+        environment["GLASSLAB_SECRET_TEST_MODE"] = "1"
         environment["TAR_STARTED"] = str(tar_started)
         environment["TAR_ARGUMENTS"] = str(tar_arguments)
         process = subprocess.Popen(
@@ -491,6 +687,77 @@ while True:
         self.assertFalse(stage.exists())
         self.assertEqual(list(self.root.glob("active-vault.rollback-*")), [])
         self.assertNotIn(SENTINEL, stdout + stderr)
+
+    def test_restore_ignores_untrusted_tar_override_outside_explicit_test_mode(self):
+        """Live restore must not execute a TAR_BIN selected through ambient environment."""
+        self.assertEqual(self.run_backup().returncode, 0)
+        fake_tar_ran = self.root / "untrusted-tar-ran"
+        fake_tar = self.root / "untrusted-tar"
+        fake_tar.write_text(
+            f"""#!{os.path.realpath(sys.executable)}
+from pathlib import Path
+Path({str(fake_tar_ran)!r}).write_text("ran", encoding="utf-8")
+raise SystemExit(99)
+""",
+            encoding="utf-8",
+        )
+        fake_tar.chmod(0o755)
+        environment = os.environ.copy()
+        environment["TAR_BIN"] = str(fake_tar)
+        environment.pop("GLASSLAB_SECRET_TEST_MODE", None)
+        active = self.root / "active-vault"
+
+        result = self.run_restore(self.archive_path(), active, environment=environment)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(fake_tar_ran.exists())
+        self.assertTrue((active / self.relative_secret).is_file())
+        self.assert_sentinel_absent(result)
+
+    def test_signal_pending_after_restore_commit_returns_success_matching_active_vault(self):
+        """A post-swap signal must not report failure after the new vault is committed."""
+        self.assertEqual(self.run_backup().returncode, 0)
+        active = self.root / "active-vault"
+        active.mkdir(mode=0o700)
+        marker = active / "active-marker"
+        marker.write_text("old-vault-must-be-rollback", encoding="utf-8")
+        boundary = load_archive_boundary()
+        real_replace = boundary._replace_vault_atomically
+
+        def replace_then_signal(staged_vault: Path, vault: Path):
+            rollback = real_replace(staged_vault, vault)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return rollback
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(
+            boundary, "_replace_vault_atomically", side_effect=replace_then_signal
+        ):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = boundary.main(
+                    [
+                        "restore",
+                        "--archive",
+                        str(self.archive_path()),
+                        "--vault-dir",
+                        str(active),
+                        "--yes",
+                    ]
+                )
+
+        self.assertEqual(result, 0, stderr.getvalue())
+        self.assertTrue((active / self.relative_secret).is_file())
+        rollbacks = list(self.root.glob("active-vault.rollback-*-*"))
+        self.assertEqual(len(rollbacks), 1, rollbacks)
+        self.assertEqual(
+            (rollbacks[0] / "active-marker").read_text(encoding="utf-8"),
+            "old-vault-must-be-rollback",
+        )
+        self.assertIn("Validated encrypted vault restored", stdout.getvalue())
+        self.assertIn("signal", stderr.getvalue().lower())
+        self.assertIn("commit", stderr.getvalue().lower())
+        self.assertNotIn(SENTINEL, stdout.getvalue() + stderr.getvalue())
 
     def test_irrecoverable_exchange_failure_preserves_old_vault_for_manual_recovery(self):
         """Cleanup must not erase the old vault after both rollback operations fail."""
@@ -596,6 +863,26 @@ for source in sources:
             encoding="utf-8",
         )
         scp.chmod(0o755)
+        link = self.fake_bin / "ln"
+        link.write_text(
+            f"""#!{os.path.realpath(sys.executable)}
+import os
+import signal
+import sys
+from pathlib import Path
+
+arguments = [item for item in sys.argv[1:] if item != "--"]
+os.link(arguments[0], arguments[1])
+marker_name = os.environ.get("LINK_INTERRUPT_MARKER")
+if marker_name:
+    marker = Path(marker_name)
+    if not marker.exists():
+        marker.write_text("published", encoding="utf-8")
+        os.kill(os.getppid(), signal.SIGUSR1)
+""",
+            encoding="utf-8",
+        )
+        link.chmod(0o755)
 
     def _write_valid_remote_artifacts(self) -> None:
         archive = self.remote_artifacts / "glasslab-secrets-20260821-130000.tar.gz"
@@ -688,6 +975,53 @@ for source in sources:
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.ssh_calls.exists())
         self.assertFalse(self.scp_calls.exists())
+
+    def test_pull_signal_after_first_publish_removes_pair_and_allows_retry(self):
+        """A terminating signal in the link window must not reserve the backup stamp."""
+        environment = self.environment()
+        environment["LINK_INTERRUPT_MARKER"] = str(self.root / "link-interrupted")
+        command = [
+            str(PULL_HELPER),
+            "--remote-host",
+            "operator@provisioner",
+            "--remote-repo",
+            "/srv/cluster",
+            "--remote-output-dir",
+            "/srv/backups",
+            "--local-output-dir",
+            str(self.local_artifacts),
+            "--stamp",
+            "20260821-130000",
+        ]
+
+        interrupted = subprocess.run(
+            command,
+            cwd=REPOSITORY_ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        archive = self.local_artifacts / "glasslab-secrets-20260821-130000.tar.gz"
+        checksum = archive.with_name(archive.name + ".sha256")
+        self.assertNotEqual(interrupted.returncode, 0)
+        self.assertFalse(archive.exists())
+        self.assertFalse(checksum.exists())
+        self.assertNotIn(SENTINEL, interrupted.stdout + interrupted.stderr)
+
+        environment.pop("LINK_INTERRUPT_MARKER")
+        retried = subprocess.run(
+            command,
+            cwd=REPOSITORY_ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        self.assertTrue(archive.is_file())
+        self.assertTrue(checksum.is_file())
 
 
 if __name__ == "__main__":

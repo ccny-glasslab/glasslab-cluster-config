@@ -114,10 +114,41 @@ remote_command+=" --stamp $(shell_quote "$STAMP")"
 ssh -T -- "$REMOTE_HOST" "$remote_command"
 
 pull_stage="$(mktemp -d -- "$LOCAL_OUTPUT_DIR/.glasslab-secret-pull.XXXXXXXX")"
+archive_path="$LOCAL_OUTPUT_DIR/$archive_name"
+checksum_path="$LOCAL_OUTPUT_DIR/$checksum_name"
+publication_committed=0
+
+rollback_publications() {
+  if [[ "$publication_committed" -eq 0 ]]; then
+    if [[ -e "$archive_path" && -e "$pull_stage/$archive_name" ]] &&
+      [[ "$archive_path" -ef "$pull_stage/$archive_name" ]]; then
+      rm -f -- "$archive_path"
+    fi
+    if [[ -e "$checksum_path" && -e "$pull_stage/$checksum_name" ]] &&
+      [[ "$checksum_path" -ef "$pull_stage/$checksum_name" ]]; then
+      rm -f -- "$checksum_path"
+    fi
+  fi
+}
+
 cleanup() {
+  rollback_publications
   rm -rf -- "$pull_stage"
 }
-trap cleanup EXIT HUP INT TERM
+
+handle_signal() {
+  local status="$1"
+  trap - HUP INT TERM USR1 USR2
+  cleanup
+  exit "$status"
+}
+
+trap cleanup EXIT
+trap 'handle_signal 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
+trap 'handle_signal 138' USR1
+trap 'handle_signal 140' USR2
 chmod 700 -- "$pull_stage"
 
 scp -- \
@@ -129,14 +160,14 @@ python3 "$ROOT/scripts/secret_backup_restore.py" verify-archive \
   --archive "$pull_stage/$archive_name" \
   --checksum "$pull_stage/$checksum_name"
 
-if ! ln -- "$pull_stage/$archive_name" "$LOCAL_OUTPUT_DIR/$archive_name"; then
+if ! ln -- "$pull_stage/$archive_name" "$archive_path"; then
   printf 'Could not publish the pulled archive without overwriting a file.\n' >&2
   exit 1
 fi
-if ! ln -- "$pull_stage/$checksum_name" "$LOCAL_OUTPUT_DIR/$checksum_name"; then
-  rm -f -- "$LOCAL_OUTPUT_DIR/$archive_name"
+if ! ln -- "$pull_stage/$checksum_name" "$checksum_path"; then
   printf 'Could not publish the pulled checksum without overwriting a file.\n' >&2
   exit 1
 fi
+publication_committed=1
 
 printf 'Pulled and verified encrypted-only backup artifacts into %s\n' "$LOCAL_OUTPUT_DIR"

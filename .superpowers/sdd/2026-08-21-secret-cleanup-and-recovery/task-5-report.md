@@ -159,3 +159,126 @@ environmental limitation rather than described as a passing full gate.
   metadata also requires confidentiality.
 - Atomic replacement requires Linux `renameat2(RENAME_EXCHANGE)`. Unsupported
   hosts fail closed before replacing an existing vault.
+
+## Fix Round 1: encrypted-only and interruption hardening
+
+### Review findings addressed
+
+- Encrypted-only validation now requires every scalar Secret value under
+  `data` and `stringData` to be a complete, structurally valid SOPS
+  `AES256_GCM` envelope. Mixed plaintext, malformed envelopes, nested or
+  non-string payloads, and duplicate YAML keys fail closed without printing
+  values.
+- SOPS recipient validation now enforces the approved OpenPGP design. Every
+  document must have a non-empty `sops.pgp` list whose records contain a
+  40-hex fingerprint, a UTC creation timestamp, and an armored message with a
+  valid base64 body. Unsupported non-empty recipient backends and malformed
+  policy `pgp` fingerprints are rejected.
+- Both source-vault and extracted-staging walks now install `os.walk` error
+  handlers and wrap traversal, metadata, and read failures as boundary
+  failures. Tests inject deterministic `PermissionError` from `os.scandir`, so
+  the fail-closed coverage remains meaningful when the suite runs privileged.
+- Python backup publication and the off-host pull helper now treat archive and
+  checksum publication as one recoverable pair. Any interruption or other
+  exceptional exit before the second link removes only destinations that are
+  still hard links to this operation's private staging files. Pre-existing or
+  racing no-clobber files are preserved, and the same stamp can be retried.
+- A signal deferred during the restore exchange can no longer produce exit
+  130 after the active vault has already been replaced. Once the atomic
+  replacement returns, the operation records committed state, keeps the signal
+  deferred through cleanup, reports the committed result, and returns success.
+  Pre-commit interruption continues to return failure and leaves the active
+  vault unchanged.
+- Production restore now uses fixed `/usr/bin/tar` and validates that it is a
+  root-owned, executable, non-symlink regular file with no group/world write
+  bits. `TAR_BIN` is honored only when the explicit
+  `GLASSLAB_SECRET_TEST_MODE=1` test boundary is set; ambient production
+  overrides are ignored.
+
+Self-review added two adjacent parser regressions beyond the review findings:
+duplicate YAML keys could otherwise hide an earlier plaintext payload, and
+OpenPGP armor markers could otherwise enclose invalid body data. Both now fail
+closed.
+
+### Fix-round TDD evidence
+
+The first RED group added five validation regressions for mixed plaintext,
+malformed SOPS envelopes, non-PGP recipient metadata, malformed OpenPGP
+records, and malformed policy fingerprints. All 5/5 failed against the prior
+implementation because it accepted the invalid inputs.
+
+The traversal/publication RED group reproduced silent subtree omission,
+Python pair-publication interruption, a no-clobber publication race, and a
+pull-helper signal after the first publication. The first privileged traversal
+harness incorrectly passed an integer directory descriptor to `Path`; after
+correcting the harness to pass descriptors through, both traversal tests
+failed against the prior implementation as intended. The five corrected
+regressions are green.
+
+The signal/tar RED group failed 2/2 against the prior implementation: ambient
+`TAR_BIN` was executed, and a signal made restore return 130 after the active
+vault had already been replaced. The existing pre-commit signal test remained
+part of the green guardrail.
+
+Self-review then added two more RED tests. Both failed because duplicate YAML
+keys and an armored OpenPGP record with an invalid body were accepted before
+the parser hardening.
+
+Final focused GREEN:
+
+```text
+python3 -m unittest tests.security.test_secret_backup_restore -v
+Ran 29 tests in 2.819s
+OK
+```
+
+The 14 added regressions cover all four Important review findings plus the two
+adjacent parser bypasses. Captured output continues to exclude the sentinel
+payload value.
+
+### Fix-round security self-review
+
+The security diff preflight was ready with delegation intentionally disabled
+by the task boundary. TAC access remained unavailable because the connector
+was not connected. The runtime scope was limited to
+`scripts/secret_backup_restore.py` and
+`scripts/pull-glasslab-secrets-backup.sh`; both files and their full working
+tree diff were inspected, with the threat model and test coverage centered on
+plaintext admission, malformed recipient metadata, traversal omission,
+pair-publication ownership, signal/commit state, and privileged executable
+selection. No candidate finding survived the local review after the duplicate
+key and PGP-body fixes.
+
+The sealed-artifact finalizer was attempted once and returned
+`manifest.scan.artifacts[0]: sealed artifact changed or is missing`. Per the
+security workflow it was not retried in the same review, so this report does
+not claim a completed canonical Codex Security scan. The failure is advisory
+to this SDD task; the repository diff, regression tests, and requested local
+security suites were reviewed independently before commit.
+
+### Fix-round verification
+
+Fresh verification before this report update produced:
+
+- `python3 -m unittest tests.security.test_secret_backup_restore -v`:
+  29/29 passed;
+- `python3 -m unittest tests.security.test_secret_process_boundaries
+  tests.security.test_credential_hygiene -v`: 55/55 passed;
+- shell syntax for all four backup/restore shell helpers: passed;
+- Python compilation for the implementation and focused tests: passed;
+- `python3 scripts/check-credential-hygiene.py .`: passed with no findings;
+- `python3 scripts/validate-configs.py`: passed;
+- `./scripts/check-before-push.sh --docs`: passed; and
+- `git diff --check`: passed before the report append and is rerun as a final
+  commit gate.
+
+### Fix-round deferred concerns
+
+- No live host, external vault, SOPS key, Kubernetes Secret, or cluster state
+  was read or changed. The live migration, enrolled cryptographic SOPS check,
+  off-host transfer, and recovery drill remain deferred.
+- The boundary validates ciphertext and recipient structure but does not
+  decrypt or cryptographically authenticate the SOPS payload; that requires
+  the separately approved enrolled SOPS operation.
+- Production restore requires trusted `/usr/bin/tar` and Linux
+  `renameat2(RENAME_EXCHANGE)`. Missing or untrusted prerequisites fail closed.

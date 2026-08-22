@@ -36,7 +36,18 @@ secrets:
 
 Every `relative_path` must be normalized, remain below the vault, and end in
 `.sops.yaml`. Backup fails if a record is missing its file or if the vault has
-an unlisted `*.sops.yaml` document. Symbolic links are rejected.
+an unlisted `*.sops.yaml` document. Symbolic links and any traversal, stat, or
+read error are rejected; an unreadable subtree cannot be treated as empty.
+
+Each ciphertext document must use the approved OpenPGP SOPS structure. Every
+scalar under Kubernetes Secret `data` or `stringData` must be a complete
+`ENC[AES256_GCM,...]` envelope with nonempty base64 fields. Mixed plaintext is
+rejected even when another field is encrypted, and duplicate YAML mappings
+cannot hide an earlier plaintext payload. Every SOPS OpenPGP record must carry
+a 40-hex fingerprint, UTC creation timestamp, and base64-valid armored
+encrypted data key; non-PGP recipient lists are not accepted by this boundary.
+Every policy creation rule must likewise name one or more comma-separated
+40-hex OpenPGP fingerprints.
 
 The live inventory must eventually cover every active secret family, including
 workflow-api, research-orchestrator, the v1 agent/model-serving path, Postgres,
@@ -93,7 +104,10 @@ Useful explicit form:
 ```
 
 The output directory is set to `0700`; published artifacts are `0600` and are
-never silently overwritten. A local private directory or conservative
+never silently overwritten. Archive and checksum publication is treated as a
+pair: an exception or termination signal before both links commit removes only
+links owned by the current private staging directory and preserves any
+pre-existing no-clobber destination. A local private directory or conservative
 `USER@HOST:/absolute/path` may be supplied with `--copy-dest`.
 
 ## Pull an off-host copy
@@ -109,8 +123,10 @@ The pull helper uses the `glasslab-provisioner` personal SSH alias by default.
 It runs the encrypted-only backup remotely without a TTY, downloads the archive
 and checksum into randomized `0700` local staging, verifies the checksum, and
 publishes both into `$HOME/glasslab-secret-backups` without overwriting an
-existing backup. It needs no inbound connection to the laptop and accepts no
-secret or passphrase argument.
+existing backup. Its signal cleanup applies the same paired-publication rule,
+so an interrupted first link does not reserve the timestamp and a safe retry
+can proceed. It needs no inbound connection to the laptop and accepts no secret
+or passphrase argument.
 
 ## Restore safety
 
@@ -121,8 +137,9 @@ the active vault:
 2. verifies the adjacent archive checksum;
 3. preflights every tar member in Python and rejects absolute paths, traversal,
    duplicates, links, devices, directories, and unexpected names;
-4. extracts only after preflight with `tar --no-same-owner` and restrictive
-   ownership and mode behavior;
+4. extracts only after preflight with fixed, root-owned `/usr/bin/tar`,
+   `--no-same-owner`, and restrictive ownership and mode behavior; ambient
+   `TAR_BIN` is ignored outside the explicit repository test mode;
 5. compares extracted paths to the preflight result and inventory;
 6. verifies internal SHA-256 coverage, policy structure, and SOPS metadata for
    every ciphertext document; and
@@ -130,9 +147,12 @@ the active vault:
    the active vault and preserves the previous vault as
    `<vault>.rollback-<UTC timestamp>-<random>`.
 
-SIGINT, SIGTERM, validation failure, or extraction failure removes staging and
-does not create a rollback. Signals are blocked only during the atomic exchange
-and rollback rename, so an interruption cannot leave a half-swapped pair. If
+SIGINT, SIGTERM, validation failure, or extraction failure before commit
+removes staging and does not create a rollback. Signals are blocked only during
+the atomic exchange and rollback rename, so an interruption cannot leave a
+half-swapped pair. A signal delivered after the exchange and rollback commit is
+reported as deferred, and the helper exits successfully with explicit restored
+vault and rollback status rather than falsely reporting an unchanged vault. If
 both the rollback rename and automatic exchange-back fail, the helper leaves
 the private staging directory in place and reports the old vault's recovery
 path instead of deleting the last preserved copy.

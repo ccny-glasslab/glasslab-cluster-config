@@ -15,6 +15,11 @@ documents. `scripts/backup-glasslab-secrets.sh` archives only those encrypted
 documents plus inventory, public SOPS policy, and checksums. The tracked
 provisioner snapshot does not capture the vault.
 
+The archive boundary accepts only structurally complete OpenPGP SOPS metadata
+and requires every Secret `data`/`stringData` scalar to be a complete encrypted
+envelope. It rejects mixed plaintext, unsupported recipient types, unreadable
+vault subtrees, and partial archive/checksum publication.
+
 See:
 
 - [`../../../docs/glasslab-v2/secrets-and-dr.md`](../../../docs/glasslab-v2/secrets-and-dr.md)

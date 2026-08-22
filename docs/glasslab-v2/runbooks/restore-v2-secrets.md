@@ -43,10 +43,12 @@ vault=/home/glasslab/.local/share/glasslab-secrets
   --yes
 ```
 
-`--yes` is mandatory. A checksum mismatch, unsafe tar path, traversal, link,
-unexpected member, inventory mismatch, invalid SOPS metadata, or tar failure
-stops before replacement. The helper never calls `sops -d` and never prints a
-secret document.
+`--yes` is mandatory. A checksum mismatch, unsafe tar path, traversal or read
+error, link, unexpected member, inventory mismatch, mixed plaintext Secret
+payload, duplicate YAML mapping, malformed OpenPGP SOPS metadata, malformed
+policy fingerprint, or tar failure stops before replacement. Normal operation
+uses the fixed root-owned `/usr/bin/tar`; an ambient `TAR_BIN` value is ignored.
+The helper never calls `sops -d` and never prints a secret document.
 
 If the vault already exists, the output reports the dated randomized rollback
 directory. Preserve it until the recovery drill and service validation are
@@ -54,6 +56,12 @@ complete. In the exceptional case where both rollback preservation and the
 automatic exchange-back fail, stop immediately: the error reports a private
 staging path that still contains the previous vault. Do not remove that path
 until an operator has completed a reviewed manual recovery.
+
+If SIGINT or SIGTERM arrives before commit, the command exits nonzero and the
+active vault remains unchanged. If a signal was already pending when the
+atomic exchange and rollback commit completed, the command reports that
+deferred signal but exits zero; its restored-vault and rollback paths are then
+the authoritative committed state.
 
 ## 3. Check restored metadata without values
 
