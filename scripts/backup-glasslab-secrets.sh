@@ -6,11 +6,10 @@ VAULT_DIR="${GLASSLAB_SECRET_VAULT:-/home/glasslab/.local/share/glasslab-secrets
 POLICY="${SOPS_CONFIG:-$ROOT/.sops.yaml}"
 OUTPUT_DIR="${OUTPUT_DIR:-$HOME/glasslab-secret-backups}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-COPY_DEST=""
 
 usage() {
   cat <<'EOF'
-Usage: backup-glasslab-secrets.sh [--vault-dir DIR] [--policy FILE] [--output-dir DIR] [--copy-dest DEST] [--stamp STAMP]
+Usage: backup-glasslab-secrets.sh [--vault-dir DIR] [--policy FILE] [--output-dir DIR] [--stamp STAMP]
 
 Creates a tar.gz recovery bundle containing only already-encrypted *.sops.yaml
 documents, vault/inventory.yaml, the public .sops.yaml policy, and SHA-256
@@ -20,10 +19,6 @@ Defaults:
   --vault-dir   $GLASSLAB_SECRET_VAULT or /home/glasslab/.local/share/glasslab-secrets
   --policy      $SOPS_CONFIG or the repository .sops.yaml
   --output-dir  $OUTPUT_DIR or $HOME/glasslab-secret-backups
-
-Off-host copy:
-  --copy-dest accepts a private local directory or a conservative scp-style
-  USER@HOST:/absolute/path destination.
 EOF
 }
 
@@ -39,10 +34,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --output-dir)
       OUTPUT_DIR="$2"
-      shift 2
-      ;;
-    --copy-dest)
-      COPY_DEST="$2"
       shift 2
       ;;
     --stamp)
@@ -67,29 +58,8 @@ if [[ ! "$STAMP" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]]; then
 fi
 
 ARCHIVE_PATH="$OUTPUT_DIR/glasslab-secrets-${STAMP}.tar.gz"
-CHECKSUM_PATH="${ARCHIVE_PATH}.sha256"
 
 python3 "$ROOT/scripts/secret_backup_restore.py" backup \
   --vault-dir "$VAULT_DIR" \
   --policy "$POLICY" \
   --output "$ARCHIVE_PATH"
-
-if [[ -n "$COPY_DEST" ]]; then
-  if [[ "$COPY_DEST" == *:* ]]; then
-    if [[ ! "$COPY_DEST" =~ ^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:/[A-Za-z0-9_./-]+/?$ ]] ||
-      [[ "$COPY_DEST" == *"/../"* ]] || [[ "$COPY_DEST" == *"/.." ]]; then
-      printf 'Remote copy destination must be USER@HOST:/absolute/safe/path.\n' >&2
-      exit 1
-    fi
-    scp -- "$ARCHIVE_PATH" "$CHECKSUM_PATH" "$COPY_DEST"
-  else
-    if [[ "$COPY_DEST" == -* ]]; then
-      printf 'Local copy destination must not begin with a dash.\n' >&2
-      exit 1
-    fi
-    mkdir -p -- "$COPY_DEST"
-    chmod 700 -- "$COPY_DEST"
-    cp -- "$ARCHIVE_PATH" "$CHECKSUM_PATH" "$COPY_DEST/"
-  fi
-  printf 'Copied encrypted-only backup artifacts to %s\n' "$COPY_DEST"
-fi

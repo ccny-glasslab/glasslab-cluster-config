@@ -38,6 +38,8 @@ Every `relative_path` must be normalized, remain below the vault, and end in
 `.sops.yaml`. Backup fails if a record is missing its file or if the vault has
 an unlisted `*.sops.yaml` document. Symbolic links and any traversal, stat, or
 read error are rejected; an unreadable subtree cannot be treated as empty.
+`target` and `owner` are required, trimmed, bounded, printable single-line
+values and are preserved as part of the validated recovery inventory.
 
 Each ciphertext document must use the approved OpenPGP SOPS structure. Every
 scalar under Kubernetes Secret `data` or `stringData` must be a complete
@@ -46,8 +48,12 @@ rejected even when another field is encrypted, and duplicate YAML mappings
 cannot hide an earlier plaintext payload. Every SOPS OpenPGP record must carry
 a 40-hex fingerprint, UTC creation timestamp, and base64-valid armored
 encrypted data key; non-PGP recipient lists are not accepted by this boundary.
-Every policy creation rule must likewise name one or more comma-separated
-40-hex OpenPGP fingerprints.
+Every policy creation rule must have a valid `path_regex` and one or more
+unique, comma-separated 40-hex OpenPGP fingerprints. For each inventory path,
+the first matching creation rule is resolved and its recipient fingerprint set
+must equal the document's SOPS OpenPGP fingerprint set. A missing match,
+malformed regex, duplicate recipient, or extra/missing document recipient
+fails both backup and restore validation.
 
 The live inventory must eventually cover every active secret family, including
 workflow-api, research-orchestrator, the v1 agent/model-serving path, Postgres,
@@ -107,8 +113,9 @@ The output directory is set to `0700`; published artifacts are `0600` and are
 never silently overwritten. Archive and checksum publication is treated as a
 pair: an exception or termination signal before both links commit removes only
 links owned by the current private staging directory and preserves any
-pre-existing no-clobber destination. A local private directory or conservative
-`USER@HOST:/absolute/path` may be supplied with `--copy-dest`.
+pre-existing no-clobber destination. The backup helper publishes locally only;
+use the verified pull helper below for the off-host copy so the archive and its
+checksum cannot be split across an unverified two-file publication path.
 
 ## Pull an off-host copy
 
@@ -139,7 +146,8 @@ the active vault:
    duplicates, links, devices, directories, and unexpected names;
 4. extracts only after preflight with fixed, root-owned `/usr/bin/tar`,
    `--no-same-owner`, and restrictive ownership and mode behavior; ambient
-   `TAR_BIN` is ignored outside the explicit repository test mode;
+   `TAR_BIN` is ignored outside the explicit repository test mode, while
+   `TAR_OPTIONS`, `TAR_RSH`, `RSH`, and `TAPE` are removed from the tar child;
 5. compares extracted paths to the preflight result and inventory;
 6. verifies internal SHA-256 coverage, policy structure, and SOPS metadata for
    every ciphertext document; and

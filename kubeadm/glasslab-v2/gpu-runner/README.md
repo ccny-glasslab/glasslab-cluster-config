@@ -13,11 +13,12 @@ This directory contains Kubernetes manifests for deploying the GPU runner with c
 
 The aggregate manifest intentionally contains no `Secret`. Either create the
 named `glasslab-v2-runner` Secret in the `glasslab-v2` namespace before
-deployment, or create an ignored local manifest ending in `.local.yaml` from
-the documentation-only schema in `40-secret.example.yaml`.
+deployment, or create the naturally named ignored local manifest
+`40-secret.local.yaml` from the documentation-only schema in
+`40-secret.example.yaml`.
 
 ```bash
-export GLASSLAB_GPU_RUNNER_SECRET_FILE=/secure/path/gpu-runner-secret.local.yaml
+export GLASSLAB_GPU_RUNNER_SECRET_FILE="$PWD/kubeadm/glasslab-v2/gpu-runner/40-secret.local.yaml"
 ./scripts/deploy-gpu-runner.sh --apply
 ```
 
@@ -30,10 +31,13 @@ variable:
 
 The deploy script fails before applying the workload when neither source is
 available. It also rejects a local manifest unless it is exactly a `v1` Secret
-named `glasslab-v2-runner` in namespace `glasslab-v2` with a nonempty
-`GLASSLAB_RUNNER_STORE_POSTGRES_DSN` entry in `data` or `stringData`. After a
-local apply, the script confirms that exact live Secret/key before applying the
-workload. Local Secret manifests must remain untracked.
+named `glasslab-v2-runner` in namespace `glasslab-v2` with exactly one
+`GLASSLAB_RUNNER_STORE_POSTGRES_DSN` entry in `data` or `stringData`. The value
+must decode as a PostgreSQL DSN with a hostname, username, password, and
+database name; empty, malformed, control-character, and placeholder values are
+rejected. After a local apply, the script decodes and validates that same
+contract from the exact live Secret/key before applying the workload. Local
+Secret manifests must remain untracked.
 
 ## Configuration
 

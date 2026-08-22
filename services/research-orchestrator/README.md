@@ -27,6 +27,22 @@ PYTHONPATH=. python -m app.smoke
 The smoke path uses scripted OpenCode output, a fake cluster executor, the
 repository example evaluation contract, and disabled Discord.
 
+For the one-time SQLite-to-Postgres migration, pass the DSN through the
+existing service environment or an already-open private descriptor, never an
+argument:
+
+```bash
+exec {postgres_dsn_fd}< /secure/path/research-orchestrator-postgres-dsn
+python3 scripts/import-sqlite-store-to-postgres.py \
+  --sqlite-path /secure/path/orchestrator.db \
+  --dsn-fd "$postgres_dsn_fd" \
+  --apply
+exec {postgres_dsn_fd}<&-
+```
+
+`GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN` is the supported environment mode.
+The historical `--postgres-dsn` option is rejected without echoing its value.
+
 The agent model is selected with
 `GLASSLAB_ORCHESTRATOR_AGENT_MODEL_PROVIDER_ID` and
 `GLASSLAB_ORCHESTRATOR_AGENT_MODEL_NAME`. The live manifest temporarily uses

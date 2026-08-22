@@ -62,6 +62,14 @@ run_credential_hygiene() {
   python3 scripts/check-credential-hygiene.py .
 }
 
+run_secret_boundary_tests() {
+  printf '[check-before-push] running secret process and recovery boundary tests\n'
+  python3 -m unittest \
+    tests.security.test_secret_process_boundaries \
+    tests.security.test_secret_backup_restore \
+    -v
+}
+
 run_docs() {
   printf '[check-before-push] checking Markdown links\n'
   python3 scripts/check-doc-links.py
@@ -145,6 +153,7 @@ case "$MODE" in
   default)
     run_configs
     run_credential_hygiene
+    run_secret_boundary_tests
     run_docs
     run_shell
     run_python_syntax

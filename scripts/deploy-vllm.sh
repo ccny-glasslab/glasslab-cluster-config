@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+TRACE_WAS_ENABLED=0
+case "$-" in
+  *x*)
+    TRACE_WAS_ENABLED=1
+    set +x
+    ;;
+esac
+export -n TRACE_WAS_ENABLED 2>/dev/null || true
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NAMESPACE="glasslab-agents"
@@ -122,3 +130,10 @@ fi
 kubectl apply -f "$ROOT/kubeadm/agent-stack/02-persistent-volume-claims.yaml"
 kubectl apply -f "$ROOT/kubeadm/agent-stack/10-vllm-config.yaml"
 kubectl apply -f "$ROOT/kubeadm/agent-stack/11-vllm-deployment.yaml"
+
+if [[ "$TRACE_WAS_ENABLED" -eq 1 ]]; then
+  unset TRACE_WAS_ENABLED
+  set -x
+else
+  unset TRACE_WAS_ENABLED
+fi

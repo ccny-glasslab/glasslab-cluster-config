@@ -81,6 +81,15 @@ class ManualRecoveryRequired(ArchiveBoundaryError):
 class InventoryRecord:
     name: str
     relative_path: str
+    target: str
+    owner: str
+
+
+@dataclass(frozen=True)
+class CreationRule:
+    path_regex: str
+    pattern: re.Pattern[str]
+    pgp_fingerprints: frozenset[str]
 
 
 @dataclass
@@ -183,17 +192,34 @@ def _load_inventory_bytes(contents: bytes) -> list[InventoryRecord]:
         relative_path = _safe_relative_path(
             entry.get("relative_path"), suffix=".sops.yaml"
         )
+        operational_metadata: dict[str, str] = {}
         for required in ("target", "owner"):
             value = entry.get(required)
-            if not isinstance(value, str) or not value.strip():
-                raise ArchiveBoundaryError(f"inventory record is missing {required}")
+            if (
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+                or len(value) > 256
+                or not value.isprintable()
+            ):
+                raise ArchiveBoundaryError(
+                    f"inventory record contains invalid {required} metadata"
+                )
+            operational_metadata[required] = value
         if name in names:
             raise ArchiveBoundaryError("inventory contains a duplicate secret name")
         if relative_path in paths:
             raise ArchiveBoundaryError("inventory contains a duplicate secret path")
         names.add(name)
         paths.add(relative_path)
-        records.append(InventoryRecord(name=name, relative_path=relative_path))
+        records.append(
+            InventoryRecord(
+                name=name,
+                relative_path=relative_path,
+                target=operational_metadata["target"],
+                owner=operational_metadata["owner"],
+            )
+        )
     return records
 
 
@@ -271,16 +297,24 @@ def _is_openpgp_recipient(value: object) -> bool:
     return bool(decoded_body)
 
 
-def _policy_pgp_fingerprints(value: object) -> list[str]:
+def _policy_pgp_fingerprints(value: object) -> frozenset[str]:
     if not isinstance(value, str) or not value.strip():
         raise ArchiveBoundaryError("SOPS policy has invalid OpenPGP recipients")
     fingerprints = [item.strip() for item in value.split(",")]
     if any(not item or FINGERPRINT.fullmatch(item) is None for item in fingerprints):
         raise ArchiveBoundaryError("SOPS policy has invalid OpenPGP recipients")
-    return fingerprints
+    normalized = [fingerprint.upper() for fingerprint in fingerprints]
+    if len(set(normalized)) != len(normalized):
+        raise ArchiveBoundaryError("SOPS policy has duplicate OpenPGP recipients")
+    return frozenset(normalized)
 
 
-def _validate_sops_document(contents: bytes, *, label: str) -> None:
+def _validate_sops_document(
+    contents: bytes,
+    *,
+    label: str,
+    expected_fingerprints: frozenset[str] | None = None,
+) -> None:
     document = _load_yaml_bytes(contents, label=label)
     if not isinstance(document, dict):
         raise ArchiveBoundaryError(f"encrypted document lacks SOPS metadata: {label}")
@@ -301,6 +335,18 @@ def _validate_sops_document(contents: bytes, *, label: str) -> None:
     if any(metadata.get(key) not in (None, []) for key in UNSUPPORTED_RECIPIENT_KEYS):
         raise ArchiveBoundaryError(
             f"encrypted document uses unsupported recipient metadata: {label}"
+        )
+    document_fingerprints = [item["fp"].upper() for item in pgp]
+    if len(set(document_fingerprints)) != len(document_fingerprints):
+        raise ArchiveBoundaryError(
+            f"encrypted document has duplicate OpenPGP recipient metadata: {label}"
+        )
+    if (
+        expected_fingerprints is not None
+        and frozenset(document_fingerprints) != expected_fingerprints
+    ):
+        raise ArchiveBoundaryError(
+            f"encrypted document recipients do not match SOPS policy: {label}"
         )
 
     payload_count = 0
@@ -324,19 +370,45 @@ def _validate_sops_document(contents: bytes, *, label: str) -> None:
         )
 
 
-def _validate_policy(contents: bytes) -> None:
+def _validate_policy(contents: bytes) -> list[CreationRule]:
     document = _load_yaml_bytes(contents, label="SOPS policy")
     if not isinstance(document, dict):
         raise ArchiveBoundaryError("SOPS policy is not a mapping")
     rules = document.get("creation_rules")
     if not isinstance(rules, list) or not rules:
         raise ArchiveBoundaryError("SOPS policy has no creation rules")
+    validated_rules: list[CreationRule] = []
     for rule in rules:
         if not isinstance(rule, dict):
             raise ArchiveBoundaryError("SOPS policy contains a malformed creation rule")
         if any(rule.get(key) not in (None, [], "") for key in UNSUPPORTED_RECIPIENT_KEYS):
             raise ArchiveBoundaryError("SOPS policy uses unsupported recipients")
-        _policy_pgp_fingerprints(rule.get("pgp"))
+        path_regex = rule.get("path_regex")
+        if not isinstance(path_regex, str) or not path_regex:
+            raise ArchiveBoundaryError("SOPS policy has an invalid path regex")
+        try:
+            pattern = re.compile(path_regex)
+        except re.error as exc:
+            raise ArchiveBoundaryError("SOPS policy has an invalid path regex") from exc
+        validated_rules.append(
+            CreationRule(
+                path_regex=path_regex,
+                pattern=pattern,
+                pgp_fingerprints=_policy_pgp_fingerprints(rule.get("pgp")),
+            )
+        )
+    return validated_rules
+
+
+def _matching_policy_fingerprints(
+    rules: list[CreationRule], relative_path: str
+) -> frozenset[str]:
+    for rule in rules:
+        if rule.pattern.search(relative_path) is not None:
+            return rule.pgp_fingerprints
+    raise ArchiveBoundaryError(
+        "encrypted document path does not match a SOPS creation rule"
+    )
 
 
 def _sha256(contents: bytes) -> str:
@@ -419,7 +491,7 @@ def create_backup(*, vault: Path, policy: Path, output: Path) -> Path:
             raise ArchiveBoundaryError("vault contains an encrypted document missing from inventory")
 
     policy_contents = _read_regular_file(policy)
-    _validate_policy(policy_contents)
+    creation_rules = _validate_policy(policy_contents)
     files: dict[str, bytes] = {
         INVENTORY_ARCHIVE_PATH: inventory_contents,
         POLICY_ARCHIVE_PATH: policy_contents,
@@ -427,7 +499,13 @@ def create_backup(*, vault: Path, policy: Path, output: Path) -> Path:
     for record in records:
         source = vault / Path(*PurePosixPath(record.relative_path).parts)
         contents = _read_regular_file(source)
-        _validate_sops_document(contents, label=record.relative_path)
+        _validate_sops_document(
+            contents,
+            label=record.relative_path,
+            expected_fingerprints=_matching_policy_fingerprints(
+                creation_rules, record.relative_path
+            ),
+        )
         files[f"vault/{record.relative_path}"] = contents
     files[CHECKSUM_NAME] = _checksum_document(files)
 
@@ -644,11 +722,16 @@ def _validate_extracted_archive(workspace: Path, member_names: set[str]) -> Path
         if _sha256(_read_regular_file(workspace / name)) != checksums[name]:
             raise ArchiveBoundaryError("an internal SHA-256 checksum does not match")
 
-    _validate_policy(_read_regular_file(workspace / POLICY_ARCHIVE_PATH))
+    creation_rules = _validate_policy(
+        _read_regular_file(workspace / POLICY_ARCHIVE_PATH)
+    )
     for record in records:
         _validate_sops_document(
             _read_regular_file(workspace / "vault" / record.relative_path),
             label=record.relative_path,
+            expected_fingerprints=_matching_policy_fingerprints(
+                creation_rules, record.relative_path
+            ),
         )
     return workspace / "vault"
 
@@ -771,12 +854,16 @@ def restore_backup(
             "--no-selinux",
         ]
         try:
+            tar_environment = os.environ.copy()
+            for name in ("TAR_OPTIONS", "TAR_RSH", "RSH", "TAPE"):
+                tar_environment.pop(name, None)
             result = subprocess.run(
                 command,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 check=False,
+                env=tar_environment,
             )
         except OSError as exc:
             raise ArchiveBoundaryError("could not execute tar for private extraction") from exc

@@ -3,23 +3,34 @@ set -euo pipefail
 
 # Upload CIFAR-100 dataset to MinIO for contrastive learning
 
+TRACE_WAS_ENABLED=0
+case "$-" in
+  *x*)
+    TRACE_WAS_ENABLED=1
+    set +x
+    ;;
+esac
+
 MINIO_ENDPOINT="${MINIO_ENDPOINT:-glasslab-minio.glasslab-v2.svc.cluster.local:9000}"
-MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-minioadmin}"
-MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-minioadmin}"
+minio_access_key="${MINIO_ACCESS_KEY:-}"
+minio_secret_key="${MINIO_SECRET_KEY:-}"
+unset MINIO_ACCESS_KEY MINIO_SECRET_KEY
+export -n minio_access_key minio_secret_key 2>/dev/null || true
 BUCKET_NAME="${BUCKET_NAME:-glasslab-artifacts}"
 DATASET_NAME="cifar100"
 DATASET_PATH="${DATASET_PATH:-/tmp/cifar100}"
 
 usage() {
   cat <<'USAGE'
-Usage: upload-cifar100.sh [--endpoint <endpoint>] [--access-key <key>] [--secret-key <secret>] [--bucket <bucket>] [--dataset-path <path>]
+Usage: upload-cifar100.sh [--endpoint <endpoint>] [--bucket <bucket>] [--dataset-path <path>]
 
 Upload CIFAR-100 dataset to MinIO.
 
+Set MINIO_ACCESS_KEY and MINIO_SECRET_KEY in the environment. They are scoped
+to each MinIO client process through MC_HOST_glasslab and never placed in argv.
+
 Options:
   --endpoint      MinIO endpoint (default: glasslab-minio.glasslab-v2.svc.cluster.local:9000)
-  --access-key    MinIO access key (default: minioadmin)
-  --secret-key    MinIO secret key (default: minioadmin)
   --bucket        MinIO bucket name (default: glasslab-artifacts)
   --dataset-path  Path to CIFAR-100 dataset (default: /tmp/cifar100)
 USAGE
@@ -31,13 +42,9 @@ while [[ $# -gt 0 ]]; do
       MINIO_ENDPOINT="$2"
       shift 2
       ;;
-    --access-key)
-      MINIO_ACCESS_KEY="$2"
-      shift 2
-      ;;
-    --secret-key)
-      MINIO_SECRET_KEY="$2"
-      shift 2
+    --access-key|--secret-key)
+      printf '[upload-cifar100] credential arguments are not supported; use the documented environment boundary\n' >&2
+      exit 1
       ;;
     --bucket)
       BUCKET_NAME="$2"
@@ -59,6 +66,42 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "$minio_access_key" || -z "$minio_secret_key" ]]; then
+  printf '[upload-cifar100] MINIO_ACCESS_KEY and MINIO_SECRET_KEY must be set\n' >&2
+  exit 1
+fi
+if [[ "$minio_access_key" == *$'\n'* || "$minio_access_key" == *$'\r'* ]] ||
+  [[ "$minio_secret_key" == *$'\n'* || "$minio_secret_key" == *$'\r'* ]]; then
+  printf '[upload-cifar100] MinIO credentials must be single-line values\n' >&2
+  exit 1
+fi
+if [[ ! "$MINIO_ENDPOINT" =~ ^[A-Za-z0-9.-]+(:[0-9]{1,5})?$ ]]; then
+  printf '[upload-cifar100] MinIO endpoint must be a DNS name with an optional port\n' >&2
+  exit 1
+fi
+
+encoded_access_key="$({ printf '%s' "$minio_access_key"; } | python3 -c '
+import sys
+from urllib.parse import quote
+
+print(quote(sys.stdin.read(), safe=""), end="")
+')"
+encoded_secret_key="$({ printf '%s' "$minio_secret_key"; } | python3 -c '
+import sys
+from urllib.parse import quote
+
+print(quote(sys.stdin.read(), safe=""), end="")
+')"
+minio_host="http://${encoded_access_key}:${encoded_secret_key}@${MINIO_ENDPOINT}"
+unset minio_access_key minio_secret_key encoded_access_key encoded_secret_key
+export -n minio_host 2>/dev/null || true
+
+run_mc() (
+  export MC_HOST_glasslab="$minio_host"
+  unset minio_host
+  exec mc "$@"
+)
+
 # Check if MinIO client is available
 if ! command -v mc &> /dev/null; then
   printf '[upload-cifar100] mc (MinIO client) not found. Installing...\n'
@@ -69,12 +112,12 @@ fi
 
 # Configure MinIO client
 printf '[upload-cifar100] configuring MinIO client...\n'
-mc alias set glasslab "http://${MINIO_ENDPOINT}" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}"
+printf '[upload-cifar100] using scoped MinIO environment alias...\n'
 
 # Create bucket if it doesn't exist
 printf '[upload-cifar100] ensuring bucket exists...\n'
-if ! mc ls glasslab/"${BUCKET_NAME}" &> /dev/null; then
-  mc mb glasslab/"${BUCKET_NAME}"
+if ! run_mc ls glasslab/"${BUCKET_NAME}" &> /dev/null; then
+  run_mc mb glasslab/"${BUCKET_NAME}"
 fi
 
 # Generate CIFAR-100 dataset if not present
@@ -135,11 +178,11 @@ fi
 
 # Upload train images
 printf '[upload-cifar100] uploading train images...\n'
-mc cp --recursive "${DATASET_PATH}/train" "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/train/"
+run_mc cp --recursive "${DATASET_PATH}/train" "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/train/"
 
 # Upload test images
 printf '[upload-cifar100] uploading test images...\n'
-mc cp --recursive "${DATASET_PATH}/test" "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/test/"
+run_mc cp --recursive "${DATASET_PATH}/test" "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/test/"
 
 # Upload dataset config
 printf '[upload-cifar100] uploading dataset config...\n'
@@ -165,11 +208,16 @@ augmentation:
   random_horizontal_flip: true
 CONFIG
 
-mc cp /tmp/cifar100_config.yaml "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/config.yaml"
+run_mc cp /tmp/cifar100_config.yaml "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/config.yaml"
 
 # Verify upload
 printf '[upload-cifar100] verifying upload...\n'
-mc ls "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/train/" | head -5
-mc ls "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/test/" | head -5
+run_mc ls "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/train/" | head -5
+run_mc ls "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/test/" | head -5
 
+unset minio_host
+if [[ "$TRACE_WAS_ENABLED" -eq 1 ]]; then
+  unset TRACE_WAS_ENABLED
+  set -x
+fi
 printf '[upload-cifar100] CIFAR-100 upload complete\n'

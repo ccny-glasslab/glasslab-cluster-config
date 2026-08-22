@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+TRACE_WAS_ENABLED=0
+case "$-" in
+  *x*)
+    TRACE_WAS_ENABLED=1
+    set +x
+    ;;
+esac
+export -n TRACE_WAS_ENABLED 2>/dev/null || true
 set -euo pipefail
 BASE_URL="${VLLM_BASE_URL:-http://127.0.0.1:8000/v1}"
 : "${VLLM_API_KEY:?VLLM_API_KEY must be set}"
@@ -28,6 +36,7 @@ umask 077
 CURL_CONFIG="$(mktemp)"
 cleanup() {
   rm -f -- "$CURL_CONFIG"
+  unset CURL_CONFIG CURL_API_KEY VLLM_API_KEY
 }
 trap cleanup EXIT
 CURL_API_KEY="${VLLM_API_KEY//\\/\\\\}"
@@ -44,3 +53,12 @@ curl -sS \
   -d "{\"model\":\"${MODEL_NAME}\",\"messages\":[{\"role\":\"user\",\"content\":\"Return valid JSON only: {\\\"ok\\\": true}\"}],\"temperature\":0.0,\"max_tokens\":64}" \
   "${BASE_URL}/chat/completions"
 printf '\n'
+
+cleanup
+trap - EXIT
+if [[ "$TRACE_WAS_ENABLED" -eq 1 ]]; then
+  unset TRACE_WAS_ENABLED
+  set -x
+else
+  unset TRACE_WAS_ENABLED
+fi

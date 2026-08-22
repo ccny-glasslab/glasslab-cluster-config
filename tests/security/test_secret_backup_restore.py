@@ -29,6 +29,7 @@ RESTORE_HELPER = REPOSITORY_ROOT / "scripts" / "restore-glasslab-secrets.sh"
 PULL_HELPER = REPOSITORY_ROOT / "scripts" / "pull-glasslab-secrets-backup.sh"
 SENTINEL = "c2VjcmV0LWJhY2t1cC1zdGRvdXQtc2VudGluZWw="
 FINGERPRINT = "A" * 40
+SECOND_FINGERPRINT = "B" * 40
 
 
 def load_archive_boundary():
@@ -42,7 +43,11 @@ def load_archive_boundary():
     return module
 
 
-def encrypted_document(*, sentinel: str = SENTINEL) -> str:
+def encrypted_document(
+    *,
+    sentinel: str = SENTINEL,
+    fingerprints: tuple[str, ...] = (FINGERPRINT,),
+) -> str:
     envelope = (
         "ENC[AES256_GCM,data:Y2lwaGVydGV4dA==,"
         "iv:aXYtaXYtaXYtaXY=,tag:dGFnLXRhZw==,type:str]"
@@ -64,8 +69,9 @@ def encrypted_document(*, sentinel: str = SENTINEL) -> str:
                             "Zml4dHVyZQ==\n"
                             "-----END PGP MESSAGE-----"
                         ),
-                        "fp": FINGERPRINT,
+                        "fp": fingerprint,
                     }
+                    for fingerprint in fingerprints
                 ],
                 "mac": envelope,
                 "version": "3.9.0",
@@ -93,13 +99,17 @@ def inventory(paths: list[str]) -> str:
     )
 
 
-def policy() -> str:
+def policy(
+    *,
+    path_regex: str = r".*\.sops\.yaml$",
+    fingerprints: tuple[str, ...] = (FINGERPRINT,),
+) -> str:
     return yaml.safe_dump(
         {
             "creation_rules": [
                 {
-                    "path_regex": r".*\.sops\.yaml$",
-                    "pgp": FINGERPRINT,
+                    "path_regex": path_regex,
+                    "pgp": ", ".join(fingerprints),
                 }
             ]
         },
@@ -391,6 +401,33 @@ class SecretBackupRestoreTests(unittest.TestCase):
         self.assertEqual(output.read_bytes(), preexisting)
         self.assertFalse(output.with_name(output.name + ".sha256").exists())
 
+    def test_backup_rejects_removed_copy_dest_before_creating_any_artifact(self):
+        """Direct two-file copy publication must stay removed in favor of verified pull."""
+        copy_destination = self.root / "copy-destination"
+        result = subprocess.run(
+            [
+                str(BACKUP_HELPER),
+                "--vault-dir",
+                str(self.vault),
+                "--policy",
+                str(self.policy),
+                "--output-dir",
+                str(self.output),
+                "--stamp",
+                "20260821-120000",
+                "--copy-dest",
+                str(copy_destination),
+            ],
+            cwd=REPOSITORY_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive_path().exists())
+        self.assertFalse(copy_destination.exists())
+
     def test_backup_rejects_mixed_plaintext_secret_payload_without_echoing_it(self):
         """One encrypted key must not hide another plaintext data or stringData key."""
         document_path = self.vault / self.relative_secret
@@ -486,6 +523,87 @@ class SecretBackupRestoreTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.archive_path().exists())
         self.assert_sentinel_absent(result)
+
+    def test_inventory_loader_preserves_validated_target_and_owner(self):
+        """Dropping ownership metadata would make restored inventory records incomplete."""
+        boundary = load_archive_boundary()
+        records = boundary._load_inventory_bytes(inventory([self.relative_secret]).encode())
+
+        self.assertEqual(getattr(records[0], "target", None), "namespace/secret-1")
+        self.assertEqual(getattr(records[0], "owner", None), "platform")
+
+    def test_backup_rejects_inventory_target_with_surrounding_whitespace(self):
+        """A visually ambiguous target is malformed operational metadata."""
+        inventory_path = self.vault / "inventory.yaml"
+        document = yaml.safe_load(inventory_path.read_text(encoding="utf-8"))
+        document["secrets"][0]["target"] = " namespace/secret-1 "
+        inventory_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+        result = self.run_backup()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive_path().exists())
+
+    def test_backup_rejects_inventory_owner_with_control_character(self):
+        """Owner metadata must be a bounded single-line identifier."""
+        inventory_path = self.vault / "inventory.yaml"
+        document = yaml.safe_load(inventory_path.read_text(encoding="utf-8"))
+        document["secrets"][0]["owner"] = "platform\noperator"
+        inventory_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+        result = self.run_backup()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive_path().exists())
+
+    def test_backup_rejects_document_recipients_not_equal_to_matching_policy_rule(self):
+        """A structurally valid document must still contain every policy recipient."""
+        self.policy.write_text(
+            policy(fingerprints=(FINGERPRINT, SECOND_FINGERPRINT)),
+            encoding="utf-8",
+        )
+
+        result = self.run_backup()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive_path().exists())
+        self.assert_sentinel_absent(result)
+
+    def test_backup_resolves_recipients_from_the_rule_matching_document_path(self):
+        """A recipient set from an unrelated creation rule cannot authorize a document."""
+        policy_document = {
+            "creation_rules": [
+                {"path_regex": r"^other/", "pgp": FINGERPRINT},
+                {
+                    "path_regex": r"^kubeadm/glasslab-v2/",
+                    "pgp": SECOND_FINGERPRINT,
+                },
+            ]
+        }
+        self.policy.write_text(yaml.safe_dump(policy_document), encoding="utf-8")
+
+        result = self.run_backup()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive_path().exists())
+
+    def test_backup_rejects_document_path_without_matching_creation_rule(self):
+        """Every inventory path needs an explicit policy rule resolution."""
+        self.policy.write_text(policy(path_regex=r"^other/"), encoding="utf-8")
+
+        result = self.run_backup()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive_path().exists())
+
+    def test_backup_rejects_malformed_creation_rule_path_regex(self):
+        """An invalid path regex cannot define an enforceable recipient policy."""
+        self.policy.write_text(policy(path_regex="[unterminated"), encoding="utf-8")
+
+        result = self.run_backup()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive_path().exists())
 
     def test_restore_rejects_corrupted_internal_checksum_before_replacement(self):
         """A modified encrypted document must not replace the active vault."""
@@ -606,6 +724,29 @@ class SecretBackupRestoreTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assert_sentinel_absent(result)
 
+    def test_restore_rejects_checksum_valid_policy_recipient_mismatch(self):
+        """Transport checksums cannot substitute for path-bound SOPS recipients."""
+        self.assertEqual(self.run_backup().returncode, 0)
+        archive = self.archive_path()
+
+        def replace_policy_and_checksums(members):
+            replacements = {member.name: contents for member, contents in members}
+            replacements["policy/.sops.yaml"] = policy(
+                fingerprints=(FINGERPRINT, SECOND_FINGERPRINT)
+            ).encode()
+            replacements["SHA256SUMS"] = "".join(
+                f"{hashlib.sha256(replacements[name]).hexdigest()}  {name}\n"
+                for name in sorted(name for name in replacements if name != "SHA256SUMS")
+            ).encode("ascii")
+            return [(member, replacements[member.name]) for member, _ in members]
+
+        self.rewrite_archive(archive, replace_policy_and_checksums)
+        result = self.run_restore(archive, self.root / "active-vault")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / "active-vault").exists())
+        self.assert_sentinel_absent(result)
+
     def test_restore_requires_explicit_confirmation_and_leaves_active_vault_unchanged(self):
         """A valid archive alone must not authorize replacement."""
         self.assertEqual(self.run_backup().returncode, 0)
@@ -713,6 +854,77 @@ raise SystemExit(99)
         self.assertFalse(fake_tar_ran.exists())
         self.assertTrue((active / self.relative_secret).is_file())
         self.assert_sentinel_absent(result)
+
+    def test_restore_scrubs_command_bearing_tar_environment_from_child(self):
+        """Trusted tar selection is insufficient if command-bearing variables survive exec."""
+        self.assertEqual(self.run_backup().returncode, 0)
+        captured_environment = self.root / "tar-environment.json"
+        fake_tar = self.root / "recording-tar"
+        fake_tar.write_text(
+            f"""#!{os.path.realpath(sys.executable)}
+import json
+import os
+from pathlib import Path
+
+Path(os.environ["CAPTURED_TAR_ENVIRONMENT"]).write_text(json.dumps({{
+    name: os.environ.get(name)
+    for name in ("TAR_OPTIONS", "TAR_RSH", "RSH", "TAPE")
+}}), encoding="utf-8")
+os.execv("/usr/bin/tar", ["/usr/bin/tar", *os.sys.argv[1:]])
+""",
+            encoding="utf-8",
+        )
+        fake_tar.chmod(0o755)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "GLASSLAB_SECRET_TEST_MODE": "1",
+                "TAR_BIN": str(fake_tar),
+                "CAPTURED_TAR_ENVIRONMENT": str(captured_environment),
+                "TAR_OPTIONS": "--no-recursion",
+                "TAR_RSH": "controlled-tar-rsh",
+                "RSH": "controlled-rsh",
+                "TAPE": "controlled-tape",
+            }
+        )
+
+        result = self.run_restore(
+            self.archive_path(),
+            self.root / "active-vault",
+            environment=environment,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(captured_environment.read_text(encoding="utf-8")),
+            {"TAR_OPTIONS": None, "TAR_RSH": None, "RSH": None, "TAPE": None},
+        )
+
+    def test_restore_does_not_execute_tar_options_checkpoint_action(self):
+        """An inherited checkpoint action must not execute during trusted extraction."""
+        self.assertEqual(self.run_backup().returncode, 0)
+        marker = self.root / "checkpoint-action-ran"
+        action = self.root / "checkpoint-action"
+        action.write_text(
+            "#!/usr/bin/env bash\n"
+            f"touch -- {marker}\n",
+            encoding="utf-8",
+        )
+        action.chmod(0o755)
+        environment = os.environ.copy()
+        environment.pop("GLASSLAB_SECRET_TEST_MODE", None)
+        environment["TAR_OPTIONS"] = (
+            f"--checkpoint=1 --checkpoint-action=exec={action}"
+        )
+
+        result = self.run_restore(
+            self.archive_path(),
+            self.root / "active-vault",
+            environment=environment,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists())
 
     def test_signal_pending_after_restore_commit_returns_success_matching_active_vault(self):
         """A post-swap signal must not report failure after the new vault is committed."""

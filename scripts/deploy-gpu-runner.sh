@@ -61,7 +61,10 @@ validate_local_secret_file() {
 
   if ! python3 - "$secret_file" "$SECRET_NAME" "$NAMESPACE" "$SECRET_KEY" <<'PY'
 import sys
+import base64
+import binascii
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -87,12 +90,46 @@ if (
 ):
     raise SystemExit(1)
 
-for section_name in ("data", "stringData"):
-    section = secret.get(section_name)
-    if isinstance(section, dict):
-        value = section.get(required_key)
-        if isinstance(value, str) and value.strip():
-            raise SystemExit(0)
+def valid_postgres_dsn(value):
+    if not isinstance(value, str) or value != value.strip() or not value:
+        return False
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        return False
+    normalized = value.lower()
+    if normalized.startswith("change-me") or normalized in {
+        "redacted",
+        "<redacted>",
+        "replace-me",
+    }:
+        return False
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"postgres", "postgresql"}
+        and parsed.hostname is not None
+        and parsed.username is not None
+        and parsed.password is not None
+        and parsed.path not in {"", "/"}
+        and (port is None or 0 < port < 65536)
+    )
+
+
+string_data = secret.get("stringData")
+data = secret.get("data")
+plain_value = string_data.get(required_key) if isinstance(string_data, dict) else None
+encoded_value = data.get(required_key) if isinstance(data, dict) else None
+if plain_value is not None and encoded_value is not None:
+    raise SystemExit(1)
+if plain_value is None and isinstance(encoded_value, str):
+    try:
+        plain_value = base64.b64decode(encoded_value, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        raise SystemExit(1)
+if valid_postgres_dsn(plain_value):
+    raise SystemExit(0)
 
 raise SystemExit(1)
 PY
@@ -104,7 +141,43 @@ PY
 
 confirm_live_secret() {
   if ! kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" \
-    -o "jsonpath={.data.${SECRET_KEY}}" 2>/dev/null | grep -q '[^[:space:]]'; then
+    -o "jsonpath={.data.${SECRET_KEY}}" 2>/dev/null | python3 -c '
+import base64
+import binascii
+import sys
+from urllib.parse import urlsplit
+
+try:
+    value = base64.b64decode(sys.stdin.buffer.read(), validate=True).decode("utf-8")
+except (binascii.Error, UnicodeDecodeError):
+    raise SystemExit(1)
+
+if value != value.strip() or not value:
+    raise SystemExit(1)
+if any(ord(character) < 32 or ord(character) == 127 for character in value):
+    raise SystemExit(1)
+normalized = value.lower()
+if normalized.startswith("change-me") or normalized in {
+    "redacted",
+    "<redacted>",
+    "replace-me",
+}:
+    raise SystemExit(1)
+try:
+    parsed = urlsplit(value)
+    port = parsed.port
+except ValueError:
+    raise SystemExit(1)
+if not (
+    parsed.scheme in {"postgres", "postgresql"}
+    and parsed.hostname is not None
+    and parsed.username is not None
+    and parsed.password is not None
+    and parsed.path not in {"", "/"}
+    and (port is None or 0 < port < 65536)
+):
+    raise SystemExit(1)
+'; then
     printf '[deploy-gpu-runner] required live GPU runner Secret/key is unavailable\n' >&2
     return 1
   fi

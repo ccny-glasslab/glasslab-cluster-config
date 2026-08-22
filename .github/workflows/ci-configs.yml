@@ -46,6 +46,13 @@ jobs:
       - name: Run credential hygiene fixture tests
         run: python -m unittest tests.security.test_credential_hygiene -v
 
+      - name: Run secret process and recovery boundary tests
+        run: >-
+          python -m unittest
+          tests.security.test_secret_process_boundaries
+          tests.security.test_secret_backup_restore
+          -v
+
       - name: Scan repository credential hygiene
         run: python scripts/check-credential-hygiene.py .
 
