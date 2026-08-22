@@ -1,22 +1,24 @@
-# Secrets
+# Secret manifest examples
 
-Store non-committed local v2 secret manifests here.
+This tracked directory contains documentation contracts and non-secret
+examples only. Do not store live plaintext manifests or encrypted live SOPS
+payloads in the public checkout.
 
-Recommended local files:
-- `10-postgres.local.yaml`
-- `15-workflow-api.local.yaml`
-- `20-minio.local.yaml`
+The planned external vault lives at:
 
-Related non-v2 secret file still relevant to the live stack:
+```text
+/home/glasslab/.local/share/glasslab-secrets
+```
 
-- `../../agent-stack/12-agent-secrets.yaml`
+It contains a non-secret `inventory.yaml` and inventory-named `*.sops.yaml`
+documents. `scripts/backup-glasslab-secrets.sh` archives only those encrypted
+documents plus inventory, public SOPS policy, and checksums. The tracked
+provisioner snapshot does not capture the vault.
 
-Recommended WhatsApp gateway local secret keys:
-- `WHATSAPP_OWNER`
-- `WHATSAPP_ALLOW_FROM`
+See:
 
-These files are ignored by Git and should be applied from the provisioner only.
+- [`../../../docs/glasslab-v2/secrets-and-dr.md`](../../../docs/glasslab-v2/secrets-and-dr.md)
+- [`../../../docs/glasslab-v2/runbooks/restore-v2-secrets.md`](../../../docs/glasslab-v2/runbooks/restore-v2-secrets.md)
 
-Encrypted off-host backups should be created with:
-
-- `scripts/backup-glasslab-secrets.sh`
+Live migration and the recovery drill remain deferred until at least two
+administrators and the offline recovery recipient have passed SOPS enrollment.
