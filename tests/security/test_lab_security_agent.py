@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import shutil
+import stat
 import subprocess
 import unittest
 from dataclasses import replace
@@ -189,6 +190,7 @@ class ExecutionContractTests(unittest.TestCase):
             self.assertIn("Inspect tracked.txt.", prompt)
             self.assertIn("exactly one fenced JSON", prompt)
             self.assertIn("disposable worktree", prompt)
+            self.assertIn("Do not call run or bash", prompt)
             self.assertNotIn("Do not expose secrets.", prompt)
             self.assertNotIn("# Glasslab Agent Handoff", prompt)
             self.assertLess(len(prompt), 8_000)
@@ -217,6 +219,11 @@ class ExecutionContractTests(unittest.TestCase):
         with self.assertRaisesRegex(DispatchError, "exactly one fenced JSON"):
             parse_model_answer(answer + "\n```json\n{}\n```")
 
+    def test_model_answer_accepts_one_bare_json_object(self) -> None:
+        result, summary = parse_model_answer('{"mode":"discover"}')
+        self.assertEqual(result, {"mode": "discover"})
+        self.assertEqual(summary, "")
+
     def test_fake_discovery_writes_validated_runtime_artifacts(self) -> None:
         with TemporaryDirectory() as raw:
             repo = WorktreeTests().make_repo(Path(raw))
@@ -239,6 +246,9 @@ class ExecutionContractTests(unittest.TestCase):
             self.assertEqual(result["findings"], [])
             self.assertEqual(result["base_commit"], paths.base_commit)
             self.assertEqual(paths.summary_md.read_text(), "No candidate findings.\n")
+            events_path = paths.runtime / "events.jsonl"
+            self.assertTrue(events_path.is_file())
+            self.assertEqual(stat.S_IMODE(events_path.stat().st_mode), 0o600)
             argv = json.loads((paths.worktree / ".fake-argv.json").read_text())
             self.assertNotIn("SECURITY METHODOLOGY", " ".join(argv))
             self.assertIn("--file", argv)

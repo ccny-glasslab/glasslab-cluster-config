@@ -215,6 +215,7 @@ def assemble_assignment(config: DispatchConfig, paths: RunPaths) -> str:
         "You are an untrusted lab security worker in a disposable worktree.",
         mode_rule,
         "Do not access external directories, credentials, networks, Git remotes, or live systems.",
+        "Use only read, grep, glob, and toc for inspection. Do not call run or bash.",
         f"MODE={config.mode}",
         f"BASE_COMMIT={paths.base_commit}",
         f"FINDING_ID={config.finding_id or ''}",
@@ -246,6 +247,16 @@ def extract_final_answer(event_stream: str) -> str:
 
 def parse_model_answer(answer: str) -> tuple[dict[str, Any], str]:
     matches = re.findall(r"```json\s*\n(.*?)\n```", answer, flags=re.DOTALL)
+    if not matches:
+        try:
+            bare_result = json.loads(answer.strip())
+        except json.JSONDecodeError as exc:
+            raise DispatchError(
+                "model answer must contain exactly one fenced JSON document"
+            ) from exc
+        if not isinstance(bare_result, dict):
+            raise DispatchError("model result must be a JSON object")
+        return bare_result, ""
     if len(matches) != 1:
         raise DispatchError("model answer must contain exactly one fenced JSON document")
     try:
@@ -398,6 +409,9 @@ def run_worker(config: DispatchConfig, paths: RunPaths) -> tuple[dict[str, Any],
     assert process is not None
     if process.returncode:
         raise DispatchError(f"OpenCode worker exited with status {process.returncode}")
+    events_path = paths.runtime / "events.jsonl"
+    events_path.write_text(stdout)
+    events_path.chmod(0o600)
     answer = extract_final_answer(stdout)
     return parse_model_answer(answer)
 
