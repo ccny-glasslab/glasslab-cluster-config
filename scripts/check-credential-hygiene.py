@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
-from yaml.nodes import MappingNode, ScalarNode
+from yaml.nodes import MappingNode, ScalarNode, SequenceNode
 
 @dataclass(frozen=True)
 class Finding:
@@ -138,64 +138,101 @@ def _mapping_values(node: MappingNode, name: str):
             yield value_node
 
 
+def _mapping_scalar_value(node: MappingNode, name: str) -> str | None:
+    for value_node in _mapping_values(node, name):
+        if isinstance(value_node, ScalarNode):
+            return value_node.value
+    return None
+
+
+def _scan_secret_mapping(
+    secret_node: MappingNode,
+    relative_path: Path,
+    findings: list[Finding],
+    seen: set[tuple[Path, int, str]],
+) -> None:
+    for section in ("data", "stringData"):
+        for section_node in _mapping_values(secret_node, section):
+            if not isinstance(section_node, MappingNode):
+                continue
+            for _, value_node in section_node.value:
+                if not isinstance(value_node, ScalarNode):
+                    continue
+                line_number = value_node.start_mark.line + 1
+                value = value_node.value
+                if section == "stringData":
+                    if "change-me" in value.lower():
+                        _append_finding(
+                            findings,
+                            seen,
+                            relative_path,
+                            line_number,
+                            "deployable-change-me-secret",
+                        )
+                    continue
+
+                decoded_value = _decode_base64(value)
+                if decoded_value is None:
+                    continue
+                if b"change-me" in decoded_value.lower():
+                    _append_finding(
+                        findings,
+                        seen,
+                        relative_path,
+                        line_number,
+                        "deployable-change-me-secret",
+                    )
+                if DSN_RE.search(decoded_value):
+                    _append_finding(
+                        findings, seen, relative_path, line_number, "secret-data-dsn"
+                    )
+                if _matches_known_digest(decoded_value):
+                    _append_finding(
+                        findings, seen, relative_path, line_number, "known-exposed-value"
+                    )
+
+
+def _scan_kubernetes_object(
+    object_node: MappingNode,
+    relative_path: Path,
+    findings: list[Finding],
+    seen: set[tuple[Path, int, str]],
+    inherited_kind: str | None = None,
+) -> None:
+    """Scan a Kubernetes object and nested List items, not arbitrary mappings."""
+    kind = _mapping_scalar_value(object_node, "kind") or inherited_kind
+    if kind == "Secret":
+        _scan_secret_mapping(object_node, relative_path, findings, seen)
+        return
+    if kind not in {"List", "SecretList"}:
+        return
+
+    item_kind = "Secret" if kind == "SecretList" else None
+    for items_node in _mapping_values(object_node, "items"):
+        if not isinstance(items_node, SequenceNode):
+            continue
+        for item_node in items_node.value:
+            if isinstance(item_node, MappingNode):
+                _scan_kubernetes_object(
+                    item_node,
+                    relative_path,
+                    findings,
+                    seen,
+                    inherited_kind=item_kind,
+                )
+
+
 def _scan_secret_documents(
     contents: str,
     relative_path: Path,
     findings: list[Finding],
     seen: set[tuple[Path, int, str]],
 ) -> None:
-    """Find Secret data structurally, independent of YAML key order or style."""
+    """Find Secret data in root objects and Kubernetes List items."""
     try:
-        documents = yaml.compose_all(contents)
-        for document in documents:
-            if not isinstance(document, MappingNode):
-                continue
-            kind_nodes = list(_mapping_values(document, "kind"))
-            if not any(
-                isinstance(kind_node, ScalarNode) and kind_node.value == "Secret"
-                for kind_node in kind_nodes
-            ):
-                continue
-
-            for section in ("data", "stringData"):
-                for section_node in _mapping_values(document, section):
-                    if not isinstance(section_node, MappingNode):
-                        continue
-                    for _, value_node in section_node.value:
-                        if not isinstance(value_node, ScalarNode):
-                            continue
-                        line_number = value_node.start_mark.line + 1
-                        value = value_node.value
-                        if section == "stringData":
-                            if "change-me" in value.lower():
-                                _append_finding(
-                                    findings,
-                                    seen,
-                                    relative_path,
-                                    line_number,
-                                    "deployable-change-me-secret",
-                                )
-                            continue
-
-                        decoded_value = _decode_base64(value)
-                        if decoded_value is None:
-                            continue
-                        if b"change-me" in decoded_value.lower():
-                            _append_finding(
-                                findings,
-                                seen,
-                                relative_path,
-                                line_number,
-                                "deployable-change-me-secret",
-                            )
-                        if DSN_RE.search(decoded_value):
-                            _append_finding(
-                                findings, seen, relative_path, line_number, "secret-data-dsn"
-                            )
-                        if _matches_known_digest(decoded_value):
-                            _append_finding(
-                                findings, seen, relative_path, line_number, "known-exposed-value"
-                            )
+        for document in yaml.compose_all(contents):
+            if isinstance(document, MappingNode):
+                _scan_kubernetes_object(document, relative_path, findings, seen)
     except yaml.YAMLError:
         return
 

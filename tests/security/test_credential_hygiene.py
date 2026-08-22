@@ -188,6 +188,55 @@ class CredentialHygieneScannerTests(unittest.TestCase):
             {"secret-data-dsn"},
         )
 
+    def test_detects_secret_inside_kubernetes_list(self):
+        """A List item that is a Secret is scanned with its source line intact."""
+        findings = self.scan_fixture(
+            {
+                "list.yaml": "\n".join(
+                    [
+                        "apiVersion: v1",
+                        "kind: List",
+                        "items:",
+                        "  - apiVersion: v1",
+                        "    kind: Secret",
+                        "    data:",
+                        f"      DATABASE_URL: {encoded('postgresql://user:REDACTED@db.invalid:5432/app')}",
+                    ]
+                )
+            }
+        )
+
+        self.assertEqual(
+            [(finding.path, finding.line, finding.rule_id) for finding in findings],
+            [(Path("list.yaml"), 7, "secret-data-dsn")],
+        )
+
+    def test_detects_secretlist_items_nested_inside_list(self):
+        """Nested SecretList items inherit Secret scanning without scanning arbitrary mappings."""
+        findings = self.scan_fixture(
+            {
+                "nested-list.yaml": "\n".join(
+                    [
+                        "apiVersion: v1",
+                        "kind: List",
+                        "items:",
+                        "  - apiVersion: v1",
+                        "    kind: SecretList",
+                        "    items:",
+                        "      - metadata:",
+                        "          name: example",
+                        "        data:",
+                        f"          DATABASE_URL: {encoded('postgresql://user:REDACTED@db.invalid:5432/app')}",
+                    ]
+                )
+            }
+        )
+
+        self.assertEqual(
+            [(finding.path, finding.line, finding.rule_id) for finding in findings],
+            [(Path("nested-list.yaml"), 10, "secret-data-dsn")],
+        )
+
     def test_detects_flow_style_secret_data(self):
         """Flow-style Secret data mappings cannot conceal a base64 DSN."""
         self.assertEqual(
