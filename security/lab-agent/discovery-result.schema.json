@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mode", "base_commit", "scope", "inspected", "findings"],
+  "properties": {
+    "mode": {"const": "discover"},
+    "base_commit": {"type": "string"},
+    "scope": {"type": "string"},
+    "inspected": {"type": "array", "items": {"type": "string"}},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "severity", "confidence", "locations", "attacker_preconditions", "source_to_sink", "impact", "evidence", "recommended_validation", "remediation_outline"],
+        "properties": {
+          "id": {"type": "string"},
+          "title": {"type": "string"},
+          "severity": {"enum": ["critical", "high", "medium", "low", "informational"]},
+          "confidence": {"enum": ["high", "medium", "low"]},
+          "locations": {"type": "array", "items": {"type": "string"}},
+          "attacker_preconditions": {"type": "string"},
+          "source_to_sink": {"type": "string"},
+          "impact": {"type": "string"},
+          "evidence": {"type": "array", "items": {"type": "string"}},
+          "recommended_validation": {"type": "array", "items": {"type": "string"}},
+          "remediation_outline": {"type": "string"}
+        }
+      }
+    }
+  }
+}
