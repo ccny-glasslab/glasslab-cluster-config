@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Sequence
@@ -90,6 +92,111 @@ def parse_args(argv: Sequence[str]) -> DispatchConfig:
         opencode_bin=args.opencode_bin,
         timeout_seconds=args.timeout,
     )
+
+
+@dataclass(frozen=True)
+class RunPaths:
+    run_root: Path
+    worktree: Path
+    runtime: Path
+    result_json: Path
+    summary_md: Path
+    log: Path
+    metadata: Path
+    base_commit: str
+    branch: str | None
+
+
+def _git(repo: Path, *args: str, check: bool = True) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if check and completed.returncode:
+        raise DispatchError(completed.stderr.strip() or "git command failed")
+    return completed.stdout.strip()
+
+
+def prepare_run(config: DispatchConfig) -> RunPaths:
+    repo = config.repo_root.resolve()
+    if Path(_git(repo, "rev-parse", "--show-toplevel")).resolve() != repo:
+        raise DispatchError("repo root does not match Git top level")
+    if _git(repo, "status", "--porcelain", "--untracked-files=all"):
+        raise DispatchError("source repository is dirty")
+    base_commit = _git(repo, "rev-parse", "--verify", f"{config.base_revision}^{{commit}}")
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", ".lab-agents/probe"], cwd=repo, check=False
+    )
+    if ignored.returncode != 0:
+        raise DispatchError(".lab-agents must be ignored")
+    run_root = repo / ".lab-agents" / config.run_name
+    if run_root.exists() or run_root.is_symlink():
+        raise DispatchError("run directory already exists")
+    worktree = run_root / "worktree"
+    runtime = run_root / "runtime"
+    runtime.mkdir(parents=True)
+    branch = None if config.mode == "discover" else f"lab-agent/{config.run_name}"
+    if branch:
+        _git(repo, "worktree", "add", "-b", branch, str(worktree), base_commit)
+    else:
+        _git(repo, "worktree", "add", "--detach", str(worktree), base_commit)
+    paths = RunPaths(
+        run_root=run_root,
+        worktree=worktree,
+        runtime=runtime,
+        result_json=runtime / "result.json",
+        summary_md=runtime / "summary.md",
+        log=runtime / "opencode.log",
+        metadata=runtime / "metadata.json",
+        base_commit=base_commit,
+        branch=branch,
+    )
+    paths.metadata.write_text(json.dumps({
+        "repo_root": str(repo),
+        "run_root": str(run_root.resolve()),
+        "worktree": str(worktree.resolve()),
+        "base_commit": base_commit,
+        "branch": branch,
+    }, indent=2, sort_keys=True) + "\n")
+    return paths
+
+
+def capture_worktree_diff(paths: RunPaths) -> str:
+    tracked = _git(paths.worktree, "diff", "--binary", paths.base_commit)
+    untracked = _git(
+        paths.worktree, "ls-files", "--others", "--exclude-standard"
+    ).splitlines()
+    sections = [tracked] if tracked else []
+    for relative in untracked:
+        path = paths.worktree / relative
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 1_048_576:
+            raise DispatchError(f"unsafe untracked file in worktree: {relative}")
+        sections.append(f"--- untracked: {relative}\n{path.read_text(errors='replace')}")
+    return "\n".join(sections)
+
+
+def cleanup_run(
+    config: DispatchConfig, paths: RunPaths, *, discard_changes: bool = False
+) -> None:
+    expected_parent = (config.repo_root / ".lab-agents" / config.run_name).resolve()
+    if paths.run_root.resolve() != expected_parent:
+        raise DispatchError("recorded run path is outside dispatcher root")
+    metadata = json.loads(paths.metadata.read_text())
+    if Path(metadata["worktree"]).resolve() != paths.worktree.resolve():
+        raise DispatchError("recorded worktree does not match run metadata")
+    changed = bool(_git(paths.worktree, "status", "--porcelain", "--untracked-files=all"))
+    if changed and not discard_changes:
+        raise DispatchError("refusing to remove dirty worktree without confirmation")
+    args = ["worktree", "remove"]
+    if changed:
+        args.append("--force")
+    args.append(str(paths.worktree))
+    _git(config.repo_root, *args)
+    shutil.rmtree(paths.run_root)
 
 
 def build_worker_environment(

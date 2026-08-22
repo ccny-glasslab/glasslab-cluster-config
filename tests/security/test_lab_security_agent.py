@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-import unittest
 import os
+import subprocess
+import unittest
+from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from scripts.lab_security_agent import (
@@ -10,8 +13,11 @@ from scripts.lab_security_agent import (
     DispatchError,
     build_opencode_config,
     build_worker_environment,
+    capture_worktree_diff,
+    cleanup_run,
     load_contract,
     parse_args,
+    prepare_run,
 )
 
 
@@ -84,6 +90,63 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(generated["permission"]["edit"], "allow")
         self.assertEqual(generated["permission"]["external_directory"], "deny")
         self.assertEqual(generated["permission"]["webfetch"], "deny")
+
+
+def git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    ).stdout.strip()
+
+
+class WorktreeTests(unittest.TestCase):
+    def make_repo(self, root: Path) -> Path:
+        repo = root / "repo"
+        repo.mkdir()
+        git(repo, "init")
+        git(repo, "config", "user.email", "test@example.invalid")
+        git(repo, "config", "user.name", "Test")
+        (repo / ".gitignore").write_text(".lab-agents/\n")
+        (repo / "tracked.txt").write_text("safe\n")
+        git(repo, "add", ".")
+        git(repo, "commit", "-m", "base")
+        return repo
+
+    def config(self, repo: Path, mode: str = "discover") -> DispatchConfig:
+        return replace(
+            DispatchConfig.for_test(
+                repo,
+                mode=mode,  # type: ignore[arg-type]
+                finding_id="SEC-1" if mode == "repair" else None,
+            ),
+            assignment_path=repo / "tracked.txt",
+        )
+
+    def test_discovery_uses_detached_worktree_at_resolved_commit(self) -> None:
+        with TemporaryDirectory() as raw:
+            repo = self.make_repo(Path(raw))
+            paths = prepare_run(self.config(repo))
+            self.assertEqual(git(paths.worktree, "branch", "--show-current"), "")
+            self.assertEqual(git(paths.worktree, "rev-parse", "HEAD"), paths.base_commit)
+
+    def test_dirty_source_repo_is_rejected(self) -> None:
+        with TemporaryDirectory() as raw:
+            repo = self.make_repo(Path(raw))
+            (repo / "tracked.txt").write_text("dirty\n")
+            with self.assertRaisesRegex(DispatchError, "source repository is dirty"):
+                prepare_run(self.config(repo))
+
+    def test_discovery_mutation_is_captured_and_cleanup_needs_confirmation(self) -> None:
+        with TemporaryDirectory() as raw:
+            repo = self.make_repo(Path(raw))
+            config = self.config(repo)
+            paths = prepare_run(config)
+            (paths.worktree / "tracked.txt").write_text("changed\n")
+            self.assertIn("changed", capture_worktree_diff(paths))
+            with self.assertRaisesRegex(DispatchError, "refusing to remove dirty"):
+                cleanup_run(config, paths)
+            cleanup_run(config, paths, discard_changes=True)
+            self.assertFalse(paths.worktree.exists())
 
 
 if __name__ == "__main__":
