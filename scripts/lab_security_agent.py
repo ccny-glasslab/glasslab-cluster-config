@@ -367,9 +367,10 @@ def run_worker(config: DispatchConfig, paths: RunPaths) -> tuple[dict[str, Any],
             signal.signal(signum, interrupt)
         process = subprocess.Popen(
             [
-                str(opencode_bin), "run", "--pure", "--format", "json",
-                "-m", f"exo/{config.model}", "--file", str(prompt_path),
+                str(opencode_bin), "run",
                 "Complete the attached bounded security assignment.",
+                "--pure", "--format", "json", "-m", f"exo/{config.model}",
+                "--file", str(prompt_path),
             ],
             cwd=paths.worktree,
             env=env,

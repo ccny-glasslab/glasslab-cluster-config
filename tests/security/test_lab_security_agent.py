@@ -242,6 +242,10 @@ class ExecutionContractTests(unittest.TestCase):
             argv = json.loads((paths.worktree / ".fake-argv.json").read_text())
             self.assertNotIn("SECURITY METHODOLOGY", " ".join(argv))
             self.assertIn("--file", argv)
+            self.assertLess(
+                argv.index("Complete the attached bounded security assignment."),
+                argv.index("--file"),
+            )
 
     def test_timeout_terminates_entire_worker_process_group(self) -> None:
         with TemporaryDirectory() as raw:
