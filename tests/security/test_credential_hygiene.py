@@ -339,18 +339,34 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
         *,
         secret_file: Path | None = None,
         cluster_secret_exists: bool = False,
+        cluster_secret_has_key: bool = True,
+        apply_creates_live_secret: bool = True,
+        applied_secret_has_key: bool = True,
     ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         with tempfile.TemporaryDirectory() as directory:
             fixture_root = Path(directory)
             bin_dir = fixture_root / "bin"
             bin_dir.mkdir()
             calls_path = fixture_root / "kubectl-calls"
+            live_secret_path = fixture_root / "live-secret"
+            live_key_path = fixture_root / "live-secret-key"
+            if cluster_secret_exists:
+                live_secret_path.touch()
+                if cluster_secret_has_key:
+                    live_key_path.touch()
             kubectl = bin_dir / "kubectl"
             kubectl.write_text(
                 "#!/usr/bin/env bash\n"
                 "printf '%s\\n' \"$*\" >> \"$KUBECTL_CALLS\"\n"
                 "if [[ \"${1-}\" == get && \"${2-}\" == secret ]]; then\n"
-                "  [[ \"${FAKE_CLUSTER_SECRET_EXISTS:-0}\" == 1 ]]\n"
+                "  [[ \"${3-}\" == glasslab-v2-runner && \"${4-}\" == -n && \"${5-}\" == glasslab-v2 ]] || exit 1\n"
+                "  [[ -f \"$FAKE_LIVE_SECRET\" ]] || exit 1\n"
+                "  if [[ -f \"$FAKE_LIVE_SECRET_KEY\" ]]; then printf 'Zml4dHVyZQ=='; fi\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [[ \"${1-}\" == apply && \"${3-}\" != *'/00-all.yaml' ]]; then\n"
+                "  if [[ \"${FAKE_APPLY_CREATES_LIVE_SECRET:-0}\" == 1 ]]; then touch \"$FAKE_LIVE_SECRET\"; fi\n"
+                "  if [[ \"${FAKE_APPLIED_SECRET_HAS_KEY:-0}\" == 1 ]]; then touch \"$FAKE_LIVE_SECRET_KEY\"; fi\n"
                 "fi\n",
                 encoding="utf-8",
             )
@@ -358,7 +374,10 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
             environment = os.environ.copy()
             environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
             environment["KUBECTL_CALLS"] = str(calls_path)
-            environment["FAKE_CLUSTER_SECRET_EXISTS"] = "1" if cluster_secret_exists else "0"
+            environment["FAKE_LIVE_SECRET"] = str(live_secret_path)
+            environment["FAKE_LIVE_SECRET_KEY"] = str(live_key_path)
+            environment["FAKE_APPLY_CREATES_LIVE_SECRET"] = "1" if apply_creates_live_secret else "0"
+            environment["FAKE_APPLIED_SECRET_HAS_KEY"] = "1" if applied_secret_has_key else "0"
             if secret_file is None:
                 environment.pop("GLASSLAB_GPU_RUNNER_SECRET_FILE", None)
             else:
@@ -374,6 +393,25 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
             )
             calls = calls_path.read_text(encoding="utf-8").splitlines() if calls_path.exists() else []
             return result, calls
+
+    @staticmethod
+    def gpu_secret_manifest(
+        *,
+        kind: str = "Secret",
+        name: str = "glasslab-v2-runner",
+        namespace: str = "glasslab-v2",
+        include_key: bool = True,
+    ) -> str:
+        string_data = "  GLASSLAB_RUNNER_STORE_POSTGRES_DSN: fixture-value\n" if include_key else "  OTHER_KEY: fixture-value\n"
+        return (
+            "apiVersion: v1\n"
+            f"kind: {kind}\n"
+            "metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {namespace}\n"
+            "stringData:\n"
+            f"{string_data}"
+        )
 
     def test_gpu_aggregate_contains_no_secret_resource(self):
         """Reintroducing a deployable Secret into the aggregate must fail."""
@@ -410,20 +448,109 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
         """An explicit local Secret must be installed before dependent resources."""
         with tempfile.TemporaryDirectory() as directory:
             secret_path = Path(directory) / "gpu-runner-secret.local.yaml"
-            secret_path.write_text("apiVersion: v1\nkind: Secret\n", encoding="utf-8")
+            secret_path.write_text(self.gpu_secret_manifest(), encoding="utf-8")
             result, calls = self.run_gpu_deploy(secret_file=secret_path)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls[0], f"apply -f {secret_path}")
-        self.assertEqual(calls[1], f"apply -f {self.GPU_RUNNER_DIR / '00-all.yaml'}")
+        self.assertEqual(
+            calls[1],
+            "get secret glasslab-v2-runner -n glasslab-v2 "
+            "-o jsonpath={.data.GLASSLAB_RUNNER_STORE_POSTGRES_DSN}",
+        )
+        self.assertEqual(calls[2], f"apply -f {self.GPU_RUNNER_DIR / '00-all.yaml'}")
 
     def test_gpu_deploy_accepts_preexisting_named_cluster_secret(self):
         """A pre-existing named cluster Secret satisfies the deployment precondition."""
         result, calls = self.run_gpu_deploy(cluster_secret_exists=True)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls[0], "get secret glasslab-v2-runner -n glasslab-v2")
+        self.assertEqual(
+            calls[0],
+            "get secret glasslab-v2-runner -n glasslab-v2 "
+            "-o jsonpath={.data.GLASSLAB_RUNNER_STORE_POSTGRES_DSN}",
+        )
         self.assertEqual(calls[1], f"apply -f {self.GPU_RUNNER_DIR / '00-all.yaml'}")
+
+    def test_gpu_deploy_rejects_local_file_with_wrong_kind(self):
+        """A non-Secret local resource must never be applied as deployment credentials."""
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = Path(directory) / "gpu-runner-secret.local.yaml"
+            secret_path.write_text(self.gpu_secret_manifest(kind="ConfigMap"), encoding="utf-8")
+            result, calls = self.run_gpu_deploy(secret_file=secret_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
+
+    def test_gpu_deploy_rejects_local_secret_with_wrong_name(self):
+        """A local Secret for another workload must never satisfy the GPU runner gate."""
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = Path(directory) / "gpu-runner-secret.local.yaml"
+            secret_path.write_text(self.gpu_secret_manifest(name="other-runner"), encoding="utf-8")
+            result, calls = self.run_gpu_deploy(secret_file=secret_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
+
+    def test_gpu_deploy_rejects_local_secret_with_wrong_namespace(self):
+        """A Secret in another namespace must never satisfy the GPU runner gate."""
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = Path(directory) / "gpu-runner-secret.local.yaml"
+            secret_path.write_text(self.gpu_secret_manifest(namespace="other-namespace"), encoding="utf-8")
+            result, calls = self.run_gpu_deploy(secret_file=secret_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
+
+    def test_gpu_deploy_rejects_local_secret_without_required_key(self):
+        """A Secret missing the runner DSN key must never be applied."""
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = Path(directory) / "gpu-runner-secret.local.yaml"
+            secret_path.write_text(self.gpu_secret_manifest(include_key=False), encoding="utf-8")
+            result, calls = self.run_gpu_deploy(secret_file=secret_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
+
+    def test_gpu_deploy_stops_when_apply_does_not_create_exact_live_secret_key(self):
+        """A successful kubectl apply without the exact live Secret/key must block the workload."""
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = Path(directory) / "gpu-runner-secret.local.yaml"
+            secret_path.write_text(self.gpu_secret_manifest(), encoding="utf-8")
+            result, calls = self.run_gpu_deploy(
+                secret_file=secret_path,
+                apply_creates_live_secret=True,
+                applied_secret_has_key=False,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls[0], f"apply -f {secret_path}")
+        self.assertEqual(
+            calls[1],
+            "get secret glasslab-v2-runner -n glasslab-v2 "
+            "-o jsonpath={.data.GLASSLAB_RUNNER_STORE_POSTGRES_DSN}",
+        )
+        self.assertFalse(any(call.endswith("/00-all.yaml") for call in calls), calls)
+
+    def test_gpu_deploy_rejects_preexisting_secret_without_required_key(self):
+        """An existing named Secret without the DSN key must block deployment."""
+        result, calls = self.run_gpu_deploy(cluster_secret_exists=True, cluster_secret_has_key=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+
+    def test_gpu_workloads_require_the_runner_secret_key(self):
+        """The pod must not start when the mandatory runner DSN key is absent."""
+        for manifest_name in ("00-all.yaml", "10-deployment.yaml"):
+            with self.subTest(manifest=manifest_name):
+                documents = yaml.safe_load_all((self.GPU_RUNNER_DIR / manifest_name).read_text(encoding="utf-8"))
+                deployment = next(document for document in documents if document.get("kind") == "Deployment")
+                environment = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+                dsn_variable = next(
+                    variable for variable in environment if variable["name"] == "GLASSLAB_RUNNER_STORE_POSTGRES_DSN"
+                )
+
+                self.assertIs(dsn_variable["valueFrom"]["secretKeyRef"].get("optional", False), False)
 
     def test_pxe_profiles_lock_passwords_and_retain_key_only_ssh(self):
         """Removing password verifiers must never remove the provisioner key or SSH hardening."""

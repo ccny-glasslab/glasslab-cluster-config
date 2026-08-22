@@ -29,7 +29,11 @@ variable:
 ```
 
 The deploy script fails before applying the workload when neither source is
-available. Local Secret manifests must remain untracked.
+available. It also rejects a local manifest unless it is exactly a `v1` Secret
+named `glasslab-v2-runner` in namespace `glasslab-v2` with a nonempty
+`GLASSLAB_RUNNER_STORE_POSTGRES_DSN` entry in `data` or `stringData`. After a
+local apply, the script confirms that exact live Secret/key before applying the
+workload. Local Secret manifests must remain untracked.
 
 ## Configuration
 
