@@ -355,6 +355,7 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
         secret_file: Path | None = None,
         cluster_secret_exists: bool = False,
         cluster_secret_value: str | None = None,
+        cluster_secret_values: dict[str, str] | None = None,
         applied_secret_has_key: bool = True,
     ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         with tempfile.TemporaryDirectory() as directory:
@@ -362,22 +363,38 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
             bin_dir = fixture_root / "bin"
             bin_dir.mkdir()
             calls_path = fixture_root / "kubectl-calls"
-            live_key_path = fixture_root / "live-secret-key"
+            live_secret_dir = fixture_root / "live-secret"
+            live_secret_dir.mkdir()
             if cluster_secret_exists:
-                value = cluster_secret_value if cluster_secret_value is not None else "fixture-live-key"
-                live_key_path.write_text(encoded(value), encoding="utf-8")
+                values = cluster_secret_values or {
+                    "VLLM_API_KEY": cluster_secret_value if cluster_secret_value is not None else "fixture-live-key"
+                }
+                for key, value in values.items():
+                    (live_secret_dir / key).write_text(encoded(value), encoding="utf-8")
             kubectl = bin_dir / "kubectl"
             kubectl.write_text(
                 "#!/usr/bin/env bash\n"
                 "printf '%s\\n' \"$*\" >> \"$KUBECTL_CALLS\"\n"
                 "if [[ \"${1-}\" == get && \"${2-}\" == secret ]]; then\n"
                 "  [[ \"${3-}\" == glasslab-agent-secrets && \"${4-}\" == -n && \"${5-}\" == glasslab-agents ]] || exit 1\n"
-                "  [[ -f \"$FAKE_LIVE_SECRET_KEY\" ]] || exit 1\n"
-                "  cat \"$FAKE_LIVE_SECRET_KEY\"\n"
+                "  case \"${7-}\" in\n"
+                "    'jsonpath={.data.VLLM_API_KEY}') key=VLLM_API_KEY ;;\n"
+                "    'jsonpath={.data.HUGGING_FACE_HUB_TOKEN}') key=HUGGING_FACE_HUB_TOKEN ;;\n"
+                "    'jsonpath={.data.GLASSLAB_AGENT_QWEN_API_KEY}') key=GLASSLAB_AGENT_QWEN_API_KEY ;;\n"
+                "    *) exit 1 ;;\n"
+                "  esac\n"
+                "  [[ -f \"$FAKE_LIVE_SECRET_DIR/$key\" ]] || exit 1\n"
+                "  cat \"$FAKE_LIVE_SECRET_DIR/$key\"\n"
                 "  exit 0\n"
                 "fi\n"
                 "if [[ \"${1-}\" == apply && \"${FAKE_APPLIED_SECRET_HAS_KEY:-0}\" == 1 ]]; then\n"
-                "  case \"${3-}\" in *agent-secrets*) printf 'Zml4dHVyZS1saXZlLWtleQ==' > \"$FAKE_LIVE_SECRET_KEY\" ;; esac\n"
+                "  case \"${3-}\" in\n"
+                "    *agent-secrets*)\n"
+                "      printf 'Zml4dHVyZS1saXZlLWtleQ==' > \"$FAKE_LIVE_SECRET_DIR/VLLM_API_KEY\"\n"
+                "      printf 'Zml4dHVyZS1odWYtdG9rZW4=' > \"$FAKE_LIVE_SECRET_DIR/HUGGING_FACE_HUB_TOKEN\"\n"
+                "      printf 'Zml4dHVyZS1xd2VuLWtleQ==' > \"$FAKE_LIVE_SECRET_DIR/GLASSLAB_AGENT_QWEN_API_KEY\"\n"
+                "      ;;\n"
+                "  esac\n"
                 "fi\n",
                 encoding="utf-8",
             )
@@ -385,7 +402,7 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
             environment = os.environ.copy()
             environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
             environment["KUBECTL_CALLS"] = str(calls_path)
-            environment["FAKE_LIVE_SECRET_KEY"] = str(live_key_path)
+            environment["FAKE_LIVE_SECRET_DIR"] = str(live_secret_dir)
             environment["FAKE_APPLIED_SECRET_HAS_KEY"] = "1" if applied_secret_has_key else "0"
             if secret_file is None:
                 environment["GLASSLAB_VLLM_SECRET_FILE"] = str(fixture_root / "missing.local.yaml")
@@ -467,6 +484,28 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
             "stringData:\n"
             f"  VLLM_API_KEY: {api_key}\n"
         )
+
+    @staticmethod
+    def agent_secret_values() -> dict[str, str]:
+        return {
+            "VLLM_API_KEY": "fixture-vllm-key",
+            "HUGGING_FACE_HUB_TOKEN": "fixture-hugging-face-token",
+            "GLASSLAB_AGENT_QWEN_API_KEY": "fixture-qwen-key",
+        }
+
+    @classmethod
+    def agent_secret_manifest(cls, values: dict[str, str] | None = None) -> str:
+        values = values or cls.agent_secret_values()
+        lines = [
+            "apiVersion: v1",
+            "kind: Secret",
+            "metadata:",
+            "  name: glasslab-agent-secrets",
+            "  namespace: glasslab-agents",
+            "stringData:",
+        ]
+        lines.extend(f"  {key}: {value}" for key, value in values.items())
+        return "\n".join(lines) + "\n"
 
     def test_tracked_secret_examples_are_not_deployable_kubernetes_secrets(self):
         """Copy-pasting a tracked secret example must never create a live Secret."""
@@ -570,6 +609,7 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
         result, calls = self.run_vllm_deploy(
             deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT,
             cluster_secret_exists=True,
+            cluster_secret_values=self.agent_secret_values(),
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -583,7 +623,7 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
         """The full stack must retain the explicit local live Secret path."""
         with tempfile.TemporaryDirectory() as directory:
             secret_path = Path(directory) / "agent-secrets.local.yaml"
-            secret_path.write_text(self.vllm_secret_manifest("fixture-live-key"), encoding="utf-8")
+            secret_path.write_text(self.agent_secret_manifest(), encoding="utf-8")
             result, calls = self.run_vllm_deploy(
                 deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT,
                 secret_file=secret_path,
@@ -592,6 +632,67 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"apply -f {secret_path}", calls)
         self.assertTrue(any(call.endswith("/21-agent-api-deployment.yaml") for call in calls), calls)
+
+    def test_agent_stack_rejects_local_secret_missing_each_required_key_before_apply(self):
+        """Every full-stack local Secret key is mandatory before any mutation."""
+        for missing_key in self.agent_secret_values():
+            with self.subTest(missing_key=missing_key), tempfile.TemporaryDirectory() as directory:
+                values = self.agent_secret_values()
+                del values[missing_key]
+                secret_path = Path(directory) / "agent-secrets.local.yaml"
+                secret_path.write_text(self.agent_secret_manifest(values), encoding="utf-8")
+                result, calls = self.run_vllm_deploy(
+                    deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT,
+                    secret_file=secret_path,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+
+    def test_agent_stack_rejects_preexisting_secret_missing_each_required_key_before_apply(self):
+        """Every full-stack cluster Secret key is mandatory before any mutation."""
+        for missing_key in self.agent_secret_values():
+            with self.subTest(missing_key=missing_key):
+                values = self.agent_secret_values()
+                del values[missing_key]
+                result, calls = self.run_vllm_deploy(
+                    deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT,
+                    cluster_secret_exists=True,
+                    cluster_secret_values=values,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+
+    def test_agent_stack_rejects_placeholder_local_qwen_key_before_apply(self):
+        """A local QWEN placeholder must not reach full-stack deployment."""
+        with tempfile.TemporaryDirectory() as directory:
+            values = self.agent_secret_values()
+            values["GLASSLAB_AGENT_QWEN_API_KEY"] = "change-me"
+            secret_path = Path(directory) / "agent-secrets.local.yaml"
+            secret_path.write_text(self.agent_secret_manifest(values), encoding="utf-8")
+            result, calls = self.run_vllm_deploy(
+                deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT,
+                secret_file=secret_path,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+        self.assertNotIn("change-me", result.stdout + result.stderr)
+
+    def test_agent_stack_rejects_placeholder_cluster_qwen_key_before_apply(self):
+        """A cluster QWEN placeholder must not reach full-stack deployment."""
+        values = self.agent_secret_values()
+        values["GLASSLAB_AGENT_QWEN_API_KEY"] = "change-me"
+        result, calls = self.run_vllm_deploy(
+            deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT,
+            cluster_secret_exists=True,
+            cluster_secret_values=values,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+        self.assertNotIn("change-me", result.stdout + result.stderr)
 
     def run_gpu_deploy(
         self,

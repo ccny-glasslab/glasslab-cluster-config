@@ -142,7 +142,7 @@ The tracked `12-agent-secrets.example.yaml` file records the required resource
 identity and key names, but is deliberately not a Kubernetes manifest and must
 not be copied or applied. The live file must be a single `v1` `Secret` named
 `glasslab-agent-secrets` in the `glasslab-agents` namespace and must provide a
-non-placeholder `VLLM_API_KEY` along with the other keys listed by the contract.
+non-empty, non-placeholder value for every key listed by the contract.
 
 The default ignored path above is used automatically. To use another live
 manifest, set its path explicitly:
@@ -152,8 +152,10 @@ export GLASSLAB_VLLM_SECRET_FILE=/secure/path/agent-secrets.local.yaml
 ```
 
 Both deployment helpers also accept the exact pre-existing cluster Secret when
-its `VLLM_API_KEY` contains a non-placeholder value. They validate the local or
-cluster source before applying any workload resources.
+the keys they consume contain non-empty, non-placeholder values. Standalone
+vLLM requires only `VLLM_API_KEY`; full-stack deployment requires all three
+keys in the tracked contract. Both helpers validate the local or cluster source
+before applying any workload resources.
 
 3. Confirm the dataset PVC plan and populate the Titanic files after the claim binds.
 
