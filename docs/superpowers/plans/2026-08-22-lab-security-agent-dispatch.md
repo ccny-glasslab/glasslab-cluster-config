@@ -14,7 +14,8 @@
 
 - Lab-agent output is untrusted until independently validated by the primary session.
 - Workers receive no SSH agent, Kubernetes configuration, SOPS identity, secret files, GitHub credentials, or permission to push or merge.
-- Discovery is read-only and must finish with an unchanged worktree.
+- Discovery may edit only its disposable detached worktree; its changes are
+  never integrated automatically.
 - Repair is permitted only for one explicitly identified, already validated finding.
 - No mode automatically commits, pushes, merges, deletes a dirty worktree, or copies a patch into the canonical checkout.
 - OpenCode sharing, web access, task delegation, external-directory access, and automatic updates remain disabled.
@@ -183,11 +184,11 @@ class ConfigurationTests(unittest.TestCase):
         self.assertNotIn("KUBECONFIG", env)
         self.assertEqual(env["HOME"], "/tmp/runtime/home")
 
-    def test_discovery_permissions_deny_mutation_and_network(self) -> None:
+    def test_discovery_permissions_allow_local_edits_but_deny_network(self) -> None:
         config = DispatchConfig.for_test(REPO_ROOT, mode="discover")
         generated = build_opencode_config(config)
         permissions = generated["permission"]
-        self.assertEqual(permissions["edit"], "deny")
+        self.assertEqual(permissions["edit"], "allow")
         self.assertEqual(permissions["bash"], "deny")
         self.assertEqual(permissions["webfetch"], "deny")
         self.assertEqual(generated["share"], "disabled")
@@ -249,7 +250,7 @@ Use `argparse` for `MODE RUN_NAME --assignment PATH`, plus optional `--base`, `-
 
 `build_worker_environment` returns a new dictionary containing only `PATH`, `LANG`, `LC_ALL`, `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, and `NO_COLOR`. Use `/usr/local/bin:/usr/bin:/bin` as the fallback PATH and never copy the parent mapping wholesale.
 
-`build_opencode_config` uses provider ID `exo`, package `@ai-sdk/openai-compatible`, and `${api_base}/v1` after removing a trailing slash. Both modes set `share: disabled`, `autoupdate: false`, `lsp: false`, and deny `external_directory`, `task`, `skill`, `webfetch`, `websearch`, and `question`. Discovery denies `edit`, `write`, `patch`, and `bash`. Repair allows edit/write/patch but denies bash in the first release; the primary session runs tests independently.
+`build_opencode_config` uses provider ID `exo`, package `@ai-sdk/openai-compatible`, and `${api_base}/v1` after removing a trailing slash. Both modes set `share: disabled`, `autoupdate: false`, `lsp: false`, deny `external_directory`, `task`, `skill`, `webfetch`, `websearch`, and `question`, allow edit/write/patch only inside the disposable worktree, and deny bash in the first release. The primary session runs tests independently.
 
 - [ ] **Step 5: Run configuration tests**
 
@@ -274,7 +275,7 @@ git commit -m "Validate lab security agent configuration"
 
 **Interfaces:**
 - Consumes: `DispatchConfig` from Task 2.
-- Produces: `RunPaths`, `prepare_run(config) -> RunPaths`, `assert_discovery_unchanged(paths) -> None`, and `cleanup_run(config, paths) -> None`.
+- Produces: `RunPaths`, `prepare_run(config) -> RunPaths`, `capture_worktree_diff(paths) -> str`, and `cleanup_run(config, paths, discard_changes=False) -> None`.
 
 - [ ] **Step 1: Write failing worktree tests using temporary Git repositories**
 
@@ -282,7 +283,7 @@ git commit -m "Validate lab security agent configuration"
 import subprocess
 
 from scripts.lab_security_agent import (
-    assert_discovery_unchanged,
+    capture_worktree_diff,
     cleanup_run,
     prepare_run,
 )
@@ -323,16 +324,16 @@ class WorktreeTests(unittest.TestCase):
             with self.assertRaisesRegex(DispatchError, "source repository is dirty"):
                 prepare_run(DispatchConfig.for_test(repo, mode="discover"))
 
-    def test_discovery_mutation_is_detected_and_cleanup_refuses(self) -> None:
+    def test_discovery_mutation_is_captured_and_cleanup_needs_confirmation(self) -> None:
         with TemporaryDirectory() as raw:
             repo = self.make_repo(Path(raw))
             config = DispatchConfig.for_test(repo, mode="discover")
             paths = prepare_run(config)
             (paths.worktree / "tracked.txt").write_text("changed\n")
-            with self.assertRaisesRegex(DispatchError, "discovery worktree changed"):
-                assert_discovery_unchanged(paths)
+            self.assertIn("changed", capture_worktree_diff(paths))
             with self.assertRaisesRegex(DispatchError, "refusing to remove dirty"):
                 cleanup_run(config, paths)
+            cleanup_run(config, paths, discard_changes=True)
 ```
 
 - [ ] **Step 2: Run worktree tests and verify they fail**
@@ -361,9 +362,9 @@ class RunPaths:
 
 `prepare_run` must use `git rev-parse --show-toplevel`, `git status --porcelain`, `git rev-parse --verify <base>^{commit}`, and `git check-ignore -q .lab-agents`. Refuse a source repository whose top level differs from `config.repo_root.resolve()`, a dirty source, an unignored `.lab-agents`, a pre-existing run directory, or a symlink in any run path component. Create discovery with `git worktree add --detach <path> <commit>`; create repair with `git worktree add -b lab-agent/<run-name> <path> <commit>`. Store canonical paths and the resolved base commit in `metadata.json`.
 
-- [ ] **Step 4: Implement unchanged checks and explicit cleanup**
+- [ ] **Step 4: Implement diff capture and explicit cleanup**
 
-`assert_discovery_unchanged` runs `git status --porcelain --untracked-files=all` inside the worktree and raises on any output. `cleanup_run` reads and compares `metadata.json`, verifies the recorded worktree is beneath `<repo>/.lab-agents/<run-name>/`, refuses a dirty worktree, runs `git worktree remove -- <exact-path>`, and removes only the now-empty runtime/run directories. It never deletes a repair branch.
+`capture_worktree_diff` returns `git diff --binary <base_commit>` plus a manifest and contents for bounded untracked files. `cleanup_run` reads and compares `metadata.json`, verifies the recorded worktree is beneath `<repo>/.lab-agents/<run-name>/`, refuses a changed worktree unless `discard_changes=True`, runs `git worktree remove --force -- <exact-path>` only after that explicit confirmation, and removes only the now-empty runtime/run directories. It never deletes a repair branch.
 
 - [ ] **Step 5: Run worktree tests**
 
@@ -414,8 +415,8 @@ class ExecutionTests(WorktreeTests):
             prompt = assemble_assignment(config, paths)
             self.assertIn("Do not expose secrets.", prompt)
             self.assertIn("Inspect scripts only.", prompt)
-            self.assertIn(str(paths.result_json), prompt)
-            self.assertIn("Do not edit", prompt)
+            self.assertIn("Return the result as JSON", prompt)
+            self.assertIn("disposable worktree", prompt)
 
     def test_fake_discovery_completes_with_valid_result_and_clean_worktree(self) -> None:
         with TemporaryDirectory() as raw:
@@ -435,7 +436,7 @@ class ExecutionTests(WorktreeTests):
             result = validate_result(config, paths)
             self.assertEqual(result["mode"], "discover")
             self.assertEqual(result["findings"], [])
-            assert_discovery_unchanged(paths)
+            self.assertEqual(capture_worktree_diff(paths), "")
 
     def test_malformed_result_fails(self) -> None:
         with TemporaryDirectory() as raw:
@@ -459,11 +460,11 @@ Avoid adding a package dependency. Implement a focused recursive validator for t
 
 - [ ] **Step 4: Implement assignment assembly and worker execution**
 
-`assemble_assignment` concatenates clear delimiters around the committed `AGENTS.md`, methodology, caller assignment, schema, exact result and summary paths, base commit, mode, and finding ID. Discovery text says: `Do not edit, create, rename, or delete repository files.` Repair text says: `Change only files necessary to remediate finding <id>; do not commit.`
+`assemble_assignment` concatenates clear delimiters around the committed `AGENTS.md`, methodology, caller assignment, schema, base commit, mode, and finding ID. It requires the final answer to contain exactly one fenced JSON result followed by a Markdown summary. Discovery text says: `You may experiment only inside this disposable worktree; do not commit.` Repair text says: `Change only files necessary to remediate finding <id>; do not commit.`
 
-`run_worker` writes the OpenCode config beneath the isolated XDG config root, invokes `[opencode_bin, "run", "-m", f"exo/{model}", prompt]` with `cwd=paths.worktree`, the sanitized environment, captured text output, and `timeout=config.timeout_seconds`. Write captured stdout/stderr to `paths.log` after replacing the API URL and worktree parent with stable labels. On timeout or nonzero exit, raise `DispatchError` and preserve the run.
+`run_worker` writes the OpenCode config beneath the isolated XDG config root, invokes `[opencode_bin, "run", "--format", "json", "-m", f"exo/{model}", prompt]` with `cwd=paths.worktree`, the sanitized environment, captured text output, and `timeout=config.timeout_seconds`. Parse the JSON Lines event stream, concatenate final assistant text events, extract exactly one fenced JSON document, validate it, and have the trusted dispatcher write `result.json` and `summary.md` beneath `paths.runtime`. Write stderr and event metadata—not hidden reasoning or raw secret-like content—to `paths.log` after replacing the API URL and worktree parent with stable labels. On timeout or nonzero exit, raise `DispatchError` and preserve the run.
 
-`dispatch` checks `${api_base}/v1/models` with `urllib.request` before worktree creation, calls `prepare_run`, executes the worker, validates its result, checks discovery unchanged state, records final metadata, and prints no model response or result content to stdout.
+`dispatch` checks `${api_base}/v1/models` with `urllib.request` before worktree creation, calls `prepare_run`, executes the worker, validates its result, captures the worktree diff and its digest, records final metadata, and prints no model response or result content to stdout.
 
 - [ ] **Step 5: Add the fake OpenCode executable**
 
@@ -473,7 +474,7 @@ The fixture reads the final prompt argument, extracts the lines beginning `RESUL
 
 Run: `python3 -m unittest tests.security.test_lab_security_agent.ExecutionTests -v`
 
-Expected: all execution tests pass, including malformed output and unchanged-worktree enforcement.
+Expected: all execution tests pass, including malformed output and disposable-worktree diff capture.
 
 - [ ] **Step 7: Commit execution support**
 
@@ -631,7 +632,8 @@ Inspect tests/security and scripts involved in SOPS backup, restore, and
 credential hygiene. Identify candidate cases where plaintext secrets can be
 persisted, exposed through process arguments or environment, restored outside
 the intended boundary, or executed through an attacker-controlled program.
-Do not inspect ignored secret values. Do not edit any repository file.
+Do not inspect ignored secret values. You may edit only this disposable
+worktree for experiments; do not commit any change.
 ```
 
 Run:
@@ -642,7 +644,7 @@ scripts/lab-security-agent discover first-secret-audit \
   --assignment security/lab-agent/assignments/first-secret-audit.md
 ```
 
-Expected: the command reports the base commit and artifact paths, result JSON validates, and the discovery worktree is unchanged.
+Expected: the command reports the base commit and artifact paths, result JSON validates, and any discovery changes remain only in the disposable worktree.
 
 - [ ] **Step 6: Independently validate the report**
 

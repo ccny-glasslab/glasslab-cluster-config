@@ -41,8 +41,8 @@ whose validity or remediation remains uncertain; they are not the default.
 Add one repository-owned command, `scripts/lab-security-agent`, with two
 explicit modes:
 
-- `discover`: create an isolated detached worktree and require a read-only
-  audit report.
+- `discover`: create an isolated detached, disposable worktree for exploratory
+  audit work and require a structured audit report.
 - `repair`: create an isolated branch worktree for one already validated
   finding and permit changes only inside that worktree.
 
@@ -95,9 +95,9 @@ uncertainty rather than inventing proof.
 
 Each run uses a uniquely named worktree rooted beneath an ignored dispatcher
 directory. Discovery worktrees are detached at the selected base commit and
-configured read-only through OpenCode permissions. Repair worktrees use a
-dedicated `lab-agent/<run-name>` branch and permit writes only under that
-worktree.
+may be modified as disposable scratch space. Repair worktrees use a dedicated
+`lab-agent/<run-name>` branch. Both modes permit writes only under their own
+worktree, and neither mode can integrate changes into the source checkout.
 
 The launcher constructs a minimal environment instead of inheriting the
 interactive shell wholesale. It supplies only the executable search path,
@@ -107,9 +107,9 @@ not propagated. The launcher does not mount or copy files from `.ssh`,
 `.kube`, `.config/sops`, ignored secret manifests, or external directories.
 
 OpenCode sharing, web access, task delegation, external-directory access, and
-automatic updates are disabled. Discovery mode denies write-capable tools.
-Repair mode allows repository-local editing and bounded test commands but
-denies network access and access outside the worktree.
+automatic updates are disabled. Both modes allow repository-local editing and
+bounded local test commands but deny network access and access outside the
+worktree.
 
 ## Runtime And Data Flow
 
@@ -119,11 +119,12 @@ directories. It then generates a per-run OpenCode configuration pointing at
 the existing OpenAI-compatible exo endpoint and starts one non-interactive
 turn with the assembled assignment.
 
-OpenCode stdout and stderr are captured without being interpreted as success.
-Completion requires a zero process exit status, a valid result document, and
-mode-specific postconditions. Discovery additionally requires an unchanged
-worktree. Repair records the complete diff and rejects modifications outside
-the allowed worktree or result directory.
+OpenCode's JSON event stream and stderr are captured without being interpreted
+as success. The trusted dispatcher extracts the final answer, validates its
+embedded result document, and writes report artifacts outside the worker's
+accessible directory. Completion requires a zero process exit status and a
+valid result document. Both modes record the disposable-worktree diff and
+reject modifications outside the allowed worktree.
 
 The primary session reads the report, reproduces the evidence, and either
 rejects, validates, or escalates each candidate. For validated repairs, it
@@ -132,31 +133,32 @@ commit or integrate it.
 
 ## Failure Handling And Cleanup
 
-A failed health check, timeout, malformed result, dirty discovery worktree,
-unexpected path, or OpenCode error marks the run failed and preserves its
-artifacts for diagnosis. The launcher records no secrets in arguments or logs.
+A failed health check, timeout, malformed result, unexpected path, or OpenCode
+error marks the run failed and preserves its artifacts and worktree for
+diagnosis. The launcher records no secrets in arguments or logs.
 
-Cleanup is a separate explicit operation. It refuses to remove worktrees with
-uncommitted changes and uses `git worktree remove` only for the exact recorded
-path. Repair branches are never deleted automatically.
+Cleanup is a separate explicit operation. It refuses to remove a changed
+worktree unless the caller explicitly confirms discarding it and uses
+`git worktree remove` only for the exact recorded path. Repair branches are
+never deleted automatically.
 
 ## Verification
 
 Automated tests cover argument validation, safe run-name handling, base-commit
 resolution, ignored-directory enforcement, sanitized environment construction,
-mode-specific OpenCode permissions, assignment composition, malformed output,
-timeouts, unchanged discovery enforcement, repair diff capture, and safe
-cleanup refusal.
+mode-specific OpenCode permissions, assignment composition, JSON-event result
+extraction, malformed output, timeouts, diff capture, and safe cleanup refusal.
 
 An integration smoke test uses a fake OpenAI-compatible endpoint and a fake
 OpenCode executable so it is deterministic and consumes no model resources.
 A separately invoked live smoke test asks exo to inspect a tiny fixture
-repository, produce the required result schema, and leave discovery state
-unchanged. The live test is never part of the normal pre-push suite.
+repository, produce the required result schema, and retain any exploratory
+diff only in its disposable worktree. The live test is never part of the
+normal pre-push suite.
 
 ## Rollout
 
-Begin with one read-only discovery worker on one narrow portion of the current
+Begin with one isolated discovery worker on one narrow portion of the current
 security audit. Compare its report against the hosted review and record misses,
 false positives, runtime, and hosted-credit savings. Enable repair mode only
 after discovery containment and output validation pass. Increase concurrency
