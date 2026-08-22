@@ -233,6 +233,13 @@ class ExecutionContractTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_entrypoint_runs_after_helper_definitions(self) -> None:
+        source = (REPO_ROOT / "scripts/lab_security_agent.py").read_text()
+        self.assertGreater(
+            source.rfind('if __name__ == "__main__":'),
+            source.rfind("def load_contract"),
+        )
+
     def test_help_documents_modes_and_no_automatic_merge(self) -> None:
         completed = subprocess.run(
             [str(REPO_ROOT / "scripts/lab-security-agent"), "--help"],

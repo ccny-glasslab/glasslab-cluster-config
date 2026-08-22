@@ -428,10 +428,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
 def build_worker_environment(
     config: DispatchConfig, runtime_root: Path
 ) -> dict[str, str]:
@@ -497,3 +493,7 @@ def load_contract(repo_root: Path, mode: str) -> tuple[str, dict[str, Any]]:
     methodology = (contract_root / "methodology.md").read_text()
     schema = json.loads((contract_root / schema_names[mode]).read_text())
     return methodology, schema
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
