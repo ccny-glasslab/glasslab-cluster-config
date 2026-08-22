@@ -243,6 +243,14 @@ class CliTests(unittest.TestCase):
         self.assertIn("repair", completed.stdout)
         self.assertIn("never commits, pushes, or merges", completed.stdout)
 
+    def test_cleanup_refuses_unknown_run(self) -> None:
+        completed = subprocess.run(
+            [str(REPO_ROOT / "scripts/lab-security-agent"), "cleanup", "missing"],
+            cwd=REPO_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("recorded run", completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

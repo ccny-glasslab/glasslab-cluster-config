@@ -366,6 +366,7 @@ def _usage() -> str:
     return """Usage:
   lab-security-agent discover RUN --assignment FILE [options]
   lab-security-agent repair RUN --assignment FILE --finding-id ID [options]
+  lab-security-agent cleanup RUN [--discard-changes]
 
 Runs an untrusted lab model in a disposable worktree. The command never commits, pushes, or merges.
 """
@@ -377,6 +378,44 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(_usage())
         return 0
     try:
+        if args[0] == "cleanup":
+            if len(args) not in {2, 3} or (len(args) == 3 and args[2] != "--discard-changes"):
+                raise DispatchError("cleanup requires RUN and optional --discard-changes")
+            run_name = args[1]
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", run_name):
+                raise DispatchError("invalid run name")
+            repo = Path.cwd().resolve()
+            run_root = repo / ".lab-agents" / run_name
+            metadata_path = run_root / "runtime" / "metadata.json"
+            if not metadata_path.is_file() or metadata_path.is_symlink():
+                raise DispatchError("recorded run was not found")
+            metadata = json.loads(metadata_path.read_text())
+            worktree = Path(metadata["worktree"])
+            runtime = run_root / "runtime"
+            paths = RunPaths(
+                run_root=run_root,
+                worktree=worktree,
+                runtime=runtime,
+                result_json=runtime / "result.json",
+                summary_md=runtime / "summary.md",
+                log=runtime / "opencode.log",
+                metadata=metadata_path,
+                base_commit=metadata["base_commit"],
+                branch=metadata.get("branch"),
+            )
+            cleanup_config = DispatchConfig(
+                repo_root=repo,
+                mode="repair" if paths.branch else "discover",
+                run_name=run_name,
+                assignment_path=repo / ".gitignore",
+            )
+            cleanup_run(
+                cleanup_config,
+                paths,
+                discard_changes="--discard-changes" in args,
+            )
+            print(f"removed={run_root}")
+            return 0
         config = parse_args(args)
         paths = dispatch(config)
     except DispatchError as exc:
