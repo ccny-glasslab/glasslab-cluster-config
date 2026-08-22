@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+XTRACE_WAS_ENABLED=false
+case "$-" in
+  *x*) XTRACE_WAS_ENABLED=true ;;
+esac
+set +x
 set -euo pipefail
 
 KUBECTL="${KUBECTL:-kubectl}"
@@ -6,6 +11,7 @@ NAMESPACE="${GLASSLAB_V2_NAMESPACE:-glasslab-v2}"
 SECRET_NAME="${GLASSLAB_GHCR_PULL_SECRET_NAME:-glasslab-ghcr-pull}"
 REGISTRY_HOST="${GLASSLAB_WORKFLOW_API_REGISTRY_HOST:-ghcr.io}"
 REGISTRY_USERNAME="${GHCR_USERNAME:-${GITHUB_ACTOR:-ccny-glasslab}}"
+unset REGISTRY_TOKEN
 REGISTRY_TOKEN="${GHCR_TOKEN:-}"
 unset GHCR_TOKEN
 
@@ -59,12 +65,12 @@ fi
 
 umask 077
 TEMP_DIR="$(mktemp -d)"
-chmod 0700 "$TEMP_DIR"
-DOCKER_CONFIG_PATH="$TEMP_DIR/config.json"
 cleanup() {
   rm -rf -- "$TEMP_DIR"
 }
 trap cleanup EXIT
+chmod 0700 "$TEMP_DIR"
+DOCKER_CONFIG_PATH="$TEMP_DIR/config.json"
 
 printf '%s' "$REGISTRY_TOKEN" | python3 -c '
 import base64
@@ -89,6 +95,9 @@ with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
     json.dump(config, stream, separators=(",", ":"))
 ' "$REGISTRY_HOST" "$REGISTRY_USERNAME" "$DOCKER_CONFIG_PATH"
 unset REGISTRY_TOKEN
+if [[ "$XTRACE_WAS_ENABLED" == true ]]; then
+  set -x
+fi
 
 printf '[create-ghcr-pull-secret] refreshing %s in namespace %s\n' "$SECRET_NAME" "$NAMESPACE"
 "$KUBECTL" -n "$NAMESPACE" create secret generic "$SECRET_NAME" \

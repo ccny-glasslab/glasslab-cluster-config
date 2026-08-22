@@ -31,13 +31,20 @@ class GhcrPullSecretBoundaryTests(unittest.TestCase):
         *,
         token_environment: str | None = None,
         stdin: str | None = None,
-    ) -> tuple[subprocess.CompletedProcess[str], list[dict[str, object]]]:
+        xtrace: bool = False,
+        preexported_registry_token: str | None = None,
+    ) -> tuple[
+        subprocess.CompletedProcess[str],
+        list[dict[str, object]],
+        list[dict[str, object]],
+    ]:
         with tempfile.TemporaryDirectory() as directory:
             fixture_root = Path(directory)
             calls_path = fixture_root / "kubectl-calls.jsonl"
+            generator_calls_path = fixture_root / "generator-calls.jsonl"
             kubectl = fixture_root / "kubectl"
             kubectl.write_text(
-                """#!/usr/bin/env python3
+                """#!PYTHON
 import json
 import os
 import stat
@@ -46,7 +53,11 @@ from pathlib import Path
 
 record = {
     "argv": sys.argv[1:],
-    "ghcr_token": os.environ.get("GHCR_TOKEN"),
+    "secret_environment": {
+        name: os.environ[name]
+        for name in ("GHCR_TOKEN", "REGISTRY_TOKEN")
+        if name in os.environ
+    },
 }
 for argument in sys.argv[1:]:
     prefix = "--from-file=.dockerconfigjson="
@@ -61,22 +72,56 @@ with Path(os.environ["KUBECTL_CALLS"]).open("a", encoding="utf-8") as stream:
 if "create" in sys.argv[1:]:
     print("apiVersion: v1")
     print("kind: Secret")
-""",
+""".replace("#!PYTHON", f"#!{os.path.realpath(sys.executable)}"),
                 encoding="utf-8",
             )
             kubectl.chmod(0o755)
+            real_python = os.path.realpath(sys.executable)
+            python_wrapper = fixture_root / "python3"
+            python_wrapper.write_text(
+                f"""#!{real_python}
+import json
+import os
+import sys
+from pathlib import Path
+
+record = {{
+    "argv": sys.argv[1:],
+    "secret_environment": {{
+        name: os.environ[name]
+        for name in ("GHCR_TOKEN", "REGISTRY_TOKEN")
+        if name in os.environ
+    }},
+}}
+with Path(os.environ["GENERATOR_CALLS"]).open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps(record) + "\\n")
+os.execv({real_python!r}, [{real_python!r}, *sys.argv[1:]])
+""",
+                encoding="utf-8",
+            )
+            python_wrapper.chmod(0o755)
 
             environment = os.environ.copy()
+            environment["PATH"] = f"{fixture_root}:{environment['PATH']}"
             environment["KUBECTL"] = str(kubectl)
             environment["KUBECTL_CALLS"] = str(calls_path)
+            environment["GENERATOR_CALLS"] = str(generator_calls_path)
             environment["GHCR_USERNAME"] = "fixture-user"
             if token_environment is None:
                 environment.pop("GHCR_TOKEN", None)
             else:
                 environment["GHCR_TOKEN"] = token_environment
+            if preexported_registry_token is None:
+                environment.pop("REGISTRY_TOKEN", None)
+            else:
+                environment["REGISTRY_TOKEN"] = preexported_registry_token
 
+            command = ["bash"]
+            if xtrace:
+                command.append("-x")
+            command.append(str(GHCR_HELPER))
             result = subprocess.run(
-                ["bash", str(GHCR_HELPER)],
+                command,
                 cwd=REPOSITORY_ROOT,
                 env=environment,
                 input=stdin,
@@ -89,24 +134,34 @@ if "create" in sys.argv[1:]:
                 if calls_path.exists()
                 else []
             )
+            generator_calls = (
+                [
+                    json.loads(line)
+                    for line in generator_calls_path.read_text(encoding="utf-8").splitlines()
+                ]
+                if generator_calls_path.exists()
+                else []
+            )
             for call in calls:
                 config_path = call.get("config_path")
                 if isinstance(config_path, str):
                     call["config_was_removed"] = not Path(config_path).exists()
-            return result, calls
+            return result, calls, generator_calls
 
     def assert_token_stayed_out_of_process_boundary(
         self,
         token: str,
         result: subprocess.CompletedProcess[str],
         calls: list[dict[str, object]],
+        generator_calls: list[dict[str, object]],
     ) -> None:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn(token, result.stdout + result.stderr)
         self.assertEqual(len(calls), 2, calls)
-        for call in calls:
+        self.assertEqual(len(generator_calls), 1, generator_calls)
+        for call in [*generator_calls, *calls]:
             self.assertNotIn(token, json.dumps(call["argv"]))
-            self.assertNotEqual(call["ghcr_token"], token)
+            self.assertEqual(call["secret_environment"], {})
 
         create_call = next(call for call in calls if "create" in call["argv"])
         config = json.loads(str(create_call["config"]))
@@ -119,23 +174,44 @@ if "create" in sys.argv[1:]:
     def test_environment_token_uses_private_docker_config_not_kubectl_argv(self):
         """Removing the private-file path would put the environment token in kubectl argv."""
         token = "ghcr-environment-token-sentinel"
-        result, calls = self.run_helper(token_environment=token)
+        result, calls, generator_calls = self.run_helper(token_environment=token)
 
-        self.assert_token_stayed_out_of_process_boundary(token, result, calls)
+        self.assert_token_stayed_out_of_process_boundary(token, result, calls, generator_calls)
 
     def test_stdin_token_uses_private_docker_config_not_kubectl_argv(self):
         """Dropping stdin support would force operators back to argument-bearing workarounds."""
         token = "ghcr-stdin-token-sentinel"
-        result, calls = self.run_helper(stdin=token + "\n")
+        result, calls, generator_calls = self.run_helper(stdin=token + "\n")
 
-        self.assert_token_stayed_out_of_process_boundary(token, result, calls)
+        self.assert_token_stayed_out_of_process_boundary(token, result, calls, generator_calls)
+
+    def test_xtrace_never_prints_token_expansions(self):
+        """Shell xtrace must be disabled across every token-bearing expansion."""
+        token = "ghcr-xtrace-token-sentinel"
+        result, calls, generator_calls = self.run_helper(
+            token_environment=token,
+            xtrace=True,
+        )
+
+        self.assert_token_stayed_out_of_process_boundary(token, result, calls, generator_calls)
+
+    def test_preexported_internal_variable_is_absent_from_every_child_environment(self):
+        """An inherited export attribute must not carry the internal token into children."""
+        token = "ghcr-inherited-export-token-sentinel"
+        result, calls, generator_calls = self.run_helper(
+            token_environment=token,
+            preexported_registry_token="preexisting-registry-token-sentinel",
+        )
+
+        self.assert_token_stayed_out_of_process_boundary(token, result, calls, generator_calls)
 
     def test_missing_token_fails_before_kubectl(self):
         """Absent token input must not create or apply an empty registry Secret."""
-        result, calls = self.run_helper(stdin="")
+        result, calls, generator_calls = self.run_helper(stdin="")
 
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(calls, [])
+        self.assertEqual(generator_calls, [])
 
 
 class PostgresImporterBoundaryTests(unittest.TestCase):
