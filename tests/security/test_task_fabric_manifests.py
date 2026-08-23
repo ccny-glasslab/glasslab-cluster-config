@@ -176,6 +176,18 @@ class RabbitMQExposureTests(unittest.TestCase):
         self.assertIn("unexpected_grant", verify)
         self.assertIn("unexpected_vhost", verify)
 
+    def test_policies_are_rejected_because_none_are_declared(self):
+        topology = by_kind(RABBITMQ_DIR / "30-topology.yaml", "ConfigMap")
+        verify = topology["data"]["verify.eval"]
+        # Policies can override quorum-queue semantics without touching
+        # declared arguments; none are declared, so any on the vhost is drift.
+        self.assertIn('<<"policies">>', verify)
+        self.assertIn('<<"operator_policies">>', verify)
+        # Operator policies are absent from exported definitions and must be
+        # checked directly against the broker.
+        script = topology["data"]["verify-topology.sh"]
+        self.assertIn("list_operator_policies", script)
+
     def test_network_policy_limits_ingress_to_named_app_clients_over_amqp(self):
         policy = documents(RABBITMQ_DIR / "50-network-policy.yaml")[0]
         self.assertEqual(policy["kind"], "NetworkPolicy")

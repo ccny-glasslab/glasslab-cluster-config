@@ -436,6 +436,46 @@ class BrokerRuntimeTests(unittest.TestCase):
         final = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
         self.assertEqual(final.returncode, 0, final.stdout + final.stderr)
 
+    def test_h_policies_on_the_glasslab_vhost_fail_verification(self):
+        name = "tf-rt-h"
+        self._boot_new_broker(name, "h-rendered", PASSWORDS_A)
+        self._mount_verify_assets(name)
+
+        baseline = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertEqual(baseline.returncode, 0, baseline.stdout + baseline.stderr)
+
+        # A regular policy can override quorum-queue semantics (max-length,
+        # overflow) without changing declared queue arguments.
+        policy = self._exec(
+            name,
+            'rabbitmqctl set_policy -p glasslab pol-maxlen "^glasslab\\\\." '
+            '\'{"max-length":5,"overflow":"drop-head"}\' --apply-to queues >/dev/null',
+        )
+        self.assertEqual(policy.returncode, 0, policy.stderr)
+        failed_policy = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertNotEqual(failed_policy.returncode, 0, "unexpected policy must fail verification")
+        self.assertIn("unexpected", failed_policy.stdout + failed_policy.stderr)
+
+        cleared = self._exec(name, "rabbitmqctl clear_policy -p glasslab pol-maxlen >/dev/null")
+        self.assertEqual(cleared.returncode, 0, cleared.stderr)
+        restored = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+
+        # Operator policies are not part of exported definitions; the verify
+        # script checks them directly against the broker.
+        operator = self._exec(
+            name,
+            'rabbitmqctl set_operator_policy op-delimit ".*" \'{"delivery-limit":3}\' -p glasslab >/dev/null',
+        )
+        self.assertEqual(operator.returncode, 0, operator.stderr)
+        failed_operator = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertNotEqual(failed_operator.returncode, 0, "unexpected operator policy must fail verification")
+
+        cleared_operator = self._exec(name, "rabbitmqctl clear_operator_policy -p glasslab op-delimit >/dev/null")
+        self.assertEqual(cleared_operator.returncode, 0, cleared_operator.stderr)
+        final = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertEqual(final.returncode, 0, final.stdout + final.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

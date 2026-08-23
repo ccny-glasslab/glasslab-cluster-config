@@ -147,6 +147,12 @@ data:
         sleep 2
     done
     rabbitmqctl export_definitions /tmp/glasslab-live-definitions.json >/dev/null
+    # Operator policies are not included in exported definitions, so they are
+    # checked directly against the broker. This deployment declares none.
+    if rabbitmqctl list_operator_policies -p glasslab 2>/dev/null | tail -n +2 | grep -q .; then
+        echo "topology drift: unexpected operator policies on vhost glasslab" >&2
+        exit 1
+    fi
     rabbitmqctl eval "$(cat /etc/rabbitmq/glasslab-verify/verify.eval)"
 
   # Deterministic topology conformance check, evaluated inside the broker via
@@ -237,7 +243,15 @@ data:
             false -> [{missing_vhost, Vhost}]
         end,
         VhostDrift = VhostIssues ++ [{unexpected_vhost, V} || V <- UnexpectedVhosts],
-        Drift = VhostDrift ++ VersionDrift ++ QueueDrift ++ ExchangeDrift ++ BindingDrift ++ PermDrift ++ UserDrift,
+        %% This deployment declares no policies; any policy or operator
+        %% policy on the Glasslab vhost can silently override quorum-queue
+        %% semantics (max-length, overflow, delivery limits, dead-lettering)
+        %% without touching declared queue arguments, so both are drift.
+        VhostPolicies = [P || P <- maps:get(<<"policies">>, Live, []), maps:get(<<"vhost">>, P, none) =:= Vhost],
+        RegularPolicyDrift = [{policy, maps:get(<<"name">>, P), unexpected} || P <- VhostPolicies],
+        VhostOperatorPolicies = [P || P <- maps:get(<<"operator_policies">>, Live, []), maps:get(<<"vhost">>, P, none) =:= Vhost],
+        OperatorPolicyDriftFromExport = [{operator_policy, maps:get(<<"name">>, P), unexpected} || P <- VhostOperatorPolicies],
+        Drift = VhostDrift ++ VersionDrift ++ QueueDrift ++ ExchangeDrift ++ BindingDrift ++ PermDrift ++ UserDrift ++ RegularPolicyDrift ++ OperatorPolicyDriftFromExport,
         case Drift of
             [] -> io:format("topology verified (glasslab/topology-version=~p)~n", [WantVersion]), ok;
             _ -> erlang:error({topology_drift, Drift})

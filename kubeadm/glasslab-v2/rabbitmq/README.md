@@ -84,9 +84,13 @@ existence.
 
 Security identity state is enforced exactly: an unexpected RabbitMQ user,
 an unexpected permission grant on the Glasslab vhost, or an unexpected
-vhost fails verification. Drain tolerance for extras applies only to
-topology entities (queues, exchanges, bindings) so old-versioned entities
-can retire; it never applies to identities. Any mismatch raises and gives
+vhost fails verification. This deployment declares no policies; any policy
+or operator policy on the Glasslab vhost also fails verification, because
+policies can override quorum-queue semantics (max-length, overflow,
+delivery limits, dead-lettering) without touching declared queue arguments.
+Drain tolerance for extras applies only to topology entities (queues,
+exchanges, bindings) so old-versioned entities can retire; it never applies
+to identities or policies. Any mismatch raises and gives
 the hook a non-zero exit, which kills the container: drift surfaces as a
 CrashLoopBackOff and `rollout-research-services.sh` stops at
 `rollout status` instead of continuing silently.
