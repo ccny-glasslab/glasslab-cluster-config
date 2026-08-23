@@ -14,11 +14,12 @@ usage() {
   cat <<'USAGE'
 Usage: rollout-research-services.sh [options]
 
-Roll out CI-published workflow-api and research-orchestrator images. Images are
-selected by immutable Git commit tag; this script does not build or push.
+Roll out the authenticated workflow-api bundle and research-orchestrator images.
+Images are selected by immutable Git commit tag; this script does not build or push.
 
 Options:
-  --service <name>  all, workflow-api, or research-orchestrator. Default: all
+  --service <name>  all, workflow-api, or research-orchestrator. workflow-api
+                    includes all three authenticated callers. Default: all
   --tag <tag>       GHCR image tag. Default: full SHA of the checked-out commit
   --sync            Fast-forward the canonical checkout to origin/main first
   --skip-smoke      Skip post-rollout service health checks
@@ -60,7 +61,6 @@ rollout_workflow_api() {
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/workflow-api/10-rbac.yaml"
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/workflow-api/30-service.yaml"
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/workflow-api/40-workspace-network-policy.yaml"
-
   printf '[rollout-research-services] deploying workflow-api image %s\n' "$image"
   "$KUBECTL" set image \
     -f "$ROOT_DIR/kubeadm/glasslab-v2/workflow-api/20-deployment.yaml" \
@@ -68,6 +68,43 @@ rollout_workflow_api() {
     "$KUBECTL" apply -f -
   "$KUBECTL" -n "$NAMESPACE" rollout status \
     deployment/glasslab-workflow-api --timeout=300s
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/workflow-api/50-ingress-network-policy.yaml"
+}
+
+rollout_command_router() {
+  local image="ghcr.io/ccny-glasslab/glasslab-research-command-router:${IMAGE_TAG}"
+  "$KUBECTL" set image \
+    -f "$ROOT_DIR/kubeadm/glasslab-v2/research-command-router/10-deployment.yaml" \
+    "research-command-router=$image" --local -o yaml |
+    "$KUBECTL" apply -f -
+  "$KUBECTL" -n "$NAMESPACE" rollout status \
+    deployment/glasslab-research-command-router --timeout=300s
+}
+
+rollout_schedule_worker() {
+  local image="ghcr.io/ccny-glasslab/glasslab-schedule-worker:${IMAGE_TAG}"
+  "$KUBECTL" set image \
+    -f "$ROOT_DIR/kubeadm/glasslab-v2/schedule-worker/10-deployment.yaml" \
+    "schedule-worker=$image" --local -o yaml |
+    "$KUBECTL" apply -f -
+  "$KUBECTL" -n "$NAMESPACE" rollout status \
+    deployment/glasslab-schedule-worker --timeout=300s
+}
+
+require_workflow_caller_secrets() {
+  require_object secret glasslab-workflow-api-research-command-router
+  require_object secret glasslab-workflow-api-schedule-worker
+  require_object secret glasslab-workflow-api-research-orchestrator
+}
+
+rollout_authenticated_workflow_bundle() {
+  require_workflow_caller_secrets
+  # New callers remain compatible with the old unauthenticated API. Roll them
+  # first so the server is never switched to fail-closed auth ahead of clients.
+  rollout_command_router
+  rollout_schedule_worker
+  rollout_research_orchestrator
+  rollout_workflow_api
 }
 
 rollout_research_orchestrator() {
@@ -160,13 +197,13 @@ require_object secret glasslab-ghcr-pull
 
 case "$SERVICE" in
   all)
-    rollout_workflow_api
-    rollout_research_orchestrator
+    rollout_authenticated_workflow_bundle
     ;;
   workflow-api)
-    rollout_workflow_api
+    rollout_authenticated_workflow_bundle
     ;;
   research-orchestrator)
+    require_object secret glasslab-workflow-api-research-orchestrator
     rollout_research_orchestrator
     ;;
 esac

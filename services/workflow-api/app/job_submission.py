@@ -81,6 +81,10 @@ class JobSubmitter(ABC):
     def get_live_logs(self, record: RunRecord) -> list[LogEntry]:
         return []
 
+    def cancel_run(self, record: RunRecord) -> None:
+        """Cancel the submitted workload, or raise when cancellation is uncertain."""
+        raise NotImplementedError('job submitter does not support cancellation')
+
 
 class NullJobSubmitter(JobSubmitter):
     def __init__(self, namespace: str) -> None:
@@ -94,6 +98,9 @@ class NullJobSubmitter(JobSubmitter):
             status='accepted',
             detail='Job submission interface is present but not wired to Kubernetes yet.',
         )
+
+    def cancel_run(self, record: RunRecord) -> None:
+        return None
 
 
 def _load_kube_modules() -> tuple[Any, Any, type[Exception], type[Exception]]:
@@ -817,6 +824,24 @@ class KubernetesJobSubmitter(JobSubmitter):
         if status.active:
             return RunStatus(run_id=record.run_id, status='running', updated_at=now, detail='Kubernetes Job is active.')
         return RunStatus(run_id=record.run_id, status='queued', updated_at=now, detail='Kubernetes Job is queued.')
+
+    def cancel_run(self, record: RunRecord) -> None:
+        try:
+            self.batch_api.delete_namespaced_job(
+                name=record.job_submission.job_name,
+                namespace=record.job_submission.namespace,
+                propagation_policy='Foreground',
+            )
+        except self.api_exception as exc:
+            if getattr(exc, 'status', None) == 404:
+                return
+            raise LiveStatusUnavailableError(
+                'Kubernetes API error during job cancellation'
+            ) from exc
+        except _KUBE_TRANSPORT_EXCEPTIONS as exc:
+            raise LiveStatusUnavailableError(
+                'Kubernetes transport failure during job cancellation'
+            ) from exc
 
     def get_live_logs(self, record: RunRecord) -> list[LogEntry]:
         try:

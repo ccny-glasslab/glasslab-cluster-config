@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient as FastAPITestClient
 
 # Prevent stale ``app.*`` module state from leaking between test modules.
 # conftest.py sets up the import paths; each test file must also clear the
@@ -22,6 +22,7 @@ for module_name in list(sys.modules):
         del sys.modules[module_name]
 
 from app.config import Settings
+from app.auth import CallerPolicy
 import app.autoresearch as autoresearch_module
 import app.main as main_module
 import app.source_documents as source_documents
@@ -35,7 +36,29 @@ from app.registry import WorkflowRegistry
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def build_client(artifacts_mount_path: Path | None = None) -> TestClient:
+class TestClient(FastAPITestClient):
+    """Exercise existing route tests as an explicitly authorized caller."""
+
+    def __init__(self, app, **kwargs) -> None:
+        app.state.settings.caller_policies = (
+            CallerPolicy(
+                name='test-suite',
+                token='test-suite-token',
+                allowed_operations=frozenset(
+                    f'{method} {route.path_format}'
+                    for route in app.routes
+                    if hasattr(route, 'path_format') and hasattr(route, 'methods')
+                    for method in route.methods & {'GET', 'POST', 'PUT', 'PATCH', 'DELETE'}
+                ),
+            ),
+        )
+        headers = dict(kwargs.pop('headers', {}))
+        headers.setdefault('X-Glasslab-Caller', 'test-suite')
+        headers.setdefault('X-Glasslab-Workflow-Token', 'test-suite-token')
+        super().__init__(app, headers=headers, **kwargs)
+
+
+def build_client(artifacts_mount_path: Path | None = None, *, submitter=None) -> TestClient:
     # Tests that need on-disk artifacts pass a tmp_path; tests that only
     # exercise API routes and in-memory state skip it so the default
     # artifacts_mount_path is not set.
@@ -49,7 +72,7 @@ def build_client(artifacts_mount_path: Path | None = None) -> TestClient:
     )
     registry = WorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
-    return TestClient(create_app(settings=settings, registry=registry, store=store))
+    return TestClient(create_app(settings=settings, registry=registry, store=store, submitter=submitter))
 
 
 def test_healthz_and_workflow_families() -> None:
@@ -6833,3 +6856,68 @@ def test_run_status_route_returns_200_during_kube_outage() -> None:
     status = got.json()['status']
     assert 'Live Kubernetes status unavailable' in status['detail']
     assert 'showing durable stored status' in status['detail']
+
+
+def test_cancel_run_confirms_submitter_before_persisting_cancelled() -> None:
+    class RecordingSubmitter(NullJobSubmitter):
+        def __init__(self) -> None:
+            super().__init__(namespace='default')
+            self.cancelled = []
+
+        def cancel_run(self, record) -> None:
+            self.cancelled.append(record.run_id)
+
+    submitter = RecordingSubmitter()
+    client = build_client(submitter=submitter)
+    created = client.post(
+        '/experiments/runs',
+        json={
+            'objective': 'Cancel a bounded metric-search job.',
+            'experiment_type': 'gpu-training-job',
+            'workload_id': 'metric-search-v0',
+            'entrypoint': ['python3', 'scripts/run_experiment.py'],
+            'config_payload': {'search_space_id': 'art-metric-baseline'},
+            'dataset_bindings': {'train_uri': 's3://datasets/art/train.parquet'},
+            'budget': {'max_epochs': 1, 'max_wallclock_minutes': 5},
+            'submitted_by': 'test-suite',
+        },
+    )
+    run_id = created.json()['run_id']
+
+    cancelled = client.post(f'/runs/{run_id}/cancel')
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()['status']['status'] == 'cancelled'
+    assert submitter.cancelled == [run_id]
+    assert client.get(f'/runs/{run_id}').json()['status']['status'] == 'cancelled'
+
+    repeated = client.post(f'/runs/{run_id}/cancel')
+    assert repeated.status_code == 200
+    assert submitter.cancelled == [run_id]
+
+
+def test_cancel_run_does_not_persist_cancelled_when_submitter_fails() -> None:
+    class FailingSubmitter(NullJobSubmitter):
+        def cancel_run(self, record) -> None:
+            raise LiveStatusUnavailableError('Kubernetes unavailable')
+
+    client = build_client(submitter=FailingSubmitter(namespace='default'))
+    created = client.post(
+        '/experiments/runs',
+        json={
+            'objective': 'Fail closed during cancellation.',
+            'experiment_type': 'gpu-training-job',
+            'workload_id': 'metric-search-v0',
+            'entrypoint': ['python3', 'scripts/run_experiment.py'],
+            'config_payload': {'search_space_id': 'art-metric-baseline'},
+            'dataset_bindings': {'train_uri': 's3://datasets/art/train.parquet'},
+            'budget': {'max_epochs': 1, 'max_wallclock_minutes': 5},
+            'submitted_by': 'test-suite',
+        },
+    )
+    run_id = created.json()['run_id']
+
+    cancelled = client.post(f'/runs/{run_id}/cancel')
+
+    assert cancelled.status_code == 503
+    assert client.get(f'/runs/{run_id}').json()['status']['status'] != 'cancelled'

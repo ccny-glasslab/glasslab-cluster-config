@@ -51,6 +51,7 @@ jobs:
           python -m unittest
           tests.security.test_secret_process_boundaries
           tests.security.test_secret_backup_restore
+          tests.security.test_workflow_security_manifests
           -v
 
       - name: Scan repository credential hygiene

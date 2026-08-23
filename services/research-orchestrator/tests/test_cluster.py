@@ -53,11 +53,13 @@ def _spec(*, workspace: bool) -> ExpandedJobSpec:
     )
 
 
-def _executor(handler) -> WorkflowApiClusterExecutor:
+def _executor(handler, *, caller_name='research-orchestrator', token='orchestrator-secret') -> WorkflowApiClusterExecutor:
     executor = WorkflowApiClusterExecutor(
         base_url='http://workflow-api.test',
         workload_id='gpu-experiment',
         experiment_type='gpu-training-job',
+        caller_name=caller_name,
+        token=token,
     )
     # Swap the real HTTP client for an in-memory MockTransport so the tests
     # exercise the exact payload and error mapping without a live workflow-api.
@@ -67,6 +69,55 @@ def _executor(handler) -> WorkflowApiClusterExecutor:
         transport=transport,
     )
     return executor
+
+
+def test_mutations_send_caller_identity() -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(request.headers)
+        return httpx.Response(201, json={'run_id': 'external-1', 'status': {'status': 'accepted'}})
+
+    _executor(handler).submit(_spec(workspace=True))
+
+    assert captured['x-glasslab-caller'] == 'research-orchestrator'
+    assert captured['x-glasslab-workflow-token'] == 'orchestrator-secret'
+
+
+def test_mutation_fails_closed_without_token() -> None:
+    executor = _executor(lambda _: pytest.fail('request must not be sent'), token='   ')
+
+    with pytest.raises(ClusterExecutorError, match='credentials are not configured'):
+        executor.submit(_spec(workspace=True))
+
+
+def test_reads_send_caller_identity() -> None:
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(dict(request.headers))
+        if request.url.path.endswith('/artifacts'):
+            return httpx.Response(404, json={'detail': 'artifacts not found'})
+        return httpx.Response(200, json={'status': {'status': 'running'}})
+
+    _executor(handler).inspect('external-1')
+
+    assert len(captured) == 2
+    assert all(headers['x-glasslab-caller'] == 'research-orchestrator' for headers in captured)
+    assert all(headers['x-glasslab-workflow-token'] == 'orchestrator-secret' for headers in captured)
+
+
+def test_cancellation_sends_caller_identity() -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(request.headers)
+        return httpx.Response(200, json={})
+
+    _executor(handler).cancel('external-1')
+
+    assert captured['x-glasslab-caller'] == 'research-orchestrator'
+    assert captured['x-glasslab-workflow-token'] == 'orchestrator-secret'
 
 
 def test_workspace_submission_defers_fixed_image_to_workflow_registry() -> None:

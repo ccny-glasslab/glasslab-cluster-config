@@ -12,12 +12,41 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .auth import CallerPolicy
 from .paths import discover_repo_root
 
 DEFAULT_REGISTRY_DIR = discover_repo_root() / 'services' / 'workflow-registry' / 'definitions'
+
+DEFAULT_CALLER_OPERATIONS = {
+    'research-command-router': frozenset({
+        'GET /research-sessions/latest/context', 'GET /research-sessions/{session_id}/context',
+        'GET /research-sessions/{session_id}/autoresearch-summary',
+        'GET /research-sessions/latest/preflight/current-plan',
+        'GET /research-sessions/{session_id}/preflight/current-plan',
+        'GET /research-sessions/latest/autoresearch-model-comparison',
+        'GET /research-sessions/{session_id}/autoresearch-model-comparison',
+        'POST /research-sessions', 'POST /research-sessions/latest/intake',
+        'POST /research-sessions/{session_id}/intake',
+        'POST /research-sessions/latest/transitions/prepare-current-plan',
+        'POST /research-sessions/{session_id}/transitions/prepare-current-plan',
+        'POST /research-sessions/latest/transitions/run-happy-path',
+        'POST /research-sessions/{session_id}/transitions/run-happy-path',
+        'POST /research-sessions/latest/transitions/advance-autoresearch',
+        'POST /research-sessions/{session_id}/transitions/advance-autoresearch',
+        'POST /research-sessions/latest/decisions/current',
+        'POST /research-sessions/{session_id}/decisions/current',
+    }),
+    'schedule-worker': frozenset({
+        'POST /digest-schedules/run-due', 'POST /approved-rerun-schedules/run-due',
+    }),
+    'research-orchestrator': frozenset({
+        'POST /experiments/runs', 'GET /runs/{run_id}',
+        'GET /runs/{run_id}/artifacts', 'POST /runs/{run_id}/cancel',
+    }),
+}
 
 
 class Settings(BaseSettings):
@@ -92,6 +121,10 @@ class Settings(BaseSettings):
     external_literature_dblp_url: str = 'https://dblp.org/search/publ/api'
     external_literature_timeout_seconds: float = 20.0
     external_literature_mailto: str | None = None
+    caller_policies: tuple[CallerPolicy, ...] = Field(default_factory=tuple)
+    research_command_router_token: SecretStr | None = None
+    schedule_worker_token: SecretStr | None = None
+    research_orchestrator_token: SecretStr | None = None
 
     @model_validator(mode='after')
     def validate_store_backend(self) -> 'Settings':
@@ -104,6 +137,27 @@ class Settings(BaseSettings):
             raise ValueError('json store backend requires a non-empty store_json_path')
         if self.store_backend == 'postgres' and not (self.store_postgres_dsn or '').strip():
             raise ValueError('postgres store backend requires a non-empty store_postgres_dsn')
+        dedicated_tokens = {
+            'research-command-router': self.research_command_router_token,
+            'schedule-worker': self.schedule_worker_token,
+            'research-orchestrator': self.research_orchestrator_token,
+        }
+        configured_tokens = {name: token for name, token in dedicated_tokens.items() if token is not None}
+        if configured_tokens and len(configured_tokens) != len(dedicated_tokens):
+            raise ValueError('all dedicated workflow caller tokens must be configured together')
+        if configured_tokens and self.caller_policies:
+            raise ValueError('configure dedicated workflow caller tokens or caller_policies, not both')
+        if configured_tokens:
+            self.caller_policies = tuple(
+                CallerPolicy(name=name, token=token, allowed_operations=DEFAULT_CALLER_OPERATIONS[name])
+                for name, token in configured_tokens.items()
+            )
+        caller_names = [policy.name for policy in self.caller_policies]
+        if len(caller_names) != len(set(caller_names)):
+            raise ValueError('caller policy names must be unique')
+        caller_tokens = [policy.token.get_secret_value() for policy in self.caller_policies]
+        if len(caller_tokens) != len(set(caller_tokens)):
+            raise ValueError('caller policy tokens must be unique')
         return self
 
 
