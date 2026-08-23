@@ -12,7 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -127,6 +127,20 @@ class Settings(BaseSettings):
     cluster_execution_mode: str = 'workflow-api'
     cluster_execution_workload_id: str = 'metric-search-v0'
     cluster_execution_experiment_type: str = 'gpu-training-job'
+    workflow_api_caller_name: str = Field(
+        default='',
+        validation_alias=AliasChoices(
+            'GLASSLAB_WORKFLOW_API_CALLER_NAME',
+            'workflow_api_caller_name',
+        ),
+    )
+    workflow_api_token: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            'GLASSLAB_WORKFLOW_API_TOKEN',
+            'workflow_api_token',
+        ),
+    )
     kubernetes_namespace: str = 'glasslab-v2'
     permitted_job_images: Annotated[list[str], NoDecode] = [
         'ghcr.io/ccny-glasslab/glasslab-metric-search:latest',

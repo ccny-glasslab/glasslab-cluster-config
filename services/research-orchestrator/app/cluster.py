@@ -149,11 +149,15 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
         base_url: str,
         workload_id: str,
         experiment_type: str,
+        caller_name: str = '',
+        token: str = '',
         timeout_seconds: float = 30.0,
     ) -> None:
         self.base_url = base_url.rstrip('/')
         self.workload_id = workload_id
         self.experiment_type = experiment_type
+        self.caller_name = caller_name.strip()
+        self.token = token
         self.timeout_seconds = timeout_seconds
         self._submitted: dict[str, ClusterSubmission] = {}
 
@@ -162,6 +166,16 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
             base_url=self.base_url,
             timeout=self.timeout_seconds,
         )
+
+    def _mutation_headers(self) -> dict[str, str]:
+        if not self.caller_name or not self.token:
+            raise ClusterExecutorError(
+                'workflow API mutation credentials are not configured'
+            )
+        return {
+            'X-Glasslab-Caller': self.caller_name,
+            'X-Glasslab-Workflow-Token': self.token,
+        }
 
     def submit(self, spec: ExpandedJobSpec) -> ClusterSubmission:
         existing = self._submitted.get(spec.idempotency_key)
@@ -234,7 +248,11 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
         if not (spec.task_bundle and spec.source_bundle):
             body['image_ref'] = spec.runner_image
         with self._client() as client:
-            response = client.post('/experiments/runs', json=body)
+            response = client.post(
+                '/experiments/runs',
+                json=body,
+                headers=self._mutation_headers(),
+            )
             if response.is_error:
                 try:
                     detail = response.json().get('detail')
@@ -296,7 +314,10 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
 
     def cancel(self, external_run_id: str) -> None:
         with self._client() as client:
-            response = client.post(f'/runs/{external_run_id}/cancel')
+            response = client.post(
+                f'/runs/{external_run_id}/cancel',
+                headers=self._mutation_headers(),
+            )
         if response.status_code == 404:
             # 404 means this workflow-api build has no bounded cancellation
             # surface; surface that as a hard error instead of silently

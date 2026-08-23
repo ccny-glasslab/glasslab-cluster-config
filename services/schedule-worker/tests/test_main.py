@@ -91,6 +91,8 @@ def test_run_once_calls_workflow_api(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(main_module.urllib_request, 'urlopen', fake_urlopen)
+    monkeypatch.setenv('GLASSLAB_WORKFLOW_API_CALLER_NAME', 'schedule-worker')
+    monkeypatch.setenv('GLASSLAB_WORKFLOW_API_TOKEN', 'schedule-secret')
 
     client = TestClient(app)
     response = client.post('/run-once')
@@ -99,3 +101,45 @@ def test_run_once_calls_workflow_api(monkeypatch) -> None:
     assert payload['executed_count'] == 2
     assert payload['executions'][0]['schedule_id'] == 'sched-1'
     assert payload['executions'][1]['schedule_id'] == 'sched-2'
+
+
+def test_schedule_mutations_send_caller_identity(monkeypatch) -> None:
+    requests = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'[]'
+
+    def fake_urlopen(request_obj, timeout):
+        requests.append(request_obj)
+        return FakeResponse()
+
+    monkeypatch.setattr(main_module.urllib_request, 'urlopen', fake_urlopen)
+    monkeypatch.setenv('GLASSLAB_WORKFLOW_API_CALLER_NAME', 'schedule-worker')
+    monkeypatch.setenv('GLASSLAB_WORKFLOW_API_TOKEN', 'schedule-secret')
+
+    main_module.run_due_digest_cycle()
+    main_module.run_due_approved_rerun_cycle()
+
+    for request_obj in requests:
+        headers = dict(request_obj.header_items())
+        assert headers['X-glasslab-caller'] == 'schedule-worker'
+        assert headers['X-glasslab-workflow-token'] == 'schedule-secret'
+
+
+def test_schedule_mutation_fails_closed_without_token(monkeypatch) -> None:
+    monkeypatch.setenv('GLASSLAB_WORKFLOW_API_CALLER_NAME', 'schedule-worker')
+    monkeypatch.delenv('GLASSLAB_WORKFLOW_API_TOKEN', raising=False)
+
+    try:
+        main_module.run_due_digest_cycle()
+    except RuntimeError as exc:
+        assert str(exc) == 'workflow API mutation credentials are not configured'
+    else:
+        raise AssertionError('mutation unexpectedly proceeded without credentials')

@@ -91,6 +91,13 @@ def _request_json(
     endpoint = f"{settings.workflow_api_url.rstrip('/')}{path}"
     data = None
     headers = {"Accept": "application/json"}
+    if method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+        caller_name = os.environ.get("GLASSLAB_WORKFLOW_API_CALLER_NAME", "").strip()
+        token = os.environ.get("GLASSLAB_WORKFLOW_API_TOKEN", "")
+        if not caller_name or not token:
+            raise RuntimeError("workflow API mutation credentials are not configured")
+        headers["X-Glasslab-Caller"] = caller_name
+        headers["X-Glasslab-Workflow-Token"] = token
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
