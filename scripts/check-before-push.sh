@@ -70,6 +70,7 @@ run_secret_boundary_tests() {
     tests.security.test_lab_security_agent \
     tests.scripts.test_glasslab_opencode \
     tests.security.test_workflow_security_manifests \
+    tests.security.test_task_fabric_manifests \
     -v
 }
 
@@ -109,6 +110,13 @@ if failures:
 
 print('All Python files compiled successfully.')
 PY
+}
+
+run_task_fabric_broker_tests() {
+  printf '[check-before-push] running task-fabric broker runtime tests\n'
+  # Skips cleanly when Docker is unavailable; exercises the pinned RabbitMQ
+  # image with the tracked manifests (import, drift, rotation, persistence).
+  pytest -q tests/integration
 }
 
 run_workflow_api_tests() {
@@ -171,6 +179,7 @@ case "$MODE" in
     run_docs
     run_shell
     run_python_syntax
+    run_task_fabric_broker_tests
     run_workflow_api_tests
     ;;
   docs)
