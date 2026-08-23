@@ -4,7 +4,7 @@ autoinstall:
   identity:
     hostname: node01
     username: clusteradmin
-    password: $6$H4LiyV0p4Wb9rafF$lM2B8k7y3S6icEXxNWvbKNYX5OrgsrptINDabGAeZj2hmqZNJh.Ce5Es.Z3JsLB6Bk.X4zegRDXyYBhEbeIs/0
+    password: '!'
   ssh:
     install-server: true
     allow-pw: false

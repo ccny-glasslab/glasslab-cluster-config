@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -20,6 +21,7 @@ from app.postgres_store import PostgresStore
 from psycopg.types.json import Jsonb
 
 
+POSTGRES_DSN_ENV = 'GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN'
 TABLES = (
     ('runs', 'orchestrator_runs', ('run_id', 'state', 'version', 'payload', 'created_at', 'updated_at'), ('run_id', 'state', 'version', 'payload', 'created_at', 'updated_at')),
     ('turns', 'orchestrator_turns', ('turn_id', 'run_id', 'status', 'payload', 'created_at', 'updated_at'), ('turn_id', 'run_id', 'status', 'payload', 'created_at', 'updated_at')),
@@ -32,6 +34,24 @@ TABLES = (
     ('knowledge_chunks', 'orchestrator_knowledge_chunks', ('chunk_id', 'source_id', 'chunk_index', 'text', 'digest', 'token_count', 'index_version'), ('chunk_id', 'source_id', 'chunk_index', 'text', 'payload')),
     ('context_packets', 'orchestrator_context_packets', ('packet_id', 'run_id', 'agent', 'turn_number', 'turn_kind', 'query', 'index_version', 'ranked_sources', 'exact_text_supplied', 'token_budget', 'created_at'), ('packet_id', 'run_id', 'payload', 'created_at')),
 )
+
+
+def load_dsn(parser: argparse.ArgumentParser, dsn_fd: int | None) -> str:
+    """Read the DSN from a non-argv channel and scrub inherited state."""
+    environment_dsn = os.environ.pop(POSTGRES_DSN_ENV, None)
+    if environment_dsn is not None and dsn_fd is not None:
+        parser.error(f'use either {POSTGRES_DSN_ENV} or --dsn-fd, not both')
+    if dsn_fd is not None:
+        try:
+            with os.fdopen(dsn_fd, encoding='utf-8', closefd=True) as stream:
+                dsn = stream.read().rstrip('\r\n')
+        except OSError:
+            parser.error('could not read the Postgres DSN from --dsn-fd')
+    else:
+        dsn = environment_dsn or ''
+    if not dsn:
+        parser.error(f'{POSTGRES_DSN_ENV} or --dsn-fd is required')
+    return dsn
 
 
 def payload_for(source_table: str, row: sqlite3.Row) -> dict:
@@ -68,9 +88,14 @@ def payload_for(source_table: str, row: sqlite3.Row) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sqlite-path', required=True)
-    parser.add_argument('--postgres-dsn', required=True)
+    parser.add_argument('--dsn-fd', type=int, help='readable file descriptor containing the Postgres DSN')
+    parser.add_argument('--postgres-dsn', nargs='?', const='', default=None, help=argparse.SUPPRESS)
     parser.add_argument('--apply', action='store_true', help='perform the import')
     args = parser.parse_args()
+    if args.postgres_dsn is not None:
+        args.postgres_dsn = None
+        parser.error(f'--postgres-dsn is not supported; use {POSTGRES_DSN_ENV} or --dsn-fd')
+    postgres_dsn = load_dsn(parser, args.dsn_fd)
 
     source_path = Path(args.sqlite_path)
     if not source_path.is_file():
@@ -79,7 +104,8 @@ def main() -> int:
         print('dry run: pass --apply to import; no database was changed')
         return 0
 
-    destination = PostgresStore(args.postgres_dsn)
+    destination = PostgresStore(postgres_dsn)
+    postgres_dsn = ''
     source = sqlite3.connect(source_path)
     source.row_factory = sqlite3.Row
     try:
@@ -112,6 +138,6 @@ def main() -> int:
 if __name__ == '__main__':
     try:
         raise SystemExit(main())
-    except Exception as exc:
-        print(f'import failed: {exc}', file=sys.stderr)
+    except Exception:
+        print('SQLite import failed.', file=sys.stderr)
         raise SystemExit(1)
