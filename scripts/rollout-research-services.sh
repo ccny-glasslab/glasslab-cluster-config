@@ -18,8 +18,9 @@ Roll out the authenticated workflow-api bundle and research-orchestrator images.
 Images are selected by immutable Git commit tag; this script does not build or push.
 
 Options:
-  --service <name>  all, workflow-api, or research-orchestrator. workflow-api
-                    includes all three authenticated callers. Default: all
+  --service <name>  all, workflow-api, research-orchestrator, or rabbitmq.
+                    workflow-api includes all three authenticated callers.
+                    rabbitmq rolls out only the task-fabric broker. Default: all
   --tag <tag>       GHCR image tag. Default: full SHA of the checked-out commit
   --sync            Fast-forward the canonical checkout to origin/main first
   --skip-smoke      Skip post-rollout service health checks
@@ -124,6 +125,21 @@ rollout_research_orchestrator() {
     deployment/glasslab-research-orchestrator --timeout=300s
 }
 
+rollout_rabbitmq() {
+  # The broker is delivery infrastructure only; PostgreSQL stays authoritative
+  # (ADR 0004). Credentials come from the SOPS-managed secret; the PVC is
+  # provisioned out-of-band like the other static local-PV services.
+  require_object secret glasslab-v2-rabbitmq
+  require_object persistentvolumeclaim glasslab-rabbitmq-data
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/rabbitmq/20-configmap.yaml"
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/rabbitmq/30-topology.yaml"
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/rabbitmq/40-service.yaml"
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/rabbitmq/50-network-policy.yaml"
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/rabbitmq/60-statefulset.yaml"
+  "$KUBECTL" -n "$NAMESPACE" rollout status \
+    statefulset/glasslab-rabbitmq --timeout=300s
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --service)
@@ -159,7 +175,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$SERVICE" in
-  all|workflow-api|research-orchestrator) ;;
+  all|workflow-api|research-orchestrator|rabbitmq) ;;
   *)
     printf '[rollout-research-services] invalid service: %s\n' "$SERVICE" >&2
     exit 1
@@ -206,7 +222,17 @@ case "$SERVICE" in
     require_object secret glasslab-workflow-api-research-orchestrator
     rollout_research_orchestrator
     ;;
+  rabbitmq)
+    rollout_rabbitmq
+    ;;
 esac
+
+if [[ "$SERVICE" == "rabbitmq" ]]; then
+  "$KUBECTL" -n "$NAMESPACE" get statefulset glasslab-rabbitmq \
+    -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image,READY:.status.readyReplicas
+  printf '[rollout-research-services] done\n'
+  exit 0
+fi
 
 printf '[rollout-research-services] deployed images\n'
 "$KUBECTL" -n "$NAMESPACE" get deployment \

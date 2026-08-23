@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glasslab-rabbitmq-config
+  namespace: glasslab-v2
+  labels:
+    app.kubernetes.io/name: glasslab-rabbitmq
+data:
+  # The management plugin provides the boot-time local-file definitions
+  # import backend. Its HTTP/UI listener is loopback-only below, so the
+  # management surface stays unreachable from the network.
+  enabled_plugins: |
+    [rabbitmq_management].
+  rabbitmq.conf: |
+    # Glasslab task-fabric broker. Single node: persistent, not highly
+    # available. See kubeadm/glasslab-v2/rabbitmq/README.md.
+    cluster_partition_handling = ignore
+
+    # Resource alarms stop publishers before the node dies of memory or
+    # disk pressure; PostgreSQL remains authoritative and outboxes republish.
+    vm_memory_high_watermark.relative = 0.6
+    disk_free_limit.absolute = 2147483648
+
+    # Bounded commands may run long between deliveries; keep the consumer
+    # timeout generous but finite, with client heartbeats enforced.
+    consumer_timeout = 3600000
+    heartbeat = 60
+
+    # Versioned topology is imported at boot from the rendered definitions
+    # file produced by the render-definitions init container. Importing
+    # definitions at boot also prevents creation of the default guest user.
+    # (RabbitMQ 4.3.x: backend alias "local_filesystem", path key
+    # "definitions.local.path".)
+    definitions.import_backend = local_filesystem
+    definitions.local.path = /etc/rabbitmq/rendered/definitions.json
+
+    # The management UI/API is loopback-only inside the pod. Operators use
+    # kubectl exec rabbitmqctl or a port-forward for administration.
+    management.tcp.ip = 127.0.0.1
+
+    log.console.level = info

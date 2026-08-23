@@ -70,6 +70,7 @@ run_secret_boundary_tests() {
     tests.security.test_lab_security_agent \
     tests.scripts.test_glasslab_opencode \
     tests.security.test_workflow_security_manifests \
+    tests.security.test_task_fabric_manifests \
     -v
 }
 

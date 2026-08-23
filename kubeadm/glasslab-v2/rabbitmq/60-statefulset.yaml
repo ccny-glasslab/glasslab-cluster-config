@@ -1,0 +1,130 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: glasslab-rabbitmq
+  namespace: glasslab-v2
+spec:
+  serviceName: glasslab-rabbitmq
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: glasslab-rabbitmq
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: glasslab-rabbitmq
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: render-definitions
+          # Digest-pinned python:3.11-slim (multi-arch index).
+          image: python@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          command: ["python", "/work/render.py"]
+          env:
+            - name: erlang_cookie
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-v2-rabbitmq
+                  key: erlang_cookie
+            - name: topology_admin_password
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-v2-rabbitmq
+                  key: topology_admin_password
+            - name: publisher_password
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-v2-rabbitmq
+                  key: publisher_password
+            - name: consumer_password
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-v2-rabbitmq
+                  key: consumer_password
+            - name: monitoring_password
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-v2-rabbitmq
+                  key: monitoring_password
+          volumeMounts:
+            - name: topology
+              mountPath: /work
+              readOnly: true
+            - name: rendered
+              mountPath: /work/rendered
+            - name: rabbitmq-data
+              mountPath: /var/lib/rabbitmq
+      containers:
+        - name: rabbitmq
+          # Tested RabbitMQ 4.3.5, linux/amd64 manifest digest.
+          image: rabbitmq@sha256:cb038b7a48d8b73507c83ff446245546a9459ac53e9ce79615217b4fbd917d50
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 5672
+              name: amqp
+          readinessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "check_running"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "ping"]
+            periodSeconds: 30
+            timeoutSeconds: 15
+          startupProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "ping"]
+            periodSeconds: 5
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: rabbitmq-data
+              mountPath: /var/lib/rabbitmq
+            - name: config
+              mountPath: /etc/rabbitmq/rabbitmq.conf
+              subPath: rabbitmq.conf
+              readOnly: true
+            - name: config
+              mountPath: /etc/rabbitmq/enabled_plugins
+              subPath: enabled_plugins
+              readOnly: true
+            - name: rendered
+              mountPath: /etc/rabbitmq/rendered
+              readOnly: true
+      volumes:
+        - name: rabbitmq-data
+          persistentVolumeClaim:
+            claimName: glasslab-rabbitmq-data
+        - name: config
+          configMap:
+            name: glasslab-rabbitmq-config
+        - name: topology
+          configMap:
+            name: glasslab-rabbitmq-topology
+        - name: rendered
+          emptyDir:
+            medium: Memory

@@ -1,0 +1,181 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glasslab-rabbitmq-topology
+  namespace: glasslab-v2
+  labels:
+    app.kubernetes.io/name: glasslab-rabbitmq
+data:
+  # Versioned task-fabric topology, owned by this repository. Applications
+  # must not declare exchanges or queues themselves. The boot-time import
+  # merges definitions: it creates missing entities and ignores argument
+  # changes to existing ones, so incompatible changes require new entity
+  # names plus a glasslab/topology-version bump (see README.md).
+  definitions.template.json: |
+    {
+      "global_parameters": [
+        {"name": "glasslab/topology-version", "value": 1}
+      ],
+      "vhosts": [
+        {"name": "glasslab"}
+      ],
+      "users": [
+        {"name": "glasslab-topology-admin", "password": "<glasslab-topology-admin-password>", "tags": ["administrator"]},
+        {"name": "glasslab-publisher", "password": "<glasslab-publisher-password>", "tags": []},
+        {"name": "glasslab-consumer", "password": "<glasslab-consumer-password>", "tags": []},
+        {"name": "glasslab-monitor", "password": "<glasslab-monitor-password>", "tags": ["monitoring"]}
+      ],
+      "permissions": [
+        {"user": "glasslab-topology-admin", "vhost": "glasslab", "configure": ".*", "write": ".*", "read": ".*"},
+        {"user": "glasslab-publisher", "vhost": "glasslab", "configure": "", "write": ".*", "read": ""},
+        {"user": "glasslab-consumer", "vhost": "glasslab", "configure": "", "write": ".*", "read": ".*"},
+        {"user": "glasslab-monitor", "vhost": "glasslab", "configure": "", "write": "", "read": ".*"}
+      ],
+      "exchanges": [
+        {"name": "glasslab.orchestrator.control", "vhost": "glasslab", "type": "topic", "durable": true, "auto_delete": false, "internal": false},
+        {"name": "glasslab.orchestrator.control.retry", "vhost": "glasslab", "type": "topic", "durable": true, "auto_delete": false, "internal": false},
+        {"name": "glasslab.orchestrator.control.dlx", "vhost": "glasslab", "type": "topic", "durable": true, "auto_delete": false, "internal": false},
+        {"name": "glasslab.workflow.execution", "vhost": "glasslab", "type": "topic", "durable": true, "auto_delete": false, "internal": false},
+        {"name": "glasslab.workflow.execution.retry", "vhost": "glasslab", "type": "topic", "durable": true, "auto_delete": false, "internal": false},
+        {"name": "glasslab.workflow.execution.dlx", "vhost": "glasslab", "type": "topic", "durable": true, "auto_delete": false, "internal": false}
+      ],
+      "queues": [
+        {
+          "name": "glasslab.orchestrator.control",
+          "vhost": "glasslab",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-queue-type": "quorum",
+            "x-max-length": 10000,
+            "x-max-length-bytes": 536870912,
+            "x-overflow": "reject-publish",
+            "x-dead-letter-exchange": "glasslab.orchestrator.control.dlx"
+          }
+        },
+        {
+          "name": "glasslab.orchestrator.control.retry",
+          "vhost": "glasslab",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-queue-type": "quorum",
+            "x-message-ttl": 30000,
+            "x-max-length": 10000,
+            "x-max-length-bytes": 536870912,
+            "x-overflow": "reject-publish",
+            "x-dead-letter-exchange": "glasslab.orchestrator.control"
+          }
+        },
+        {
+          "name": "glasslab.orchestrator.control.dlq",
+          "vhost": "glasslab",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-queue-type": "quorum",
+            "x-max-length": 10000,
+            "x-max-length-bytes": 536870912,
+            "x-overflow": "reject-publish"
+          }
+        },
+        {
+          "name": "glasslab.workflow.execution",
+          "vhost": "glasslab",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-queue-type": "quorum",
+            "x-max-length": 10000,
+            "x-max-length-bytes": 536870912,
+            "x-overflow": "reject-publish",
+            "x-dead-letter-exchange": "glasslab.workflow.execution.dlx"
+          }
+        },
+        {
+          "name": "glasslab.workflow.execution.retry",
+          "vhost": "glasslab",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-queue-type": "quorum",
+            "x-message-ttl": 30000,
+            "x-max-length": 10000,
+            "x-max-length-bytes": 536870912,
+            "x-overflow": "reject-publish",
+            "x-dead-letter-exchange": "glasslab.workflow.execution"
+          }
+        },
+        {
+          "name": "glasslab.workflow.execution.dlq",
+          "vhost": "glasslab",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-queue-type": "quorum",
+            "x-max-length": 10000,
+            "x-max-length-bytes": 536870912,
+            "x-overflow": "reject-publish"
+          }
+        }
+      ],
+      "bindings": [
+        {"source": "glasslab.orchestrator.control", "vhost": "glasslab", "destination": "glasslab.orchestrator.control", "destination_type": "queue", "routing_key": "#", "arguments": {}},
+        {"source": "glasslab.orchestrator.control.retry", "vhost": "glasslab", "destination": "glasslab.orchestrator.control.retry", "destination_type": "queue", "routing_key": "#", "arguments": {}},
+        {"source": "glasslab.orchestrator.control.dlx", "vhost": "glasslab", "destination": "glasslab.orchestrator.control.dlq", "destination_type": "queue", "routing_key": "#", "arguments": {}},
+        {"source": "glasslab.workflow.execution", "vhost": "glasslab", "destination": "glasslab.workflow.execution", "destination_type": "queue", "routing_key": "#", "arguments": {}},
+        {"source": "glasslab.workflow.execution.retry", "vhost": "glasslab", "destination": "glasslab.workflow.execution.retry", "destination_type": "queue", "routing_key": "#", "arguments": {}},
+        {"source": "glasslab.workflow.execution.dlx", "vhost": "glasslab", "destination": "glasslab.workflow.execution.dlq", "destination_type": "queue", "routing_key": "#", "arguments": {}}
+      ]
+    }
+  render.py: |
+    """Render broker definitions from the versioned template and SOPS-managed
+    credentials. Fails closed: any unresolved placeholder aborts the pod before
+    RabbitMQ starts."""
+
+    from __future__ import annotations
+
+    import json
+    import os
+    from pathlib import Path
+
+    WORK = Path("/work")
+    TEMPLATE = WORK / "definitions.template.json"
+    RENDERED = WORK / "rendered" / "definitions.json"
+    COOKIE = Path("/var/lib/rabbitmq/.erlang.cookie")
+
+    PASSWORD_ENV = {
+        "glasslab-topology-admin": "topology_admin_password",
+        "glasslab-publisher": "publisher_password",
+        "glasslab-consumer": "consumer_password",
+        "glasslab-monitor": "monitoring_password",
+    }
+
+    def main() -> None:
+        document = json.loads(TEMPLATE.read_text(encoding="utf-8"))
+
+        for user in document["users"]:
+            env_name = PASSWORD_ENV[user["name"]]
+            password = os.environ[env_name]
+            if not password:
+                raise SystemExit(f"{env_name} is empty")
+            user["password"] = password
+
+        rendered = json.dumps(document, indent=2)
+        if "<glasslab-" in rendered:
+            raise SystemExit("unresolved credential placeholder in rendered definitions")
+
+        RENDERED.parent.mkdir(parents=True, exist_ok=True)
+        RENDERED.write_text(rendered + "\n", encoding="utf-8")
+        RENDERED.chmod(0o600)
+
+        cookie = os.environ["erlang_cookie"]
+        if not cookie:
+            raise SystemExit("erlang_cookie is empty")
+        COOKIE.write_text(cookie + "\n", encoding="ascii")
+        COOKIE.chmod(0o600)
+
+        print("rendered task-fabric definitions")
+
+    if __name__ == "__main__":
+        main()
