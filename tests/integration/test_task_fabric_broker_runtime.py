@@ -306,7 +306,7 @@ class BrokerRuntimeTests(unittest.TestCase):
 
         self._assert_expected_topology("tf-rt-e")
 
-    def test_f_version_is_derived_from_rendered_file_and_old_entities_drain(self):
+    def test_f_version_is_derived_and_retired_bindings_require_operator_removal(self):
         name = "tf-rt-f"
         self._boot_new_broker(name, "f-rendered", PASSWORDS_A)
         self._mount_verify_assets(name)
@@ -315,71 +315,98 @@ class BrokerRuntimeTests(unittest.TestCase):
         baseline = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
         self.assertEqual(baseline.returncode, 0, baseline.stdout + baseline.stderr)
 
-        # Build a v2 topology file: version bumped, one new queue added, one
-        # old queue (plus its binding) retired so it can drain.
-        template = json.loads((self.workdir / "definitions.template.json").read_text())
-        for entry in template["global_parameters"]:
-            if entry["name"] == "glasslab/topology-version":
-                entry["value"] = 2
-        retired_queue = "glasslab.orchestrator.control.retry"
-        template["queues"] = [q for q in template["queues"] if q["name"] != retired_queue]
-        template["bindings"] = [
-            b for b in template["bindings"] if b.get("destination") != retired_queue
-        ]
-        new_queue = {
-            "name": "glasslab.orchestrator.control.v2",
-            "vhost": "glasslab",
-            "durable": True,
-            "auto_delete": False,
-            "arguments": {
-                "x-queue-type": "quorum",
-                "x-max-length": 10000,
-                "x-max-length-bytes": 536870912,
-                "x-overflow": "reject-publish",
-                "x-dead-letter-exchange": "glasslab.orchestrator.control.dlx",
-            },
-        }
-        template["queues"].append(new_queue)
-        template["bindings"].append({
-            "source": "glasslab.orchestrator.control",
-            "vhost": "glasslab",
-            "destination": new_queue["name"],
-            "destination_type": "queue",
-            "routing_key": "v2",
-            "arguments": {},
-        })
-        (self.workdir / "definitions.template.json").write_text(json.dumps(template, indent=2))
+        # Build a v2 topology file: version bumped, one new queue added,
+        # one old queue (plus its binding) retired. Removing the binding is
+        # required because bindings are active routing state; the operator
+        # performs that removal explicitly below.
+        template_path = self.workdir / "definitions.template.json"
+        pristine_template = template_path.read_text()
+        try:
+            template = json.loads(pristine_template)
+            for entry in template["global_parameters"]:
+                if entry["name"] == "glasslab/topology-version":
+                    entry["value"] = 2
+            retired_queue = "glasslab.orchestrator.control.retry"
+            template["queues"] = [q for q in template["queues"] if q["name"] != retired_queue]
+            template["bindings"] = [
+                b for b in template["bindings"] if b.get("destination") != retired_queue
+            ]
+            new_queue = {
+                "name": "glasslab.orchestrator.control.v2",
+                "vhost": "glasslab",
+                "durable": True,
+                "auto_delete": False,
+                "arguments": {
+                    "x-queue-type": "quorum",
+                    "x-max-length": 10000,
+                    "x-max-length-bytes": 536870912,
+                    "x-overflow": "reject-publish",
+                    "x-dead-letter-exchange": "glasslab.orchestrator.control.dlx",
+                },
+            }
+            template["queues"].append(new_queue)
+            template["bindings"].append({
+                "source": "glasslab.orchestrator.control",
+                "vhost": "glasslab",
+                "destination": new_queue["name"],
+                "destination_type": "queue",
+                "routing_key": "v2",
+                "arguments": {},
+            })
+            template_path.write_text(json.dumps(template, indent=2))
 
-        # Re-render with the v2 template; the running broker is still v1.
-        rendered, _ = self._render("f-rendered", PASSWORDS_A)
-        pre_restart = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
-        self.assertNotEqual(
-            pre_restart.returncode,
-            0,
-            "verifier must fail while live broker is still on version 1 — "
-            "this proves the expected version is derived from the rendered "
-            "file rather than hard-coded",
-        )
+            # Re-render with the v2 template; the running broker is still v1.
+            self._render("f-rendered", PASSWORDS_A)
+            pre_restart = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+            self.assertNotEqual(
+                pre_restart.returncode,
+                0,
+                "verifier must fail while live broker is still on version 1 — "
+                "this proves the expected version is derived from the rendered "
+                "file rather than hard-coded",
+            )
 
-        # Roll the broker: import applies the v2 parameter and creates the
-        # new queue; the retired queue keeps draining as a tolerated extra.
-        restarted = run(["docker", "restart", name])
-        self.assertEqual(restarted.returncode, 0)
-        self.assertTrue(self._wait_ping(name))
+            # Roll the broker: import applies the v2 parameter and creates the
+            # new queue. The retired retry queue still exists with its old
+            # binding, which is active routing state — verification must fail
+            # until the operator removes it (delete_queue removes the binding).
+            restarted = run(["docker", "restart", name])
+            self.assertEqual(restarted.returncode, 0)
+            self.assertTrue(self._wait_ping(name))
 
-        post = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
-        self.assertEqual(post.returncode, 0, post.stdout + post.stderr)
+            pre_cleanup = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+            self.assertNotEqual(
+                pre_cleanup.returncode,
+                0,
+                "a retired queue's surviving binding must fail verification",
+            )
+            self.assertIn("binding_unexpected", pre_cleanup.stdout + pre_cleanup.stderr)
 
-        live = self._live_definitions(name)
-        versions = [
-            entry["value"]
-            for entry in live["global_parameters"]
-            if entry["name"] == "glasslab/topology-version"
-        ]
-        self.assertEqual(versions, [2], "boot re-import must update the topology-version parameter")
-        queue_names = {q["name"] for q in live["queues"] if q.get("vhost") == "glasslab"}
-        self.assertIn(new_queue["name"], queue_names)
-        self.assertIn(retired_queue, queue_names, "retired entity must be tolerated while draining")
+            # Operator retirement step: deleting the queue removes its
+            # binding. The boot import never deletes entities, so this is an
+            # explicit operator action, not something rollout does implicitly.
+            deleted = self._exec(
+                name,
+                "rabbitmqctl -p glasslab delete_queue glasslab.orchestrator.control.retry >/dev/null",
+            )
+            self.assertEqual(deleted.returncode, 0, deleted.stderr)
+
+            post = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+            self.assertEqual(post.returncode, 0, post.stdout + post.stderr)
+
+            live = self._live_definitions(name)
+            versions = [
+                entry["value"]
+                for entry in live["global_parameters"]
+                if entry["name"] == "glasslab/topology-version"
+            ]
+            self.assertEqual(versions, [2], "boot re-import must update the topology-version parameter")
+            queue_names = {q["name"] for q in live["queues"] if q.get("vhost") == "glasslab"}
+            self.assertIn(new_queue["name"], queue_names)
+            self.assertNotIn(retired_queue, queue_names, "retired queue is removed by the operator retirement step")
+        finally:
+            template_path.write_text(pristine_template)
+
 
     def test_g_identity_state_is_enforced_exactly(self):
         name = "tf-rt-g"
@@ -473,6 +500,68 @@ class BrokerRuntimeTests(unittest.TestCase):
 
         cleared_operator = self._exec(name, "rabbitmqctl clear_operator_policy -p glasslab op-delimit >/dev/null")
         self.assertEqual(cleared_operator.returncode, 0, cleared_operator.stderr)
+        final = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertEqual(final.returncode, 0, final.stdout + final.stderr)
+
+    def test_i_unexpected_bindings_fail_verification(self):
+        name = "tf-rt-i"
+        self._boot_new_broker(name, "i-rendered", PASSWORDS_A)
+        self._mount_verify_assets(name)
+
+        baseline = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertEqual(baseline.returncode, 0, baseline.stdout + baseline.stderr)
+
+        # Simulate a rolled-back topology change whose binding survived on the
+        # broker: apply an extra binding (current exchange -> retired-style
+        # queue), then restore the expected file while the broker keeps it.
+        original = self._exec(name, "cat /etc/rabbitmq/rendered/definitions.json").stdout
+        doc = json.loads(original)
+        retired_queue = {
+            "name": "glasslab.retired.legacy",
+            "vhost": "glasslab",
+            "durable": True,
+            "auto_delete": False,
+            "arguments": {"x-queue-type": "quorum"},
+        }
+        extra_binding = {
+            "source": "glasslab.orchestrator.control",
+            "vhost": "glasslab",
+            "destination": retired_queue["name"],
+            "destination_type": "queue",
+            "routing_key": "legacy",
+            "arguments": {},
+        }
+        doc["queues"].append(retired_queue)
+        doc["bindings"].append(extra_binding)
+        mutated = self.scratch / "mutated-definitions.json"
+        mutated.write_text(json.dumps(doc, indent=2))
+        copied = run(["docker", "cp", str(mutated), f"{name}:/etc/rabbitmq/rendered/definitions.json"])
+        self.assertEqual(copied.returncode, 0, copied.stderr)
+
+        restarted = run(["docker", "restart", name])
+        self.assertEqual(restarted.returncode, 0)
+        self.assertTrue(self._wait_ping(name))
+
+        # Restore the original expected file BEFORE verifying: the broker now
+        # holds the extra binding, but expectations no longer declare it, so
+        # it is genuinely unexpected rather than self-consistently declared.
+        restored_file = self.scratch / "restored-definitions.json"
+        restored_file.write_text(original)
+        copied_back = run(["docker", "cp", str(restored_file), f"{name}:/etc/rabbitmq/rendered/definitions.json"])
+        self.assertEqual(copied_back.returncode, 0, copied_back.stderr)
+
+        # The extra queue itself drains as a tolerated extra, but its binding
+        # is active routing state and must fail verification.
+        failed = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertNotEqual(failed.returncode, 0, "unexpected binding must fail verification")
+        combined = failed.stdout + failed.stderr
+        self.assertIn("binding_unexpected", combined)
+        self.assertNotIn("binding_missing", combined)
+
+        # Removing the binding (by deleting the retired queue it feeds)
+        # restores conformance against the unchanged expected file.
+        deleted = self._exec(name, "rabbitmqctl -p glasslab delete_queue glasslab.retired.legacy >/dev/null")
+        self.assertEqual(deleted.returncode, 0, deleted.stderr)
         final = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
         self.assertEqual(final.returncode, 0, final.stdout + final.stderr)
 

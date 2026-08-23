@@ -160,8 +160,10 @@ data:
   # rendered expected file: vhost, glasslab/topology-version global parameter
   # (derived from the rendered file, never hard-coded), queues and exchanges
   # (flags plus EXACT argument-map equality in both directions — an expected
-  # entity may not carry undeclared live arguments), bindings (including
-  # destination type and arguments), and per-user permissions.
+  # entity may not carry undeclared live arguments), and bindings as an exact
+  # set match (bindings are active routing state; an unexpected binding keeps
+  # routing new messages to a retired queue, so only whole queues/exchanges
+  # may drain as tolerated extras — never their bindings).
   #
   # Security identity state is enforced exactly: unexpected users, unexpected
   # permission grants on the Glasslab vhost, and unexpected vhosts all fail
@@ -222,11 +224,19 @@ data:
         end,
         QueueDrift = EntityDrift(queue, <<"queues">>, [<<"durable">>, <<"auto_delete">>], false),
         ExchangeDrift = EntityDrift(exchange, <<"exchanges">>, [<<"durable">>, <<"auto_delete">>, <<"internal">>], true),
+        %% Bindings are active routing state, not inert retained state: an
+        %% unexpected binding keeps delivering newly published messages to a
+        %% supposedly retired queue. The live Glasslab binding set must match
+        %% the expected set exactly; drain tolerance applies only to extra
+        %% queues/exchanges themselves, never to their bindings.
         BindingKey = fun(B) ->
             {maps:get(<<"source">>, B), maps:get(<<"destination">>, B), maps:get(<<"routing_key">>, B), maps:get(<<"destination_type">>, B, none), maps:get(<<"arguments">>, B, #{})}
         end,
+        ExpectedBindingKeys = [BindingKey(B) || B <- maps:get(<<"bindings">>, Expected, [])],
         LiveBindingKeys = [BindingKey(B) || B <- maps:get(<<"bindings">>, Live, []), maps:get(<<"vhost">>, B, none) =:= Vhost],
-        BindingDrift = [{binding, element(1, BindingKey(B)), element(2, BindingKey(B)), missing_or_changed} || B <- maps:get(<<"bindings">>, Expected, []), not lists:member(BindingKey(B), LiveBindingKeys)],
+        MissingBindings = [{binding_missing, element(1, K), element(2, K)} || K <- ExpectedBindingKeys, not lists:member(K, LiveBindingKeys)],
+        UnexpectedBindings = [{binding_unexpected, element(1, K), element(2, K)} || K <- LiveBindingKeys, not lists:member(K, ExpectedBindingKeys)],
+        BindingDrift = MissingBindings ++ UnexpectedBindings,
         LiveUserNames = [maps:get(<<"name">>, U) || U <- maps:get(<<"users">>, Live, [])],
         ExpectedUserNames = [maps:get(<<"name">>, U) || U <- maps:get(<<"users">>, Expected, [])],
         UserDrift = [{user, N, missing} || N <- ExpectedUserNames, not lists:member(N, LiveUserNames)]

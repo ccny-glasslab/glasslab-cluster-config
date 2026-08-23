@@ -88,18 +88,23 @@ vhost fails verification. This deployment declares no policies; any policy
 or operator policy on the Glasslab vhost also fails verification, because
 policies can override quorum-queue semantics (max-length, overflow,
 delivery limits, dead-lettering) without touching declared queue arguments.
-Drain tolerance for extras applies only to topology entities (queues,
-exchanges, bindings) so old-versioned entities can retire; it never applies
-to identities or policies. Any mismatch raises and gives
+Drain tolerance for extras applies only to whole queues and exchanges so
+old-versioned entities can retire; it never applies to identities, policies,
+or bindings — bindings are active routing state and the live Glasslab
+binding set must match the expected set exactly, otherwise a retired queue
+would keep receiving new deliveries. Any mismatch raises and gives
 the hook a non-zero exit, which kills the container: drift surfaces as a
 CrashLoopBackOff and `rollout-research-services.sh` stops at
 `rollout status` instead of continuing silently.
 
 Incompatible topology changes MUST therefore introduce new entity names
-together with a `glasslab/topology-version` bump; retired entities keep
-draining as tolerated extras until an operator removes them. Compatible
-additions may extend the current version in place. Password hashes are
-deliberately excluded from this comparison — see rotation below.
+together with a `glasslab/topology-version` bump. Because the import never
+deletes entities and bindings are active routing state, retiring a queue or
+exchange requires an explicit operator step — `rabbitmqctl delete_queue`
+removes the queue together with its bindings; unbound leftover queues and
+exchanges are tolerated extras until deleted. Compatible additions may
+extend the current version in place. Password hashes are deliberately
+excluded from this comparison — see rotation below.
 
 ## Identities and credential rotation
 

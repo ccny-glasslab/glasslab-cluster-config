@@ -167,6 +167,10 @@ class RabbitMQExposureTests(unittest.TestCase):
         verify = by_kind(RABBITMQ_DIR / "30-topology.yaml", "ConfigMap")["data"]["verify.eval"]
         self.assertIn("extra_arg", verify)
         self.assertIn("destination_type", verify)
+        # Bindings are active routing state: the live binding set must match
+        # expectations exactly, with no drain tolerance for extras.
+        self.assertIn("binding_unexpected", verify)
+        self.assertIn("binding_missing", verify)
 
     def test_identity_state_conformance_is_exact_not_drain_tolerant(self):
         verify = by_kind(RABBITMQ_DIR / "30-topology.yaml", "ConfigMap")["data"]["verify.eval"]
