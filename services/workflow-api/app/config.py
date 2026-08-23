@@ -110,6 +110,10 @@ class Settings(BaseSettings):
     source_document_storage_mode: Literal['filesystem', 'minio'] = 'filesystem'
     source_document_storage_dir: str = '/mnt/artifacts/source-documents'
     source_document_bucket: str = 'research-sources'
+    source_document_fetch_timeout_seconds: float = Field(default=30.0, gt=0)
+    source_document_max_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
+    source_document_max_redirects: int = Field(default=4, ge=0, le=10)
+    source_document_allowed_hosts: tuple[str, ...] = Field(default_factory=tuple)
     minio_endpoint: str = 'glasslab-minio.glasslab-v2.svc.cluster.local:9000'
     minio_access_key: str | None = None
     minio_secret_key: str | None = None
