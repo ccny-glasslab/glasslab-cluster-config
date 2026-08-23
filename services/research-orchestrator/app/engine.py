@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
+import zipfile
 from threading import RLock
 from typing import Any
 from uuid import uuid4, uuid5, NAMESPACE_URL
@@ -2551,6 +2553,123 @@ class ResearchOrchestrator:
         self._transition(action.run_id, RunState.BEAKER_PLANNING)
         self._beaker_plan(action.run_id)
 
+    def _build_objective_execution(
+        self,
+        run: RunRecord,
+        matrix: ExperimentMatrix,
+    ) -> dict[str, object]:
+        # Objective-driven runs have no imported task bundle. The deployed
+        # workflow-api workspace contract requires both a task and a source
+        # bundle, so synthesize a deterministic generic task bundle from the
+        # objective text itself instead of weakening that contract (issue
+        # #98). Beaker's worktree is the source bundle; datasets cited by
+        # the objective are bound by their immutable registry records.
+        problem = (
+            '# Objective\n\n' + run.objective.strip() + '\n\n'
+            '# Run binding\n\n'
+            f'- run_id: {run.run_id}\n'
+            '- evaluation_contract: '
+            f'{run.evaluation_contract_id}@'
+            f'{run.evaluation_contract_version}\n'
+        )
+        evaluator_prompt = (
+            'Evaluate the artifacts emitted under GLASSLAB_OUTPUT_DIR for '
+            'this run against its immutable evaluation contract.\n'
+            'contract: '
+            f'{run.evaluation_contract_id}@{run.evaluation_contract_version}\n'
+            'Required artifacts are declared by the contract manifest; the '
+            'workload must not create or score evaluation.json, '
+            'integrity_pass, or rubric_score.\n'
+        )
+        bundle_root = (
+            Path(self.settings.task_bundle_root) / 'objective'
+        )
+        bundle_root.mkdir(parents=True, exist_ok=True)
+        staging_digest = sha256(
+            (problem + evaluator_prompt + run.run_id).encode('utf-8')
+        ).hexdigest()
+        bundle_path = bundle_root / staging_digest / 'task.zip'
+        if not bundle_path.is_file():
+            bundle_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = bundle_path.with_suffix('.tmp')
+            with zipfile.ZipFile(
+                temporary,
+                mode='w',
+                compression=zipfile.ZIP_DEFLATED,
+            ) as archive:
+                for name, content in (
+                    ('problem.md', problem),
+                    ('eval_agent_prompt.md', evaluator_prompt),
+                ):
+                    info = zipfile.ZipInfo(name)
+                    info.date_time = (1980, 1, 1, 0, 0, 0)
+                    archive.writestr(
+                        info,
+                        content,
+                        compress_type=zipfile.ZIP_DEFLATED,
+                    )
+            os.replace(temporary, bundle_path)
+        shared_root = Path(self.settings.shared_mount_root).resolve()
+        bundle_relative = bundle_path.resolve().relative_to(shared_root)
+
+        source_path, source_digest = self.workspaces.package_source_bundle(
+            run_id=run.run_id,
+            source_subdirectory='.',
+        )
+        source_relative = source_path.resolve().relative_to(shared_root)
+        self._save_local_artifact(
+            run_id=run.run_id,
+            artifact_type='source_bundle',
+            uri='artifact://' + source_relative.as_posix(),
+            digest=source_digest,
+            metadata={'path': str(source_path)},
+        )
+
+        dataset_ids = sorted(
+            set(
+                re.findall(
+                    r'glasslab-dataset://([0-9a-f]{64})',
+                    run.objective,
+                )
+            )
+        )
+        records = [self.store.get_dataset(d) for d in dataset_ids]
+        return {
+            'workload_id': self.settings.cluster_execution_workload_id,
+            'experiment_type': 'research-workspace-job',
+            'task_bundle': {
+                'uri': 's3://artifacts/' + bundle_relative.as_posix(),
+                'sha256': self._file_sha256(bundle_path),
+            },
+            'source_bundle': {
+                'uri': 's3://artifacts/' + source_relative.as_posix(),
+                'sha256': source_digest,
+            },
+            'workspace_command': ['python3', 'run.py'],
+            'dataset_contracts': [
+                {
+                    'name': record.name,
+                    'role': record.role,
+                    'contains_labels': record.contains_labels,
+                    'asset': {
+                        'uri': record.artifact_uri,
+                        'sha256': record.sha256,
+                    },
+                }
+                for record in records
+            ],
+            'dataset_bindings': {
+                record.name: record.artifact_uri for record in records
+            },
+        }
+
+    def _file_sha256(self, path: Path) -> str:
+        digest = sha256()
+        with path.open('rb') as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+
     def _beaker_plan(self, run_id: str) -> None:
         run = self.store.get_run(run_id)
         task_context = ''
@@ -2739,7 +2858,13 @@ class ResearchOrchestrator:
             'Every ingested dataset '
             'cited by the objective is already copied read-only under '
             '`datasets/` in this worktree; load it from there and never make '
-            'network calls. Finish the bounded experiment '
+            'network calls. The approved cluster job executes this worktree '
+            'with `python3 run.py`, so a repo-root `run.py` entrypoint is '
+            'mandatory: read `GLASSLAB_GENERIC_CONFIG_JSON` for the variant '
+            'name, seed, base_config path, and overrides; read '
+            '`GLASSLAB_DATASET_BINDINGS_JSON` (dataset name to mounted path) '
+            'for data access; write every output artifact, including '
+            '`metrics.json`, under `GLASSLAB_OUTPUT_DIR`. Finish the bounded experiment '
             'runner, run the listed lightweight checks, and '
             'propose one submit_experiment_matrix action. The action arguments '
             'must match the ExperimentMatrix schema and must not contain an '
@@ -3530,6 +3655,8 @@ class ResearchOrchestrator:
                 digest=source_digest,
                 metadata={'path': str(source_path)},
             )
+        else:
+            execution = self._build_objective_execution(run, matrix)
         specs = expand_experiment_matrix(
             run_id=run.run_id,
             action_id=action.action_id,
