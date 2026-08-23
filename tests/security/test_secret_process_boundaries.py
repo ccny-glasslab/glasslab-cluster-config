@@ -238,6 +238,9 @@ with Path(os.environ["PYTHON_CALLS"]).open("a", encoding="utf-8") as stream:
             fake_pytest = root / "pytest"
             fake_pytest.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
             fake_pytest.chmod(0o755)
+            fake_mypy = root / "mypy"
+            fake_mypy.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            fake_mypy.chmod(0o755)
             environment = os.environ.copy()
             environment["PATH"] = f"{root}:{environment['PATH']}"
             environment["PYTHON_CALLS"] = str(records)
