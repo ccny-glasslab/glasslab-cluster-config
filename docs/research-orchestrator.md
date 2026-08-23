@@ -277,7 +277,9 @@ a serialization-shape mismatch. Trimming is least-protected-first: logs and
 CSVs are dropped before the artifact inventory and job summaries, which are
 dropped before `status.json`/`report.md`, and verbatim evaluator and metrics
 content is retained longest (highest retention priority). Anything dropped
-is recorded in a `truncation` note listing the omitted URIs (bounded to the
+is recorded in a `truncation` note listing the omitted references — explicit
+`artifact://...` and `job://...` references, one per trimmed artifact or job
+summary (bounded to the
 first 25 plus an `omitted_more_count`, so the note cannot grow without limit).
 The cap is validated at Settings construction against
 `EVIDENCE_SNAPSHOT_MIN_BYTES` (1024): the minimal satisfiable snapshot (empty
