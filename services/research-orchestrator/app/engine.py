@@ -16,6 +16,11 @@ from .contract_candidates import ContractCandidateManager
 from .contracts import EvaluationContractResolver
 from .discord_adapter import DiscordAdapter
 from .datasets import DatasetIngestionManager
+from .evidence import (
+    EvidencePhase,
+    build_evidence_snapshot,
+    serialize_evidence,
+)
 from .matrix import expand_experiment_matrix
 from .opencode_runtime import AgentRuntime
 from .policy import ActionPolicy
@@ -3733,85 +3738,20 @@ class ResearchOrchestrator:
             },
         )
 
-    def _evidence_snapshot(self, run_id: str) -> dict[str, Any]:
-        artifacts = self.store.list_artifacts(run_id)
-        return {
-            'jobs': [
-                job.model_dump(mode='json')
-                for job in self.store.list_jobs(run_id)
-            ],
-            'artifacts': [
-                artifact.model_dump(mode='json')
-                for artifact in artifacts
-            ],
-            'artifact_contents': [
-                excerpt
-                for artifact in artifacts
-                if (excerpt := self._artifact_evidence_excerpt(artifact))
-                is not None
-            ],
-        }
-
-    def _artifact_evidence_excerpt(
+    def _evidence_snapshot(
         self,
-        artifact: ArtifactRecord,
-    ) -> dict[str, Any] | None:
-        relative = Path(artifact.uri)
-        if relative.name not in {
-            'runner.log',
-            'status.json',
-            'evaluation.json',
-            'metrics.json',
-            'metrics.csv',
-            'fairness.csv',
-            'report.md',
-        }:
-            return None
-        shared_root = Path(self.settings.shared_mount_root).resolve()
-        path = (shared_root / relative).resolve()
-        if not path.is_relative_to(shared_root) or not path.is_file():
-            return None
-        digest = sha256()
-        with path.open('rb') as handle:
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
-        if digest.hexdigest() != artifact.sha256:
-            return {
-                'uri': f'artifact://{artifact.uri}',
-                'type': artifact.type,
-                'sha256': artifact.sha256,
-                'content_unavailable': 'artifact digest mismatch',
-            }
-        maximum = self.settings.evidence_excerpt_max_bytes
-        size = path.stat().st_size
-        with path.open('rb') as handle:
-            if relative.name == 'runner.log' and size > maximum:
-                handle.seek(-maximum, 2)
-            content = handle.read(maximum)
-        text = content.decode('utf-8', errors='replace')
-        parsed: Any = text
-        if relative.suffix == '.json' and size <= maximum:
-            try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError:
-                parsed = text
-        return {
-            'uri': f'artifact://{artifact.uri}',
-            'type': artifact.type,
-            'sha256': artifact.sha256,
-            'digest_verified': True,
-            'size_bytes': size,
-            'truncated': size > maximum,
-            'excerpt_position': (
-                'tail'
-                if relative.name == 'runner.log' and size > maximum
-                else 'head'
-            ),
-            'content': parsed,
-        }
+        run_id: str,
+        phase: EvidencePhase = EvidencePhase.ANALYSIS,
+    ) -> dict[str, Any]:
+        """Bounded evidence summary for an agent turn, scoped by phase."""
+        return build_evidence_snapshot(
+            self.settings, self.store, run_id, phase=phase
+        )
 
     def _analyze_results(self, run_id: str) -> None:
-        evidence = self._evidence_snapshot(run_id)
+        evidence = self._evidence_snapshot(
+            run_id, phase=EvidencePhase.ANALYSIS
+        )
         _, result = self._run_agent_turn(
             run_id=run_id,
             agent=AgentName.BEAKER,
@@ -3820,7 +3760,7 @@ class ResearchOrchestrator:
                 'failed job is an observation to explain, not proof that the '
                 'research run failed. Cite evidence URIs for every material '
                 'claim.\n\n'
-                + json.dumps(evidence, indent=2, sort_keys=True)
+                + serialize_evidence(evidence)
             ),
             expected_kind=TurnKind.EXPERIMENT_ANALYSIS,
             input_event=evidence,
@@ -3835,7 +3775,9 @@ class ResearchOrchestrator:
         self._verify_results(run_id)
 
     def _verify_results(self, run_id: str) -> None:
-        evidence = self._evidence_snapshot(run_id)
+        evidence = self._evidence_snapshot(
+            run_id, phase=EvidencePhase.VERIFICATION
+        )
         _, result = self._run_agent_turn(
             run_id=run_id,
             agent=AgentName.HONEYDEW,
@@ -3844,7 +3786,7 @@ class ResearchOrchestrator:
                 'authoritative records and the approved program.md. Set '
                 'done=true only if the evidence supports a final report. Cite '
                 'artifact, job, event, Git, or contract URIs.\n\n'
-                + json.dumps(evidence, indent=2, sort_keys=True)
+                + serialize_evidence(evidence)
             ),
             expected_kind=TurnKind.VERIFICATION,
             input_event=evidence,
@@ -3868,13 +3810,13 @@ class ResearchOrchestrator:
         self._write_report(run_id)
 
     def _write_report(self, run_id: str, feedback: str | None = None) -> None:
-        evidence = self._evidence_snapshot(run_id)
+        evidence = self._evidence_snapshot(run_id, phase=EvidencePhase.REPORT)
         prompt = (
             'Write report.md for the human. Separate observations from '
             'inferences, cite authoritative evidence URIs, include failed runs '
             'and limitations, and do not overstate single-run results. Return '
             'the file with purpose "report".\n\n'
-            + json.dumps(evidence, indent=2, sort_keys=True)
+            + serialize_evidence(evidence)
         )
         if feedback:
             prompt += f'\n\nHuman rejection feedback:\n{feedback}'

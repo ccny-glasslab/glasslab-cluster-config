@@ -18,6 +18,13 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 
+# The minimal satisfiable evidence snapshot is the empty jobs/artifacts/
+# artifact_contents skeleton plus a count-only truncation note, which
+# serializes to ~251 bytes. A cap below this floor could never be honored, so
+# Settings rejects it at construction. 1024 bytes keeps a documented 4x margin
+# over the measured floor while still allowing tight test caps.
+EVIDENCE_SNAPSHOT_MIN_BYTES = 1024
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -55,6 +62,10 @@ class Settings(BaseSettings):
         '/workspace/cluster-config/services/research-orchestrator/evaluation-contracts',
     ]
     evidence_excerpt_max_bytes: int = 32 * 1024
+    # Verbatim tier for evaluator failures/metrics (larger than the general
+    # excerpt cap); the whole snapshot is bounded by the snapshot cap.
+    evidence_verbatim_max_bytes: int = 64 * 1024
+    evidence_snapshot_max_bytes: int = 512 * 1024
     approved_repo_path: str = '/workspace/cluster-config'
     approved_repo_ref: str = 'main'
     evaluation_contract_root: str = str(SERVICE_ROOT / 'evaluation-contracts')
@@ -172,6 +183,16 @@ class Settings(BaseSettings):
     @property
     def effective_agent_model_name(self) -> str:
         return self.agent_model_name or self.qwen_model_name
+
+    @field_validator('evidence_snapshot_max_bytes')
+    @classmethod
+    def enforce_evidence_snapshot_minimum(cls, value: int) -> int:
+        if value < EVIDENCE_SNAPSHOT_MIN_BYTES:
+            raise ValueError(
+                'evidence_snapshot_max_bytes must be at least '
+                f'{EVIDENCE_SNAPSHOT_MIN_BYTES} bytes'
+            )
+        return value
 
     @field_validator('store_postgres_dsn')
     @classmethod
