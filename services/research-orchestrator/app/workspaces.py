@@ -262,7 +262,10 @@ class WorkspaceManager:
                 # These are reconstructed by the orchestrator from their
                 # authoritative sources; copying them as a delta would either
                 # duplicate immutable task inputs or retain mode 0444.
-                if rel == Path('program.md') or rel.parts[0] == 'benchmark-task':
+                # Orchestrator-managed scaffolding is reconstructed for
+                # every workspace and is not checkpoint evidence; legacy
+                # manifests predate it.
+                if rel in {Path('program.md'), Path('AGENTS.md')} or rel.parts[0] == 'benchmark-task':
                     continue
                 source = source_root / rel
                 if source.is_symlink() or not source.is_file():
@@ -365,7 +368,10 @@ class WorkspaceManager:
                 rel = Path(relative)
                 if code not in {' M', 'M ', '??'} or rel.is_absolute() or '..' in rel.parts:
                     raise WorkspaceError('retry child worktree delta is ambiguous')
-                if rel == Path('program.md') or rel.parts[0] == 'benchmark-task':
+                # Orchestrator-managed scaffolding is reconstructed for
+                # every workspace and is not checkpoint evidence; legacy
+                # manifests predate it.
+                if rel in {Path('program.md'), Path('AGENTS.md')} or rel.parts[0] == 'benchmark-task':
                     continue
                 observed_files.add((name, rel.as_posix()))
         if observed_files != manifest_files:
