@@ -2118,7 +2118,8 @@ class ResearchOrchestrator:
             'contract.json, the execution wrapper, evaluator, input and output '
             'JSON schemas, and concise test vectors or tests. contract.json '
             'must be one JSON object with exactly these top-level keys and '
-            'no others: contract_id (string), version (semver string), '
+            'no others: contract_id (string; it must be EXACTLY the approved '
+            'proposal evaluator_type value below, not a descriptive name), '
             'manifest (an inline JSON object holding primary_metric name, '
             'primary_metric_direction, methodology_requirements, budget, '
             'and guardrails; never a filename reference), execution_wrapper '
@@ -2205,28 +2206,79 @@ class ResearchOrchestrator:
             primary = proposal.get('primary_metric')
             resources = proposal.get('resource_constraints')
             required_artifacts = proposal.get('required_artifacts')
-            if (
-                request.contract_id != proposal.get('evaluator_type')
-                or not isinstance(primary, dict)
-                or descriptor.manifest.get('primary_metric')
-                != primary.get('name')
-                or descriptor.manifest.get('primary_metric_direction')
-                != primary.get('direction')
-                or not isinstance(required_artifacts, list)
-                or not set(required_artifacts).issubset(
-                    descriptor.required_artifacts
+            mismatches: list[str] = []
+            if request.contract_id != proposal.get('evaluator_type'):
+                mismatches.append(
+                    'contract_id must be exactly the approved proposal '
+                    f'evaluator_type {proposal.get("evaluator_type")!r} but '
+                    f'the action proposed {request.contract_id!r}'
                 )
-                or not isinstance(resources, dict)
-                or float(resources.get('cpu', float('inf')))
-                > descriptor.resource_constraints.cpu
-                or float(resources.get('memory_gib', float('inf')))
-                > descriptor.resource_constraints.memory_gib
-                or int(resources.get('gpus', self.policy.maximum_gpus + 1))
-                > descriptor.resource_constraints.gpus
+            if not isinstance(primary, dict):
+                mismatches.append(
+                    'approved proposal has no primary_metric object'
+                )
+            else:
+                if descriptor.manifest.get('primary_metric') != primary.get(
+                    'name'
+                ):
+                    mismatches.append(
+                        'manifest.primary_metric must equal the approved '
+                        f'primary metric name {primary.get("name")!r} but is '
+                        f'{descriptor.manifest.get("primary_metric")!r}'
+                    )
+                if descriptor.manifest.get('primary_metric_direction') != (
+                    primary.get('direction')
+                ):
+                    mismatches.append(
+                        'manifest.primary_metric_direction must equal the '
+                        'approved direction '
+                        f'{primary.get("direction")!r} but is '
+                        f'{descriptor.manifest.get("primary_metric_direction")!r}'
+                    )
+            if not isinstance(required_artifacts, list):
+                mismatches.append(
+                    'approved proposal has no required_artifacts list'
+                )
+            elif not set(required_artifacts).issubset(
+                descriptor.required_artifacts
             ):
+                missing = sorted(
+                    set(required_artifacts) - set(descriptor.required_artifacts)
+                )
+                mismatches.append(
+                    'descriptor.required_artifacts must include every '
+                    f'approved artifact; missing: {missing}'
+                )
+            if not isinstance(resources, dict):
+                mismatches.append(
+                    'approved proposal has no resource_constraints object'
+                )
+            else:
+                if float(resources.get('cpu', float('inf'))) > (
+                    descriptor.resource_constraints.cpu
+                ):
+                    mismatches.append(
+                        'resource_constraints.cpu is below the approved '
+                        f'minimum {resources.get("cpu")}'
+                    )
+                if float(resources.get('memory_gib', float('inf'))) > (
+                    descriptor.resource_constraints.memory_gib
+                ):
+                    mismatches.append(
+                        'resource_constraints.memory_gib is below the '
+                        f'approved minimum {resources.get("memory_gib")}'
+                    )
+                if int(resources.get('gpus', self.policy.maximum_gpus + 1)) > (
+                    descriptor.resource_constraints.gpus
+                ):
+                    mismatches.append(
+                        'resource_constraints.gpus is below the approved '
+                        f'minimum {resources.get("gpus")}'
+                    )
+            if mismatches:
                 raise WorkflowError(
                     'candidate descriptor does not implement the approved '
-                    'scientific contract proposal'
+                    'scientific contract proposal: ' + '; '.join(mismatches)
                 )
         except (OSError, ValueError, WorkflowError) as exc:
             feedback_message = (
