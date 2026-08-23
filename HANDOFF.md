@@ -20,7 +20,9 @@ Three distinct layers of truth, in decreasing authority:
 
 ## Runtime And Storage
 
-- **Runtime:** Hermes is the selected agent runtime for Honeydew and Beaker.
+- **Runtime:** OpenCode is the selected agent runtime for Honeydew and Beaker
+  (issue-98 validation path). Hermes is retained only as an explicit opt-in
+  rollback backend.
   OpenCode is installed only as a rollback runtime, selected only by setting
   `GLASSLAB_ORCHESTRATOR_AGENT_RUNTIME_BACKEND` back to `opencode`.
 - **Store:** PostgreSQL is the production store
@@ -40,10 +42,11 @@ NFS at:
 Both agent runtimes point at the exo OpenAI-compatible service at
 `192.168.1.17:52415`. The cabled exo pair is `.17` and `.18`.
 
-## Deployed State (last verified 2026-08-13)
+## Deployed State (last verified 2026-08-23)
 
-At the last check the deployed research-orchestrator image was commit `6ed16e8`
-(#141), running with `AGENT_RUNTIME_BACKEND=hermes` and
+At the last check the deployed research-orchestrator image was commit `c525861`
+(#169), running with `AGENT_RUNTIME_BACKEND=opencode` (flipped for the #98
+validation run) and
 `STORE_BACKEND=postgres`. Re-verify before relying on it:
 
 ```bash
