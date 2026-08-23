@@ -247,13 +247,18 @@ of three `EvidencePhase` values:
   `metrics.json` only.
 
 The engine wrapper `_evidence_snapshot(run_id, phase=EvidencePhase.ANALYSIS)`
-keeps its previous default, so existing callers are unchanged.
+keeps its previous default, so existing callers are unchanged. The artifact
+inventory is phase-scoped like the contents: metadata for artifacts whose
+content a phase never receives is not included, so an agent cannot cite URIs
+for evidence it was never shown.
 
 Artifact contents are deduplicated by `(sha256, type)`. The first occurrence in
 store order keeps its content; later identical occurrences carry a
 `duplicate_of` reference to the first URI. Two artifacts with the same digest
 but different types are never collapsed, so a verbatim `metrics.json` cannot be
-replaced by coincidentally identical `status.json` bytes.
+replaced by coincidentally identical `status.json` bytes. When the size budget
+drops a content representative, its dependents are dropped with it so no
+retained `duplicate_of` ever points at missing content.
 
 `evaluation.json` and `metrics.json` are kept verbatim as fully parsed JSON up
 to `evidence_verbatim_max_bytes` (64 KiB by default). An artifact beyond that
@@ -264,12 +269,20 @@ never cut mid-JSON. All other excerpted files are bounded by
 tail-excerpted.
 
 The whole snapshot is bounded by `evidence_snapshot_max_bytes` (512 KiB by
-default), applied in a fixed priority order: verbatim evaluator and metrics
-content first, then `status.json` and `report.md`, then jobs and inventory,
-then logs and CSVs last. Anything dropped is recorded in a `truncation` note
-listing the omitted URIs. Complete artifacts always remain in the durable
-artifact store; the snapshot is a lossy-but-referenced projection, never a
-deletion.
+default). The budget measures the exact production serialization the engine
+embeds in agent prompts (`serialize_evidence`: `json.dumps(snapshot, indent=2,
+sort_keys=True, ensure_ascii=False)`) counted as encoded UTF-8 bytes, and it
+includes the truncation note itself, so the prompt can never exceed the cap by
+a serialization-shape mismatch. Trimming applies a fixed priority order:
+verbatim evaluator and metrics content first, then `status.json` and
+`report.md`, then jobs and inventory, then logs and CSVs last. Anything dropped
+is recorded in a `truncation` note listing the omitted URIs (bounded to the
+first 25 plus an `omitted_more_count`, so the note cannot grow without limit).
+The hard bound holds down to the minimal-skeleton floor (~280 bytes of empty
+lists plus the count-only note); a cap below that floor returns the minimal
+representation rather than deleting the truncation explanation.
+Complete artifacts always remain in the durable artifact store; the snapshot
+is a lossy-but-referenced projection, never a deletion.
 
 The three limits are additive settings in
 `services/research-orchestrator/app/config.py`, exposed as
