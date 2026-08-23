@@ -55,6 +55,10 @@ class Settings(BaseSettings):
         '/workspace/cluster-config/services/research-orchestrator/evaluation-contracts',
     ]
     evidence_excerpt_max_bytes: int = 32 * 1024
+    # Verbatim tier for evaluator failures/metrics (larger than the general
+    # excerpt cap); the whole snapshot is bounded by the snapshot cap.
+    evidence_verbatim_max_bytes: int = 64 * 1024
+    evidence_snapshot_max_bytes: int = 512 * 1024
     approved_repo_path: str = '/workspace/cluster-config'
     approved_repo_ref: str = 'main'
     evaluation_contract_root: str = str(SERVICE_ROOT / 'evaluation-contracts')
