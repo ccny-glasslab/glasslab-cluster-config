@@ -16,7 +16,11 @@ from .contract_candidates import ContractCandidateManager
 from .contracts import EvaluationContractResolver
 from .discord_adapter import DiscordAdapter
 from .datasets import DatasetIngestionManager
-from .evidence import EvidencePhase, build_evidence_snapshot
+from .evidence import (
+    EvidencePhase,
+    build_evidence_snapshot,
+    serialize_evidence,
+)
 from .matrix import expand_experiment_matrix
 from .opencode_runtime import AgentRuntime
 from .policy import ActionPolicy
@@ -3756,7 +3760,7 @@ class ResearchOrchestrator:
                 'failed job is an observation to explain, not proof that the '
                 'research run failed. Cite evidence URIs for every material '
                 'claim.\n\n'
-                + json.dumps(evidence, indent=2, sort_keys=True)
+                + serialize_evidence(evidence)
             ),
             expected_kind=TurnKind.EXPERIMENT_ANALYSIS,
             input_event=evidence,
@@ -3782,7 +3786,7 @@ class ResearchOrchestrator:
                 'authoritative records and the approved program.md. Set '
                 'done=true only if the evidence supports a final report. Cite '
                 'artifact, job, event, Git, or contract URIs.\n\n'
-                + json.dumps(evidence, indent=2, sort_keys=True)
+                + serialize_evidence(evidence)
             ),
             expected_kind=TurnKind.VERIFICATION,
             input_event=evidence,
@@ -3812,7 +3816,7 @@ class ResearchOrchestrator:
             'inferences, cite authoritative evidence URIs, include failed runs '
             'and limitations, and do not overstate single-run results. Return '
             'the file with purpose "report".\n\n'
-            + json.dumps(evidence, indent=2, sort_keys=True)
+            + serialize_evidence(evidence)
         )
         if feedback:
             prompt += f'\n\nHuman rejection feedback:\n{feedback}'

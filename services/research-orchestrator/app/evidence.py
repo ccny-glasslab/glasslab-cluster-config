@@ -2,7 +2,9 @@
 
 Projects jobs and artifacts into bounded summaries and attaches per-phase
 artifact excerpts, deduplicated by content digest, with a hard serialized-size
-budget enforced by deterministic trimming.
+budget enforced by deterministic trimming. The budget measures the exact
+production serialization the engine embeds in agent prompts
+(``serialize_evidence``), counted as encoded UTF-8 bytes.
 """
 
 from __future__ import annotations
@@ -54,6 +56,21 @@ _TRUNCATION_NOTE = (
     'evidence snapshot exceeded evidence_snapshot_max_bytes; complete '
     'artifacts remain in the durable record'
 )
+_MAX_OMITTED_URIS = 25
+
+
+def serialize_evidence(snapshot: dict[str, Any]) -> str:
+    """The exact JSON the engine embeds in agent prompts.
+
+    Must stay in sync with the engine call sites (they import this function);
+    the size budget is measured on its UTF-8 encoding, so the prompt can never
+    exceed the configured cap by a serialization-shape mismatch.
+    """
+    return json.dumps(snapshot, indent=2, sort_keys=True, ensure_ascii=False)
+
+
+def evidence_byte_size(snapshot: dict[str, Any]) -> int:
+    return len(serialize_evidence(snapshot).encode('utf-8'))
 
 
 def _project_job(job: JobRecord, phase: EvidencePhase) -> dict[str, Any]:
@@ -176,6 +193,49 @@ def _drop_candidates(
     return candidates
 
 
+def _truncation_note(dropped: list[str]) -> dict[str, Any]:
+    note: dict[str, Any] = {
+        'note': _TRUNCATION_NOTE,
+        'omitted_uris': dropped[:_MAX_OMITTED_URIS],
+        'omitted_count': len(dropped),
+    }
+    if len(dropped) > _MAX_OMITTED_URIS:
+        note['omitted_more_count'] = len(dropped) - _MAX_OMITTED_URIS
+    return note
+
+
+def _drop_content_entry(
+    snapshot: dict[str, Any],
+    dependents_by_rep: dict[str, list[str]],
+    dropped: list[str],
+    key: str,
+) -> None:
+    """Remove one content entry plus any duplicates that reference it.
+
+    A duplicate's ``duplicate_of`` must never point at content that trimming
+    removed: dropping a representative also drops its dependents so no retained
+    reference dangles. The representative is removed first and dependents are
+    looked up fresh afterwards, so a dependent sharing the representative's uri
+    can never be matched against it.
+    """
+    entry = next(
+        (e for e in snapshot['artifact_contents'] if e['uri'] == key),
+        None,
+    )
+    if entry is None:
+        return
+    snapshot['artifact_contents'].remove(entry)
+    dropped.append(key)
+    for dependent_uri in dependents_by_rep.get(key, []):
+        dependent = next(
+            (e for e in snapshot['artifact_contents'] if e['uri'] == dependent_uri),
+            None,
+        )
+        if dependent is not None:
+            snapshot['artifact_contents'].remove(dependent)
+            dropped.append(str(dependent['uri']))
+
+
 def build_evidence_snapshot(
     settings: Settings,
     store: ResearchStore,
@@ -184,12 +244,16 @@ def build_evidence_snapshot(
 ) -> dict[str, Any]:
     allowed = _PHASE_FILENAMES[phase]
     jobs = [_project_job(job, phase) for job in store.list_jobs(run_id)]
+    # The inventory is phase-scoped like the contents: metadata for artifacts
+    # whose content the phase never receives is not phase-relevant evidence.
     artifacts = [
         artifact.model_dump(mode='json', include=_ARTIFACT_KEYS)
         for artifact in store.list_artifacts(run_id)
+        if Path(artifact.uri).name in allowed
     ]
     contents: list[dict[str, Any]] = []
     first_uri_by_digest: dict[tuple[str, str], str] = {}
+    dependents_by_rep: dict[str, list[str]] = {}
     for artifact in store.list_artifacts(run_id):
         filename = Path(artifact.uri).name
         if filename not in allowed:
@@ -205,6 +269,9 @@ def build_evidence_snapshot(
             else:
                 excerpt.pop('content')
                 excerpt['duplicate_of'] = first_uri
+                dependents_by_rep.setdefault(first_uri, []).append(
+                    str(excerpt['uri'])
+                )
         contents.append(excerpt)
     snapshot: dict[str, Any] = {
         'jobs': jobs,
@@ -216,26 +283,42 @@ def build_evidence_snapshot(
     while candidates:
         provisional = dict(snapshot)
         if dropped:
-            provisional['truncation'] = {
-                'note': _TRUNCATION_NOTE,
-                'omitted_uris': dropped,
-                'omitted_count': len(dropped),
-            }
-        if (
-            len(json.dumps(provisional, sort_keys=True))
-            <= settings.evidence_snapshot_max_bytes
-        ):
+            provisional['truncation'] = _truncation_note(dropped)
+        if evidence_byte_size(provisional) <= settings.evidence_snapshot_max_bytes:
             break
         kind, key, identifier = candidates.pop(0)
-        field = 'job_id' if kind == 'jobs' else 'uri'
-        snapshot[kind] = [
-            item for item in snapshot[kind] if str(item[field]) != key
-        ]
-        dropped.append(identifier)
+        if kind == 'artifact_contents':
+            _drop_content_entry(
+                snapshot, dependents_by_rep, dropped, key
+            )
+        elif kind == 'artifacts':
+            snapshot['artifacts'] = [
+                item for item in snapshot['artifacts'] if str(item['uri']) != key
+            ]
+            dropped.append(identifier)
+        else:
+            snapshot['jobs'] = [
+                item for item in snapshot['jobs'] if str(item['job_id']) != key
+            ]
+            dropped.append(identifier)
     if dropped:
-        snapshot['truncation'] = {
-            'note': _TRUNCATION_NOTE,
-            'omitted_uris': dropped,
-            'omitted_count': len(dropped),
-        }
+        snapshot['truncation'] = _truncation_note(dropped)
+        # Hard guarantee: the note itself adds bytes; if the final
+        # serialization still exceeds the cap (pathological tiny caps), keep
+        # summarizing the omitted-URI list until it fits.
+        note = snapshot['truncation']
+        while (
+            note['omitted_uris']
+            and evidence_byte_size(snapshot)
+            > settings.evidence_snapshot_max_bytes
+        ):
+            note['omitted_uris'] = note['omitted_uris'][: len(note['omitted_uris']) // 2]
+            if len(note['omitted_uris']) < note['omitted_count']:
+                note['omitted_more_count'] = (
+                    note['omitted_count'] - len(note['omitted_uris'])
+                )
+        # Floor: with every list empty and the note reduced to its fixed text
+        # plus a count, the serialized snapshot is ~280 bytes. A cap below
+        # that cannot be satisfied without deleting the truncation explanation
+        # itself; the default cap (512 KiB) is far above the floor.
     return snapshot
