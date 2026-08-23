@@ -227,6 +227,56 @@ runtime that repeats the same failure in its repair turn ends the run
 `FAILED` rather than looping; resuming from a terminal state is not yet
 supported and is tracked as terminal-checkpoint retry (#92).
 
+## Evidence Snapshots
+
+Agent turns that consume job output never receive raw cluster access or
+unbounded files. Before `_analyze_results` (Beaker), `_verify_results`
+(Honeydew), and `_write_report` (Honeydew), the orchestrator builds a compact,
+phase-scoped snapshot with `build_evidence_snapshot(settings, store, run_id,
+phase)` in `services/research-orchestrator/app/evidence.py`. The phase is one
+of three `EvidencePhase` values:
+
+- `ANALYSIS` gives Beaker job identity, status, exit, variant, and seed records
+  (spec and requested_resources projected out) plus excerpts of `runner.log`,
+  `status.json`, `evaluation.json`, `metrics.json`, `metrics.csv`, and
+  `fairness.csv`.
+- `VERIFICATION` gives Honeydew status-only job summaries plus `status.json`,
+  `evaluation.json`, `metrics.json`, and `report.md`. It contains no
+  `runner.log` and no CSV tables.
+- `REPORT` gives Honeydew status-only job summaries plus `evaluation.json` and
+  `metrics.json` only.
+
+The engine wrapper `_evidence_snapshot(run_id, phase=EvidencePhase.ANALYSIS)`
+keeps its previous default, so existing callers are unchanged.
+
+Artifact contents are deduplicated by `(sha256, type)`. The first occurrence in
+store order keeps its content; later identical occurrences carry a
+`duplicate_of` reference to the first URI. Two artifacts with the same digest
+but different types are never collapsed, so a verbatim `metrics.json` cannot be
+replaced by coincidentally identical `status.json` bytes.
+
+`evaluation.json` and `metrics.json` are kept verbatim as fully parsed JSON up
+to `evidence_verbatim_max_bytes` (64 KiB by default). An artifact beyond that
+cap contributes a `content_omitted` reference instead of a head-truncated
+partial JSON document, so evaluator failures and representative metrics are
+never cut mid-JSON. All other excerpted files are bounded by
+`evidence_excerpt_max_bytes` (32 KiB by default), with `runner.log`
+tail-excerpted.
+
+The whole snapshot is bounded by `evidence_snapshot_max_bytes` (512 KiB by
+default), applied in a fixed priority order: verbatim evaluator and metrics
+content first, then `status.json` and `report.md`, then jobs and inventory,
+then logs and CSVs last. Anything dropped is recorded in a `truncation` note
+listing the omitted URIs. Complete artifacts always remain in the durable
+artifact store; the snapshot is a lossy-but-referenced projection, never a
+deletion.
+
+The three limits are additive settings in
+`services/research-orchestrator/app/config.py`, exposed as
+`GLASSLAB_ORCHESTRATOR_EVIDENCE_*_MAX_BYTES`. The builder treats the store as
+read-only: no evidence is removed from the durable record, and there are no
+schema or store-contract changes.
+
 ## Evaluation Integrity
 
 Contracts live under
