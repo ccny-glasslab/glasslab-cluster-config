@@ -309,6 +309,12 @@ record = {
         if name in os.environ
     },
 }
+if "apply" in sys.argv[1:]:
+    # Real `kubectl apply -f -` consumes the complete manifest.  The fixture
+    # must do the same or the producer can intermittently receive SIGPIPE
+    # while writing its stdout, turning a successful boundary test into exit
+    # status 120 on faster CI hosts.
+    record["stdin"] = sys.stdin.read()
 for argument in sys.argv[1:]:
     prefix = "--from-file=.dockerconfigjson="
     if argument.startswith(prefix):
