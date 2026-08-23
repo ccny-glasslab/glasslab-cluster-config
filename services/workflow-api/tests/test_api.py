@@ -852,7 +852,7 @@ def test_session_source_document_ingest_bootstraps_intake_for_run(monkeypatch) -
     monkeypatch.setattr(
         source_documents,
         'fetch_source_document_bytes',
-        lambda source_url: (
+        lambda source_url, **kwargs: (
             b'<html><title>DreamSim</title><body>DreamSim uses contrastive loss with timm and torch.</body></html>',
             'text/html',
         ),
@@ -950,7 +950,7 @@ def test_session_intake_endpoint_accepts_note_dataset_and_source(monkeypatch) ->
     monkeypatch.setattr(
         source_documents,
         'fetch_source_document_bytes',
-        lambda source_url: (b'<html><title>Paper</title><body>bounded source</body></html>', 'text/html'),
+        lambda source_url, **kwargs: (b'<html><title>Paper</title><body>bounded source</body></html>', 'text/html'),
     )
     monkeypatch.setattr(
         source_documents,
