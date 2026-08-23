@@ -12,6 +12,7 @@ from app.hermes_runtime import (
     HermesProcessRuntime,
     _HermesHandle,
     _decode_structured_output,
+    _required_turn_kind,
 )
 from app.main import build_agent_runtime
 from app.opencode_runtime import OpenCodeProcessRuntime
@@ -98,9 +99,18 @@ def test_hermes_profiles_are_isolated_and_bounded(tmp_path: Path) -> None:
     ]
     assert 'memory' in beaker_config['agent']['disabled_toolsets']
     assert 'web' in beaker_config['agent']['disabled_toolsets']
+    denied_commands = beaker_config['approvals']['deny']
+    assert 'pip3 *' in denied_commands
+    assert 'python3 -m pip *' in denied_commands
+    assert 'uv pip *' in denied_commands
+    assert 'apt-get *' in denied_commands
+    assert 'npm *' in denied_commands
     assert 'key' not in beaker_config['gateway']['api_server']
     assert (beaker_home / 'SOUL.md').read_text() != (
         honeydew_home / 'SOUL.md'
+    ).read_text()
+    assert 'Never install packages or dependencies' in (
+        beaker_home / 'SOUL.md'
     ).read_text()
 
 
@@ -220,3 +230,82 @@ def test_hermes_structured_output_failures_are_distinguishable() -> None:
             json.dumps({'kind': 'protocol_draft', 'summary': ''})
         )
     assert invalid.value.failure_class == 'schema_invalid'
+
+
+def test_hermes_repair_carries_rejected_output_and_required_kind(
+    tmp_path: Path,
+) -> None:
+    submitted_inputs: list[str] = []
+    outputs = [
+        json.dumps(
+            {
+                'kind': 'experiment_analysis',
+                'summary': 'The implementation plan was written.',
+                'produced_files': [
+                    {
+                        'path': 'implementation-plan.md',
+                        'purpose': 'implementation',
+                    }
+                ],
+            }
+        ),
+        json.dumps(
+            {
+                'kind': 'implementation_plan',
+                'summary': 'The implementation plan was written.',
+                'produced_files': [
+                    {
+                        'path': 'implementation-plan.md',
+                        'purpose': 'implementation',
+                    }
+                ],
+            }
+        ),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == 'POST' and request.url.path == '/v1/runs':
+            submitted_inputs.append(json.loads(request.content)['input'])
+            return httpx.Response(
+                200,
+                json={'run_id': f'hermes-run-{len(submitted_inputs)}'},
+            )
+        if request.method == 'GET' and request.url.path.startswith('/v1/runs/'):
+            run_number = int(request.url.path.rsplit('-', 1)[1])
+            return httpx.Response(
+                200,
+                json={'status': 'completed', 'output': outputs[run_number - 1]},
+            )
+        raise AssertionError(f'unexpected request: {request.method} {request.url}')
+
+    runtime = HermesProcessRuntime(
+        Settings(
+            hermes_poll_interval_seconds=0,
+            hermes_structured_repair_attempts=1,
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    handle = _handle(tmp_path)
+    runtime._start_process = lambda **_kwargs: handle  # type: ignore[method-assign]
+
+    result, _ = runtime.run_turn(
+        run_id='run-test',
+        agent=AgentName.HONEYDEW,
+        workspace=handle.workspace,
+        session_id='glasslab-honeydew-run-test',
+        prompt=(
+            'Write implementation-plan.md.\n\n'
+            'AUTHORITATIVE STRUCTURED OUTPUT CONTRACT:\n'
+            '- Set the JSON `kind` field to exactly `implementation_plan`.\n'
+        ),
+    )
+
+    assert result.kind == TurnKind.IMPLEMENTATION_PLAN
+    assert len(submitted_inputs) == 2
+    assert outputs[0] in submitted_inputs[1]
+    assert 'Validation error: Hermes structured output used kind' in (
+        submitted_inputs[1]
+    )
+    assert '"const": "implementation_plan"' in submitted_inputs[0]
+    assert '"const": "implementation_plan"' in submitted_inputs[1]
+    assert _required_turn_kind(submitted_inputs[0]) == TurnKind.IMPLEMENTATION_PLAN

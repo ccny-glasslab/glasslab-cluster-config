@@ -8,10 +8,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git nodejs npm ca-certificates curl xz-utils \
+    && apt-get install -y --no-install-recommends git nodejs npm ca-certificates curl xz-utils libatomic1 \
     && npm install --global "opencode-ai@${OPENCODE_VERSION}" \
-    && curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- \
+    && curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/install-hermes.sh \
+    # The orchestrator does not use Hermes' browser tooling. The upstream
+    # installer still installs its npm workspace even with --skip-browser.
+    && sed -i 's/if \[ -f "$INSTALL_DIR\/package.json" \]; then/if false; then/' /tmp/install-hermes.sh \
+    && bash /tmp/install-hermes.sh \
         --branch "${HERMES_VERSION}" --skip-setup --skip-browser --no-skills \
+    && rm -f /tmp/install-hermes.sh \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
