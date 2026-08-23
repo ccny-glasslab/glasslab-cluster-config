@@ -2733,7 +2733,10 @@ class ResearchOrchestrator:
         prompt = (
             'Read the approved read-only program.md and implementation-plan.md. '
             'Execute the task-specific plan in your isolated worktree, adapting '
-            'it when repository evidence requires. Every ingested dataset '
+            'it when repository evidence requires. Your only tools are bash, '
+            'edit, glob, grep, read, todowrite, and write; there is no run or '
+            'list tool, so execute every command and script through bash. '
+            'Every ingested dataset '
             'cited by the objective is already copied read-only under '
             '`datasets/` in this worktree; load it from there and never make '
             'network calls. Finish the bounded experiment '
