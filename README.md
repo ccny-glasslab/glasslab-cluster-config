@@ -54,7 +54,7 @@ are not the current research front door.
 
 The current bounded Honeydew/Beaker research workflow is documented in
 [`docs/research-orchestrator.md`](docs/research-orchestrator.md). It adds a
-durable research workflow around isolated Hermes-backed runtimes and the
+durable research workflow around isolated OpenCode-backed runtimes and the
 existing bounded cluster-execution service. The Titanic stack remains legacy
 v1 reference material; see [`docs/glasslab-v2/historical/titanic-agent-stack.md`](docs/glasslab-v2/historical/titanic-agent-stack.md).
 
@@ -69,12 +69,12 @@ The canonical human research path is:
 
 - Discord
 - `research-orchestrator`
-- isolated Hermes-backed Honeydew and Beaker runtimes
+- isolated OpenCode-backed Honeydew and Beaker runtimes
 - configured local OpenAI-compatible model serving
 - `workflow-api`
 - bounded Kubernetes Jobs
 
-Hermes owns agent-level runtime behavior. Glasslab owns the durable workflow,
+OpenCode owns agent-level runtime behavior. Glasslab owns the durable workflow,
 state transitions, approvals, evaluation contracts, job policy, artifacts, and
 provenance. `workflow-api` remains the bounded cluster-execution control plane.
 The remaining orchestration boundary is tracked in
@@ -98,7 +98,7 @@ question
 
 Discord is the primary human surface. The research orchestrator's database and
 append-only event log are authoritative; Discord is their operator-facing
-projection. Hermes remains internal to Honeydew and Beaker.
+projection. OpenCode remains internal to Honeydew and Beaker.
 
 ## Start Here
 

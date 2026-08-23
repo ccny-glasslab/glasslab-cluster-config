@@ -32,9 +32,11 @@ data:
   GLASSLAB_ORCHESTRATOR_BENCHMARK_DATASET_CATALOG_PATH: /mnt/artifacts/research-orchestrator/datasets/catalog.json
   GLASSLAB_ORCHESTRATOR_DEFAULT_EVALUATION_CONTRACT_ID: example-research-v1
   GLASSLAB_ORCHESTRATOR_DEFAULT_EVALUATION_CONTRACT_VERSION: 1.0.0
-  # Hermes owns the inner agent tool-use loop; Glasslab still owns state,
-  # approvals, evaluation contracts, jobs, artifacts, and Discord projection.
-  GLASSLAB_ORCHESTRATOR_AGENT_RUNTIME_BACKEND: hermes
+  # OpenCode is the selected agent runtime for the issue-98 validation path;
+  # Glasslab still owns state, approvals, evaluation contracts, jobs,
+  # artifacts, and Discord projection. Hermes remains an explicit opt-in
+  # rollback backend (see test_agent_runtime.py).
+  GLASSLAB_ORCHESTRATOR_AGENT_RUNTIME_BACKEND: opencode
   GLASSLAB_ORCHESTRATOR_OPENCODE_EXECUTABLE: /usr/local/bin/opencode
   GLASSLAB_ORCHESTRATOR_OPENCODE_START_PORT: "4210"
   GLASSLAB_ORCHESTRATOR_OPENCODE_TURN_TIMEOUT_SECONDS: "1800"
@@ -45,7 +47,8 @@ data:
   # instead of a copy per run (see issue #99); session/auth/log state stays
   # per-run regardless of this setting.
   GLASSLAB_ORCHESTRATOR_OPENCODE_SHARED_CACHE_ROOT: /mnt/artifacts/research-orchestrator/opencode-cache
-  # OpenCode remains installed only as a rollback runtime.
+  # OpenCode is the selected runtime; the model is served by the local exo
+  # endpoint (Hermes, when opted in, connects to the same endpoint).
   GLASSLAB_ORCHESTRATOR_AGENT_MODEL_PROVIDER_ID: exo
   GLASSLAB_ORCHESTRATOR_AGENT_MODEL_NAME: mlx-community/Qwen3-Coder-Next-4bit
   # Hermes connects directly to this OpenAI-compatible Exo endpoint.

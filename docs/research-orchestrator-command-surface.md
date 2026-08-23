@@ -72,7 +72,7 @@ reference in `problem.md` or the objective.
 - If verification finds missing or invalid evidence, a fresh bounded revision
   budget begins and Beaker receives the failure details.
 - `/research-pause` aborts an active model turn but preserves the worktree and
-  recovery checkpoint. `/research-resume` starts a fresh Hermes session from
+  recovery checkpoint. `/research-resume` starts a fresh OpenCode session from
   that checkpoint.
 - `FAILED`, `CANCELLED`, and `TIMED_OUT` are terminal. They cannot currently be
   resumed. Retry-from-terminal-checkpoint is a known missing capability.
@@ -293,8 +293,8 @@ both input and output before the response is built. It is additive: the
 normalized event log remains the authoritative record, and `/turns` never
 supersedes it.
 
-The run's workspaces, protocol, reports, Hermes data, and recovery checkpoints
-are stored beneath
+The run's workspaces, protocol, reports, OpenCode runtime data, and recovery
+checkpoints are stored beneath
 `/mnt/artifacts/research-orchestrator/runs/<run-id>/` in the orchestrator pod.
 Use `kubectl exec` from the provisioner to inspect raw runtime storage beyond
 what `/turns` exposes.
@@ -330,7 +330,7 @@ runs live readiness checks.
 
 Implemented and live:
 
-- separate Honeydew and Beaker Hermes sessions and workspaces
+- separate Honeydew and Beaker OpenCode sessions and workspaces
 - fresh-session recovery after failed or interrupted agent turns, with compact
   persisted checkpoints and unchanged worktrees
 - a bounded Beaker planning turn before implementation, without a fixed

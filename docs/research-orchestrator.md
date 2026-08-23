@@ -47,7 +47,7 @@ existing bounded execution plane:
       |             |
       v             v
  Honeydew        Beaker
- Hermes          Hermes
+ OpenCode        OpenCode
  runtime         runtime
       |             |
       +------+------+
@@ -65,10 +65,10 @@ existing bounded execution plane:
   artifacts + evaluation output
 ```
 
-Hermes is the inner runtime. It performs each agent's model call, local tool
-loop, file changes, and structured response. The orchestrator is the outer
-scientific workflow. It owns turn-taking, approvals, durable state, privileged
-actions, evidence, interruption, and recovery.
+The agent runtime is the inner loop. It performs each agent's model call,
+local tool loop, file changes, and structured response. The orchestrator is
+the outer scientific workflow. It owns turn-taking, approvals, durable state,
+privileged actions, evidence, interruption, and recovery.
 
 This separation avoids another home-grown model tool loop and prevents model
 prose from being confused with an authoritative action result.
@@ -143,7 +143,7 @@ names are translated into events such as `agent.tool_started`,
 `agent.turn_completed`, `action.proposed`, `job.completed`, and
 `artifact.recorded`.
 
-## Workspaces And Hermes
+## Workspaces And Agent Runtimes
 
 Each run has this layout:
 
