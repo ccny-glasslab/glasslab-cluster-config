@@ -1,10 +1,11 @@
 # Glasslab Work Queue
 
-Last reviewed: 2026-08-06
+Last reviewed: 2026-08-13
 
 GitHub Issues are the authoritative backlog. This file is a compact priority
 index for humans and coding agents arriving in the repository; it must not
-duplicate complete task specifications or maintain an independent status.
+duplicate complete task specifications or maintain an independent status. The
+authoritative roadmap, ownership, and current order of work are in issue #155.
 
 Current issues:
 
@@ -12,29 +13,17 @@ Current issues:
 - [ready work](https://github.com/ccny-glasslab/glasslab-cluster-config/issues?q=is%3Aissue%20state%3Aopen%20label%3Astate%3Aready)
 - [newcomer work](https://github.com/ccny-glasslab/glasslab-cluster-config/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
 
-## P0: Restore The End-To-End Research Loop
+## P0: Architecture And End-To-End Validation
 
-- [#104 Prevent missing Honeydew contract metadata from failing a run](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/104)
-- [#92 Add terminal research-run checkpoint retry](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/92)
-- [#100 Complete corrected Wine clustering run](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/100), blocked by #92
-
-## P1: Make Operation Observable And Faster
-
-- [#95 Expose structured research-run turn inspection](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/95)
-- [#94 Add Discord research run status and discovery commands](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/94)
-- [#93 Compact research-agent evidence prompts](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/93)
-- [#99 Add research runtime storage retention and cache cleanup](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/99)
-
-## P1: Validate General Research Tasks
-
+- [#154 Reassess ResearchOrchestrator responsibilities after Hermes migration](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/154)
+- [#92 Add terminal research-run checkpoint retry](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/92), implemented in #145 (draft)
 - [#98 Validate an arbitrary-dataset research workflow end to end](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/98)
+
+## P1: Research Validation And Operability
+
+- [#100 Complete corrected Wine clustering run](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/100), blocked by #92/#145
 - [#101 Complete Fashion-MNIST compatibility run](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/101)
-- [#96 Evaluate Hermes as a research-agent runtime adapter](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/96)
-
-## P2: Durability And Maintenance
-
-- [#97 Plan PostgreSQL migration for the research orchestrator](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/97)
-- [#102 Consolidate current docs and triage legacy issues](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/102)
+- [#93 Compact research-agent evidence prompts](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/93)
 
 ## Maintenance Rule
 

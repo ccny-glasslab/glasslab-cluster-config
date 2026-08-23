@@ -1162,6 +1162,8 @@ def test_imported_task_prompt_uses_exact_dataset_binding_names(
     assert '"adult_train": "/mnt/datasets/adult_train"' in implementation_prompt
     assert 'Run a loader-only smoke check' in implementation_prompt
     assert 'Do not run the full benchmark' in implementation_prompt
+    assert 'Do not install Python or system dependencies' in implementation_prompt
+    assert 'preselected runner image owns experiment dependencies' in implementation_prompt
     assert '`metrics.json` document root' in implementation_prompt
 
 
