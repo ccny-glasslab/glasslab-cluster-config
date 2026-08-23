@@ -518,7 +518,8 @@ def test_snapshot_truncation_note_growth_bounded(orchestrator_bundle) -> None:
         RunCreateRequest(objective='The truncation note itself stays bounded.')
     )
     # Many small artifacts under a tight cap force a large number of drops; the
-    # omitted-URI list must be summarized rather than growing without bound.
+    # omitted-reference list must be summarized rather than growing without
+    # bound.
     for index in range(40):
         _write_artifact(
             settings,
@@ -535,10 +536,50 @@ def test_snapshot_truncation_note_growth_bounded(orchestrator_bundle) -> None:
     assert evidence_byte_size(snapshot) <= 3000
     note = snapshot['truncation']
     assert note['omitted_count'] >= 1
-    assert len(note['omitted_uris']) <= 25
+    assert len(note['omitted_references']) <= 25
     assert note['omitted_more_count'] == note['omitted_count'] - len(
-        note['omitted_uris']
+        note['omitted_references']
     )
+
+
+def test_snapshot_truncation_mixed_job_and_artifact_references(
+    orchestrator_bundle,
+) -> None:
+    settings, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Truncation references are explicitly typed.')
+    )
+    # Two jobs plus two large artifacts under a tight cap: both job summaries
+    # and artifact content are trimmed. The note must carry explicit,
+    # unambiguous references (artifact://... and job://...) rather than mixing
+    # raw job ids into a field named for uris.
+    store.create_job_if_absent(_job_record(store, run.run_id, job_id='job-1'))
+    store.create_job_if_absent(_job_record(store, run.run_id, job_id='job-2'))
+    for index, pad in ((1, 3000), (2, 2500)):
+        content = json.dumps(
+            {'status': 'complete', 'pad': 'x' * pad}
+        ).encode()
+        _write_artifact(
+            settings,
+            store,
+            run.run_id,
+            type='status',
+            uri=f'artifacts/job-{index}/status.json',
+            content=content,
+        )
+    engine.settings.evidence_snapshot_max_bytes = 3000
+    engine.settings.evidence_excerpt_max_bytes = 1024 * 1024
+
+    snapshot = build_evidence_snapshot(settings, store, run.run_id)
+    assert evidence_byte_size(snapshot) <= 3000
+    note = snapshot['truncation']
+    references = note['omitted_references']
+    assert len(references) == len(set(references))
+    assert note['omitted_count'] == len(references)
+    assert any(ref.startswith('artifact://') for ref in references)
+    assert any(ref.startswith('job://') for ref in references)
+    for ref in references:
+        assert ref.startswith(('artifact://', 'job://'))
 
 
 def test_snapshot_dedupe_representative_removed_no_dangling(
@@ -692,11 +733,11 @@ def test_snapshot_truncation_counts_unique_artifact_uris(
     snapshot = build_evidence_snapshot(settings, store, run.run_id)
     assert evidence_byte_size(snapshot) <= 2000
     note = snapshot['truncation']
-    uris = note['omitted_uris']
-    assert len(uris) == len(set(uris))
-    assert note['omitted_count'] == len(set(uris))
-    for uri in uris:
-        assert uri.startswith('artifact://artifacts/job-')
+    references = note['omitted_references']
+    assert len(references) == len(set(references))
+    assert note['omitted_count'] == len(set(references))
+    for ref in references:
+        assert ref.startswith('artifact://artifacts/job-')
 
 
 def test_snapshot_phase_scoped_artifact_inventory(orchestrator_bundle) -> None:

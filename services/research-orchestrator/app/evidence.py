@@ -56,7 +56,7 @@ _TRUNCATION_NOTE = (
     'evidence snapshot exceeded evidence_snapshot_max_bytes; complete '
     'artifacts remain in the durable record'
 )
-_MAX_OMITTED_URIS = 25
+_MAX_OMITTED_REFERENCES = 25
 
 
 def serialize_evidence(snapshot: dict[str, Any]) -> str:
@@ -180,7 +180,7 @@ def _drop_candidates(
         )
     for entry in sorted(jobs, key=lambda e: str(e['job_id'])):
         candidates.append(
-            ('jobs', str(entry['job_id']), str(entry['job_id']))
+            ('jobs', str(entry['job_id']), f"job://{entry['job_id']}")
         )
     for filenames in (_PRIORITY_1_FILENAMES, _VERBATIM_FILENAMES):
         for entry in sorted(
@@ -196,11 +196,11 @@ def _drop_candidates(
 def _truncation_note(dropped: list[str]) -> dict[str, Any]:
     note: dict[str, Any] = {
         'note': _TRUNCATION_NOTE,
-        'omitted_uris': dropped[:_MAX_OMITTED_URIS],
+        'omitted_references': dropped[:_MAX_OMITTED_REFERENCES],
         'omitted_count': len(dropped),
     }
-    if len(dropped) > _MAX_OMITTED_URIS:
-        note['omitted_more_count'] = len(dropped) - _MAX_OMITTED_URIS
+    if len(dropped) > _MAX_OMITTED_REFERENCES:
+        note['omitted_more_count'] = len(dropped) - _MAX_OMITTED_REFERENCES
     return note
 
 
@@ -317,14 +317,14 @@ def build_evidence_snapshot(
         # summarizing the omitted-URI list until it fits.
         note = snapshot['truncation']
         while (
-            note['omitted_uris']
+            note['omitted_references']
             and evidence_byte_size(snapshot)
             > settings.evidence_snapshot_max_bytes
         ):
-            note['omitted_uris'] = note['omitted_uris'][: len(note['omitted_uris']) // 2]
-            if len(note['omitted_uris']) < note['omitted_count']:
+            note['omitted_references'] = note['omitted_references'][: len(note['omitted_references']) // 2]
+            if len(note['omitted_references']) < note['omitted_count']:
                 note['omitted_more_count'] = (
-                    note['omitted_count'] - len(note['omitted_uris'])
+                    note['omitted_count'] - len(note['omitted_references'])
                 )
         # Floor: with every list empty and the note reduced to its fixed text
         # plus a count, the serialized snapshot is ~251 bytes. Settings rejects
