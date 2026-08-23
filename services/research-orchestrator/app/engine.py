@@ -4185,6 +4185,7 @@ class ResearchOrchestrator:
                     'active_since': utc_now(),
                 },
             )
+            self.workspaces.seed_agent_context(run_id)
             self._materialize_objective_datasets(run_id)
             self._event(
                 run_id,

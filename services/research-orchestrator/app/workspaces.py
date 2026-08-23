@@ -93,6 +93,12 @@ class WorkspaceManager:
         'glob or `ls` through bash.\n'
     )
 
+    def seed_agent_context(self, run_id: str) -> None:
+        # Resume paths skip prepare(); existing worktrees still need the
+        # authoritative tool roster so retried sessions see it.
+        self._seed_tool_roster(self.paths(run_id).beaker)
+        self._seed_tool_roster(self.paths(run_id).honeydew)
+
     def _seed_tool_roster(self, workspace: Path) -> None:
         agents_md = workspace / 'AGENTS.md'
         if agents_md.is_file():
