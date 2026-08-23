@@ -16,7 +16,12 @@ from pathlib import Path
 
 import pytest
 
-from app.evidence import EvidencePhase, build_evidence_snapshot
+from app.evidence import (
+    EvidencePhase,
+    build_evidence_snapshot,
+    evidence_byte_size,
+    serialize_evidence,
+)
 from app.schemas import (
     ActionRecord,
     AgentName,
@@ -395,16 +400,13 @@ def test_snapshot_total_size_bounded_and_trim_note(orchestrator_bundle) -> None:
     )
 
     snapshot = engine._evidence_snapshot(run.run_id)
-    serialized = json.dumps(snapshot, sort_keys=True)
-    assert len(serialized) <= 4096
+    serialized = serialize_evidence(snapshot)
+    assert len(serialized.encode('utf-8')) <= 4096
     assert 'truncation' in snapshot
     assert 'artifact://artifacts/job-1/runner.log' in json.dumps(
         snapshot['truncation'], sort_keys=True
     )
-    assert (
-        json.dumps(engine._evidence_snapshot(run.run_id), sort_keys=True)
-        == serialized
-    )
+    assert serialize_evidence(engine._evidence_snapshot(run.run_id)) == serialized
 
 
 def test_snapshot_size_bound_includes_truncation_note(orchestrator_bundle) -> None:
@@ -435,9 +437,291 @@ def test_snapshot_size_bound_includes_truncation_note(orchestrator_bundle) -> No
     )
 
     snapshot = engine._evidence_snapshot(run.run_id)
-    assert len(json.dumps(snapshot, sort_keys=True)) <= 4096
+    assert evidence_byte_size(snapshot) <= 4096
     assert 'truncation' in snapshot
     assert snapshot['truncation']['omitted_count'] >= 1
+
+
+def test_snapshot_budget_bounds_production_prompt_serialization(
+    orchestrator_bundle,
+) -> None:
+    settings, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Bound the exact production prompt serialization.')
+    )
+    # Compact serialization fits under the cap; the indented production form
+    # (json.dumps(indent=2, sort_keys=True, ensure_ascii=False) as UTF-8 bytes)
+    # does not. The builder must trim against the production form, so the
+    # prompt the engine actually embeds stays under the configured cap.
+    compact_payload = {
+        'status': 'complete',
+        'pad': 'x' * 3550,
+    }
+    _write_artifact(
+        settings,
+        store,
+        run.run_id,
+        type='status',
+        uri='artifacts/job-1/status.json',
+        content=json.dumps(compact_payload).encode(),
+    )
+    engine.settings.evidence_snapshot_max_bytes = 4096
+    engine.settings.evidence_excerpt_max_bytes = 1024 * 1024
+
+    snapshot = build_evidence_snapshot(settings, store, run.run_id)
+    production = serialize_evidence(snapshot)
+    compact = json.dumps(snapshot, sort_keys=True)
+    assert len(production.encode('utf-8')) <= 4096
+    # The untrimmed content alone would exceed the cap in the production form;
+    # prove trimming was driven by the indented, byte-measured form.
+    untrimmed = build_evidence_snapshot(settings, store, run.run_id)
+    assert len(compact) < 4096
+    assert evidence_byte_size(untrimmed) <= 4096
+
+
+def test_snapshot_multibyte_utf8_measured_as_bytes(orchestrator_bundle) -> None:
+    settings, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Count UTF-8 bytes, not Python characters.')
+    )
+    # 800 CJK characters are 2400 raw UTF-8 bytes. The serialized snapshot must
+    # be bounded by its encoded byte length; a char-count budget would pass it.
+    _write_artifact(
+        settings,
+        store,
+        run.run_id,
+        type='runner_log',
+        uri='artifacts/job-1/runner.log',
+        content=('测' * 800).encode(),
+    )
+    engine.settings.evidence_snapshot_max_bytes = 1500
+    engine.settings.evidence_excerpt_max_bytes = 1024 * 1024
+
+    snapshot = build_evidence_snapshot(settings, store, run.run_id)
+    assert evidence_byte_size(snapshot) <= 1500
+    assert 'truncation' in snapshot
+    # The raw log (2400 bytes) cannot fit a 1500-byte cap; it must be dropped.
+    assert (
+        'artifact://artifacts/job-1/runner.log'
+        in json.dumps(snapshot['truncation'], sort_keys=True)
+    )
+    # Byte measurement, not char count: the serialized form carries raw UTF-8.
+    serialized = serialize_evidence(snapshot)
+    assert len(serialized.encode('utf-8')) == evidence_byte_size(snapshot)
+
+
+def test_snapshot_truncation_note_growth_bounded(orchestrator_bundle) -> None:
+    settings, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='The truncation note itself stays bounded.')
+    )
+    # Many small artifacts under a tight cap force a large number of drops; the
+    # omitted-URI list must be summarized rather than growing without bound.
+    for index in range(40):
+        _write_artifact(
+            settings,
+            store,
+            run.run_id,
+            type='runner_log',
+            uri=f'artifacts/job-{index}/runner.log',
+            content=f'log line {index}\n'.encode() * 50,
+        )
+    engine.settings.evidence_snapshot_max_bytes = 3000
+    engine.settings.evidence_excerpt_max_bytes = 1024 * 1024
+
+    snapshot = build_evidence_snapshot(settings, store, run.run_id)
+    assert evidence_byte_size(snapshot) <= 3000
+    note = snapshot['truncation']
+    assert note['omitted_count'] >= 1
+    assert len(note['omitted_uris']) <= 25
+    assert note['omitted_more_count'] == note['omitted_count'] - len(
+        note['omitted_uris']
+    )
+
+
+def test_snapshot_dedupe_representative_removed_no_dangling(
+    orchestrator_bundle,
+) -> None:
+    settings, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='No duplicate_of may point at missing content.')
+    )
+    # Two identical status.json in different jobs: the first is the content
+    # representative, the second is a duplicate_of reference. The shared
+    # content is padded so the full snapshot (4276 bytes) exceeds the cap while
+    # the duplicate alone (908 bytes) fits: a budget that drops the
+    # representative must not leave the dependent pointing at missing content.
+    shared = json.dumps({'status': 'complete', 'pad': 'x' * 3000}).encode()
+    for uri in ('artifacts/job-1/status.json', 'artifacts/job-2/status.json'):
+        _write_artifact(
+            settings,
+            store,
+            run.run_id,
+            type='status',
+            uri=uri,
+            content=shared,
+        )
+    engine.settings.evidence_snapshot_max_bytes = 3500
+    engine.settings.evidence_excerpt_max_bytes = 1024 * 1024
+
+    snapshot = build_evidence_snapshot(settings, store, run.run_id)
+    assert evidence_byte_size(snapshot) <= 3500
+    uris = {entry['uri'] for entry in snapshot['artifact_contents']}
+    for entry in snapshot['artifact_contents']:
+        if 'duplicate_of' in entry:
+            assert entry['duplicate_of'] in uris
+
+
+def test_snapshot_dedupe_and_trimming_together(orchestrator_bundle) -> None:
+    settings, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Deduplication and trimming compose safely.')
+    )
+    # The three status.json duplicates carry enough shared content that the
+    # budget must drop the representative (job-1) after the runner.logs are
+    # trimmed; dependents (job-2/job-3) must not dangle when it does.
+    shared = json.dumps({'status': 'complete', 'pad': 'x' * 3000}).encode()
+    for uri in (
+        'artifacts/job-1/status.json',
+        'artifacts/job-2/status.json',
+        'artifacts/job-3/status.json',
+    ):
+        _write_artifact(
+            settings,
+            store,
+            run.run_id,
+            type='status',
+            uri=uri,
+            content=shared,
+        )
+    for index in range(6):
+        _write_artifact(
+            settings,
+            store,
+            run.run_id,
+            type='runner_log',
+            uri=f'artifacts/job-{index}/runner.log',
+            content=f'log line {index}\n'.encode() * 60,
+        )
+    engine.settings.evidence_snapshot_max_bytes = 4000
+    engine.settings.evidence_excerpt_max_bytes = 1024 * 1024
+
+    first = build_evidence_snapshot(settings, store, run.run_id)
+    second = build_evidence_snapshot(settings, store, run.run_id)
+    assert first == second
+    assert evidence_byte_size(first) <= 4000
+    uris = {entry['uri'] for entry in first['artifact_contents']}
+    for entry in first['artifact_contents']:
+        if 'duplicate_of' in entry:
+            assert entry['duplicate_of'] in uris
+
+
+def test_snapshot_dedupe_same_uri_rows_do_not_crash(orchestrator_bundle) -> None:
+    settings, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Duplicate rows sharing a uri trim safely.')
+    )
+    # Two artifact rows with the same uri and same content (same sha256+type):
+    # the dedup dependent lookup must not match the representative itself and
+    # then crash on a second remove. The storage schema permits this state
+    # (no unique constraint on uri), even though the production recorder uses
+    # deterministic ids.
+    content = json.dumps({'status': 'complete', 'pad': 'x' * 3000}).encode()
+    path = Path(settings.shared_mount_root) / 'artifacts/job-1/status.json'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content)
+    digest = sha256(content).hexdigest()
+    for _ in range(2):
+        store.save_artifact(
+            ArtifactRecord(
+                run_id=run.run_id,
+                type='status',
+                uri='artifacts/job-1/status.json',
+                sha256=digest,
+            )
+        )
+    engine.settings.evidence_snapshot_max_bytes = 3500
+    engine.settings.evidence_excerpt_max_bytes = 1024 * 1024
+
+    snapshot = build_evidence_snapshot(settings, store, run.run_id)
+    assert evidence_byte_size(snapshot) <= 3500
+    uris = {entry['uri'] for entry in snapshot['artifact_contents']}
+    for entry in snapshot['artifact_contents']:
+        if 'duplicate_of' in entry:
+            assert entry['duplicate_of'] in uris
+
+
+def test_snapshot_size_bound_floor_keeps_truncation_explanation(
+    orchestrator_bundle,
+) -> None:
+    settings, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='A below-floor cap keeps the truncation note.')
+    )
+    _write_artifact(
+        settings,
+        store,
+        run.run_id,
+        type='runner_log',
+        uri='artifacts/job-1/runner.log',
+        content=b'log line\n' * 6000,
+    )
+    engine.settings.evidence_snapshot_max_bytes = 200
+    engine.settings.evidence_excerpt_max_bytes = 1024 * 1024
+
+    snapshot = build_evidence_snapshot(settings, store, run.run_id)
+    # The floor is the minimal empty skeleton plus the count-only note (~280
+    # bytes). The builder must not crash or delete the truncation explanation;
+    # it returns the minimal representation instead.
+    assert 'truncation' in snapshot
+    assert snapshot['truncation']['omitted_count'] >= 1
+    assert snapshot['truncation']['omitted_uris'] == []
+    assert evidence_byte_size(snapshot) <= 320
+
+
+def test_snapshot_phase_scoped_artifact_inventory(orchestrator_bundle) -> None:
+    settings, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Inventory metadata is phase-relevant too.')
+    )
+    artifacts = {
+        'runner.log': ('runner_log', b'log line\n'),
+        'status.json': ('status', b'{"status":"complete"}'),
+        'evaluation.json': ('evaluation', b'{"score":0.9}'),
+        'metrics.json': ('metrics', b'{"loss":0.1}'),
+        'metrics.csv': ('metrics_table', b'metric,value\nloss,0.1\n'),
+        'fairness.csv': ('fairness_table', b'group,accuracy\nA,0.75\n'),
+        'report.md': ('report', b'# Report\n'),
+    }
+    for name, (type_, content) in artifacts.items():
+        _write_artifact(
+            settings,
+            store,
+            run.run_id,
+            type=type_,
+            uri=f'artifacts/job-1/{name}',
+            content=content,
+        )
+
+    allowed = {
+        EvidencePhase.ANALYSIS: {
+            'runner.log', 'status.json', 'evaluation.json', 'metrics.json',
+            'metrics.csv', 'fairness.csv',
+        },
+        EvidencePhase.VERIFICATION: {
+            'status.json', 'evaluation.json', 'metrics.json', 'report.md',
+        },
+        EvidencePhase.REPORT: {'evaluation.json', 'metrics.json'},
+    }
+    for phase, filenames in allowed.items():
+        snapshot = build_evidence_snapshot(
+            settings, store, run.run_id, phase=phase
+        )
+        inventory_names = {
+            Path(str(entry['uri']).split('://', 1)[-1]).name
+            for entry in snapshot['artifacts']
+        }
+        assert inventory_names == filenames
 
 
 def test_snapshot_deterministic_across_calls(orchestrator_bundle) -> None:
