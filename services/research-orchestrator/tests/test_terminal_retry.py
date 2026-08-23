@@ -115,6 +115,30 @@ def test_terminal_retry_is_idempotent_and_recovery_is_safe(orchestrator_bundle):
     assert len(store.list_actions(first.run_id)) == action_count
 
 
+def test_retry_tolerates_orchestrator_seeded_workspace_files(orchestrator_bundle, monkeypatch):
+    """Legacy checkpoints predate orchestrator-seeded scaffolding files.
+
+    prepare() materializes AGENTS.md in every agent worktree. A parent that
+    ran before that scaffolding existed produces a manifest without it, while
+    every freshly prepared child contains it. The checkpoint must treat
+    orchestrator-managed scaffolding as reconstructed context, not evidence,
+    so the retry still verifies.
+    """
+    _, store, _, _, engine = orchestrator_bundle
+    parent = _terminal_parent(engine, store)
+    for worktree in (Path(parent.beaker_workspace), Path(parent.honeydew_workspace)):
+        agents = worktree / 'AGENTS.md'
+        if agents.exists():
+            agents.unlink()
+
+    child = engine.retry_terminal_run(parent.run_id, TerminalRetryRequest())
+
+    assert child.state == RunState.AWAITING_PROTOCOL_APPROVAL
+    assert [(a.type, a.approval_status) for a in store.list_actions(child.run_id)] == [
+        ('approve_protocol', ApprovalStatus.PENDING)
+    ]
+
+
 def _force_run_state(store, run_id: str, state: RunState) -> None:
     current = store.get_run(run_id)
     store.replace_run(current.model_copy(update={'state': state}), expected_version=current.version)
