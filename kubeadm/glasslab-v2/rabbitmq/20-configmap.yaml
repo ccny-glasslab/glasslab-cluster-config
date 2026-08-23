@@ -6,11 +6,13 @@ metadata:
   labels:
     app.kubernetes.io/name: glasslab-rabbitmq
 data:
-  # The management plugin provides the boot-time local-file definitions
-  # import backend. Its HTTP/UI listener is loopback-only below, so the
-  # management surface stays unreachable from the network.
+  # No plugins are enabled. Boot-time local-file definitions import is core
+  # RabbitMQ functionality (rabbit_definitions_import_local_filesystem ships
+  # in the rabbit application; verified against the pinned 4.3.5 image), so
+  # the management plugin is not installed and the management UI/API does not
+  # exist in the pod at all. Administration uses kubectl exec rabbitmqctl.
   enabled_plugins: |
-    [rabbitmq_management].
+    [].
   rabbitmq.conf: |
     # Glasslab task-fabric broker. Single node: persistent, not highly
     # available. See kubeadm/glasslab-v2/rabbitmq/README.md.
@@ -33,9 +35,5 @@ data:
     # "definitions.local.path".)
     definitions.import_backend = local_filesystem
     definitions.local.path = /etc/rabbitmq/rendered/definitions.json
-
-    # The management UI/API is loopback-only inside the pod. Operators use
-    # kubectl exec rabbitmqctl or a port-forward for administration.
-    management.tcp.ip = 127.0.0.1
 
     log.console.level = info

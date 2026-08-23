@@ -94,6 +94,11 @@ spec:
               command: ["rabbitmq-diagnostics", "-q", "ping"]
             periodSeconds: 5
             failureThreshold: 60
+          lifecycle:
+            postStart:
+              exec:
+                # Fails the container on topology drift; see verify-topology.sh.
+                command: ["/bin/sh", "/etc/rabbitmq/glasslab-verify/verify-topology.sh"]
           resources:
             requests:
               cpu: 250m
@@ -114,6 +119,9 @@ spec:
               readOnly: true
             - name: rendered
               mountPath: /etc/rabbitmq/rendered
+              readOnly: true
+            - name: topology
+              mountPath: /etc/rabbitmq/glasslab-verify
               readOnly: true
       volumes:
         - name: rabbitmq-data

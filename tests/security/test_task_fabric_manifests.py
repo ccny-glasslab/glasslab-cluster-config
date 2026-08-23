@@ -127,18 +127,38 @@ class RabbitMQExposureTests(unittest.TestCase):
         self.assertEqual(ports, [(5672, "amqp")])
         self.assertNotIn("ingress", service["metadata"].get("annotations", {}))
 
-    def test_management_ui_is_loopback_only_and_not_exposed(self):
+    def test_management_ui_is_not_exposed(self):
+        # The management plugin is not enabled at all, so no UI/API listener
+        # exists; the Service and NetworkPolicy must not open one either.
         conf = config_file("rabbitmq.conf")
-        self.assertRegex(conf, r"(?m)^management\.tcp\.ip\s*=\s*127\.0\.0\.1\s*$")
+        self.assertNotRegex(conf, r"(?m)^management\.tcp\.port\b")
+        policy = documents(RABBITMQ_DIR / "50-network-policy.yaml")[0]
+        policy_ports = [item["port"] for item in policy["spec"]["ingress"][0]["ports"]]
+        self.assertNotIn(15672, policy_ports)
+
+    def test_no_plugins_are_enabled(self):
+        configmap = by_kind(RABBITMQ_DIR / "20-configmap.yaml", "ConfigMap")
+        enabled = configmap["data"]["enabled_plugins"].strip()
+        self.assertEqual(enabled, "[].")
+        self.assertNotIn("rabbitmq_management", enabled)
+
+    def test_management_surface_is_absent_from_configuration(self):
+        conf = config_file("rabbitmq.conf")
+        self.assertNotIn("management.", conf)
         service = by_kind(RABBITMQ_DIR / "40-service.yaml", "Service")
         service_ports = [item["port"] for item in service["spec"]["ports"]]
         self.assertNotIn(15672, service_ports)
 
-    def test_management_plugin_enabled_for_definitions_import(self):
-        configmap = by_kind(RABBITMQ_DIR / "20-configmap.yaml", "ConfigMap")
-        enabled = configmap["data"]["enabled_plugins"]
-        self.assertIn("rabbitmq_management", enabled)
-        self.assertNotIn("rabbitmq_prometheus", enabled)
+    def test_post_start_verification_is_wired_into_the_broker_container(self):
+        rabbitmq = containers()["rabbitmq"]
+        hook = rabbitmq["lifecycle"]["postStart"]["exec"]["command"]
+        self.assertIn("/etc/rabbitmq/glasslab-verify/verify-topology.sh", " ".join(hook))
+        mounts = {item["mountPath"] for item in rabbitmq["volumeMounts"]}
+        self.assertIn("/etc/rabbitmq/glasslab-verify", mounts)
+        topology = by_kind(RABBITMQ_DIR / "30-topology.yaml", "ConfigMap")
+        self.assertIn("verify-topology.sh", topology["data"])
+        self.assertIn("verify.eval", topology["data"])
+        self.assertIn("topology_drift", topology["data"]["verify.eval"])
 
     def test_network_policy_limits_ingress_to_named_app_clients_over_amqp(self):
         policy = documents(RABBITMQ_DIR / "50-network-policy.yaml")[0]

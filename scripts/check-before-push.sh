@@ -112,6 +112,13 @@ print('All Python files compiled successfully.')
 PY
 }
 
+run_task_fabric_broker_tests() {
+  printf '[check-before-push] running task-fabric broker runtime tests\n'
+  # Skips cleanly when Docker is unavailable; exercises the pinned RabbitMQ
+  # image with the tracked manifests (import, drift, rotation, persistence).
+  pytest -q tests/integration
+}
+
 run_workflow_api_tests() {
   printf '[check-before-push] running core service tests\n'
   (
@@ -172,6 +179,7 @@ case "$MODE" in
     run_docs
     run_shell
     run_python_syntax
+    run_task_fabric_broker_tests
     run_workflow_api_tests
     ;;
   docs)

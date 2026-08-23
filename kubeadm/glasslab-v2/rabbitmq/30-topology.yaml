@@ -128,6 +128,97 @@ data:
         {"source": "glasslab.workflow.execution.dlx", "vhost": "glasslab", "destination": "glasslab.workflow.execution.dlq", "destination_type": "queue", "routing_key": "#", "arguments": {}}
       ]
     }
+  # Post-start verification script. Exports the live definitions and compares
+  # them against the rendered expected topology (verify.eval). A non-zero exit
+  # fails the postStart hook, which kills the container: drift surfaces as a
+  # CrashLoopBackOff and the rollout stops instead of continuing silently.
+  verify-topology.sh: |
+    #!/bin/sh
+    set -eu
+    i=0
+    # check_running waits for the rabbit application itself (definitions
+    # import included); plain ping succeeds earlier, during Erlang boot.
+    until rabbitmq-diagnostics -q check_running >/dev/null 2>&1; do
+        i=$((i+1))
+        if [ "$i" -ge 90 ]; then
+            echo "topology verify: broker did not become ready" >&2
+            exit 1
+        fi
+        sleep 2
+    done
+    rabbitmqctl export_definitions /tmp/glasslab-live-definitions.json >/dev/null
+    rabbitmqctl eval "$(cat /etc/rabbitmq/glasslab-verify/verify.eval)"
+
+  # Deterministic topology conformance check, evaluated inside the broker via
+  # `rabbitmqctl eval`. Compares the live exported definitions against the
+  # rendered expected file: vhost, glasslab/topology-version global parameter,
+  # queues (durable/auto_delete plus exact declared arguments), exchanges
+  # (type/durable/auto_delete/internal), bindings, per-user permissions, and
+  # user existence. Any mismatch raises, giving rabbitmqctl a non-zero exit.
+  # Password hashes are deliberately not compared; rotation is handled by
+  # re-import (see README.md).
+  verify.eval: |
+    begin
+        {ok, ExpBin} = file:read_file("/etc/rabbitmq/rendered/definitions.json"),
+        Expected = json:decode(ExpBin),
+        {ok, LiveBin} = file:read_file("/tmp/glasslab-live-definitions.json"),
+        Live = json:decode(LiveBin),
+        Vhost = <<"glasslab">>,
+        LiveVhosts = [maps:get(<<"name">>, V) || V <- maps:get(<<"vhosts">>, Live, [])],
+        VhostDrift = case lists:member(Vhost, LiveVhosts) of
+            true -> [];
+            false -> [{missing_vhost, Vhost}]
+        end,
+        WantVersion = 1,
+        LiveVersions = [Value || Entry <- maps:get(<<"global_parameters">>, Live, []), is_map(Entry), maps:get(<<"name">>, Entry) =:= <<"glasslab/topology-version">>, Value <- [maps:get(<<"value">>, Entry)]],
+        VersionDrift = case LiveVersions of
+            [WantVersion] -> [];
+            Other -> [{version, expected, WantVersion, live, Other}]
+        end,
+        ByName = fun(Section) -> maps:from_list([{maps:get(<<"name">>, E), E} || E <- maps:get(Section, Live, []), maps:get(<<"vhost">>, E, none) =:= Vhost]) end,
+        ArgsDrift = fun(W, L) ->
+            WA = maps:get(<<"arguments">>, W, #{}),
+            LA = maps:get(<<"arguments">>, L, #{}),
+            [K || K <- maps:keys(WA), maps:get(K, LA, unmatched) =/= maps:get(K, WA)]
+        end,
+        Bool = fun(M, K) -> maps:get(K, M, false) end,
+        EntityDrift = fun(Kind, Section, Fields, CompareType) ->
+            Have = ByName(Section),
+            lists:append([case maps:find(maps:get(<<"name">>, W), Have) of
+                error -> [{Kind, maps:get(<<"name">>, W), missing}];
+                {ok, L} ->
+                    Name = maps:get(<<"name">>, W),
+                    FieldIssues = [{Kind, Name, F, expected, Bool(W, F), live, Bool(L, F)} || F <- Fields, Bool(W, F) =/= Bool(L, F)],
+                    ArgIssues = case ArgsDrift(W, L) of
+                        [] -> [];
+                        BadKeys -> [{Kind, Name, args_mismatch, BadKeys}]
+                    end,
+                    TypeIssues = case CompareType of
+                        false -> [];
+                        true -> case maps:get(<<"type">>, W, none) =:= maps:get(<<"type">>, L, none) of
+                            true -> [];
+                            false -> [{Kind, Name, type, expected, maps:get(<<"type">>, W, none), live, maps:get(<<"type">>, L, none)}]
+                        end
+                    end,
+                    FieldIssues ++ ArgIssues ++ TypeIssues
+            end || W <- maps:get(Section, Expected, [])])
+        end,
+        QueueDrift = EntityDrift(queue, <<"queues">>, [<<"durable">>, <<"auto_delete">>], false),
+        ExchangeDrift = EntityDrift(exchange, <<"exchanges">>, [<<"durable">>, <<"auto_delete">>, <<"internal">>], true),
+        BindingKey = fun(B) -> {maps:get(<<"source">>, B), maps:get(<<"destination">>, B), maps:get(<<"routing_key">>, B)} end,
+        LiveBindingKeys = [BindingKey(B) || B <- maps:get(<<"bindings">>, Live, []), maps:get(<<"vhost">>, B, none) =:= Vhost, maps:get(<<"destination_type">>, B, none) =:= <<"queue">>],
+        BindingDrift = [{binding, BindingKey(B), missing} || B <- maps:get(<<"bindings">>, Expected, []), not lists:member(BindingKey(B), LiveBindingKeys)],
+        PermKey = fun(P) -> {maps:get(<<"user">>, P), maps:get(<<"configure">>, P), maps:get(<<"write">>, P), maps:get(<<"read">>, P)} end,
+        LivePermKeys = [PermKey(P) || P <- maps:get(<<"permissions">>, Live, []), maps:get(<<"vhost">>, P, none) =:= Vhost],
+        PermDrift = [{permission, maps:get(<<"user">>, P), missing_or_changed} || P <- maps:get(<<"permissions">>, Expected, []), not lists:member(PermKey(P), LivePermKeys)],
+        LiveUserNames = [maps:get(<<"name">>, U) || U <- maps:get(<<"users">>, Live, [])],
+        UserDrift = [{user, maps:get(<<"name">>, U), missing} || U <- maps:get(<<"users">>, Expected, []), not lists:member(maps:get(<<"name">>, U), LiveUserNames)],
+        Drift = VhostDrift ++ VersionDrift ++ QueueDrift ++ ExchangeDrift ++ BindingDrift ++ PermDrift ++ UserDrift,
+        case Drift of
+            [] -> io:format("topology verified (glasslab/topology-version=~p)~n", [WantVersion]), ok;
+            _ -> erlang:error({topology_drift, Drift})
+        end
+    end.
   render.py: |
     """Render broker definitions from the versioned template and SOPS-managed
     credentials. Fails closed: any unresolved placeholder aborts the pod before
