@@ -151,10 +151,13 @@ data:
 
   # Deterministic topology conformance check, evaluated inside the broker via
   # `rabbitmqctl eval`. Compares the live exported definitions against the
-  # rendered expected file: vhost, glasslab/topology-version global parameter,
-  # queues (durable/auto_delete plus exact declared arguments), exchanges
-  # (type/durable/auto_delete/internal), bindings, per-user permissions, and
-  # user existence. Any mismatch raises, giving rabbitmqctl a non-zero exit.
+  # rendered expected file: vhost, glasslab/topology-version global parameter
+  # (derived from the rendered file, never hard-coded), queues and exchanges
+  # (flags plus EXACT argument-map equality in both directions — an expected
+  # entity may not carry undeclared live arguments), bindings (including
+  # destination type and arguments), per-user permissions, and user existence.
+  # Extra live entities that are absent from the expected file are tolerated
+  # so old-versioned entities can drain; anything expected must match exactly.
   # Password hashes are deliberately not compared; rotation is handled by
   # re-import (see README.md).
   verify.eval: |
@@ -169,17 +172,26 @@ data:
             true -> [];
             false -> [{missing_vhost, Vhost}]
         end,
-        WantVersion = 1,
+        ExpectedVersions = [Value || Entry <- maps:get(<<"global_parameters">>, Expected, []), is_map(Entry), maps:get(<<"name">>, Entry) =:= <<"glasslab/topology-version">>, Value <- [maps:get(<<"value">>, Entry)]],
+        WantVersion = case ExpectedVersions of
+            [V] when is_integer(V) -> V;
+            BadExpected -> erlang:error({invalid_expected_version, BadExpected})
+        end,
         LiveVersions = [Value || Entry <- maps:get(<<"global_parameters">>, Live, []), is_map(Entry), maps:get(<<"name">>, Entry) =:= <<"glasslab/topology-version">>, Value <- [maps:get(<<"value">>, Entry)]],
         VersionDrift = case LiveVersions of
             [WantVersion] -> [];
-            Other -> [{version, expected, WantVersion, live, Other}]
+            LiveOther -> [{version, expected, WantVersion, live, LiveOther}]
         end,
         ByName = fun(Section) -> maps:from_list([{maps:get(<<"name">>, E), E} || E <- maps:get(Section, Live, []), maps:get(<<"vhost">>, E, none) =:= Vhost]) end,
         ArgsDrift = fun(W, L) ->
             WA = maps:get(<<"arguments">>, W, #{}),
             LA = maps:get(<<"arguments">>, L, #{}),
-            [K || K <- maps:keys(WA), maps:get(K, LA, unmatched) =/= maps:get(K, WA)]
+            lists:append([
+                case maps:get(K, LA, unmatched) of
+                    WV -> [];
+                    LiveValue -> [{arg_mismatch, K, expected, WV, live, LiveValue}]
+                end || {K, WV} <- maps:to_list(WA)
+            ]) ++ [{extra_arg, K} || K <- maps:keys(LA), not maps:is_key(K, WA)]
         end,
         Bool = fun(M, K) -> maps:get(K, M, false) end,
         EntityDrift = fun(Kind, Section, Fields, CompareType) ->
@@ -191,7 +203,7 @@ data:
                     FieldIssues = [{Kind, Name, F, expected, Bool(W, F), live, Bool(L, F)} || F <- Fields, Bool(W, F) =/= Bool(L, F)],
                     ArgIssues = case ArgsDrift(W, L) of
                         [] -> [];
-                        BadKeys -> [{Kind, Name, args_mismatch, BadKeys}]
+                        BadArgs -> [{Kind, Name, args_mismatch, BadArgs}]
                     end,
                     TypeIssues = case CompareType of
                         false -> [];
@@ -205,9 +217,11 @@ data:
         end,
         QueueDrift = EntityDrift(queue, <<"queues">>, [<<"durable">>, <<"auto_delete">>], false),
         ExchangeDrift = EntityDrift(exchange, <<"exchanges">>, [<<"durable">>, <<"auto_delete">>, <<"internal">>], true),
-        BindingKey = fun(B) -> {maps:get(<<"source">>, B), maps:get(<<"destination">>, B), maps:get(<<"routing_key">>, B)} end,
-        LiveBindingKeys = [BindingKey(B) || B <- maps:get(<<"bindings">>, Live, []), maps:get(<<"vhost">>, B, none) =:= Vhost, maps:get(<<"destination_type">>, B, none) =:= <<"queue">>],
-        BindingDrift = [{binding, BindingKey(B), missing} || B <- maps:get(<<"bindings">>, Expected, []), not lists:member(BindingKey(B), LiveBindingKeys)],
+        BindingKey = fun(B) ->
+            {maps:get(<<"source">>, B), maps:get(<<"destination">>, B), maps:get(<<"routing_key">>, B), maps:get(<<"destination_type">>, B, none), maps:get(<<"arguments">>, B, #{})}
+        end,
+        LiveBindingKeys = [BindingKey(B) || B <- maps:get(<<"bindings">>, Live, []), maps:get(<<"vhost">>, B, none) =:= Vhost],
+        BindingDrift = [{binding, element(1, BindingKey(B)), element(2, BindingKey(B)), missing_or_changed} || B <- maps:get(<<"bindings">>, Expected, []), not lists:member(BindingKey(B), LiveBindingKeys)],
         PermKey = fun(P) -> {maps:get(<<"user">>, P), maps:get(<<"configure">>, P), maps:get(<<"write">>, P), maps:get(<<"read">>, P)} end,
         LivePermKeys = [PermKey(P) || P <- maps:get(<<"permissions">>, Live, []), maps:get(<<"vhost">>, P, none) =:= Vhost],
         PermDrift = [{permission, maps:get(<<"user">>, P), missing_or_changed} || P <- maps:get(<<"permissions">>, Expected, []), not lists:member(PermKey(P), LivePermKeys)],

@@ -159,6 +159,14 @@ class RabbitMQExposureTests(unittest.TestCase):
         self.assertIn("verify-topology.sh", topology["data"])
         self.assertIn("verify.eval", topology["data"])
         self.assertIn("topology_drift", topology["data"]["verify.eval"])
+        # The expected version must come from the rendered definitions file,
+        # never a hard-coded literal that would silently accept stale brokers.
+        self.assertNotRegex(topology["data"]["verify.eval"], r"WantVersion\s*=\s*\d")
+
+    def test_topology_argument_conformance_is_exact_in_both_directions(self):
+        verify = by_kind(RABBITMQ_DIR / "30-topology.yaml", "ConfigMap")["data"]["verify.eval"]
+        self.assertIn("extra_arg", verify)
+        self.assertIn("destination_type", verify)
 
     def test_network_policy_limits_ingress_to_named_app_clients_over_amqp(self):
         policy = documents(RABBITMQ_DIR / "50-network-policy.yaml")[0]
@@ -325,6 +333,19 @@ class RabbitMQRolloutTests(unittest.TestCase):
         ):
             self.assertIn(f"rabbitmq/{manifest}", self.rollout)
         self.assertIn("statefulset/glasslab-rabbitmq", self.rollout)
+
+    def test_rollout_forces_new_pod_before_waiting_for_status(self):
+        # ConfigMap changes do not roll a StatefulSet and subPath mounts never
+        # receive live updates; without an explicit restart the old broker
+        # keeps running stale config/topology while rollout status passes.
+        function_body = self.rollout[self.rollout.index("rollout_rabbitmq()") :]
+        function_body = function_body[: function_body.index("\n}")]
+        self.assertIn("rollout restart \\\n    statefulset/glasslab-rabbitmq", function_body)
+        restart_position = function_body.index("rollout restart")
+        status_position = function_body.index("rollout status")
+        apply_position = function_body.index("60-statefulset.yaml")
+        self.assertLess(apply_position, restart_position)
+        self.assertLess(restart_position, status_position)
 
     def test_default_rollout_bundle_does_not_include_the_broker(self):
         bundle = self.rollout[

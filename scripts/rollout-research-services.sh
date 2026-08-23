@@ -136,6 +136,12 @@ rollout_rabbitmq() {
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/rabbitmq/40-service.yaml"
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/rabbitmq/50-network-policy.yaml"
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/rabbitmq/60-statefulset.yaml"
+  # ConfigMap changes do not roll a StatefulSet, and rabbitmq.conf /
+  # enabled_plugins are subPath mounts that never receive live updates. The
+  # init renderer and postStart verifier only run in a fresh pod, so every
+  # intentional rollout forces a new pod before waiting for status.
+  "$KUBECTL" -n "$NAMESPACE" rollout restart \
+    statefulset/glasslab-rabbitmq
   "$KUBECTL" -n "$NAMESPACE" rollout status \
     statefulset/glasslab-rabbitmq --timeout=300s
 }

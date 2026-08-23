@@ -306,6 +306,81 @@ class BrokerRuntimeTests(unittest.TestCase):
 
         self._assert_expected_topology("tf-rt-e")
 
+    def test_f_version_is_derived_from_rendered_file_and_old_entities_drain(self):
+        name = "tf-rt-f"
+        self._boot_new_broker(name, "f-rendered", PASSWORDS_A)
+        self._mount_verify_assets(name)
+
+        # Baseline: v1 expected vs v1 live verifies cleanly.
+        baseline = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertEqual(baseline.returncode, 0, baseline.stdout + baseline.stderr)
+
+        # Build a v2 topology file: version bumped, one new queue added, one
+        # old queue (plus its binding) retired so it can drain.
+        template = json.loads((self.workdir / "definitions.template.json").read_text())
+        for entry in template["global_parameters"]:
+            if entry["name"] == "glasslab/topology-version":
+                entry["value"] = 2
+        retired_queue = "glasslab.orchestrator.control.retry"
+        template["queues"] = [q for q in template["queues"] if q["name"] != retired_queue]
+        template["bindings"] = [
+            b for b in template["bindings"] if b.get("destination") != retired_queue
+        ]
+        new_queue = {
+            "name": "glasslab.orchestrator.control.v2",
+            "vhost": "glasslab",
+            "durable": True,
+            "auto_delete": False,
+            "arguments": {
+                "x-queue-type": "quorum",
+                "x-max-length": 10000,
+                "x-max-length-bytes": 536870912,
+                "x-overflow": "reject-publish",
+                "x-dead-letter-exchange": "glasslab.orchestrator.control.dlx",
+            },
+        }
+        template["queues"].append(new_queue)
+        template["bindings"].append({
+            "source": "glasslab.orchestrator.control",
+            "vhost": "glasslab",
+            "destination": new_queue["name"],
+            "destination_type": "queue",
+            "routing_key": "v2",
+            "arguments": {},
+        })
+        (self.workdir / "definitions.template.json").write_text(json.dumps(template, indent=2))
+
+        # Re-render with the v2 template; the running broker is still v1.
+        rendered, _ = self._render("f-rendered", PASSWORDS_A)
+        pre_restart = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertNotEqual(
+            pre_restart.returncode,
+            0,
+            "verifier must fail while live broker is still on version 1 — "
+            "this proves the expected version is derived from the rendered "
+            "file rather than hard-coded",
+        )
+
+        # Roll the broker: import applies the v2 parameter and creates the
+        # new queue; the retired queue keeps draining as a tolerated extra.
+        restarted = run(["docker", "restart", name])
+        self.assertEqual(restarted.returncode, 0)
+        self.assertTrue(self._wait_ping(name))
+
+        post = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertEqual(post.returncode, 0, post.stdout + post.stderr)
+
+        live = self._live_definitions(name)
+        versions = [
+            entry["value"]
+            for entry in live["global_parameters"]
+            if entry["name"] == "glasslab/topology-version"
+        ]
+        self.assertEqual(versions, [2], "boot re-import must update the topology-version parameter")
+        queue_names = {q["name"] for q in live["queues"] if q.get("vhost") == "glasslab"}
+        self.assertIn(new_queue["name"], queue_names)
+        self.assertIn(retired_queue, queue_names, "retired entity must be tolerated while draining")
+
 
 if __name__ == "__main__":
     unittest.main()

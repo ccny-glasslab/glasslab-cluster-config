@@ -76,17 +76,21 @@ Because merge semantics can hide divergence between Git and the running
 broker, every broker start runs a conformance check
 (`verify-topology.sh` via a postStart hook): it exports the live definitions
 and compares them against the rendered expected file — vhost, topology
-version, queues (flags plus exact declared arguments), exchanges (type and
-flags), bindings, per-user permissions, and user existence. Any mismatch
-raises and gives the hook a non-zero exit, which kills the container: drift
-surfaces as a CrashLoopBackOff and `rollout-research-services.sh` stops at
+version (derived from the rendered file, never hard-coded), queues and
+exchanges with **exact argument-map equality in both directions** (an
+expected entity must not carry undeclared live arguments), bindings
+including destination type and arguments, per-user permissions, and user
+existence. Extra live entities that are absent from the expected file are
+tolerated so old-versioned entities can drain. Any mismatch raises and gives
+the hook a non-zero exit, which kills the container: drift surfaces as a
+CrashLoopBackOff and `rollout-research-services.sh` stops at
 `rollout status` instead of continuing silently.
 
 Incompatible topology changes MUST therefore introduce new entity names
-together with a `glasslab/topology-version` bump; old queues drain naturally
-before retirement. Compatible additions may extend the current version in
-place. Password hashes are deliberately excluded from this comparison — see
-rotation below.
+together with a `glasslab/topology-version` bump; retired entities keep
+draining as tolerated extras until an operator removes them. Compatible
+additions may extend the current version in place. Password hashes are
+deliberately excluded from this comparison — see rotation below.
 
 ## Identities and credential rotation
 
@@ -152,5 +156,9 @@ Rollout uses the tracked script target:
 ```
 
 The script requires the `glasslab-v2-rabbitmq` secret and the
-`glasslab-rabbitmq-data` PVC to exist before applying anything. The default
-`all` bundle does not touch the broker.
+`glasslab-rabbitmq-data` PVC to exist before applying anything. It then
+explicitly runs `kubectl rollout restart statefulset/glasslab-rabbitmq`
+before waiting for status: ConfigMap changes do not roll a StatefulSet and
+the config/verifier mounts are subPath or read-only, so without the forced
+restart the old pod would keep running stale config and topology while
+status reported success. The default `all` bundle does not touch the broker.
