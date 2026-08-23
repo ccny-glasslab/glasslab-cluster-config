@@ -389,15 +389,23 @@ class SqliteStore:
         self, record: RunRecord, *, parent_run_id: str, retry_key: str,
         checkpoint_digest: str, one_active_run: bool,
     ) -> tuple[RunRecord, bool]:
-        """Atomically reserve the one permitted child for a terminal parent."""
+        """Atomically point the parent's retry slot at its newest child."""
         terminal = tuple(state.value for state in TERMINAL_STATES)
         placeholders = ','.join('?' for _ in terminal)
         with self.transaction() as connection:
             existing = connection.execute(
-                'SELECT child_run_id FROM terminal_run_retries WHERE parent_run_id = ?',
+                '''SELECT terminal_run_retries.child_run_id AS child_run_id,
+                          terminal_run_retries.retry_key AS retry_key,
+                          runs.state AS child_state
+                     FROM terminal_run_retries
+                     JOIN runs ON runs.run_id = terminal_run_retries.child_run_id
+                    WHERE terminal_run_retries.parent_run_id = ?''',
                 (parent_run_id,),
             ).fetchone()
-            if existing is not None:
+            if existing is not None and (
+                existing['child_state'] not in terminal
+                or existing['retry_key'] == retry_key
+            ):
                 return self.get_run(str(existing['child_run_id'])), False
             parent = connection.execute(
                 'SELECT state FROM runs WHERE run_id = ?', (parent_run_id,)
@@ -417,10 +425,30 @@ class SqliteStore:
                 'INSERT INTO runs (run_id, state, version, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
                 (record.run_id, record.state.value, record.version, _dump(record), record.created_at.isoformat(), record.updated_at.isoformat()),
             )
-            connection.execute(
-                'INSERT INTO terminal_run_retries (parent_run_id, child_run_id, retry_key, checkpoint_digest, created_at) VALUES (?, ?, ?, ?, ?)',
-                (parent_run_id, record.run_id, retry_key, checkpoint_digest, record.created_at.isoformat()),
-            )
+            if existing is None:
+                connection.execute(
+                    'INSERT INTO terminal_run_retries (parent_run_id, child_run_id, retry_key, checkpoint_digest, created_at) VALUES (?, ?, ?, ?, ?)',
+                    (parent_run_id, record.run_id, retry_key, checkpoint_digest, record.created_at.isoformat()),
+                )
+            else:
+                connection.execute(
+                    '''UPDATE terminal_run_retries
+                          SET child_run_id = ?, retry_key = ?, checkpoint_digest = ?, created_at = ?
+                        WHERE parent_run_id = ?''',
+                    (record.run_id, retry_key, checkpoint_digest, record.created_at.isoformat(), parent_run_id),
+                )
+                superseded_payload = {
+                    'parent_run_id': parent_run_id,
+                    'child_run_id': str(existing['child_run_id']),
+                    'superseded_by': record.run_id,
+                }
+                self._append_event_conn(
+                    connection,
+                    run_id=str(existing['child_run_id']),
+                    source='orchestrator',
+                    event_type='run.retry_superseded',
+                    payload=superseded_payload,
+                )
             payload = {'parent_run_id': parent_run_id, 'child_run_id': record.run_id, 'checkpoint_digest': checkpoint_digest}
             self._append_event_conn(connection, run_id=parent_run_id, source='orchestrator', event_type='run.retry_created', payload=payload)
             self._append_event_conn(connection, run_id=record.run_id, source='orchestrator', event_type='run.created', payload={'objective': record.objective, 'state': record.state.value, 'parent_run_id': parent_run_id})
