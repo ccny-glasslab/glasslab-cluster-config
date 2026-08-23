@@ -26,6 +26,21 @@ spec:
             - configMapRef:
                 name: glasslab-v2-workflow-api-config
           env:
+            - name: GLASSLAB_WORKFLOW_API_RESEARCH_COMMAND_ROUTER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-workflow-api-research-command-router
+                  key: token
+            - name: GLASSLAB_WORKFLOW_API_SCHEDULE_WORKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-workflow-api-schedule-worker
+                  key: token
+            - name: GLASSLAB_WORKFLOW_API_RESEARCH_ORCHESTRATOR_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-workflow-api-research-orchestrator
+                  key: token
             - name: GLASSLAB_WORKFLOW_API_STORE_POSTGRES_DSN
               valueFrom:
                 secretKeyRef:
