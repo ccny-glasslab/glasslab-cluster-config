@@ -26,7 +26,8 @@ from app.registry import WorkflowRegistry
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-MUTATION_METHODS = frozenset({'POST', 'PUT', 'PATCH', 'DELETE'})
+PROTECTED_METHODS = frozenset({'GET', 'POST', 'PUT', 'PATCH', 'DELETE'})
+ANONYMOUS_OPERATIONS = frozenset({'GET /healthz'})
 def build_app():
     settings = Settings(
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
@@ -39,13 +40,14 @@ def build_app():
     )
 
 
-def mutation_routes() -> list[tuple[str, str]]:
+def protected_routes() -> list[tuple[str, str]]:
     app = build_app()
     return [
         (method, route.path_format)
         for route in app.routes
         if isinstance(route, APIRoute)
-        for method in sorted(route.methods & MUTATION_METHODS)
+        for method in sorted(route.methods & PROTECTED_METHODS)
+        if f'{method} {route.path_format}' not in ANONYMOUS_OPERATIONS
     ]
 
 
@@ -53,7 +55,7 @@ def request_path(path_template: str) -> str:
     return re.sub(r'\{[^}]+\}', 'test-id', path_template)
 
 
-MUTATION_ROUTES = mutation_routes()
+PROTECTED_ROUTES = protected_routes()
 
 
 @pytest.fixture(scope='module')
@@ -66,7 +68,7 @@ def client() -> TestClient:
                 'token': 'authorized-token',
                 'allowed_operations': [
                     f'{method} {path_template}'
-                    for method, path_template in MUTATION_ROUTES
+                    for method, path_template in PROTECTED_ROUTES
                 ],
             },
             {
@@ -88,7 +90,7 @@ def client() -> TestClient:
 
 @pytest.mark.parametrize(
     ('method', 'path_template'),
-    MUTATION_ROUTES,
+    PROTECTED_ROUTES,
     ids=lambda value: value.replace('/', '_') if isinstance(value, str) else value,
 )
 @pytest.mark.parametrize(
@@ -121,7 +123,7 @@ def test_each_mutation_rejects_missing_or_invalid_credentials(
 
 @pytest.mark.parametrize(
     ('method', 'path_template'),
-    MUTATION_ROUTES,
+    PROTECTED_ROUTES,
     ids=lambda value: value.replace('/', '_') if isinstance(value, str) else value,
 )
 def test_each_mutation_rejects_authenticated_caller_without_operation_permission(
@@ -145,7 +147,7 @@ def test_each_mutation_rejects_authenticated_caller_without_operation_permission
 
 @pytest.mark.parametrize(
     ('method', 'path_template'),
-    MUTATION_ROUTES,
+    PROTECTED_ROUTES,
     ids=lambda value: value.replace('/', '_') if isinstance(value, str) else value,
 )
 def test_each_mutation_reaches_its_existing_response_for_an_authorized_caller(
@@ -171,3 +173,16 @@ def test_healthz_remains_available_without_caller_credentials(client: TestClient
     response = client.get('/healthz')
 
     assert response.status_code == 200
+
+
+def test_caller_policy_rejects_whitespace_token() -> None:
+    with pytest.raises(ValueError, match='token must not be empty'):
+        Settings(caller_policies=[{'name': 'caller', 'token': '   ', 'allowed_operations': []}])
+
+
+def test_settings_reject_duplicate_caller_tokens() -> None:
+    with pytest.raises(ValueError, match='tokens must be unique'):
+        Settings(caller_policies=[
+            {'name': 'reader', 'token': 'shared', 'allowed_operations': ['GET /runs']},
+            {'name': 'writer', 'token': 'shared', 'allowed_operations': ['POST /datasets']},
+        ])

@@ -38,7 +38,7 @@ class CallerPolicy(BaseModel):
     @field_validator('token')
     @classmethod
     def require_token(cls, value: SecretStr) -> SecretStr:
-        if not value.get_secret_value():
+        if not value.get_secret_value().strip():
             raise ValueError('caller policy token must not be empty')
         return value
 
@@ -47,7 +47,7 @@ class CallerPolicy(BaseModel):
     def require_normalized_operations(cls, value: frozenset[str]) -> frozenset[str]:
         for operation in value:
             method, separator, path = operation.partition(' ')
-            if not separator or method not in {'POST', 'PUT', 'PATCH', 'DELETE'} or not path.startswith('/'):
+            if not separator or method not in {'GET', 'POST', 'PUT', 'PATCH', 'DELETE'} or not path.startswith('/'):
                 raise ValueError('caller policy operations must use the form "METHOD /path-template"')
         return value
 

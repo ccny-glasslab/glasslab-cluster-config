@@ -1196,8 +1196,8 @@ def create_app(
     app.state.submitter = submitter
 
     @app.middleware('http')
-    async def authorize_mutations(request: Request, call_next):
-        if request.method not in {'GET', 'HEAD', 'OPTIONS'}:
+    async def authorize_requests(request: Request, call_next):
+        if not (request.method == 'GET' and request.url.path == '/healthz'):
             try:
                 authenticate_request(request, settings)
             except HTTPException as exc:

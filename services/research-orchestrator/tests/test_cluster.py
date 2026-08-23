@@ -87,8 +87,24 @@ def test_mutations_send_caller_identity() -> None:
 def test_mutation_fails_closed_without_token() -> None:
     executor = _executor(lambda _: pytest.fail('request must not be sent'), token='   ')
 
-    with pytest.raises(ClusterExecutorError, match='mutation credentials are not configured'):
+    with pytest.raises(ClusterExecutorError, match='credentials are not configured'):
         executor.submit(_spec(workspace=True))
+
+
+def test_reads_send_caller_identity() -> None:
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(dict(request.headers))
+        if request.url.path.endswith('/artifacts'):
+            return httpx.Response(404, json={'detail': 'artifacts not found'})
+        return httpx.Response(200, json={'status': {'status': 'running'}})
+
+    _executor(handler).inspect('external-1')
+
+    assert len(captured) == 2
+    assert all(headers['x-glasslab-caller'] == 'research-orchestrator' for headers in captured)
+    assert all(headers['x-glasslab-workflow-token'] == 'orchestrator-secret' for headers in captured)
 
 
 def test_cancellation_sends_caller_identity() -> None:

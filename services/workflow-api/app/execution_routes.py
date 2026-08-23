@@ -20,7 +20,7 @@ from services.common.schemas import ArtifactIndexEntry, ArtifactsIndex, Expected
 
 from .config import Settings
 from .execution_preflight import build_execution_preflight_result
-from .job_submission import JobSubmitter, resolve_evaluation_contract
+from .job_submission import JobSubmitter, LiveStatusUnavailableError, resolve_evaluation_contract
 from .persistence import RunStore
 from .registry import WorkflowRegistry
 from .run_artifacts import (
@@ -654,6 +654,37 @@ def register_execution_routes(
         if record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='run not found')
         return record.model_copy(update={'status': resolve_run_status(record, settings, submitter)})
+
+    @app.post('/runs/{run_id}/cancel', response_model=RunRecord)
+    def cancel_run(run_id: str) -> RunRecord:
+        record = store.get_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='run not found')
+        if record.status.status == 'cancelled':
+            return record
+        if record.status.status in {'succeeded', 'failed', 'rejected'}:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='terminal run cannot be cancelled')
+        try:
+            submitter.cancel_run(record)
+        except (LiveStatusUnavailableError, NotImplementedError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail='workload cancellation could not be confirmed',
+            ) from exc
+        now = datetime.now(timezone.utc)
+        updated = record.model_copy(
+            update={
+                'updated_at': now,
+                'status': RunStatus(
+                    run_id=run_id,
+                    status='cancelled',
+                    updated_at=now,
+                    detail='Workload cancellation confirmed.',
+                ),
+            }
+        )
+        store.save_run(updated)
+        return updated
 
     @app.get('/runs/{run_id}/artifacts', response_model=RunArtifactsResponse)
     def get_run_artifacts(run_id: str) -> RunArtifactsResponse:

@@ -109,6 +109,9 @@ class Settings(BaseSettings):
         caller_names = [policy.name for policy in self.caller_policies]
         if len(caller_names) != len(set(caller_names)):
             raise ValueError('caller policy names must be unique')
+        caller_tokens = [policy.token.get_secret_value() for policy in self.caller_policies]
+        if len(caller_tokens) != len(set(caller_tokens)):
+            raise ValueError('caller policy tokens must be unique')
         return self
 
 

@@ -38,6 +38,32 @@ def test_workflow_mutation_sends_caller_identity(monkeypatch) -> None:
     assert captured['headers']['X-glasslab-workflow-token'] == 'router-secret'
 
 
+def test_workflow_read_sends_caller_identity(monkeypatch) -> None:
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{}'
+
+    def fake_urlopen(request, timeout):
+        captured['headers'] = dict(request.header_items())
+        return Response()
+
+    monkeypatch.setattr('app.main.urllib_request.urlopen', fake_urlopen)
+    monkeypatch.setenv('GLASSLAB_WORKFLOW_API_CALLER_NAME', 'research-command-router')
+    monkeypatch.setenv('GLASSLAB_WORKFLOW_API_TOKEN', 'router-secret')
+    _request_json(Settings(), '/research-sessions/latest')
+
+    assert captured['headers']['X-glasslab-caller'] == 'research-command-router'
+    assert captured['headers']['X-glasslab-workflow-token'] == 'router-secret'
+
+
 @pytest.mark.parametrize('token', ['', '   '])
 def test_workflow_mutation_fails_closed_without_caller_token(monkeypatch, token) -> None:
     monkeypatch.setenv('GLASSLAB_WORKFLOW_API_CALLER_NAME', 'research-command-router')
@@ -46,7 +72,7 @@ def test_workflow_mutation_fails_closed_without_caller_token(monkeypatch, token)
     try:
         _request_json(Settings(), '/research-sessions', method='POST', body={})
     except RuntimeError as exc:
-        assert str(exc) == 'workflow API mutation credentials are not configured'
+        assert str(exc) == 'workflow API credentials are not configured'
     else:
         raise AssertionError('mutation unexpectedly proceeded without credentials')
 

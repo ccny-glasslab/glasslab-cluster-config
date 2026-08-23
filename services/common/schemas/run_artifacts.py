@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-RunState = Literal['accepted', 'queued', 'running', 'succeeded', 'failed', 'rejected']
+RunState = Literal['accepted', 'queued', 'running', 'succeeded', 'failed', 'rejected', 'cancelled']
 MetricDirection = Literal['maximize', 'minimize']
 RunPriority = Literal['user', 'autonomous']
 

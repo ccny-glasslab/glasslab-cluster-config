@@ -167,10 +167,10 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
             timeout=self.timeout_seconds,
         )
 
-    def _mutation_headers(self) -> dict[str, str]:
+    def _auth_headers(self) -> dict[str, str]:
         if not self.caller_name or not self.token.strip():
             raise ClusterExecutorError(
-                'workflow API mutation credentials are not configured'
+                'workflow API credentials are not configured'
             )
         return {
             'X-Glasslab-Caller': self.caller_name,
@@ -251,7 +251,7 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
             response = client.post(
                 '/experiments/runs',
                 json=body,
-                headers=self._mutation_headers(),
+                headers=self._auth_headers(),
             )
             if response.is_error:
                 try:
@@ -276,11 +276,15 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
 
     def inspect(self, external_run_id: str) -> ClusterJobSnapshot:
         with self._client() as client:
-            response = client.get(f'/runs/{external_run_id}')
+            response = client.get(
+                f'/runs/{external_run_id}', headers=self._auth_headers()
+            )
             response.raise_for_status()
             payload = response.json()
             raw_status = str((payload.get('status') or {}).get('status', 'unknown'))
-            artifacts_response = client.get(f'/runs/{external_run_id}/artifacts')
+            artifacts_response = client.get(
+                f'/runs/{external_run_id}/artifacts', headers=self._auth_headers()
+            )
         artifacts: list[ClusterArtifact] = []
         if artifacts_response.status_code == 200:
             for item in (
@@ -316,7 +320,7 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
         with self._client() as client:
             response = client.post(
                 f'/runs/{external_run_id}/cancel',
-                headers=self._mutation_headers(),
+                headers=self._auth_headers(),
             )
         if response.status_code == 404:
             # 404 means this workflow-api build has no bounded cancellation
