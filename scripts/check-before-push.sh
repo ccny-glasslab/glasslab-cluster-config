@@ -125,6 +125,14 @@ run_workflow_api_tests() {
       -q
   )
   (
+    cd services/task-fabric
+    # Shared task-fabric protocol package: stdlib-only, no service imports.
+    PYTHONPATH=".${PYTHONPATH:+:$PYTHONPATH}" pytest \
+      -p no:cacheprovider \
+      tests \
+      -q
+  )
+  (
     cd services/research-workspace-runner
     PYTHONPATH=".${PYTHONPATH:+:$PYTHONPATH}" pytest \
       -p no:cacheprovider \
