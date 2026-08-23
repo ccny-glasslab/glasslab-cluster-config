@@ -273,14 +273,17 @@ default). The budget measures the exact production serialization the engine
 embeds in agent prompts (`serialize_evidence`: `json.dumps(snapshot, indent=2,
 sort_keys=True, ensure_ascii=False)`) counted as encoded UTF-8 bytes, and it
 includes the truncation note itself, so the prompt can never exceed the cap by
-a serialization-shape mismatch. Trimming applies a fixed priority order:
-verbatim evaluator and metrics content first, then `status.json` and
-`report.md`, then jobs and inventory, then logs and CSVs last. Anything dropped
+a serialization-shape mismatch. Trimming is least-protected-first: logs and
+CSVs are dropped before the artifact inventory and job summaries, which are
+dropped before `status.json`/`report.md`, and verbatim evaluator and metrics
+content is retained longest (highest retention priority). Anything dropped
 is recorded in a `truncation` note listing the omitted URIs (bounded to the
 first 25 plus an `omitted_more_count`, so the note cannot grow without limit).
-The hard bound holds down to the minimal-skeleton floor (~280 bytes of empty
-lists plus the count-only note); a cap below that floor returns the minimal
-representation rather than deleting the truncation explanation.
+The cap is validated at Settings construction against
+`EVIDENCE_SNAPSHOT_MIN_BYTES` (1024): the minimal satisfiable snapshot (empty
+lists plus a count-only note) serializes to ~251 bytes, so every accepted
+configuration can always be trimmed to honor the bound. Omitted URIs are
+counted once per artifact, not once per snapshot-entry removal operation.
 Complete artifacts always remain in the durable artifact store; the snapshot
 is a lossy-but-referenced projection, never a deletion.
 
