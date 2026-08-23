@@ -3136,9 +3136,11 @@ class ResearchOrchestrator:
             action=action,
         )
         if not preflight.passed:
+            joined = '; '.join(preflight.errors)
             rejection_reason = (
                 'Deterministic matrix preflight failed: '
-                + '; '.join(preflight.errors)
+                + joined
+                + self._methodology_resolution_appendix(joined)
             )
             self.store.update_action(
                 action.action_id,
@@ -3430,27 +3432,31 @@ class ResearchOrchestrator:
         if not report.errors:
             return None
         joined = '; '.join(report.errors)
-        if 'methodology setting' in joined:
-            # The resolution mechanics (dotted paths into the base_config
-            # document, list-of-distinct-values for comparisons) are not
-            # guessable from the bare error; without this appendix every
-            # revision burns out on the same gap (issue #98 run
-            # 5fbf145886c84255b7af2e06ebded295).
-            joined += (
-                '. Methodology requirements resolve against the YAML file '
-                'at matrix.base_config inside your worktree: each '
-                'requirement config_path is a dotted key path into that '
-                'document, and dots create nested keys. A comparison '
-                'requirement needs its node to be a list of at least '
-                'minimum_distinct_values distinct strings; decision '
-                'requirements need at least one value. Example for '
-                'config_path "src/train.py" with three model families: '
-                '"src:\\n  train:\\n    py:\\n      - logistic_regression'
-                '\\n      - random_forest\\n      - gradient_boosting". '
-                'Edit the base_config file so every listed requirement '
-                'resolves, then re-propose the same matrix.'
-            )
-        return joined
+        return joined + self._methodology_resolution_appendix(joined)
+
+    @staticmethod
+    def _methodology_resolution_appendix(errors: str) -> str:
+        if 'methodology setting' not in errors:
+            return ''
+        # The resolution mechanics (dotted paths into the base_config
+        # document, list-of-distinct-values for comparisons) are not
+        # guessable from the bare error; without this appendix every
+        # revision burns out on the same gap (issue #98 run
+        # 5fbf145886c84255b7af2e06ebded295).
+        return (
+            '. Methodology requirements resolve against the YAML file '
+            'at matrix.base_config inside your worktree: each '
+            'requirement config_path is a dotted key path into that '
+            'document, and dots create nested keys. A comparison '
+            'requirement needs its node to be a list of at least '
+            'minimum_distinct_values distinct strings; decision '
+            'requirements need at least one value. Example for '
+            'config_path "src/train.py" with three model families: '
+            '"src:\\n  train:\\n    py:\\n      - logistic_regression'
+            '\\n      - random_forest\\n      - gradient_boosting". '
+            'Edit the base_config file so every listed requirement '
+            'resolves, then re-propose the same matrix.'
+        )
 
     @staticmethod
     def _methodology_feedback(result: AgentTurnResult) -> str:
