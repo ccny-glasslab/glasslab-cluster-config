@@ -76,7 +76,37 @@ class WorkspaceManager:
         ref = repo_ref or self.approved_repo_ref
         self._ensure_worktree(paths.beaker, ref)
         self._ensure_worktree(paths.honeydew, ref)
+        self._seed_tool_roster(paths.beaker)
+        self._seed_tool_roster(paths.honeydew)
         return paths
+
+    # Models occasionally hallucinate tool names ('run', 'list') that do not
+    # exist in the OpenCode runtime; repeated identical invalid calls trip the
+    # doom-loop guard and abort the whole turn. The workspace-level AGENTS.md
+    # is persistent context every session reads, so the authoritative roster
+    # lives here in addition to per-turn prompts.
+    TOOL_ROSTER_NOTE = (
+        '\n## Available tools (authoritative)\n\n'
+        'Exactly these tools exist: bash, edit, glob, grep, read, '
+        'todowrite, write. There is no `run` tool and no `list` tool. '
+        'Execute every command or script with bash; enumerate files with '
+        'glob or `ls` through bash.\n'
+    )
+
+    def _seed_tool_roster(self, workspace: Path) -> None:
+        agents_md = workspace / 'AGENTS.md'
+        if agents_md.is_file():
+            text = agents_md.read_text(encoding='utf-8')
+            if '## Available tools (authoritative)' not in text:
+                agents_md.write_text(
+                    text.rstrip() + '\n' + self.TOOL_ROSTER_NOTE,
+                    encoding='utf-8',
+                )
+            return
+        agents_md.write_text(
+            '# Workspace agent notes\n' + self.TOOL_ROSTER_NOTE,
+            encoding='utf-8',
+        )
 
     def _ensure_worktree(self, destination: Path, repo_ref: str) -> None:
         # Worktrees give each agent an isolated working tree while sharing the

@@ -864,10 +864,11 @@ def test_mocked_complete_workflow_and_agent_isolation(orchestrator_bundle) -> No
     } == {
         'protocol',
         'evaluation_contract_proposal',
+        'source_bundle',
         'metrics',
         'report',
     }
-    assert len(store.list_artifacts(run.run_id)) == 5
+    assert len(store.list_artifacts(run.run_id)) == 6
     turns = store.list_turns(run.run_id)
     assert len(turns) == 7
     assert all(turn.status == 'completed' for turn in turns)
@@ -1630,7 +1631,7 @@ def test_restart_recovery_from_job_running(orchestrator_bundle) -> None:
     assert restarted.recover() == [run.run_id]
     recovered = restarted_store.get_run(run.run_id)
     assert recovered.state == RunState.AWAITING_FINAL_ACCEPTANCE
-    assert len(restarted_store.list_artifacts(run.run_id)) == 5
+    assert len(restarted_store.list_artifacts(run.run_id)) == 6
 
 
 def test_recovery_does_not_replay_stale_approved_matrix(
@@ -2044,3 +2045,81 @@ def test_objective_dataset_references_are_materialized(
         installed = Path(workspace) / 'datasets' / 'tiny.csv'
         assert installed.is_file()
         assert installed.read_bytes() == content
+
+
+def test_objective_runs_build_cluster_execution_payload(
+    orchestrator_bundle,
+    tmp_path,
+) -> None:
+    # Objective-driven runs have no imported task bundle; the submitted job
+    # must still carry Beaker's code (source bundle), a deterministic generic
+    # task bundle, and digest-verified dataset bindings, or the cluster would
+    # execute something unrelated to the approved research (issue #98).
+    _, store, _, _, engine = orchestrator_bundle
+    content = b'fixed_acidity,quality\n7.4,5\n'
+    digest = sha256(content).hexdigest()
+    source = tmp_path / 'tiny.csv'
+    source.write_bytes(content)
+    store.save_dataset(
+        IngestedDatasetRecord(
+            dataset_id=digest,
+            name='tiny-data',
+            filename='tiny.csv',
+            reference_uri=f'glasslab-dataset://{digest}',
+            artifact_uri=(
+                's3://artifacts/research-orchestrator/dataset-uploads/'
+                f'{digest}/tiny.csv'
+            ),
+            path=str(source),
+            sha256=digest,
+            size_bytes=len(content),
+            role='input',
+        )
+    )
+    run = engine.create_run(
+        RunCreateRequest(
+            objective=(
+                'Analyze glasslab-dataset://'
+                f'{digest} across three model families.'
+            )
+        )
+    )
+    run = engine.store.get_run(run.run_id)
+    worktree = Path(run.beaker_workspace)
+    (worktree / 'run.py').write_text('print("entrypoint")\n')
+
+    matrix = ExperimentMatrix(
+        base_config='configs/candidate.yaml',
+        variants=[{'name': 'baseline', 'overrides': {}}],
+        seeds=[42],
+        runner_image=RUNNER_IMAGE,
+        resources={'cpu': 2, 'memory_gib': 4, 'gpus': 0,
+                   'wallclock_minutes': 30},
+    )
+    execution = engine._build_objective_execution(run, matrix)
+
+    assert execution['workspace_command'] == ['python3', 'run.py']
+    assert execution['experiment_type'] == 'research-workspace-job'
+    assert execution['workload_id']
+    shared_root = Path(engine.settings.shared_mount_root)
+    task_uri = execution['task_bundle']['uri']
+    source_uri = execution['source_bundle']['uri']
+    assert task_uri.startswith('s3://artifacts/')
+    assert source_uri.startswith('s3://artifacts/')
+    task_path = shared_root / task_uri.removeprefix('s3://artifacts/')
+    with __import__('zipfile').ZipFile(task_path) as archive:
+        assert sorted(archive.namelist()) == [
+            'eval_agent_prompt.md',
+            'problem.md',
+        ]
+    source_path = shared_root / source_uri.removeprefix('s3://artifacts/')
+    with __import__('zipfile').ZipFile(source_path) as archive:
+        assert 'run.py' in archive.namelist()
+    assert execution['dataset_bindings'] == {
+        'tiny-data': (
+            's3://artifacts/research-orchestrator/dataset-uploads/'
+            f'{digest}/tiny.csv'
+        )
+    }
+    contracts = execution['dataset_contracts']
+    assert contracts[0]['asset']['sha256'] == digest
