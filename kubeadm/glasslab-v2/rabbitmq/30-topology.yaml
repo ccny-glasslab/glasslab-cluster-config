@@ -155,11 +155,14 @@ data:
   # (derived from the rendered file, never hard-coded), queues and exchanges
   # (flags plus EXACT argument-map equality in both directions — an expected
   # entity may not carry undeclared live arguments), bindings (including
-  # destination type and arguments), per-user permissions, and user existence.
-  # Extra live entities that are absent from the expected file are tolerated
-  # so old-versioned entities can drain; anything expected must match exactly.
-  # Password hashes are deliberately not compared; rotation is handled by
-  # re-import (see README.md).
+  # destination type and arguments), and per-user permissions.
+  #
+  # Security identity state is enforced exactly: unexpected users, unexpected
+  # permission grants on the Glasslab vhost, and unexpected vhosts all fail
+  # verification. Only topology entities (queues, exchanges, bindings) get
+  # drain tolerance as tolerated extras; that exception never applies to
+  # identities. Password hashes are deliberately not compared; rotation is
+  # handled by re-import (see README.md).
   verify.eval: |
     begin
         {ok, ExpBin} = file:read_file("/etc/rabbitmq/rendered/definitions.json"),
@@ -168,10 +171,6 @@ data:
         Live = json:decode(LiveBin),
         Vhost = <<"glasslab">>,
         LiveVhosts = [maps:get(<<"name">>, V) || V <- maps:get(<<"vhosts">>, Live, [])],
-        VhostDrift = case lists:member(Vhost, LiveVhosts) of
-            true -> [];
-            false -> [{missing_vhost, Vhost}]
-        end,
         ExpectedVersions = [Value || Entry <- maps:get(<<"global_parameters">>, Expected, []), is_map(Entry), maps:get(<<"name">>, Entry) =:= <<"glasslab/topology-version">>, Value <- [maps:get(<<"value">>, Entry)]],
         WantVersion = case ExpectedVersions of
             [V] when is_integer(V) -> V;
@@ -222,11 +221,22 @@ data:
         end,
         LiveBindingKeys = [BindingKey(B) || B <- maps:get(<<"bindings">>, Live, []), maps:get(<<"vhost">>, B, none) =:= Vhost],
         BindingDrift = [{binding, element(1, BindingKey(B)), element(2, BindingKey(B)), missing_or_changed} || B <- maps:get(<<"bindings">>, Expected, []), not lists:member(BindingKey(B), LiveBindingKeys)],
+        LiveUserNames = [maps:get(<<"name">>, U) || U <- maps:get(<<"users">>, Live, [])],
+        ExpectedUserNames = [maps:get(<<"name">>, U) || U <- maps:get(<<"users">>, Expected, [])],
+        UserDrift = [{user, N, missing} || N <- ExpectedUserNames, not lists:member(N, LiveUserNames)]
+            ++ [{user, N, unexpected} || N <- LiveUserNames, not lists:member(N, ExpectedUserNames)],
         PermKey = fun(P) -> {maps:get(<<"user">>, P), maps:get(<<"configure">>, P), maps:get(<<"write">>, P), maps:get(<<"read">>, P)} end,
         LivePermKeys = [PermKey(P) || P <- maps:get(<<"permissions">>, Live, []), maps:get(<<"vhost">>, P, none) =:= Vhost],
-        PermDrift = [{permission, maps:get(<<"user">>, P), missing_or_changed} || P <- maps:get(<<"permissions">>, Expected, []), not lists:member(PermKey(P), LivePermKeys)],
-        LiveUserNames = [maps:get(<<"name">>, U) || U <- maps:get(<<"users">>, Live, [])],
-        UserDrift = [{user, maps:get(<<"name">>, U), missing} || U <- maps:get(<<"users">>, Expected, []), not lists:member(maps:get(<<"name">>, U), LiveUserNames)],
+        ExpectedPermKeys = [PermKey(P) || P <- maps:get(<<"permissions">>, Expected, [])],
+        PermDrift = [{permission, element(1, K), missing_or_changed} || K <- ExpectedPermKeys, not lists:member(K, LivePermKeys)]
+            ++ [{permission, element(1, K), unexpected_grant} || K <- LivePermKeys, not lists:member(K, ExpectedPermKeys)],
+        AllowedVhosts = [Vhost, <<"/">>],
+        UnexpectedVhosts = [V || V <- LiveVhosts, not lists:member(V, AllowedVhosts)],
+        VhostIssues = case lists:member(Vhost, LiveVhosts) of
+            true -> [];
+            false -> [{missing_vhost, Vhost}]
+        end,
+        VhostDrift = VhostIssues ++ [{unexpected_vhost, V} || V <- UnexpectedVhosts],
         Drift = VhostDrift ++ VersionDrift ++ QueueDrift ++ ExchangeDrift ++ BindingDrift ++ PermDrift ++ UserDrift,
         case Drift of
             [] -> io:format("topology verified (glasslab/topology-version=~p)~n", [WantVersion]), ok;

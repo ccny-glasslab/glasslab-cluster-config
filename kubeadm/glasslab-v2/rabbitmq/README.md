@@ -80,8 +80,13 @@ version (derived from the rendered file, never hard-coded), queues and
 exchanges with **exact argument-map equality in both directions** (an
 expected entity must not carry undeclared live arguments), bindings
 including destination type and arguments, per-user permissions, and user
-existence. Extra live entities that are absent from the expected file are
-tolerated so old-versioned entities can drain. Any mismatch raises and gives
+existence.
+
+Security identity state is enforced exactly: an unexpected RabbitMQ user,
+an unexpected permission grant on the Glasslab vhost, or an unexpected
+vhost fails verification. Drain tolerance for extras applies only to
+topology entities (queues, exchanges, bindings) so old-versioned entities
+can retire; it never applies to identities. Any mismatch raises and gives
 the hook a non-zero exit, which kills the container: drift surfaces as a
 CrashLoopBackOff and `rollout-research-services.sh` stops at
 `rollout status` instead of continuing silently.

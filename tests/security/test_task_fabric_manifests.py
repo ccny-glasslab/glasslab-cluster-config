@@ -168,6 +168,14 @@ class RabbitMQExposureTests(unittest.TestCase):
         self.assertIn("extra_arg", verify)
         self.assertIn("destination_type", verify)
 
+    def test_identity_state_conformance_is_exact_not_drain_tolerant(self):
+        verify = by_kind(RABBITMQ_DIR / "30-topology.yaml", "ConfigMap")["data"]["verify.eval"]
+        # Unexpected users, unexpected permission grants, and unexpected
+        # vhosts must fail; drain tolerance applies only to topology entities.
+        self.assertIn("unexpected}", verify)
+        self.assertIn("unexpected_grant", verify)
+        self.assertIn("unexpected_vhost", verify)
+
     def test_network_policy_limits_ingress_to_named_app_clients_over_amqp(self):
         policy = documents(RABBITMQ_DIR / "50-network-policy.yaml")[0]
         self.assertEqual(policy["kind"], "NetworkPolicy")

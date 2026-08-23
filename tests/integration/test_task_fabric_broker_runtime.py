@@ -381,6 +381,61 @@ class BrokerRuntimeTests(unittest.TestCase):
         self.assertIn(new_queue["name"], queue_names)
         self.assertIn(retired_queue, queue_names, "retired entity must be tolerated while draining")
 
+    def test_g_identity_state_is_enforced_exactly(self):
+        name = "tf-rt-g"
+        self._boot_new_broker(name, "g-rendered", PASSWORDS_A)
+        self._mount_verify_assets(name)
+
+        baseline = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertEqual(baseline.returncode, 0, baseline.stdout + baseline.stderr)
+
+        # Injected extra admin user must fail verification.
+        injected_user = self._exec(
+            name,
+            'rabbitmqctl add_user glasslab-intruder rt-intruder-pass >/dev/null && '
+            'rabbitmqctl set_permissions -p glasslab glasslab-intruder ".*" ".*" ".*" >/dev/null',
+        )
+        self.assertEqual(injected_user.returncode, 0, injected_user.stderr)
+        failed_user = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertNotEqual(failed_user.returncode, 0, "unexpected user must fail verification")
+        combined = failed_user.stdout + failed_user.stderr
+        self.assertIn("unexpected", combined)
+
+        # Removing the intruder restores conformance.
+        removed = self._exec(name, "rabbitmqctl delete_user glasslab-intruder >/dev/null")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        restored = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+
+        # An unexpected permission grant on the Glasslab vhost must also fail.
+        grant = self._exec(
+            name,
+            'rabbitmqctl set_permissions -p glasslab glasslab-monitor ".*" ".*" ".*" >/dev/null',
+        )
+        self.assertEqual(grant.returncode, 0, grant.stderr)
+        failed_grant = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertNotEqual(failed_grant.returncode, 0, "unexpected permission grant must fail verification")
+        self.assertIn("unexpected_grant", failed_grant.stdout + failed_grant.stderr)
+
+        revoke = self._exec(
+            name,
+            'rabbitmqctl set_permissions -p glasslab glasslab-monitor "" "" ".*" >/dev/null',
+        )
+        self.assertEqual(revoke.returncode, 0, revoke.stderr)
+
+        # An unexpected vhost must fail; only the Glasslab vhost and the
+        # RabbitMQ system default are allowlisted.
+        new_vhost = self._exec(name, "rabbitmqctl add_vhost intruder-vhost >/dev/null")
+        self.assertEqual(new_vhost.returncode, 0, new_vhost.stderr)
+        failed_vhost = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertNotEqual(failed_vhost.returncode, 0, "unexpected vhost must fail verification")
+        self.assertIn("unexpected_vhost", failed_vhost.stdout + failed_vhost.stderr)
+
+        deleted_vhost = self._exec(name, "rabbitmqctl delete_vhost intruder-vhost >/dev/null")
+        self.assertEqual(deleted_vhost.returncode, 0, deleted_vhost.stderr)
+        final = self._exec(name, "sh /etc/rabbitmq/glasslab-verify/verify-topology.sh")
+        self.assertEqual(final.returncode, 0, final.stdout + final.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
