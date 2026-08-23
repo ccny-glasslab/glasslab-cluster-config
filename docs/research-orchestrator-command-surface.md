@@ -75,7 +75,9 @@ reference in `problem.md` or the objective.
   recovery checkpoint. `/research-resume` starts a fresh OpenCode session from
   that checkpoint.
 - `FAILED`, `CANCELLED`, and `TIMED_OUT` are terminal. They cannot currently be
-  resumed. Retry-from-terminal-checkpoint is a known missing capability.
+  resumed. `POST /runs/{run_id}/retry` creates a fresh child from the parent's
+  verified checkpoint; when an earlier retry child is itself terminal, the
+  next retry supersedes it.
 - The run thread must receive a persisted follow-up for an execution or
   interaction failure; an ephemeral Discord error is not sufficient.
 
@@ -390,10 +392,10 @@ path is `/task-start`, not another hardcoded task entry.
 - fixed approved repository and runtime profiles
 - no authenticated remote dataset download or private object-store browser
 - no Discord list or status commands
-- no retry or clone operation from a terminal run checkpoint
 - no first-class HTTP endpoint for complete structured turn inspection
 - terminal retries are limited to verified `FAILED`/`TIMED_OUT` protocol
-  checkpoints and always require fresh approvals
+  checkpoints and always require fresh approvals; a terminal retry child is
+  superseded by the next retry rather than reopened
 - no automatic Git push or pull request creation
 - no arbitrary SSH, `kubectl`, secret access, or container publication for
   either agent
