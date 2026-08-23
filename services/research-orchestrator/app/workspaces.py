@@ -506,6 +506,38 @@ class WorkspaceManager:
             # workspaces: agents may read the task but cannot rewrite it.
             destination.chmod(0o555)
 
+    def install_run_datasets(
+        self,
+        *,
+        run_id: str,
+        datasets: list[tuple[str, str]],
+    ) -> list[str]:
+        # Objective-referenced ingested datasets land read-only under
+        # datasets/ in both workspaces so agent local checks never need the
+        # network. Idempotent: an existing file is left untouched.
+        installed: list[str] = []
+        for workspace in (
+            self.paths(run_id).beaker,
+            self.paths(run_id).honeydew,
+        ):
+            destination = workspace / 'datasets'
+            destination.mkdir(parents=True, exist_ok=True)
+            for source_name, filename in datasets:
+                source = Path(source_name).resolve()
+                if source.is_symlink() or not source.is_file():
+                    raise WorkspaceError(
+                        f'run dataset is unavailable: {filename}'
+                    )
+                target = destination / Path(filename).name
+                if not target.exists():
+                    shutil.copy2(source, target)
+                    target.chmod(0o444)
+                installed.append(
+                    (target.relative_to(workspace)).as_posix()
+                )
+            destination.chmod(0o555)
+        return installed
+
     def package_source_bundle(
         self,
         *,

@@ -32,6 +32,7 @@ from app.schemas import (
     ApprovalStatus,
     ArtifactRecord,
     ExperimentMatrix,
+    IngestedDatasetRecord,
     JobStatus,
     RequestedAction,
     PolicyClassification,
@@ -1997,3 +1998,49 @@ def test_http_mutations_require_operator_token(orchestrator_bundle) -> None:
             },
         )
         assert response.status_code == 201
+
+
+def test_objective_dataset_references_are_materialized(
+    orchestrator_bundle,
+    tmp_path,
+) -> None:
+    # An objective citing glasslab-dataset:// URIs must find the real bytes
+    # under datasets/ in both agent workspaces, digest-verified: agent
+    # runtimes have no network egress, so a missing local copy drives the
+    # implementer into futile download retries (issue #98 run
+    # 5fbf145886c84255b7af2e06ebded295).
+    _, store, _, _, engine = orchestrator_bundle
+    content = b'fixed_acidity,quality\n7.4,5\n'
+    digest = sha256(content).hexdigest()
+    source = tmp_path / 'tiny.csv'
+    source.write_bytes(content)
+    store.save_dataset(
+        IngestedDatasetRecord(
+            dataset_id=digest,
+            name='tiny-data',
+            filename='tiny.csv',
+            reference_uri=f'glasslab-dataset://{digest}',
+            artifact_uri=(
+                's3://artifacts/research-orchestrator/dataset-uploads/'
+                f'{digest}/tiny.csv'
+            ),
+            path=str(source),
+            sha256=digest,
+            size_bytes=len(content),
+            role='input',
+        )
+    )
+
+    run = engine.create_run(
+        RunCreateRequest(
+            objective=(
+                'Analyze glasslab-dataset://'
+                f'{digest} across three model families.'
+            )
+        )
+    )
+
+    for workspace in (run.beaker_workspace, run.honeydew_workspace):
+        installed = Path(workspace) / 'datasets' / 'tiny.csv'
+        assert installed.is_file()
+        assert installed.read_bytes() == content

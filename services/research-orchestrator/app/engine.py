@@ -3,6 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 from pathlib import Path
+import re
 import subprocess
 from threading import RLock
 from typing import Any
@@ -319,6 +320,7 @@ class ResearchOrchestrator:
             # recover() sees a run in PREPARING and resumes drafting, which is
             # the only signal that workspace setup finished.
             self._transition(run_id, RunState.PREPARING)
+            self._materialize_objective_datasets(run_id)
             self._transition(run_id, RunState.HONEYDEW_DRAFTING_PROTOCOL)
             try:
                 self._draft_protocol(run_id)
@@ -326,6 +328,48 @@ class ResearchOrchestrator:
                 self._fail_run(run_id, exc)
                 raise
             return self.store.get_run(run_id)
+
+    def _materialize_objective_datasets(self, run_id: str) -> None:
+        # Copy every ingested dataset cited by the objective into the agent
+        # workspaces. Agent runtimes have no network egress, so without the
+        # local copy the implementer can only fail (issue #98).
+        run = self.store.get_run(run_id)
+        dataset_ids = sorted(
+            set(
+                re.findall(
+                    r'glasslab-dataset://([0-9a-f]{64})',
+                    run.objective,
+                )
+            )
+        )
+        if not dataset_ids:
+            return
+        datasets: list[tuple[str, str]] = []
+        for dataset_id in dataset_ids:
+            record = self.store.get_dataset(dataset_id)
+            source = Path(record.path)
+            digest = sha256()
+            with source.open('rb') as handle:
+                for chunk in iter(
+                    lambda: handle.read(1024 * 1024), b''
+                ):
+                    digest.update(chunk)
+            if digest.hexdigest() != record.sha256:
+                raise WorkflowError(
+                    'objective dataset failed checksum verification: '
+                    f'{record.name}'
+                )
+            datasets.append((record.path, record.filename))
+        installed = self.workspaces.install_run_datasets(
+            run_id=run_id,
+            datasets=datasets,
+        )
+        self._event(
+            run_id,
+            source='orchestrator',
+            event_type='run.datasets_materialized',
+            payload={'files': sorted(set(installed))},
+        )
 
     def import_task_bundle(
         self,
@@ -2689,7 +2733,10 @@ class ResearchOrchestrator:
         prompt = (
             'Read the approved read-only program.md and implementation-plan.md. '
             'Execute the task-specific plan in your isolated worktree, adapting '
-            'it when repository evidence requires. Finish the bounded experiment '
+            'it when repository evidence requires. Every ingested dataset '
+            'cited by the objective is already copied read-only under '
+            '`datasets/` in this worktree; load it from there and never make '
+            'network calls. Finish the bounded experiment '
             'runner, run the listed lightweight checks, and '
             'propose one submit_experiment_matrix action. The action arguments '
             'must match the ExperimentMatrix schema and must not contain an '
@@ -4008,6 +4055,7 @@ class ResearchOrchestrator:
                     'active_since': utc_now(),
                 },
             )
+            self._materialize_objective_datasets(run_id)
             self._event(
                 run_id,
                 source='orchestrator',
