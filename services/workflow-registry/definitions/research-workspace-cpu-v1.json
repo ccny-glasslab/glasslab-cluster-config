@@ -20,7 +20,9 @@
   "allowed_models": [
     "agent-generated-python"
   ],
-  "runner_image": "ghcr.io/ccny-glasslab/glasslab-research-workspace-runner:0.1.0",
+  "runner_image": "ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:3c169671563c165e5a72e16d20daf955dfefcba7cb99d44aca47931dd093ed6a",
+  "runner_service_account_name": "glasslab-gpu-runner",
+  "max_wallclock_minutes": 60,
   "evaluator_type": "rubric-gated-v1",
   "expected_artifacts": {
     "required": [
@@ -89,8 +91,6 @@
     "-m",
     "runner"
   ],
-  "allow_custom_image": false,
-  "allow_custom_entrypoint": false,
   "metric_contract": {
     "primary_metric": "rubric_score",
     "higher_is_better": true,

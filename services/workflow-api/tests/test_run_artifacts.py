@@ -51,6 +51,7 @@ def build_run_record(run_id: str, status: RunStatus) -> RunRecord:
         resource_limits={},
         node_selector={},
         runner_image='busybox:latest',
+        runner_service_account_name='registry-runner',
         evaluator_type='none',
         approval_tier='tier-1-read-only',
         expected_artifacts={'required': ['status.json'], 'optional': ['logs/runner.log']},

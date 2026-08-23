@@ -70,7 +70,6 @@ class Settings(BaseSettings):
     runner_namespace: str = 'glasslab-v2'
     default_submitted_by: str = 'glasslab-operator'
     job_submission_mode: Literal['null', 'kubernetes'] = 'null'
-    runner_service_account_name: str = 'default'
     runner_image_pull_policy: str = 'IfNotPresent'
     runner_backoff_limit: int = 0
     runner_job_ttl_seconds: int = 86400

@@ -21,6 +21,7 @@
     "config-driven"
   ],
   "runner_image": "ghcr.io/ccny-glasslab/glasslab-gpu-experiment-runner:0.1.7-local",
+  "runner_service_account_name": "glasslab-gpu-runner",
   "evaluator_type": "art-retrieval-v1",
   "expected_artifacts": {
     "required": [
@@ -59,9 +60,9 @@
     }
   },
   "approval_tier": "tier-2-approved-execution",
-  "execution_status": "ready",
-  "submission_backend": "kubernetes",
-  "execution_blockers": [],
+  "execution_status": "disabled",
+  "submission_backend": "null",
+  "execution_blockers": ["Runner image digest is unavailable; rebuild and pin the image before re-enabling execution."],
   "runtime_requirements": {
     "gpu": true,
     "training_stack": ["pytorch", "pytorch-metric-learning", "faiss", "umap"],
@@ -97,8 +98,6 @@
     "-lc",
     "python3 scripts/run_experiment.py --config configs/search_spaces/art_metric_baseline.yaml --output-dir /mnt/artifacts/$GLASSLAB_RUNNER_EXPERIMENT_ID"
   ],
-  "allow_custom_image": true,
-  "allow_custom_entrypoint": true,
   "metric_contract": {
     "primary_metric": "composite_score",
     "higher_is_better": true

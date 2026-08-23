@@ -242,11 +242,8 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
             'submitted_by': 'research-orchestrator',
             'run_priority': 'user',
         }
-        # Workspace runner images are fixed by the workflow registry. Omitting
-        # image_ref prevents a persisted task bundle from overriding a newer,
-        # compatible registry image after an orchestrator upgrade.
-        if not (spec.task_bundle and spec.source_bundle):
-            body['image_ref'] = spec.runner_image
+        # Runner images are fixed by the workflow registry for every workload.
+        # A persisted job spec may describe provenance, but cannot select code.
         with self._client() as client:
             response = client.post(
                 '/experiments/runs',
