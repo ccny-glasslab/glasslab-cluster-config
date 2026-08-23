@@ -429,6 +429,15 @@ class RunRecord(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     run_id: str
+    # A retry is a distinct run.  This immutable link is the API-visible
+    # lineage edge; terminal parents are never reopened or rewritten.
+    parent_run_id: str | None = None
+    retry_checkpoint_digest: str | None = None
+    # The exact Git commit used to create both isolated worktrees.  Retry
+    # children are pinned here instead of resolving a moving branch name.
+    workspace_base_commit: str | None = Field(
+        default=None, pattern=r'^[a-f0-9]{40}$'
+    )
     objective: str
     state: RunState
     protocol_path: str | None = None
@@ -782,6 +791,14 @@ class RunCreateRequest(BaseModel):
         if bool(self.evaluation_contract_id) != bool(self.evaluation_contract_version):
             raise ValueError('evaluation contract ID and version must be supplied together')
         return self
+
+
+class TerminalRetryRequest(BaseModel):
+    """Optional caller key for an auditable, idempotent terminal retry."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=256)
 
 
 class ApprovalRequest(BaseModel):

@@ -310,6 +310,13 @@ class DiscordRenderer:
                 'Orchestrator',
                 f"Research run created: {payload.get('objective', '')}",
             )
+        if event_type == 'run.retry_created':
+            return DiscordMessage(
+                'Orchestrator',
+                'Terminal retry checkpoint created: '
+                f"parent `{payload.get('parent_run_id')}`, child "
+                f"`{payload.get('child_run_id')}`. The child requires fresh approvals.",
+            )
         if event_type == 'run.state_changed':
             return DiscordMessage(
                 'Orchestrator',

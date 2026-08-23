@@ -24,9 +24,9 @@ glasslab_identity_users:
   - username: denic
     display_name: Denise Cakoni
     state: present
-    # Keep the existing password during key onboarding. Set true only after a
-    # successful key-only login has been confirmed from every active client.
-    password_locked: false
+    # Public-key authentication has been observed on the live provisioner.
+    # Password authentication is no longer an approved fallback.
+    password_locked: true
     targets: [gateway, provisioner, exo]
     darwin_uid: 503
     roles:
@@ -40,9 +40,9 @@ glasslab_identity_users:
   - username: tristanc
     display_name: Tristan C
     state: present
-    # Keep the existing password during key onboarding. Set true only after a
-    # successful key-only login has been confirmed from every active client.
-    password_locked: false
+    # Public-key authentication has been observed on the live provisioner.
+    # Password authentication is no longer an approved fallback.
+    password_locked: true
     targets: [gateway, provisioner, exo]
     darwin_uid: 504
     roles:

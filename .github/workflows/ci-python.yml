@@ -92,6 +92,45 @@ jobs:
         run: |
           pytest ${{ matrix.tests }} -q
 
+  postgres-store-contract:
+    name: research-orchestrator PostgreSQL store contract
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: glasslab
+          POSTGRES_PASSWORD: glasslab
+          POSTGRES_DB: orchestrator_contract
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U glasslab -d orchestrator_contract"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install research-orchestrator dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r services/research-orchestrator/requirements.txt \
+            -r services/research-orchestrator/requirements-dev.txt
+
+      - name: Run backend-neutral store contract
+        working-directory: services/research-orchestrator
+        env:
+          PYTHONPATH: .
+          GLASSLAB_TEST_POSTGRES_DSN: postgresql://glasslab:glasslab@127.0.0.1:5432/orchestrator_contract
+        run: pytest tests/test_store_contract.py -q
+
   adapter-tests:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
