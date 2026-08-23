@@ -1776,6 +1776,30 @@ def test_cancellation_aborts_sessions_and_jobs(orchestrator_bundle) -> None:
     )
 
 
+def test_cancellation_failure_does_not_claim_external_job_or_run_cancelled(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    _, store, cluster, runtime, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    job = store.list_jobs(run.run_id)[0]
+
+    def fail_cancel(_external_run_id: str) -> None:
+        raise RuntimeError('workflow-api cancellation unavailable')
+
+    monkeypatch.setattr(cluster, 'cancel', fail_cancel)
+
+    with pytest.raises(WorkflowError, match='could not be confirmed'):
+        engine.cancel_run(run.run_id)
+
+    assert store.get_run(run.run_id).state != RunState.CANCELLED
+    assert store.get_job(job.job_id).status != JobStatus.CANCELLED
+    assert runtime.aborted
+    event = store.list_events(run.run_id)[-1]
+    assert event.event_type == 'run.cancellation_failed'
+    assert event.payload['cancellation_errors']
+
+
 def test_cancellation_discards_paused_run_without_resuming(orchestrator_bundle) -> None:
     _, store, _, runtime, engine = orchestrator_bundle
     run = engine.create_run(

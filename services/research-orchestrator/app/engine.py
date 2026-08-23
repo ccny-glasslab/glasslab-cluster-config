@@ -4124,6 +4124,7 @@ class ResearchOrchestrator:
                     self.cluster.cancel(job.external_run_id)
                 except Exception as exc:
                     cancellation_errors.append(f'{job.job_id}: {exc}')
+                    continue
             self.store.update_job(
                 job.model_copy(
                     update={
@@ -4134,6 +4135,20 @@ class ResearchOrchestrator:
                         },
                     }
                 )
+            )
+        if cancellation_errors:
+            self._event(
+                run_id,
+                source='orchestrator',
+                event_type='run.cancellation_failed',
+                payload={
+                    'cancellation_errors': cancellation_errors,
+                    'requested_by': requested_by,
+                    'reason': reason,
+                },
+            )
+            raise WorkflowError(
+                'cancellation could not be confirmed for every external job'
             )
         cancelled = self._transition(
             run_id,
