@@ -56,6 +56,7 @@ from .schemas import (
     RunCreateRequest,
     RunListResponse,
     RunRecord,
+    TerminalRetryRequest,
     SourceType,
     TurnListResponse,
 )
@@ -356,6 +357,17 @@ def create_app(
     ) -> RunRecord:
         try:
             return engine.create_run(request)
+        except Exception as exc:
+            raise map_error(exc) from exc
+
+    @app.post('/runs/{run_id}/retry', response_model=RunRecord, status_code=status.HTTP_201_CREATED)
+    def retry_terminal_run(
+        run_id: str,
+        request: TerminalRetryRequest,
+        _: None = Depends(require_operator),
+    ) -> RunRecord:
+        try:
+            return engine.retry_terminal_run(run_id, request)
         except Exception as exc:
             raise map_error(exc) from exc
 

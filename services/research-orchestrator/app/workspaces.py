@@ -59,7 +59,7 @@ class WorkspaceManager:
             events=root / 'events',
         )
 
-    def prepare(self, run_id: str) -> RunWorkspaces:
+    def prepare(self, run_id: str, *, repo_ref: str | None = None) -> RunWorkspaces:
         paths = self.paths(run_id)
         for path in (
             paths.root,
@@ -73,11 +73,12 @@ class WorkspaceManager:
             raise WorkspaceError(
                 f'approved repository is not a Git checkout: {self.approved_repo_path}'
             )
-        self._ensure_worktree(paths.beaker)
-        self._ensure_worktree(paths.honeydew)
+        ref = repo_ref or self.approved_repo_ref
+        self._ensure_worktree(paths.beaker, ref)
+        self._ensure_worktree(paths.honeydew, ref)
         return paths
 
-    def _ensure_worktree(self, destination: Path) -> None:
+    def _ensure_worktree(self, destination: Path, repo_ref: str) -> None:
         # Worktrees give each agent an isolated working tree while sharing the
         # approved repository's objects; detached HEAD means agents never
         # advance a branch in the approved checkout.
@@ -99,7 +100,7 @@ class WorkspaceManager:
                 'add',
                 '--detach',
                 str(destination),
-                self.approved_repo_ref,
+                repo_ref,
             ],
             capture_output=True,
             text=True,
@@ -107,6 +108,14 @@ class WorkspaceManager:
         )
         if completed.returncode != 0:
             raise WorkspaceError(completed.stderr.strip() or 'git worktree add failed')
+
+    def worktree_base_commit(self, run_id: str) -> str:
+        paths = self.paths(run_id)
+        beaker = self._git(paths.beaker, 'rev-parse', 'HEAD')
+        honeydew = self._git(paths.honeydew, 'rev-parse', 'HEAD')
+        if beaker != honeydew:
+            raise WorkspaceError('agent worktrees do not share a base commit')
+        return beaker
 
     def agent_workspace(self, run_id: str, agent: AgentName) -> Path:
         paths = self.paths(run_id)
@@ -147,7 +156,7 @@ class WorkspaceManager:
 
     def freeze_protocol(self, run_id: str) -> None:
         protocol = self.paths(run_id).protocol / 'program.md'
-        if not protocol.is_file():
+        if protocol.is_symlink() or not protocol.is_file():
             raise WorkspaceError('program.md does not exist')
         protocol.chmod(0o444)
         # After approval the protocol is immutable everywhere (protocol dir and
@@ -158,8 +167,206 @@ class WorkspaceManager:
             self.paths(run_id).honeydew,
         ):
             target = workspace / 'program.md'
+            # exists() is false for a dangling link, so test link identity
+            # before existence or chmod/copy2 could follow it outside the
+            # isolated worktree.
+            if target.is_symlink():
+                raise WorkspaceError('worktree program.md must not be a symlink')
+            if target.exists():
+                target.chmod(target.stat().st_mode | 0o200)
             shutil.copy2(protocol, target)
             target.chmod(0o444)
+
+    def create_terminal_retry_checkpoint(
+        self, *, parent_run_id: str, child_run_id: str, protocol_digest: str,
+        contract: dict[str, str], task_binding: dict | None, base_commit: str,
+        maximum_files: int = 128,
+        maximum_bytes: int = 4 * 1024 * 1024,
+    ) -> tuple[Path, str]:
+        """Copy a small, unambiguous workspace delta into a retry child.
+
+        Committed, deleted, renamed and conflicted worktrees are intentionally
+        rejected.  A retry must be evidence-preserving, not a best-effort copy
+        of an arbitrary Git history.
+        """
+        parent = self.paths(parent_run_id)
+        child = self.paths(child_run_id)
+        source_protocol = parent.protocol / 'program.md'
+        if not source_protocol.is_file() or source_protocol.is_symlink():
+            raise WorkspaceError('retry source protocol is unavailable')
+        if sha256(source_protocol.read_bytes()).hexdigest() != protocol_digest:
+            raise WorkspaceError('retry source protocol checksum mismatch')
+        target_protocol = child.protocol / 'program.md'
+        shutil.copy2(source_protocol, target_protocol)
+        managed_task_files = self._managed_task_files(task_binding)
+        files: list[dict[str, object]] = []
+        total = 0
+        for name, source_root, target_root in (
+            ('beaker', parent.beaker, child.beaker),
+            ('honeydew', parent.honeydew, child.honeydew),
+        ):
+            if self._git(source_root, 'rev-parse', 'HEAD') != base_commit:
+                raise WorkspaceError('retry source contains an unbounded committed checkpoint')
+            if self._git(target_root, 'rev-parse', 'HEAD') != base_commit:
+                raise WorkspaceError('retry child was not created from source base commit')
+            status = self._git_bytes(
+                source_root, 'status', '--porcelain=v1', '-z',
+                '--untracked-files=all',
+            )
+            for entry in status.split(b'\0'):
+                if not entry:
+                    continue
+                code = entry[:2].decode('ascii')
+                relative = entry[3:].decode('utf-8', errors='surrogateescape')
+                if code not in {' M', 'M ', '??'}:
+                    raise WorkspaceError(f'retry source has ambiguous worktree change: {entry!r}')
+                rel = Path(relative)
+                if rel.is_absolute() or '..' in rel.parts:
+                    raise WorkspaceError('retry source path escapes worktree')
+                # These are reconstructed by the orchestrator from their
+                # authoritative sources; copying them as a delta would either
+                # duplicate immutable task inputs or retain mode 0444.
+                if rel == Path('program.md') or rel.parts[0] == 'benchmark-task':
+                    continue
+                source = source_root / rel
+                if source.is_symlink() or not source.is_file():
+                    raise WorkspaceError(f'retry source is not a regular file: {relative}')
+                if len(files) >= maximum_files:
+                    raise WorkspaceError('retry checkpoint exceeds file limit')
+                size = source.stat().st_size
+                if total + size > maximum_bytes:
+                    raise WorkspaceError('retry checkpoint exceeds byte limit')
+                target = target_root / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                target.chmod(target.stat().st_mode | 0o200)
+                digest = sha256(target.read_bytes()).hexdigest()
+                files.append({'workspace': name, 'path': rel.as_posix(), 'size_bytes': size, 'sha256': digest})
+                total += size
+        manifest_path = child.events / 'terminal-retry-checkpoint.json'
+        manifest = {'schema_version': 'glasslab-terminal-retry-checkpoint-v1', 'parent_run_id': parent_run_id, 'base_commit': base_commit, 'protocol': {'path': 'protocol/program.md', 'sha256': protocol_digest}, 'contract': contract, 'task_binding': task_binding, 'managed_task_files': managed_task_files, 'files': files, 'total_bytes': total}
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+        digest = sha256(manifest_path.read_bytes()).hexdigest()
+        return manifest_path, digest
+
+    def verify_terminal_retry_checkpoint(self, run_id: str, checkpoint_digest: str) -> dict:
+        path = self.paths(run_id).events / 'terminal-retry-checkpoint.json'
+        if not path.is_file() or path.is_symlink() or sha256(path.read_bytes()).hexdigest() != checkpoint_digest:
+            raise WorkspaceError('retry checkpoint manifest checksum mismatch')
+        manifest = json.loads(path.read_text(encoding='utf-8'))
+        if manifest.get('schema_version') != 'glasslab-terminal-retry-checkpoint-v1':
+            raise WorkspaceError('retry checkpoint schema is unsupported')
+        base_commit = manifest.get('base_commit')
+        if not isinstance(base_commit, str) or self.worktree_base_commit(run_id) != base_commit:
+            raise WorkspaceError('retry worktree base commit mismatch')
+        protocol = manifest.get('protocol', {})
+        protocol_path = self.paths(run_id).root / str(protocol.get('path', ''))
+        if protocol_path.is_symlink() or not protocol_path.is_file() or sha256(protocol_path.read_bytes()).hexdigest() != protocol.get('sha256'):
+            raise WorkspaceError('retry protocol checksum mismatch')
+        managed_task_files = manifest.get('managed_task_files')
+        if not isinstance(managed_task_files, list):
+            raise WorkspaceError('retry managed task manifest is invalid')
+        for workspace in (self.paths(run_id).beaker, self.paths(run_id).honeydew):
+            worktree_protocol = workspace / 'program.md'
+            if worktree_protocol.is_symlink():
+                raise WorkspaceError('retry worktree protocol must not be a symlink')
+            if worktree_protocol.exists() and (
+                not worktree_protocol.is_file()
+                or sha256(worktree_protocol.read_bytes()).hexdigest()
+                != protocol.get('sha256')
+            ):
+                raise WorkspaceError('retry worktree protocol does not match authoritative protocol')
+            task_root = workspace / 'benchmark-task'
+            if task_root.is_symlink():
+                raise WorkspaceError('retry benchmark-task root must not be a symlink')
+            if not managed_task_files:
+                if task_root.exists() and any(task_root.rglob('*')):
+                    raise WorkspaceError('taskless retry contains benchmark-task content')
+                continue
+            if not task_root.is_dir() or task_root.is_symlink():
+                raise WorkspaceError('retry task inputs are unavailable')
+            expected_task_files = {
+                str(item.get('path')): str(item.get('sha256'))
+                for item in managed_task_files
+                if isinstance(item, dict)
+            }
+            if set(expected_task_files) != {
+                'problem.md', 'eval_agent_prompt.md'
+            }:
+                raise WorkspaceError('retry managed task manifest is invalid')
+            actual_task_files = {
+                candidate.relative_to(task_root).as_posix()
+                for candidate in task_root.rglob('*')
+                if candidate.is_file() or candidate.is_symlink()
+            }
+            if actual_task_files != set(expected_task_files):
+                raise WorkspaceError('retry task inputs contain unexpected or missing files')
+            for relative, digest in expected_task_files.items():
+                candidate = task_root / relative
+                if (
+                    candidate.is_symlink() or not candidate.is_file()
+                    or sha256(candidate.read_bytes()).hexdigest() != digest
+                ):
+                    raise WorkspaceError('retry task input checksum mismatch')
+        manifest_files: set[tuple[str, str]] = set()
+        for item in manifest.get('files', []):
+            if not isinstance(item, dict): raise WorkspaceError('retry checkpoint file entry is invalid')
+            root = self.paths(run_id).beaker if item.get('workspace') == 'beaker' else self.paths(run_id).honeydew if item.get('workspace') == 'honeydew' else None
+            rel = Path(str(item.get('path', '')))
+            if root is None or rel.is_absolute() or '..' in rel.parts: raise WorkspaceError('retry checkpoint path is invalid')
+            candidate = root / rel
+            if not candidate.is_file() or candidate.is_symlink() or sha256(candidate.read_bytes()).hexdigest() != item.get('sha256'):
+                raise WorkspaceError('retry checkpoint file checksum mismatch')
+            manifest_files.add((str(item['workspace']), rel.as_posix()))
+        observed_files: set[tuple[str, str]] = set()
+        for name, root in (('beaker', self.paths(run_id).beaker), ('honeydew', self.paths(run_id).honeydew)):
+            status = self._git_bytes(root, 'status', '--porcelain=v1', '-z', '--untracked-files=all')
+            for entry in status.split(b'\0'):
+                if not entry:
+                    continue
+                code = entry[:2].decode('ascii')
+                relative = entry[3:].decode('utf-8', errors='surrogateescape')
+                rel = Path(relative)
+                if code not in {' M', 'M ', '??'} or rel.is_absolute() or '..' in rel.parts:
+                    raise WorkspaceError('retry child worktree delta is ambiguous')
+                if rel == Path('program.md') or rel.parts[0] == 'benchmark-task':
+                    continue
+                observed_files.add((name, rel.as_posix()))
+        if observed_files != manifest_files:
+            raise WorkspaceError('retry child worktree delta does not match manifest')
+        return manifest
+
+    @staticmethod
+    def _git(path: Path, *args: str) -> str:
+        result = subprocess.run(['git', '-C', str(path), *args], capture_output=True, text=True, check=False)
+        if result.returncode != 0: raise WorkspaceError(result.stderr.strip() or 'git inspection failed')
+        return result.stdout.strip()
+
+    @staticmethod
+    def _git_bytes(path: Path, *args: str) -> bytes:
+        result = subprocess.run(['git', '-C', str(path), *args], capture_output=True, check=False)
+        if result.returncode != 0:
+            raise WorkspaceError(result.stderr.decode().strip() or 'git inspection failed')
+        return result.stdout
+
+    @staticmethod
+    def _managed_task_files(task_binding: dict | None) -> list[dict[str, str]]:
+        if task_binding is None:
+            return []
+        paths = {
+            'problem.md': task_binding.get('problem_path'),
+            'eval_agent_prompt.md': task_binding.get('evaluator_prompt_path'),
+        }
+        files: list[dict[str, str]] = []
+        for destination, raw_source in paths.items():
+            source = Path(str(raw_source or '')).resolve()
+            if source.is_symlink() or not source.is_file():
+                raise WorkspaceError('retry task source is unavailable')
+            files.append({
+                'path': destination,
+                'sha256': sha256(source.read_bytes()).hexdigest(),
+            })
+        return files
 
     def create_review_snapshot(
         self,

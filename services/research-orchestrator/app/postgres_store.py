@@ -98,6 +98,11 @@ class PostgresStore:
           sequence_number INTEGER NOT NULL, source TEXT NOT NULL, event_type TEXT NOT NULL,
           payload JSONB NOT NULL, timestamp TIMESTAMPTZ NOT NULL, UNIQUE(run_id, sequence_number));
         CREATE INDEX IF NOT EXISTS orchestrator_events_run_idx ON orchestrator_events(run_id, sequence_number);
+        CREATE TABLE IF NOT EXISTS orchestrator_terminal_run_retries (
+          parent_run_id TEXT PRIMARY KEY REFERENCES orchestrator_runs(run_id),
+          child_run_id TEXT NOT NULL UNIQUE REFERENCES orchestrator_runs(run_id),
+          retry_key TEXT NOT NULL UNIQUE, checkpoint_digest TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL);
         CREATE TABLE IF NOT EXISTS orchestrator_knowledge_sources (
           source_id TEXT PRIMARY KEY, source_type TEXT NOT NULL, canonical_uri TEXT NOT NULL,
           run_scope TEXT, digest TEXT NOT NULL, payload JSONB NOT NULL, ingested_at TIMESTAMPTZ NOT NULL,
@@ -144,6 +149,32 @@ class PostgresStore:
             conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at))
             self._append_event_conn(conn, run_id=record.run_id, source='orchestrator', event_type='run.created', payload={'objective': record.objective, 'state': record.state.value})
         return record
+
+    def create_terminal_retry(self, record: RunRecord, *, parent_run_id: str, retry_key: str, checkpoint_digest: str, one_active_run: bool) -> tuple[RunRecord, bool]:
+        with self.transaction() as conn:
+            existing = conn.execute('SELECT child_run_id FROM orchestrator_terminal_run_retries WHERE parent_run_id=%s FOR UPDATE', (parent_run_id,)).fetchone()
+            if existing:
+                row = conn.execute('SELECT payload FROM orchestrator_runs WHERE run_id=%s', (existing['child_run_id'],)).fetchone()
+                return self._run(row, str(existing['child_run_id'])), False
+            parent = conn.execute('SELECT state FROM orchestrator_runs WHERE run_id=%s FOR UPDATE', (parent_run_id,)).fetchone()
+            if parent is None: raise RecordNotFound(parent_run_id)
+            if parent['state'] not in {state.value for state in TERMINAL_STATES}:
+                raise ConcurrencyConflict('terminal retry source is not terminal')
+            if one_active_run:
+                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) LIMIT 1', ([state.value for state in TERMINAL_STATES],)).fetchone()
+                if active: raise ConcurrencyConflict(f"active run already exists: {active['run_id']}")
+            conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at))
+            conn.execute('INSERT INTO orchestrator_terminal_run_retries (parent_run_id, child_run_id, retry_key, checkpoint_digest, created_at) VALUES (%s,%s,%s,%s,%s)', (parent_run_id, record.run_id, retry_key, checkpoint_digest, record.created_at))
+            payload = {'parent_run_id': parent_run_id, 'child_run_id': record.run_id, 'checkpoint_digest': checkpoint_digest}
+            self._append_event_conn(conn, run_id=parent_run_id, source='orchestrator', event_type='run.retry_created', payload=payload)
+            self._append_event_conn(conn, run_id=record.run_id, source='orchestrator', event_type='run.created', payload={'objective': record.objective, 'state': record.state.value, 'parent_run_id': parent_run_id})
+            self._append_event_conn(conn, run_id=record.run_id, source='orchestrator', event_type='run.retry_created', payload=payload)
+        return record, True
+
+    def get_terminal_retry_child(self, parent_run_id: str) -> RunRecord | None:
+        with self._connect() as conn:
+            row = conn.execute('SELECT orchestrator_runs.payload FROM orchestrator_terminal_run_retries JOIN orchestrator_runs ON orchestrator_runs.run_id = orchestrator_terminal_run_retries.child_run_id WHERE parent_run_id=%s', (parent_run_id,)).fetchone()
+        return RunRecord.model_validate(row['payload']) if row else None
 
     def _run(self, row: dict[str, Any] | None, run_id: str) -> RunRecord:
         if row is None: raise RecordNotFound(run_id)
@@ -211,6 +242,14 @@ class PostgresStore:
 
     def save_action(self, record: ActionRecord) -> ActionRecord:
         return self._save_payload('orchestrator_actions', 'action_id', record, columns={'run_id': record.run_id, 'approval_status': record.approval_status.value, 'idempotency_key': record.idempotency_key, 'created_at': record.created_at, 'updated_at': record.updated_at}, conflict='return_existing')
+    def save_action_with_event(self, record: ActionRecord, *, source: str, payload: dict[str, Any]) -> tuple[ActionRecord, bool]:
+        with self.transaction() as conn:
+            existing = conn.execute('SELECT payload FROM orchestrator_actions WHERE idempotency_key=%s', (record.idempotency_key,)).fetchone()
+            if existing:
+                return ActionRecord.model_validate(existing['payload']), False
+            conn.execute('INSERT INTO orchestrator_actions (action_id, run_id, approval_status, idempotency_key, payload, created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s)', (record.action_id, record.run_id, record.approval_status.value, record.idempotency_key, self._payload(record), record.created_at, record.updated_at))
+            self._append_event_conn(conn, run_id=record.run_id, source=source, event_type='action.proposed', payload=payload)
+        return record, True
     def get_action(self, action_id: str) -> ActionRecord:
         with self._connect() as conn:
             row = conn.execute('SELECT payload FROM orchestrator_actions WHERE action_id=%s', (action_id,)).fetchone()
@@ -309,7 +348,11 @@ class PostgresStore:
     def list_knowledge_chunks(self, source_id: str) -> list[KnowledgeChunk]:
         with self._connect() as conn: return [KnowledgeChunk.model_validate(r['payload']) for r in conn.execute('SELECT payload FROM orchestrator_knowledge_chunks WHERE source_id=%s ORDER BY chunk_index', (source_id,)).fetchall()]
     def search_knowledge_chunks(self, query: str, *, source_ids: list[str] | None = None, limit: int = 10) -> list[dict[str, Any]]:
-        params: list[Any] = [query]; clause = "to_tsvector('simple', text) @@ websearch_to_tsquery('simple', %s)"
+        # The rank expression and the WHERE predicate each bind the search
+        # query. Keep both parameters explicit; psycopg does not reuse a
+        # positional placeholder automatically.
+        params: list[Any] = [query, query]
+        clause = "to_tsvector('simple', text) @@ websearch_to_tsquery('simple', %s)"
         if source_ids: clause += ' AND source_id = ANY(%s)'; params.append(source_ids)
         params.append(limit)
         sql = "SELECT payload, ts_rank_cd(to_tsvector('simple', text), websearch_to_tsquery('simple', %s)) AS rank FROM orchestrator_knowledge_chunks WHERE " + clause + ' ORDER BY rank DESC, chunk_index LIMIT %s'

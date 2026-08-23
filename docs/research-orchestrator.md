@@ -12,6 +12,25 @@ synthetic task; a complete arbitrary-dataset run remains outstanding.
 For the concise operator surface, read
 [`research-orchestrator-command-surface.md`](research-orchestrator-command-surface.md).
 
+## Terminal-run retry checkpoints
+
+Retries are new child runs, never reopenings or mutations of a `FAILED` or
+`TIMED_OUT` parent. The initial implementation intentionally supports one
+conservative checkpoint.
+
+| Eligible checkpoint | Copied durable material | Excluded material | Child path | Renewed approvals | Validation and failure |
+| --- | --- | --- | --- | --- | --- |
+| `approved_protocol_v1` | task binding/digest plus fresh task preflight, approved `program.md`, resolved contract ID/version/digest, recorded base commit, bounded non-destructive worktree delta | jobs, runtimes, sessions, turns, actions, approvals, locks, parent Discord IDs, counters, artifacts other than protocol, terminal state | `PREPARING` then `AWAITING_PROTOCOL_APPROVAL` | protocol, any contract promotion, execution, final report | Every copied file is manifested and SHA-256 checked. The child is pinned to the parent base commit, has a fresh Discord thread, and reconstructs task inputs and `program.md` from authoritative copies. Missing, changed, ambiguous, oversized, symlinked, committed, renamed, or deleted worktree material fails the child closed. |
+
+The retry relationship is committed transactionally and appears in both event
+streams. An equivalent repeated retry returns the same child. Discord only
+projects the stored relationship and may fail without changing it.
+
+Migration: startup creates the additive `terminal_run_retries` (SQLite) or
+`orchestrator_terminal_run_retries` (PostgreSQL) table. Existing run payloads
+remain valid because lineage fields are optional; no existing run is migrated
+or made retryable without its verified checkpoint files.
+
 ## Purpose
 
 The research orchestrator coordinates two isolated research agents around the

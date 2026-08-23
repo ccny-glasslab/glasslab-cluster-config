@@ -243,6 +243,7 @@ deployment:
 
 ```text
 POST /runs
+POST /runs/{run_id}/retry
 POST /task-bundles/import
 POST /datasets/import
 POST /knowledge/sources
@@ -390,6 +391,9 @@ path is `/task-start`, not another hardcoded task entry.
 - no authenticated remote dataset download or private object-store browser
 - no Discord list or status commands
 - no retry or clone operation from a terminal run checkpoint
+- no first-class HTTP endpoint for complete structured turn inspection
+- terminal retries are limited to verified `FAILED`/`TIMED_OUT` protocol
+  checkpoints and always require fresh approvals
 - no automatic Git push or pull request creation
 - no arbitrary SSH, `kubectl`, secret access, or container publication for
   either agent

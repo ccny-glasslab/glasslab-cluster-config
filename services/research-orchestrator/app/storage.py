@@ -189,6 +189,14 @@ class SqliteStore:
                 CREATE INDEX IF NOT EXISTS events_run_idx
                 ON events(run_id, sequence_number);
 
+                CREATE TABLE IF NOT EXISTS terminal_run_retries (
+                    parent_run_id TEXT PRIMARY KEY REFERENCES runs(run_id),
+                    child_run_id TEXT NOT NULL UNIQUE REFERENCES runs(run_id),
+                    retry_key TEXT NOT NULL UNIQUE,
+                    checkpoint_digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
                 -- Knowledge store tables. The orchestrator has no formal
                 -- migration framework; schema drift is handled by additive
                 -- CREATE TABLE IF NOT EXISTS statements that run on every
@@ -376,6 +384,58 @@ class SqliteStore:
                 payload={'objective': record.objective, 'state': record.state.value},
             )
         return record
+
+    def create_terminal_retry(
+        self, record: RunRecord, *, parent_run_id: str, retry_key: str,
+        checkpoint_digest: str, one_active_run: bool,
+    ) -> tuple[RunRecord, bool]:
+        """Atomically reserve the one permitted child for a terminal parent."""
+        terminal = tuple(state.value for state in TERMINAL_STATES)
+        placeholders = ','.join('?' for _ in terminal)
+        with self.transaction() as connection:
+            existing = connection.execute(
+                'SELECT child_run_id FROM terminal_run_retries WHERE parent_run_id = ?',
+                (parent_run_id,),
+            ).fetchone()
+            if existing is not None:
+                return self.get_run(str(existing['child_run_id'])), False
+            parent = connection.execute(
+                'SELECT state FROM runs WHERE run_id = ?', (parent_run_id,)
+            ).fetchone()
+            if parent is None:
+                raise RecordNotFound(parent_run_id)
+            if parent['state'] not in terminal:
+                raise ConcurrencyConflict('terminal retry source is not terminal')
+            if one_active_run:
+                active = connection.execute(
+                    f'SELECT run_id FROM runs WHERE state NOT IN ({placeholders}) LIMIT 1',
+                    terminal,
+                ).fetchone()
+                if active is not None:
+                    raise ConcurrencyConflict(f'active run already exists: {active["run_id"]}')
+            connection.execute(
+                'INSERT INTO runs (run_id, state, version, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+                (record.run_id, record.state.value, record.version, _dump(record), record.created_at.isoformat(), record.updated_at.isoformat()),
+            )
+            connection.execute(
+                'INSERT INTO terminal_run_retries (parent_run_id, child_run_id, retry_key, checkpoint_digest, created_at) VALUES (?, ?, ?, ?, ?)',
+                (parent_run_id, record.run_id, retry_key, checkpoint_digest, record.created_at.isoformat()),
+            )
+            payload = {'parent_run_id': parent_run_id, 'child_run_id': record.run_id, 'checkpoint_digest': checkpoint_digest}
+            self._append_event_conn(connection, run_id=parent_run_id, source='orchestrator', event_type='run.retry_created', payload=payload)
+            self._append_event_conn(connection, run_id=record.run_id, source='orchestrator', event_type='run.created', payload={'objective': record.objective, 'state': record.state.value, 'parent_run_id': parent_run_id})
+            self._append_event_conn(connection, run_id=record.run_id, source='orchestrator', event_type='run.retry_created', payload=payload)
+        return record, True
+
+    def get_terminal_retry_child(self, parent_run_id: str) -> RunRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                '''SELECT runs.payload FROM terminal_run_retries
+                   JOIN runs ON runs.run_id = terminal_run_retries.child_run_id
+                   WHERE parent_run_id = ?''',
+                (parent_run_id,),
+            ).fetchone()
+        return RunRecord.model_validate_json(row['payload']) if row else None
 
     def get_run(self, run_id: str) -> RunRecord:
         with self._connect() as connection:
@@ -670,6 +730,31 @@ class SqliteStore:
                 ),
             )
         return record
+
+    def save_action_with_event(
+        self, record: ActionRecord, *, source: str, payload: dict[str, Any],
+    ) -> tuple[ActionRecord, bool]:
+        """Persist an action and its proposal event in one transaction."""
+        with self.transaction() as connection:
+            existing = connection.execute(
+                'SELECT payload FROM actions WHERE idempotency_key = ?',
+                (record.idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                return ActionRecord.model_validate_json(existing['payload']), False
+            connection.execute(
+                '''INSERT INTO actions (action_id, run_id, approval_status,
+                   idempotency_key, payload, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                (record.action_id, record.run_id, record.approval_status.value,
+                 record.idempotency_key, _dump(record),
+                 record.created_at.isoformat(), record.updated_at.isoformat()),
+            )
+            self._append_event_conn(
+                connection, run_id=record.run_id, source=source,
+                event_type='action.proposed', payload=payload,
+            )
+        return record, True
 
     def update_action(
         self,

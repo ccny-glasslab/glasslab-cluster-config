@@ -26,6 +26,9 @@ TRANSITIONS: dict[RunState, set[RunState]] = {
     RunState.CREATED: {RunState.PREPARING, RunState.CANCELLED, RunState.FAILED},
     RunState.PREPARING: {
         RunState.HONEYDEW_DRAFTING_PROTOCOL,
+        # A terminal retry with a verified immutable protocol intentionally
+        # waits for a fresh human protocol approval rather than redrafting it.
+        RunState.AWAITING_PROTOCOL_APPROVAL,
         RunState.PAUSED,
         RunState.CANCELLED,
         RunState.FAILED,
