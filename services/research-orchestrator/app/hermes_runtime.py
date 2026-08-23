@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 import secrets
 import socket
 import subprocess
@@ -16,7 +17,7 @@ from pydantic import ValidationError
 
 from .config import Settings
 from .opencode_runtime import AgentRuntime, RuntimeSession
-from .schemas import AgentName, AgentTurnResult
+from .schemas import AgentName, AgentTurnResult, TurnKind
 
 
 class HermesRuntimeError(RuntimeError):
@@ -45,8 +46,32 @@ class _HermesHandle:
     log_handle: Any
 
 
-def _structured_prompt(prompt: str) -> str:
-    schema = json.dumps(AgentTurnResult.model_json_schema(), sort_keys=True)
+def _required_turn_kind(prompt: str) -> TurnKind | None:
+    match = re.search(
+        r'Set the JSON `kind` field to exactly `([^`]+)`\.',
+        prompt,
+    )
+    if match is None:
+        return None
+    try:
+        return TurnKind(match.group(1))
+    except ValueError:
+        return None
+
+
+def _structured_prompt(
+    prompt: str,
+    *,
+    required_kind: TurnKind | None = None,
+) -> str:
+    schema_object = AgentTurnResult.model_json_schema()
+    if required_kind is not None:
+        schema_object['properties']['kind'] = {
+            'const': required_kind.value,
+            'title': 'Kind',
+            'type': 'string',
+        }
+    schema = json.dumps(schema_object, sort_keys=True)
     return (
         prompt
         + '\n\nReturn only one JSON object matching this schema after all '
@@ -55,7 +80,11 @@ def _structured_prompt(prompt: str) -> str:
     )
 
 
-def _decode_structured_output(output: Any) -> AgentTurnResult:
+def _decode_structured_output(
+    output: Any,
+    *,
+    required_kind: TurnKind | None = None,
+) -> AgentTurnResult:
     if not isinstance(output, str):
         raise HermesRuntimeError(
             'Hermes run output was not text',
@@ -73,7 +102,7 @@ def _decode_structured_output(output: Any) -> AgentTurnResult:
             failure_class='malformed_json',
         ) from exc
     try:
-        return AgentTurnResult.model_validate(payload)
+        result = AgentTurnResult.model_validate(payload)
     except ValidationError as exc:
         details = '; '.join(
             f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
@@ -83,6 +112,13 @@ def _decode_structured_output(output: Any) -> AgentTurnResult:
             f'Hermes structured output failed validation: {details}',
             failure_class='schema_invalid',
         ) from exc
+    if required_kind is not None and result.kind != required_kind:
+        raise HermesRuntimeError(
+            'Hermes structured output used kind '
+            f'{result.kind.value}; expected {required_kind.value}',
+            failure_class='wrong_kind',
+        )
+    return result
 
 
 class HermesProcessRuntime(AgentRuntime):
@@ -193,6 +229,20 @@ class HermesProcessRuntime(AgentRuntime):
                     'scp *',
                     'docker *',
                     'podman *',
+                    'pip *',
+                    'pip3 *',
+                    'python -m pip *',
+                    'python3 -m pip *',
+                    'uv pip *',
+                    'apt *',
+                    'apt-get *',
+                    'npm *',
+                    'npx *',
+                    'yarn *',
+                    'pnpm *',
+                    'conda *',
+                    'mamba *',
+                    'brew *',
                     'git push*',
                     'gh pr create*',
                     '*secret*',
@@ -356,7 +406,11 @@ class HermesProcessRuntime(AgentRuntime):
             agent=agent,
             workspace=workspace,
         )
-        current_prompt = _structured_prompt(prompt)
+        required_kind = _required_turn_kind(prompt)
+        current_prompt = _structured_prompt(
+            prompt,
+            required_kind=required_kind,
+        )
         attempts = self.settings.hermes_structured_repair_attempts + 1
         for attempt in range(attempts):
             with self._client(handle) as client:
@@ -379,14 +433,29 @@ class HermesProcessRuntime(AgentRuntime):
             finally:
                 self._active_runs.pop(key, None)
             try:
-                return _decode_structured_output(output), hermes_run_id
-            except HermesRuntimeError:
+                return _decode_structured_output(
+                    output,
+                    required_kind=required_kind,
+                ), hermes_run_id
+            except HermesRuntimeError as exc:
                 if attempt + 1 >= attempts:
                     raise
+                previous_output = (
+                    output
+                    if isinstance(output, str)
+                    else json.dumps(output, sort_keys=True, default=str)
+                )
                 current_prompt = _structured_prompt(
-                    'Correct only the structured result from your previous '
-                    'completed turn. Do not repeat workspace work. Return a '
-                    'complete object matching the supplied schema.'
+                    'Correct only the structured result quoted below from '
+                    'your previous completed turn. Do not repeat workspace '
+                    'work. Preserve valid content, repair the identified '
+                    'error, and return a complete object matching the '
+                    'supplied schema.\n\n'
+                    f'Validation error: {exc}\n'
+                    'BEGIN PREVIOUS OUTPUT\n'
+                    f'{previous_output}\n'
+                    'END PREVIOUS OUTPUT',
+                    required_kind=required_kind,
                 )
         raise HermesRuntimeError('Hermes turn ended without a result')
 
