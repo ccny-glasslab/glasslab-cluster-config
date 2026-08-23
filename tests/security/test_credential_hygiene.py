@@ -66,6 +66,44 @@ class CredentialHygieneScannerTests(unittest.TestCase):
             (Path("secret.yaml"), 4, "secret-data-dsn")
         ])
 
+    def test_rejects_malformed_base64_in_kubernetes_secret_data(self):
+        """Malformed Secret.data must fail closed without exposing its contents."""
+        findings = self.scan_fixture(
+            {
+                "secret.yaml": "\n".join(
+                    [
+                        "apiVersion: v1",
+                        "kind: Secret",
+                        "data:",
+                        "  DATABASE_URL: not-base64!",
+                    ]
+                )
+            }
+        )
+
+        self.assertEqual(
+            [(finding.path, finding.line, finding.rule_id) for finding in findings],
+            [(Path("secret.yaml"), 4, "secret-data-invalid-base64")],
+        )
+
+    def test_allows_empty_base64_in_kubernetes_secret_data(self):
+        """An empty Secret.data value is valid base64 and must remain accepted."""
+        self.assertEqual(
+            self.scan_fixture(
+                {
+                    "secret.yaml": "\n".join(
+                        [
+                            "apiVersion: v1",
+                            "kind: Secret",
+                            "data:",
+                            '  OPTIONAL_TOKEN: ""',
+                        ]
+                    )
+                }
+            ),
+            [],
+        )
+
     def test_detects_sha512_crypt_verifier(self):
         """Published SHA-512 crypt password verifiers must be rejected."""
         findings = self.scan_fixture(
@@ -188,6 +226,19 @@ class CredentialHygieneScannerTests(unittest.TestCase):
         )
 
         self.assertEqual(findings, [])
+
+    def test_ignores_disposable_lab_agent_worktrees(self):
+        """Ignored agent worktrees must not duplicate scans or consume a full CPU core."""
+        self.assertEqual(
+            self.rule_ids(
+                {
+                    ".lab-agents/audit/worktree/fixture.sh": (
+                        "ssh" + "pass -p 'fixture-only' ssh host\n"
+                    )
+                }
+            ),
+            set(),
+        )
 
     def test_does_not_honor_content_controlled_fixture_marker(self):
         """An ordinary comment cannot suppress credential scanning."""

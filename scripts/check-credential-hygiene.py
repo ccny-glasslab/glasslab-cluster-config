@@ -32,6 +32,7 @@ class Finding:
 EXCLUDED_DIRECTORY_NAMES = frozenset(
     {
         ".git",
+        ".lab-agents",
         ".cache",
         ".mypy_cache",
         ".pytest_cache",
@@ -120,7 +121,9 @@ def _is_excluded_path(relative_path: Path) -> bool:
 
 def _decode_base64(value: str) -> bytes | None:
     candidate = value.strip().strip("'\"")
-    if not candidate or len(candidate) % 4:
+    if not candidate:
+        return b""
+    if len(candidate) % 4:
         return None
     try:
         return base64.b64decode(candidate, validate=True)
@@ -286,6 +289,13 @@ def _scan_secret_mapping(
 
                 decoded_value = _decode_base64(value)
                 if decoded_value is None:
+                    _append_finding(
+                        findings,
+                        seen,
+                        relative_path,
+                        line_number,
+                        "secret-data-invalid-base64",
+                    )
                     continue
                 if b"change-me" in decoded_value.lower():
                     _append_finding(
