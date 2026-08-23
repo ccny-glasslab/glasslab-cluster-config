@@ -3237,9 +3237,23 @@ class ResearchOrchestrator:
                     'reason': rejection_reason,
                 },
             )
+            # Honeydew's summary alone can drop the deterministic error
+            # mechanics (e.g. how methodology requirements resolve against
+            # base_config); the raw preflight text must survive into the
+            # revision prompt or every revision burns out identically.
+            feedback = self._methodology_feedback(result)
+            preflight_error = self._matrix_preflight_error(
+                run_id=run_id,
+                action=action,
+            )
+            if preflight_error:
+                feedback = (
+                    feedback + '\n\nDeterministic preflight error: '
+                    + preflight_error
+                )
             self._request_methodology_revision(
                 run_id,
-                feedback=self._methodology_feedback(result),
+                feedback=feedback,
             )
             return
         approved_action = self.store.mark_action_honeydew_approved(
