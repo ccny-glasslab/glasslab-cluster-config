@@ -50,7 +50,9 @@ data:
   # OpenCode is the selected runtime; the model is served by the local exo
   # endpoint (Hermes, when opted in, connects to the same endpoint).
   GLASSLAB_ORCHESTRATOR_AGENT_MODEL_PROVIDER_ID: exo
-  GLASSLAB_ORCHESTRATOR_AGENT_MODEL_NAME: mlx-community/Qwen3-Coder-480B-A35B-Instruct-4bit
+  # Qwen3-Coder-Next-4bit is the only model with an active exo instance
+  # (reconciler-approved placement); alternates 404 with "No instance found".
+  GLASSLAB_ORCHESTRATOR_AGENT_MODEL_NAME: mlx-community/Qwen3-Coder-Next-4bit
   # Hermes connects directly to this OpenAI-compatible Exo endpoint.
   GLASSLAB_ORCHESTRATOR_QWEN_BASE_URL: http://192.168.1.17:52415/v1
   GLASSLAB_ORCHESTRATOR_QWEN_MODEL_NAME: mlx-community/Qwen3-Coder-Next-4bit
