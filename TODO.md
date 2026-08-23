@@ -16,12 +16,12 @@ Current issues:
 ## P0: Architecture And End-To-End Validation
 
 - [#154 Reassess ResearchOrchestrator responsibilities after Hermes migration](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/154)
-- [#92 Add terminal research-run checkpoint retry](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/92), implemented in #145 (draft)
+- [#92 Add terminal research-run checkpoint retry](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/92), implemented in #145 (merged to `testing`)
 - [#98 Validate an arbitrary-dataset research workflow end to end](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/98)
 
 ## P1: Research Validation And Operability
 
-- [#100 Complete corrected Wine clustering run](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/100), blocked by #92/#145
+- [#100 Complete corrected Wine clustering run](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/100), unblocked; resume via superseding terminal retry of `39101d9c9d3d4753bcd74e93e6106819`
 - [#101 Complete Fashion-MNIST compatibility run](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/101)
 - [#93 Compact research-agent evidence prompts](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/93)
 

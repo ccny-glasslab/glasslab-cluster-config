@@ -23,7 +23,12 @@ conservative checkpoint.
 | `approved_protocol_v1` | task binding/digest plus fresh task preflight, approved `program.md`, resolved contract ID/version/digest, recorded base commit, bounded non-destructive worktree delta | jobs, runtimes, sessions, turns, actions, approvals, locks, parent Discord IDs, counters, artifacts other than protocol, terminal state | `PREPARING` then `AWAITING_PROTOCOL_APPROVAL` | protocol, any contract promotion, execution, final report | Every copied file is manifested and SHA-256 checked. The child is pinned to the parent base commit, has a fresh Discord thread, and reconstructs task inputs and `program.md` from authoritative copies. Missing, changed, ambiguous, oversized, symlinked, committed, renamed, or deleted worktree material fails the child closed. |
 
 The retry relationship is committed transactionally and appears in both event
-streams. An equivalent repeated retry returns the same child. Discord only
+streams. While a child is still active, an equivalent repeated retry returns
+that same child. Once a child has itself reached a terminal state
+(`FAILED`, `TIMED_OUT`, `CANCELLED`), the next retry supersedes it: a fresh
+child is created from the parent's verified checkpoint, the parent's retry
+slot points at the new child, and the superseded child gains a durable
+`run.retry_superseded` event without any other mutation. Discord only
 projects the stored relationship and may fail without changing it.
 
 Migration: startup creates the additive `terminal_run_retries` (SQLite) or

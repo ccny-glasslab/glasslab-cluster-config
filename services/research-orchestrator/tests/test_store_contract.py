@@ -211,6 +211,164 @@ def test_retry_lineage_event_is_transactionally_visible(store) -> None:
     }
 
 
+def _cancel_run(store, run: RunRecord) -> None:
+    """Force a run into CANCELLED without transition validation (test seam)."""
+    current = store.get_run(run.run_id)
+    store.replace_run(current.model_copy(update={'state': RunState.CANCELLED}), expected_version=current.version)
+
+
+def test_retry_pointer_supersedes_terminal_child(store) -> None:
+    parent = store.create_run(_run(state=RunState.FAILED), one_active_run=False)
+    first = _run(state=RunState.PREPARING)
+    stored, created = store.create_terminal_retry(
+        first,
+        parent_run_id=parent.run_id,
+        retry_key=_id('retry-key'),
+        checkpoint_digest='3' * 64,
+        one_active_run=False,
+    )
+    assert created is True
+    _cancel_run(store, stored)
+    before = store.get_run(stored.run_id).model_dump(mode='json')
+    events_before = store.list_events(stored.run_id)
+    parent_events_before = [e.event_type for e in store.list_events(parent.run_id)]
+
+    replacement = _run(state=RunState.PREPARING)
+    superseding, created_again = store.create_terminal_retry(
+        replacement,
+        parent_run_id=parent.run_id,
+        retry_key=_id('retry-key'),
+        checkpoint_digest='4' * 64,
+        one_active_run=False,
+    )
+
+    assert created_again is True
+    assert superseding.run_id == replacement.run_id
+    assert superseding.run_id != stored.run_id
+    assert store.get_terminal_retry_child(parent.run_id).run_id == replacement.run_id
+    assert store.get_run(stored.run_id).model_dump(mode='json') == before
+    superseded_events = store.list_events(stored.run_id)
+    assert len(superseded_events) == len(events_before) + 1
+    assert superseded_events[-1].event_type == 'run.retry_superseded'
+    assert superseded_events[-1].payload['child_run_id'] == stored.run_id
+    assert superseded_events[-1].payload['superseded_by'] == replacement.run_id
+    parent_event_types = [e.event_type for e in store.list_events(parent.run_id)]
+    assert parent_event_types.count('run.retry_created') == 2
+    latest_parent_event = store.list_events(parent.run_id)[-1]
+    assert latest_parent_event.payload == {
+        'parent_run_id': parent.run_id,
+        'child_run_id': replacement.run_id,
+        'checkpoint_digest': '4' * 64,
+    }
+    replacement_events = [e.event_type for e in store.list_events(replacement.run_id)]
+    assert replacement_events[0] == 'run.created'
+    assert 'run.retry_created' in replacement_events
+    assert parent_events_before.count('run.retry_created') == 1
+
+
+def test_retry_returns_live_child_unchanged(store) -> None:
+    parent = store.create_run(_run(state=RunState.FAILED), one_active_run=False)
+    child = _run(state=RunState.PREPARING)
+    store.create_terminal_retry(
+        child,
+        parent_run_id=parent.run_id,
+        retry_key=_id('retry-key'),
+        checkpoint_digest='3' * 64,
+        one_active_run=False,
+    )
+    events_before = len(store.list_events(child.run_id))
+    runs_before = {run.run_id for run in store.list_runs()}
+
+    again, created = store.create_terminal_retry(
+        child.model_copy(update={'run_id': _id('other-child')}),
+        parent_run_id=parent.run_id,
+        retry_key=_id('retry-key'),
+        checkpoint_digest='9' * 64,
+        one_active_run=False,
+    )
+
+    assert created is False
+    assert again.run_id == child.run_id
+    assert len(store.list_events(child.run_id)) == events_before
+    assert {run.run_id for run in store.list_runs()} == runs_before
+
+
+def test_retry_explicit_key_replay_after_terminal_returns_same_child(store) -> None:
+    parent = store.create_run(_run(state=RunState.FAILED), one_active_run=False)
+    key = _id('explicit-retry-key')
+    child = _run(state=RunState.PREPARING)
+    store.create_terminal_retry(
+        child,
+        parent_run_id=parent.run_id,
+        retry_key=key,
+        checkpoint_digest='3' * 64,
+        one_active_run=False,
+    )
+    _cancel_run(store, store.get_run(child.run_id))
+    events_before = len(store.list_events(child.run_id))
+    runs_before = {run.run_id for run in store.list_runs()}
+
+    replayed, created = store.create_terminal_retry(
+        child.model_copy(update={'run_id': _id('other-child')}),
+        parent_run_id=parent.run_id,
+        retry_key=key,
+        checkpoint_digest='5' * 64,
+        one_active_run=False,
+    )
+
+    assert created is False
+    assert replayed.run_id == child.run_id
+    assert store.get_terminal_retry_child(parent.run_id).run_id == child.run_id
+    assert len(store.list_events(child.run_id)) == events_before
+    assert {run.run_id for run in store.list_runs()} == runs_before
+
+
+def test_retry_supersede_rechecks_parent_terminal_and_slot(store) -> None:
+    slot_parent = store.create_run(_run(state=RunState.FAILED), one_active_run=False)
+    blocked_child = _run(state=RunState.PREPARING)
+    stored, _ = store.create_terminal_retry(
+        blocked_child,
+        parent_run_id=slot_parent.run_id,
+        retry_key=_id('retry-key'),
+        checkpoint_digest='3' * 64,
+        one_active_run=False,
+    )
+    _cancel_run(store, stored)
+    foreign_active = store.create_run(_run(state=RunState.BEAKER_PLANNING), one_active_run=False)
+
+    with pytest.raises(ConcurrencyConflict, match='active run already exists'):
+        store.create_terminal_retry(
+            _run(state=RunState.PREPARING),
+            parent_run_id=slot_parent.run_id,
+            retry_key=_id('retry-key'),
+            checkpoint_digest='6' * 64,
+            one_active_run=True,
+        )
+
+    state_parent = store.create_run(_run(state=RunState.FAILED), one_active_run=False)
+    state_child = _run(state=RunState.PREPARING)
+    stored_state_child, _ = store.create_terminal_retry(
+        state_child,
+        parent_run_id=state_parent.run_id,
+        retry_key=_id('retry-key'),
+        checkpoint_digest='7' * 64,
+        one_active_run=False,
+    )
+    _cancel_run(store, stored_state_child)
+    awakened = store.get_run(state_parent.run_id).model_copy(update={'state': RunState.BEAKER_PLANNING})
+    store.replace_run(awakened, expected_version=awakened.version)
+
+    with pytest.raises(ConcurrencyConflict, match='not terminal'):
+        store.create_terminal_retry(
+            _run(state=RunState.PREPARING),
+            parent_run_id=state_parent.run_id,
+            retry_key=_id('retry-key'),
+            checkpoint_digest='8' * 64,
+            one_active_run=False,
+        )
+    assert store.get_run(foreign_active.run_id).state is RunState.BEAKER_PLANNING
+
+
 def test_knowledge_and_context_records_round_trip(store) -> None:
     run = store.create_run(_run(), one_active_run=False)
     source_digest = uuid4().hex + uuid4().hex

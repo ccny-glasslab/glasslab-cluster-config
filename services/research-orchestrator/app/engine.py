@@ -1126,7 +1126,7 @@ class ResearchOrchestrator:
             if parent.state not in {RunState.FAILED, RunState.TIMED_OUT}:
                 raise WorkflowError('only FAILED or TIMED_OUT runs can be retried')
             existing_child = self.store.get_terminal_retry_child(parent_run_id)
-            if existing_child is not None:
+            if existing_child is not None and existing_child.state not in TERMINAL_STATES:
                 return existing_child
             source_protocol = Path(parent.protocol_path or '')
             if not source_protocol.is_file() or source_protocol.is_symlink():
@@ -1201,9 +1201,13 @@ class ResearchOrchestrator:
                 task_binding=task_binding,
                 base_commit=parent_base_commit,
             )
-            retry_key = request.idempotency_key or sha256(
-                f'terminal-retry-v1:{parent_run_id}:{checkpoint_digest}'.encode()
-            ).hexdigest()
+            if request.idempotency_key:
+                retry_key = request.idempotency_key
+            else:
+                attempt = f'{parent_run_id}:{checkpoint_digest}'
+                if existing_child is not None:
+                    attempt = f'{attempt}:{existing_child.run_id}'
+                retry_key = sha256(f'terminal-retry-v1:{attempt}'.encode()).hexdigest()
             now = utc_now()
             child = RunRecord(
                 run_id=child_id, parent_run_id=parent_run_id,

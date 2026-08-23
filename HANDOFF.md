@@ -154,8 +154,8 @@ Per-run files are available inside the orchestrator pod at:
   single points of the research path.
 - Agent turns can be slow against the shared exo model; large evidence bundles
   amplify the problem.
-- Terminal checkpoint retry is implemented in #145 (open, targeting `testing`)
-  but not yet merged.
+- Terminal checkpoint retry (#145) is merged to `testing` and deployed; a
+  terminal retry child is superseded by the next retry rather than reopened.
 - Hermes runtime storage does not yet have the same shared-cache treatment as
   OpenCode; only per-run cleanup applies (see
   `services/research-orchestrator/scripts/cleanup-run-storage.py`).
