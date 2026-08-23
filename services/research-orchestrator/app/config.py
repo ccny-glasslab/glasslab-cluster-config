@@ -211,6 +211,13 @@ class Settings(BaseSettings):
             return [item.strip() for item in value.split(',') if item.strip()]
         return value
 
+    @field_validator('knowledge_allowlist_roots', mode='before')
+    @classmethod
+    def parse_knowledge_allowlist(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(',') if item.strip()]
+        return value
+
     @field_validator('discord_admin_user_ids', mode='before')
     @classmethod
     def parse_discord_user_allowlist(cls, value: object) -> object:
