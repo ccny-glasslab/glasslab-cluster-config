@@ -23,12 +23,14 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib import request as urllib_request
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
 from services.common.schemas import ArtifactIndexEntry, ArtifactsIndex, RunManifest, RunStatus, WorkflowRegistryEntry
 
 from .config import Settings, get_settings
+from .auth import authenticate_request
 from .autoresearch_routes import register_autoresearch_routes
 from .digest_scheduling import schedule_is_due
 from .execution_routes import register_execution_routes
@@ -1192,6 +1194,15 @@ def create_app(
     app.state.registry = registry
     app.state.store = store
     app.state.submitter = submitter
+
+    @app.middleware('http')
+    async def authorize_mutations(request: Request, call_next):
+        if request.method not in {'GET', 'HEAD', 'OPTIONS'}:
+            try:
+                authenticate_request(request, settings)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
+        return await call_next(request)
 
     @app.get('/healthz')
     def healthz() -> dict:

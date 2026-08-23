@@ -15,6 +15,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .auth import CallerPolicy
 from .paths import discover_repo_root
 
 DEFAULT_REGISTRY_DIR = discover_repo_root() / 'services' / 'workflow-registry' / 'definitions'
@@ -92,6 +93,7 @@ class Settings(BaseSettings):
     external_literature_dblp_url: str = 'https://dblp.org/search/publ/api'
     external_literature_timeout_seconds: float = 20.0
     external_literature_mailto: str | None = None
+    caller_policies: tuple[CallerPolicy, ...] = Field(default_factory=tuple)
 
     @model_validator(mode='after')
     def validate_store_backend(self) -> 'Settings':
@@ -104,6 +106,9 @@ class Settings(BaseSettings):
             raise ValueError('json store backend requires a non-empty store_json_path')
         if self.store_backend == 'postgres' and not (self.store_postgres_dsn or '').strip():
             raise ValueError('postgres store backend requires a non-empty store_postgres_dsn')
+        caller_names = [policy.name for policy in self.caller_policies]
+        if len(caller_names) != len(set(caller_names)):
+            raise ValueError('caller policy names must be unique')
         return self
 
 

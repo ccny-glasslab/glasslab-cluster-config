@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient as FastAPITestClient
 
 # Prevent stale ``app.*`` module state from leaking between test modules.
 # conftest.py sets up the import paths; each test file must also clear the
@@ -22,6 +23,7 @@ for module_name in list(sys.modules):
         del sys.modules[module_name]
 
 from app.config import Settings
+from app.auth import CallerPolicy
 import app.autoresearch as autoresearch_module
 import app.main as main_module
 import app.source_documents as source_documents
@@ -33,6 +35,28 @@ from app.persistence import InMemoryRunStore
 from app.registry import WorkflowRegistry
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+class TestClient(FastAPITestClient):
+    """Exercise existing route tests as an explicitly authorized caller."""
+
+    def __init__(self, app, **kwargs) -> None:
+        app.state.settings.caller_policies = (
+            CallerPolicy(
+                name='test-suite',
+                token='test-suite-token',
+                allowed_operations=frozenset(
+                    f'{method} {route.path_format}'
+                    for route in app.routes
+                    if isinstance(route, APIRoute)
+                    for method in route.methods & {'POST', 'PUT', 'PATCH', 'DELETE'}
+                ),
+            ),
+        )
+        headers = dict(kwargs.pop('headers', {}))
+        headers.setdefault('X-Glasslab-Caller', 'test-suite')
+        headers.setdefault('X-Glasslab-Workflow-Token', 'test-suite-token')
+        super().__init__(app, headers=headers, **kwargs)
 
 
 def build_client(artifacts_mount_path: Path | None = None) -> TestClient:
