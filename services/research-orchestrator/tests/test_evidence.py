@@ -22,6 +22,8 @@ from app.evidence import (
     evidence_byte_size,
     serialize_evidence,
 )
+from app.config import EVIDENCE_SNAPSHOT_MIN_BYTES, Settings
+from pydantic import ValidationError
 from app.schemas import (
     ActionRecord,
     AgentName,
@@ -651,32 +653,50 @@ def test_snapshot_dedupe_same_uri_rows_do_not_crash(orchestrator_bundle) -> None
             assert entry['duplicate_of'] in uris
 
 
-def test_snapshot_size_bound_floor_keeps_truncation_explanation(
+def test_snapshot_max_bytes_below_minimum_rejected() -> None:
+    # The cap is a documented hard maximum: a value below the safe minimum can
+    # never be honored (the empty skeleton plus count-only note already
+    # serializes to ~250 bytes), so Settings must reject it at construction
+    # rather than silently producing an over-budget snapshot.
+    with pytest.raises(ValidationError):
+        Settings(evidence_snapshot_max_bytes=EVIDENCE_SNAPSHOT_MIN_BYTES - 1)
+    Settings(evidence_snapshot_max_bytes=EVIDENCE_SNAPSHOT_MIN_BYTES)
+
+
+def test_snapshot_truncation_counts_unique_artifact_uris(
     orchestrator_bundle,
 ) -> None:
     settings, store, _, _, engine = orchestrator_bundle
     run = engine.create_run(
-        RunCreateRequest(objective='A below-floor cap keeps the truncation note.')
+        RunCreateRequest(objective='Truncation counts unique evidence URIs.')
     )
-    _write_artifact(
-        settings,
-        store,
-        run.run_id,
-        type='runner_log',
-        uri='artifacts/job-1/runner.log',
-        content=b'log line\n' * 6000,
-    )
-    engine.settings.evidence_snapshot_max_bytes = 200
+    # Two distinct status.json artifacts (different content so neither is a
+    # dedup dependent). The budget must trim both their artifact_contents
+    # entries and their artifact inventory entries; each artifact's uri must
+    # be recorded once, not once per snapshot-entry removal operation.
+    for index, pad in ((1, 3000), (2, 2500)):
+        content = json.dumps(
+            {'status': 'complete', 'pad': 'x' * pad}
+        ).encode()
+        _write_artifact(
+            settings,
+            store,
+            run.run_id,
+            type='status',
+            uri=f'artifacts/job-{index}/status.json',
+            content=content,
+        )
+    engine.settings.evidence_snapshot_max_bytes = 2000
     engine.settings.evidence_excerpt_max_bytes = 1024 * 1024
 
     snapshot = build_evidence_snapshot(settings, store, run.run_id)
-    # The floor is the minimal empty skeleton plus the count-only note (~280
-    # bytes). The builder must not crash or delete the truncation explanation;
-    # it returns the minimal representation instead.
-    assert 'truncation' in snapshot
-    assert snapshot['truncation']['omitted_count'] >= 1
-    assert snapshot['truncation']['omitted_uris'] == []
-    assert evidence_byte_size(snapshot) <= 320
+    assert evidence_byte_size(snapshot) <= 2000
+    note = snapshot['truncation']
+    uris = note['omitted_uris']
+    assert len(uris) == len(set(uris))
+    assert note['omitted_count'] == len(set(uris))
+    for uri in uris:
+        assert uri.startswith('artifact://artifacts/job-')
 
 
 def test_snapshot_phase_scoped_artifact_inventory(orchestrator_bundle) -> None:

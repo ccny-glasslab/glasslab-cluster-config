@@ -207,25 +207,25 @@ def _truncation_note(dropped: list[str]) -> dict[str, Any]:
 def _drop_content_entry(
     snapshot: dict[str, Any],
     dependents_by_rep: dict[str, list[str]],
-    dropped: list[str],
     key: str,
-) -> None:
+) -> list[str]:
     """Remove one content entry plus any duplicates that reference it.
 
     A duplicate's ``duplicate_of`` must never point at content that trimming
     removed: dropping a representative also drops its dependents so no retained
     reference dangles. The representative is removed first and dependents are
     looked up fresh afterwards, so a dependent sharing the representative's uri
-    can never be matched against it.
+    can never be matched against it. Returns the removed uris so the caller can
+    record them exactly once in the truncation note.
     """
     entry = next(
         (e for e in snapshot['artifact_contents'] if e['uri'] == key),
         None,
     )
     if entry is None:
-        return
+        return []
     snapshot['artifact_contents'].remove(entry)
-    dropped.append(key)
+    removed = [key]
     for dependent_uri in dependents_by_rep.get(key, []):
         dependent = next(
             (e for e in snapshot['artifact_contents'] if e['uri'] == dependent_uri),
@@ -233,7 +233,8 @@ def _drop_content_entry(
         )
         if dependent is not None:
             snapshot['artifact_contents'].remove(dependent)
-            dropped.append(str(dependent['uri']))
+            removed.append(str(dependent['uri']))
+    return removed
 
 
 def build_evidence_snapshot(
@@ -280,6 +281,7 @@ def build_evidence_snapshot(
     }
     candidates = _drop_candidates(jobs, artifacts, contents)
     dropped: list[str] = []
+    dropped_set: set[str] = set()
     while candidates:
         provisional = dict(snapshot)
         if dropped:
@@ -288,19 +290,26 @@ def build_evidence_snapshot(
             break
         kind, key, identifier = candidates.pop(0)
         if kind == 'artifact_contents':
-            _drop_content_entry(
-                snapshot, dependents_by_rep, dropped, key
-            )
+            for removed_uri in _drop_content_entry(
+                snapshot, dependents_by_rep, key
+            ):
+                if removed_uri not in dropped_set:
+                    dropped_set.add(removed_uri)
+                    dropped.append(removed_uri)
         elif kind == 'artifacts':
             snapshot['artifacts'] = [
                 item for item in snapshot['artifacts'] if str(item['uri']) != key
             ]
-            dropped.append(identifier)
+            if identifier not in dropped_set:
+                dropped_set.add(identifier)
+                dropped.append(identifier)
         else:
             snapshot['jobs'] = [
                 item for item in snapshot['jobs'] if str(item['job_id']) != key
             ]
-            dropped.append(identifier)
+            if identifier not in dropped_set:
+                dropped_set.add(identifier)
+                dropped.append(identifier)
     if dropped:
         snapshot['truncation'] = _truncation_note(dropped)
         # Hard guarantee: the note itself adds bytes; if the final
@@ -318,7 +327,7 @@ def build_evidence_snapshot(
                     note['omitted_count'] - len(note['omitted_uris'])
                 )
         # Floor: with every list empty and the note reduced to its fixed text
-        # plus a count, the serialized snapshot is ~280 bytes. A cap below
-        # that cannot be satisfied without deleting the truncation explanation
-        # itself; the default cap (512 KiB) is far above the floor.
+        # plus a count, the serialized snapshot is ~251 bytes. Settings rejects
+        # caps below EVIDENCE_SNAPSHOT_MIN_BYTES (1024), so this halving loop
+        # only runs defensively when a cap was mutated after construction.
     return snapshot
