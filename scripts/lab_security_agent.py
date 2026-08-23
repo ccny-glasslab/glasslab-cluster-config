@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
@@ -353,6 +354,15 @@ def _terminate_process_group(process: subprocess.Popen[str]) -> None:
         process.communicate(timeout=5)
 
 
+def _set_parent_death_signal(expected_parent: int) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGTERM) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    if os.getppid() != expected_parent:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
 def run_worker(config: DispatchConfig, paths: RunPaths) -> tuple[dict[str, Any], str]:
     opencode_bin = resolve_executable(config.opencode_bin)
     env = build_worker_environment(config, paths.runtime)
@@ -376,12 +386,17 @@ def run_worker(config: DispatchConfig, paths: RunPaths) -> tuple[dict[str, Any],
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[signum] = signal.getsignal(signum)
             signal.signal(signum, interrupt)
+        worker_command = [
+            str(opencode_bin), "run",
+            "Complete the attached bounded security assignment.",
+            "--pure", "--format", "json", "-m", f"exo/{config.model}",
+            "--file", str(prompt_path),
+        ]
+        expected_parent = os.getpid()
         process = subprocess.Popen(
             [
-                str(opencode_bin), "run",
-                "Complete the attached bounded security assignment.",
-                "--pure", "--format", "json", "-m", f"exo/{config.model}",
-                "--file", str(prompt_path),
+                "/usr/bin/timeout", "--signal=TERM", "--kill-after=5s",
+                str(config.timeout_seconds), *worker_command,
             ],
             cwd=paths.worktree,
             env=env,
@@ -389,8 +404,9 @@ def run_worker(config: DispatchConfig, paths: RunPaths) -> tuple[dict[str, Any],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            preexec_fn=lambda: _set_parent_death_signal(expected_parent),
         )
-        stdout, stderr = process.communicate(timeout=config.timeout_seconds)
+        stdout, stderr = process.communicate(timeout=config.timeout_seconds + 10)
     except subprocess.TimeoutExpired as exc:
         if process is not None:
             _terminate_process_group(process)
@@ -407,6 +423,8 @@ def run_worker(config: DispatchConfig, paths: RunPaths) -> tuple[dict[str, Any],
     safe_stderr = stderr.replace(config.api_base, "<EXO_API>")
     paths.log.write_text(safe_stderr[-131072:])
     assert process is not None
+    if process.returncode == 124:
+        raise DispatchError("OpenCode worker timed out")
     if process.returncode:
         raise DispatchError(f"OpenCode worker exited with status {process.returncode}")
     events_path = paths.runtime / "events.jsonl"

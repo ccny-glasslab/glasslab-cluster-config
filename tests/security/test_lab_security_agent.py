@@ -3,8 +3,10 @@ from __future__ import annotations
 import os
 import json
 import shutil
+import signal
 import stat
 import subprocess
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -279,6 +281,55 @@ class ExecutionContractTests(unittest.TestCase):
             child_pid = int((paths.worktree / ".fake-child-pid").read_text())
             with self.assertRaises(ProcessLookupError):
                 os.kill(child_pid, 0)
+
+    def test_dispatcher_sigkill_does_not_orphan_worker_process_group(self) -> None:
+        with TemporaryDirectory() as raw:
+            repo = WorktreeTests().make_repo(Path(raw))
+            shutil.copytree(
+                REPO_ROOT / "security" / "lab-agent",
+                repo / "security" / "lab-agent",
+            )
+            (repo / "scope.md").write_text("Inspect tracked.txt.\n")
+            git(repo, "add", ".")
+            git(repo, "commit", "-m", "contracts")
+            config = replace(
+                DispatchConfig.for_test(repo, mode="discover"),
+                assignment_path=repo / "scope.md",
+                opencode_bin=str(REPO_ROOT / "tests/security/fixtures/fake-opencode-hangs.py"),
+                timeout_seconds=30,
+            )
+            paths = prepare_run(config)
+            dispatcher_pid = os.fork()
+            if dispatcher_pid == 0:
+                try:
+                    run_worker(config, paths)
+                finally:
+                    os._exit(0)
+
+            child_pid_path = paths.worktree / ".fake-child-pid"
+            deadline = time.monotonic() + 5
+            while not child_pid_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(child_pid_path.exists(), "fake worker did not start")
+            child_pid = int(child_pid_path.read_text())
+            worker_group = os.getpgid(child_pid)
+            try:
+                os.kill(dispatcher_pid, signal.SIGKILL)
+                os.waitpid(dispatcher_pid, 0)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(child_pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.05)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(child_pid, 0)
+            finally:
+                try:
+                    os.killpg(worker_group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 class CliTests(unittest.TestCase):
