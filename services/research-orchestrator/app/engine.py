@@ -2130,9 +2130,14 @@ class ResearchOrchestrator:
             'Python file inside the candidate directory, not a command or '
             'module reference. Do not write '
             'contract.sha256; the orchestrator owns sealing. Run lightweight '
-            'local checks. Return exactly one `propose_evaluation_contract` '
-            'action with contract_id, semantic version, candidate_path, and '
-            'rationale. Do not request publication, Kubernetes, registry, or '
+            'local checks with PYTHONDONTWRITEBYTECODE=1 and remove any '
+            '__pycache__ directory before returning. Return exactly one '
+            '`propose_evaluation_contract` '
+            'action whose arguments contain exactly the keys `contract_id`, '
+            '`version` (semantic-version string such as 1.0.0; the key is '
+            '`version`, never `semantic_version`), `candidate_path` (relative '
+            'to the Beaker workspace), and `rationale`. Do not request '
+            'publication, Kubernetes, registry, or '
             'shared-storage access.\n\nApproved scientific proposal:\n'
             + json.dumps(proposal, indent=2, sort_keys=True)
         )
