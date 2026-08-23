@@ -19,3 +19,5 @@ __pycache__/
 kubeadm/agent-stack/12-agent-secrets.yaml
 kubeadm/glasslab-v2/secrets/*.local.yaml
 kubeadm/glasslab-v2/gpu-runner/40-secret.local.yaml
+services/task-fabric/build/
+services/task-fabric/*.egg-info/

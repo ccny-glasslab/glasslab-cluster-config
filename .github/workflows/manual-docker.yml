@@ -76,7 +76,7 @@ jobs:
               echo "image=ghcr.io/${REPO_OWNER}/glasslab-schedule-worker" >> "$GITHUB_OUTPUT"
               ;;
             research-orchestrator)
-              echo "context=services/research-orchestrator" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
               echo "dockerfile=services/research-orchestrator/Dockerfile" >> "$GITHUB_OUTPUT"
               echo "image=ghcr.io/${REPO_OWNER}/glasslab-research-orchestrator" >> "$GITHUB_OUTPUT"
               ;;
