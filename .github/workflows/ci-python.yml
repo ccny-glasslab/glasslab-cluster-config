@@ -121,8 +121,7 @@ jobs:
       - name: Install research-orchestrator dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r services/research-orchestrator/requirements.txt \
-            -r services/research-orchestrator/requirements-dev.txt
+          pip install -r services/research-orchestrator/requirements-dev.txt
 
       - name: Run backend-neutral store contract
         working-directory: services/research-orchestrator
@@ -130,6 +129,10 @@ jobs:
           PYTHONPATH: .
           GLASSLAB_TEST_POSTGRES_DSN: postgresql://glasslab:glasslab@127.0.0.1:5432/orchestrator_contract
         run: pytest tests/test_store_contract.py -q
+
+      - name: Check ResearchStore structural conformance
+        working-directory: services/research-orchestrator
+        run: mypy --config-file mypy-research-store.ini
 
   adapter-tests:
     if: ${{ github.event_name == 'workflow_dispatch' }}

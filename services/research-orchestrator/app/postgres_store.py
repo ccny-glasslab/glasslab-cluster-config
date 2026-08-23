@@ -298,7 +298,8 @@ class PostgresStore:
         if not row: raise RecordNotFound(job_id)
         return JobRecord.model_validate(row['payload'])
     def list_jobs(self, run_id: str, *, statuses: Iterable[JobStatus] | None = None) -> list[JobRecord]:
-        query, params = 'SELECT payload FROM orchestrator_jobs WHERE run_id=%s', [run_id]
+        query = 'SELECT payload FROM orchestrator_jobs WHERE run_id=%s'
+        params: list[Any] = [run_id]
         if statuses: query += ' AND status = ANY(%s)'; params.append([s.value for s in statuses])
         query += ' ORDER BY created_at'
         with self._connect() as conn: return [JobRecord.model_validate(r['payload']) for r in conn.execute(query, params).fetchall()]
@@ -330,7 +331,9 @@ class PostgresStore:
         with self._connect() as conn: row = conn.execute('SELECT payload FROM orchestrator_knowledge_sources WHERE digest=%s AND canonical_uri=%s', (digest, canonical_uri)).fetchone()
         return KnowledgeSource.model_validate(row['payload']) if row else None
     def list_knowledge_sources(self, *, source_types: Iterable[SourceType] | None = None, run_scope: str | None = None) -> list[KnowledgeSource]:
-        query, params, clauses = 'SELECT payload FROM orchestrator_knowledge_sources', [], []
+        query = 'SELECT payload FROM orchestrator_knowledge_sources'
+        params: list[Any] = []
+        clauses: list[str] = []
         if run_scope is not None: clauses.append('(run_scope=%s OR run_scope IS NULL)'); params.append(run_scope)
         if source_types: clauses.append('source_type = ANY(%s)'); params.append([x.value for x in source_types])
         if clauses: query += ' WHERE ' + ' AND '.join(clauses)

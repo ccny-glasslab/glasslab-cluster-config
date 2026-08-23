@@ -15,7 +15,8 @@ from tempfile import NamedTemporaryFile
 from typing import BinaryIO
 
 from .schemas import IngestedDatasetRecord
-from .storage import RecordNotFound, SqliteStore
+from .research_store import ResearchStore
+from .storage import RecordNotFound
 from .task_bundles import DatasetAsset, TaskBundleError
 
 
@@ -31,7 +32,7 @@ class DatasetIngestionManager:
     def __init__(
         self,
         *,
-        store: SqliteStore,
+        store: ResearchStore,
         root: str,
         shared_mount_root: str,
         maximum_bytes: int,

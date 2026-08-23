@@ -20,6 +20,7 @@ from .matrix import expand_experiment_matrix
 from .opencode_runtime import AgentRuntime
 from .policy import ActionPolicy
 from .preflight import MatrixPreflightReport, preflight_matrix
+from .research_store import ResearchStore
 from .schemas import (
     ActionRecord,
     AgentName,
@@ -45,7 +46,7 @@ from .schemas import (
     TurnRecord,
     utc_now,
 )
-from .storage import ConcurrencyConflict, SqliteStore
+from .storage import ConcurrencyConflict
 from .task_bundles import (
     TaskBundleManager,
     TaskBundleRecord,
@@ -64,7 +65,7 @@ class ResearchOrchestrator:
         self,
         *,
         settings: Settings,
-        store: SqliteStore,
+        store: ResearchStore,
         runtime: AgentRuntime,
         workspaces: WorkspaceManager,
         contracts: EvaluationContractResolver,
