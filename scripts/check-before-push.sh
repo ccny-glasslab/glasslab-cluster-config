@@ -68,6 +68,7 @@ run_secret_boundary_tests() {
     tests.security.test_secret_process_boundaries \
     tests.security.test_secret_backup_restore \
     tests.security.test_lab_security_agent \
+    tests.security.test_workflow_security_manifests \
     -v
 }
 
