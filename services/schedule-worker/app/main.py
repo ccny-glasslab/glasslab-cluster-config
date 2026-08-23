@@ -23,7 +23,7 @@ TIMEOUT_SECONDS = float(os.environ.get('GLASSLAB_SCHEDULE_WORKER_TIMEOUT_SECONDS
 def mutation_headers() -> dict[str, str]:
     caller_name = os.environ.get('GLASSLAB_WORKFLOW_API_CALLER_NAME', '').strip()
     token = os.environ.get('GLASSLAB_WORKFLOW_API_TOKEN', '')
-    if not caller_name or not token:
+    if not caller_name or not token.strip():
         raise RuntimeError('workflow API mutation credentials are not configured')
     return {
         'Content-Type': 'application/json',

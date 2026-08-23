@@ -6,6 +6,7 @@ workflow-api endpoint/method/body the router produces for a command. No test
 touches a real backend.
 """
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import Settings, _request_json, create_app
@@ -37,9 +38,10 @@ def test_workflow_mutation_sends_caller_identity(monkeypatch) -> None:
     assert captured['headers']['X-glasslab-workflow-token'] == 'router-secret'
 
 
-def test_workflow_mutation_fails_closed_without_caller_token(monkeypatch) -> None:
-    monkeypatch.delenv('GLASSLAB_WORKFLOW_API_CALLER_NAME', raising=False)
-    monkeypatch.delenv('GLASSLAB_WORKFLOW_API_TOKEN', raising=False)
+@pytest.mark.parametrize('token', ['', '   '])
+def test_workflow_mutation_fails_closed_without_caller_token(monkeypatch, token) -> None:
+    monkeypatch.setenv('GLASSLAB_WORKFLOW_API_CALLER_NAME', 'research-command-router')
+    monkeypatch.setenv('GLASSLAB_WORKFLOW_API_TOKEN', token)
 
     try:
         _request_json(Settings(), '/research-sessions', method='POST', body={})

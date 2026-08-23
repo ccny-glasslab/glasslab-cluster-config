@@ -168,7 +168,7 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
         )
 
     def _mutation_headers(self) -> dict[str, str]:
-        if not self.caller_name or not self.token:
+        if not self.caller_name or not self.token.strip():
             raise ClusterExecutorError(
                 'workflow API mutation credentials are not configured'
             )

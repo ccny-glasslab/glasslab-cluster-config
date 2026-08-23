@@ -135,7 +135,7 @@ def test_schedule_mutations_send_caller_identity(monkeypatch) -> None:
 
 def test_schedule_mutation_fails_closed_without_token(monkeypatch) -> None:
     monkeypatch.setenv('GLASSLAB_WORKFLOW_API_CALLER_NAME', 'schedule-worker')
-    monkeypatch.delenv('GLASSLAB_WORKFLOW_API_TOKEN', raising=False)
+    monkeypatch.setenv('GLASSLAB_WORKFLOW_API_TOKEN', '   ')
 
     try:
         main_module.run_due_digest_cycle()
