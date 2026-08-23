@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import ctypes
 import hashlib
 import json
@@ -8,9 +9,11 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Sequence
 from urllib.parse import urlsplit
@@ -32,6 +35,7 @@ class DispatchConfig:
     api_base: str = "http://192.168.1.17:52415"
     model: str = "mlx-community/Qwen3-Coder-Next-4bit"
     opencode_bin: str = "opencode"
+    exo_ssh_target: str | None = "glasslab-exo17"
     timeout_seconds: int = 1800
 
     @classmethod
@@ -315,6 +319,60 @@ def check_exo_health(config: DispatchConfig) -> None:
         raise DispatchError("exo health check failed") from exc
 
 
+def _reserve_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+@contextmanager
+def open_exo_connection(config: DispatchConfig):
+    try:
+        check_exo_health(config)
+    except DispatchError as direct_error:
+        if not config.exo_ssh_target:
+            raise direct_error
+    else:
+        yield config
+        return
+
+    local_port = _reserve_local_port()
+    local_forward = f"127.0.0.1:{local_port}:127.0.0.1:52415"
+    command = [
+        "ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+        "-o", "ServerAliveInterval=30", "-L", local_forward,
+        config.exo_ssh_target,
+    ]
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    connected = replace(config, api_base=f"http://127.0.0.1:{local_port}")
+    try:
+        deadline = time.monotonic() + 15
+        while True:
+            if process.poll() is not None:
+                raise DispatchError("exo SSH tunnel exited before becoming ready")
+            try:
+                check_exo_health(connected)
+                break
+            except DispatchError:
+                if time.monotonic() >= deadline:
+                    raise DispatchError("exo SSH tunnel did not become ready")
+                time.sleep(0.2)
+        yield connected
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
 def resolve_executable(name: str) -> Path:
     candidate = Path(name)
     if candidate.is_absolute():
@@ -435,9 +493,9 @@ def run_worker(config: DispatchConfig, paths: RunPaths) -> tuple[dict[str, Any],
 
 
 def dispatch(config: DispatchConfig) -> RunPaths:
-    check_exo_health(config)
-    paths = prepare_run(config)
-    result, summary = run_worker(config, paths)
+    with open_exo_connection(config) as connected:
+        paths = prepare_run(connected)
+        result, summary = run_worker(connected, paths)
     _, schema = load_contract(config.repo_root, config.mode)
     validate_schema(result, schema)
     if result.get("base_commit") != paths.base_commit:

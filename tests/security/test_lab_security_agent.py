@@ -24,6 +24,7 @@ from scripts.lab_security_agent import (
     dispatch,
     extract_final_answer,
     load_contract,
+    open_exo_connection,
     parse_model_answer,
     parse_args,
     prepare_run,
@@ -62,6 +63,39 @@ class ContractTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_exo_connection_falls_back_to_managed_ssh_tunnel(self) -> None:
+        config = DispatchConfig.for_test(REPO_ROOT, mode="discover")
+        process = unittest.mock.MagicMock()
+        process.poll.return_value = None
+        with (
+            patch(
+                "scripts.lab_security_agent.check_exo_health",
+                side_effect=[DispatchError("direct failed"), None],
+            ) as health,
+            patch("scripts.lab_security_agent._reserve_local_port", return_value=65415),
+            patch("scripts.lab_security_agent.subprocess.Popen", return_value=process) as popen,
+        ):
+            with open_exo_connection(config) as connected:
+                self.assertEqual(connected.api_base, "http://127.0.0.1:65415")
+
+        self.assertEqual(health.call_count, 2)
+        command = popen.call_args.args[0]
+        self.assertIn("glasslab-exo17", command)
+        self.assertIn("127.0.0.1:65415:127.0.0.1:52415", command)
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=5)
+
+    def test_direct_connection_does_not_swallow_dispatch_errors(self) -> None:
+        config = DispatchConfig.for_test(REPO_ROOT, mode="discover")
+        with (
+            patch("scripts.lab_security_agent.check_exo_health"),
+            patch("scripts.lab_security_agent.subprocess.Popen") as popen,
+        ):
+            with self.assertRaisesRegex(DispatchError, "worker failed"):
+                with open_exo_connection(config):
+                    raise DispatchError("worker failed")
+        popen.assert_not_called()
+
     def test_resolves_opencode_before_worker_environment_is_sanitized(self) -> None:
         resolved = resolve_executable("opencode")
         self.assertTrue(resolved.is_absolute())

@@ -68,6 +68,7 @@ run_secret_boundary_tests() {
     tests.security.test_secret_process_boundaries \
     tests.security.test_secret_backup_restore \
     tests.security.test_lab_security_agent \
+    tests.scripts.test_glasslab_opencode \
     tests.security.test_workflow_security_manifests \
     -v
 }
@@ -114,7 +115,7 @@ run_workflow_api_tests() {
   printf '[check-before-push] running core service tests\n'
   (
     cd services/workflow-api
-    PYTHONPATH=../..:. pytest \
+    PYTHONPATH="../..:.${PYTHONPATH:+:$PYTHONPATH}" pytest \
       -p no:cacheprovider \
       tests/test_api.py \
       tests/test_persistence.py \
@@ -125,7 +126,7 @@ run_workflow_api_tests() {
   )
   (
     cd services/research-workspace-runner
-    PYTHONPATH=. pytest \
+    PYTHONPATH=".${PYTHONPATH:+:$PYTHONPATH}" pytest \
       -p no:cacheprovider \
       tests/test_runner.py \
       -q
@@ -147,7 +148,7 @@ run_workflow_api_tests() {
     GLASSLAB_ORCHESTRATOR_TASK_ASSET_ROOT="$contract_test_root/task-assets" \
     GLASSLAB_ORCHESTRATOR_DATASET_UPLOAD_ROOT="$contract_test_root/dataset-uploads" \
     GLASSLAB_ORCHESTRATOR_BENCHMARK_DATASET_CATALOG_PATH="$contract_test_root/datasets/catalog.json" \
-    PYTHONPATH=. pytest \
+    PYTHONPATH=".${PYTHONPATH:+:$PYTHONPATH}" pytest \
       -p no:cacheprovider \
       tests \
       -q
