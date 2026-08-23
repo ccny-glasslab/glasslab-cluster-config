@@ -48,7 +48,7 @@ from .schemas import (
     TurnKind,
     utc_now,
 )
-from .storage import SqliteStore
+from .research_store import ResearchStore
 
 
 SECRET_PATTERNS = (
@@ -121,7 +121,7 @@ class KnowledgeManager:
     def __init__(
         self,
         *,
-        store: SqliteStore,
+        store: ResearchStore,
         root: Path,
         allowlist_roots: Iterable[Path] | None = None,
         chunk_size: int = 1500,

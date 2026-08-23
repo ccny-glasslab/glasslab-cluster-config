@@ -132,6 +132,8 @@ run_workflow_api_tests() {
   )
   (
     cd services/research-orchestrator
+    # Narrow structural gate for the SQLite/PostgreSQL ResearchStore surface.
+    mypy --config-file mypy-research-store.ini
     contract_test_root="$(mktemp -d)"
     trap 'chmod -R u+w "$contract_test_root" 2>/dev/null || true; rm -rf "$contract_test_root"' EXIT
     GLASSLAB_ORCHESTRATOR_DATABASE_PATH="$contract_test_root/orchestrator.db" \
