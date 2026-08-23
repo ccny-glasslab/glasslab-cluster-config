@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ApprovalTier = Literal['tier-1-read-only', 'tier-2-approved-execution', 'tier-3-human-approval']
 InputType = Literal['dataset', 'paper_bundle', 'artifact_bundle', 'notes', 'text', 'url', 'parameter_set']
@@ -71,8 +71,12 @@ class WorkflowRegistryEntry(BaseModel):
     workload_id: str | None = None
     schema_ref: str | None = None
     default_entrypoint: list[str] = Field(default_factory=list)
-    allow_custom_image: bool = False
-    allow_custom_entrypoint: bool = False
+    runner_service_account_name: str = Field(
+        min_length=1,
+        max_length=253,
+        pattern=r'^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$',
+    )
+    max_wallclock_minutes: int | None = Field(default=None, ge=1)
     metric_contract: dict[str, Any] = Field(default_factory=dict)
     pipeline_support: dict[str, Any] = Field(default_factory=dict)
 
@@ -107,3 +111,20 @@ class WorkflowRegistryEntry(BaseModel):
     def validate_default_entrypoint(cls, value: list[str]) -> list[str]:
         cleaned = [' '.join(str(item).split()).strip() for item in value]
         return [item for item in cleaned if item]
+
+    @model_validator(mode='after')
+    def validate_active_execution_policy(self) -> 'WorkflowRegistryEntry':
+        if self.execution_status != 'ready' or self.submission_backend != 'kubernetes':
+            return self
+        image_name, separator, digest = self.runner_image.rpartition('@sha256:')
+        if not separator or not image_name or len(digest) != 64 or any(
+            character not in '0123456789abcdef' for character in digest
+        ):
+            raise ValueError('active runner_image must be digest-pinned with @sha256:<64 lowercase hex>')
+        if not self.default_entrypoint:
+            raise ValueError('active execution policy requires a fixed default_entrypoint')
+        if not self.resource_profile.requests or not self.resource_profile.limits:
+            raise ValueError('active execution policy requires bounded resource requests and limits')
+        if self.max_wallclock_minutes is None:
+            raise ValueError('active execution policy requires a fixed wall-clock ceiling')
+        return self

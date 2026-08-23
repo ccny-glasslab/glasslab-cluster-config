@@ -125,8 +125,8 @@ class Settings(BaseSettings):
         'http://glasslab-workflow-api.glasslab-v2.svc.cluster.local:8080'
     )
     cluster_execution_mode: str = 'workflow-api'
-    cluster_execution_workload_id: str = 'metric-search-v0'
-    cluster_execution_experiment_type: str = 'gpu-training-job'
+    cluster_execution_workload_id: str = 'workspace-cpu-ml-v1'
+    cluster_execution_experiment_type: str = 'research-workspace-job'
     workflow_api_caller_name: str = Field(
         default='',
         validation_alias=AliasChoices(
@@ -143,7 +143,8 @@ class Settings(BaseSettings):
     )
     kubernetes_namespace: str = 'glasslab-v2'
     permitted_job_images: Annotated[list[str], NoDecode] = [
-        'ghcr.io/ccny-glasslab/glasslab-metric-search:latest',
+        'ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:'
+        'dae5bc4967f5ac54edb6c6d63d8d3db9e4652cc46e035118b0c456eb70121061',
     ]
 
     maximum_turns: int = 20

@@ -2,7 +2,7 @@
 
 Covers which fields the submission payload carries for research-workspace
 workloads (fixed registry image, task/source bundles) versus GPU-training
-workloads (validated custom image), and that workflow-api rejection detail is
+workloads (also registry-owned), and that workflow-api rejection detail is
 preserved verbatim as ClusterExecutorError.
 """
 
@@ -136,7 +136,7 @@ def test_workspace_submission_defers_fixed_image_to_workflow_registry() -> None:
     assert 'image_ref' not in captured
 
 
-def test_non_workspace_submission_keeps_validated_custom_image() -> None:
+def test_non_workspace_submission_also_defers_image_to_workflow_registry() -> None:
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -147,18 +147,18 @@ def test_non_workspace_submission_keeps_validated_custom_image() -> None:
         )
 
     _executor(handler).submit(_spec(workspace=False))
-    assert captured['image_ref'] == 'example.invalid/stale-runner:v1'
+    assert 'image_ref' not in captured
 
 
 def test_submission_error_preserves_workflow_api_detail() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
             409,
-            json={'detail': 'workload does not allow a custom image_ref'},
+            json={'detail': 'workflow execution policy rejected the submission'},
         )
 
     with pytest.raises(
         ClusterExecutorError,
-        match='workload does not allow a custom image_ref',
+        match='workflow execution policy rejected the submission',
     ):
         _executor(handler).submit(_spec(workspace=False))

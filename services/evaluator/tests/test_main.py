@@ -27,6 +27,7 @@ def write_bundle(path: Path, run_id: str, metric: float, runtime_seconds: float)
                 'requested_models': ['random_forest'],
                 'resource_profile': 'cpu-small',
                 'runner_image': 'ghcr.io/ccny-glasslab/glasslab-tabular-runner:0.1.2',
+                'runner_service_account_name': 'glasslab-gpu-runner',
                 'evaluator_type': 'tabular-metric-max',
                 'approval_tier': 'tier-2-approved-execution',
                 'expected_artifacts': {'required': ['run_manifest.json'], 'optional': []},

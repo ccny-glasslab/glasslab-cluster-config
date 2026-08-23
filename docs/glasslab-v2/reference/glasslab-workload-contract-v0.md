@@ -62,7 +62,9 @@ Each run must reference an approved workflow from the registry:
   "description": "Run approved baseline models against a tabular dataset",
   "required_inputs": [...],
   "allowed_models": [...],
-  "runner_image": "ghcr.io/ccny-glasslab/glasslab-tabular-runner:0.1.2",
+  "runner_image": "ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:<digest>",
+  "runner_service_account_name": "glasslab-gpu-runner",
+  "max_wallclock_minutes": 60,
   "evaluator_type": "tabular-metric-max",
   "expected_artifacts": {...},
   "resource_profile": {...},
@@ -74,14 +76,35 @@ Each run must reference an approved workflow from the registry:
 }
 ```
 
-**Current Approved Workflows:**
+**Current Registry Execution State:**
+
+Runnable workflows are fail-closed: the registry fixes a digest-pinned image,
+container entrypoint, bounded resources, and runner service account. The older
+specialized runner tags could not be resolved to published OCI digests, so
+those definitions remain discoverable but are disabled until rebuilt and
+digest-pinned.
+
+For research-workspace workflows, `workspace.command` is a distinct bounded
+payload inside the frozen source bundle. It is an argv list executed without a
+shell by the fixed workspace runner, and the API accepts only the approved
+`python3` executable form with bounded argument count and size. It does not
+replace the registry-owned container entrypoint. The request wall-clock budget
+must also be positive and no greater than the registry's fixed ceiling; the
+same ceiling is carried into the run manifest and enforced when rendering the
+Kubernetes Job deadline.
 
 | Workflow ID | Family | Runner Image | Approval Tier | Status |
 |-------------|--------|--------------|---------------|--------|
-| `generic-tabular-benchmark` | tabular-benchmark | glasslab-tabular-runner:0.1.2 | tier-2 | ready |
-| `gpu-experiment` | gpu-experiment | glasslab-gpu-experiment-runner:0.1.7-local | tier-2 | ready |
-| `literature-to-experiment` | literature-to-experiment | glasslab-literature-runner:0.1.2 | tier-2 | ready |
-| `replication-lite` | replication-lite | glasslab-replication-runner:0.1.0 | tier-3 | declared-only |
+| `generic-tabular-benchmark` | tabular-benchmark | unresolved legacy tag | tier-2 | disabled |
+| `gpu-experiment` | gpu-experiment | unresolved local tag | tier-2 | disabled |
+| `literature-to-experiment` | literature-to-experiment | unresolved legacy tag | tier-2 | disabled |
+| `metric-search-v0` | generic-experiment | unresolved local tag | tier-2 | disabled |
+| `replication-lite` | replication-lite | unresolved legacy tag | tier-3 | disabled |
+| `research-workspace-cpu-v1` | research-workspace | digest-pinned workspace runner | tier-2 | ready |
+| `benchmark-workspace-cpu-v1` | research-workspace | digest-pinned workspace runner | tier-2 | ready |
+| `benchmark-workspace-gpu-v1` | research-workspace | digest-pinned workspace runner | tier-2 | ready |
+| `workspace-cpu-ml-v1` | research-workspace | digest-pinned workspace runner | tier-2 | ready |
+| `workspace-gpu-ml-v1` | research-workspace | digest-pinned workspace runner | tier-2 | ready |
 
 ### 1.3 Required Workflow Inputs
 
