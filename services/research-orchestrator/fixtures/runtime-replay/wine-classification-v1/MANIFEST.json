@@ -9,6 +9,22 @@
     "matrix.json": "2dcbb07717f55944469fa5a06a480ed8702cc35e4b0a6ac69e8d303144599c15",
     "workspace/configs/candidate.yaml": "767459d6609f069c4774f09ffa161bedcdb5d36e3af0ccfb970c723a0acd358f"
   },
+  "provenance": {
+    "appendix_lineage": "#196 methodology appendix as corrected by #202; same resolution mechanics verified delivered live in run 4be29763 event 163",
+    "claims": {
+      "input_to_manual_ab": "ESTABLISHED: PROMPT.txt bytes were passed verbatim as the CLI prompt argument to both manual A/B candidate invocations (quoted \"$(cat ab_prompt.txt)\" recorded in preserved session transcripts; file has no trailing newline so quoting is lossless)",
+      "live_turn_identity": "NOT established: orchestrator-delivered live turn prompts carry different wrapper text; the fixture is the standalone-replay form of the corrected feedback, not a byte-copy of any single live turn prompt"
+    },
+    "input_sha256_at_capture": {
+      "PROMPT.txt": "ea54a9f3926579563407a1ae4a5b5f9814462e13adb8c2540d52f70d41845b4f",
+      "workspace/configs/candidate.yaml": "767459d6609f069c4774f09ffa161bedcdb5d36e3af0ccfb970c723a0acd358f"
+    },
+    "run_ids": [
+      "39101d9c9d3d4753bcd74e93e6106819",
+      "4be2976337d046429e0f7b9426392477"
+    ],
+    "source_case": "run #98 corrected-feedback A/B replay (2026-08-23)"
+  },
   "schema_version": "glasslab-runtime-replay-fixture-v1",
   "source": "run #98 corrected-feedback A/B replay (2026-08-23)"
 }

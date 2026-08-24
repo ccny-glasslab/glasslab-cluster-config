@@ -111,3 +111,19 @@ def acceptance_gate(workspace_root: Path):
 def test_frozen_case_content_markers(relative: str, marker: str) -> None:
     text = (FIXTURE_ROOT / relative).read_text()
     assert marker in text
+
+
+def test_provenance_claims_present_and_bounded() -> None:
+    manifest = json.loads((FIXTURE_ROOT / 'MANIFEST.json').read_text())
+    provenance = manifest['provenance']
+    assert '4be2976337d046429e0f7b9426392477' in provenance['run_ids']
+    assert '#196' in provenance['appendix_lineage']
+    assert '#202' in provenance['appendix_lineage']
+    claims = provenance['claims']
+    assert claims['input_to_manual_ab'].startswith('ESTABLISHED')
+    assert 'NOT established' in claims['live_turn_identity']
+    for relative, sha in provenance['input_sha256_at_capture'].items():
+        assert (
+            hashlib.sha256((FIXTURE_ROOT / relative).read_bytes()).hexdigest()
+            == sha
+        ), relative
