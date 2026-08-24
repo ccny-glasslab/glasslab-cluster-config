@@ -146,6 +146,8 @@ def _page_blocks(page: object) -> list[_RawBlock]:
 def _strip_repeated_headers_footers(pages: list[list[_RawBlock]]) -> int:
     counts: dict[str, int] = {}
     for blocks in pages:
+        if not blocks:
+            continue
         edge_texts = {blocks[0].text.strip()}
         if len(blocks) > 1:
             edge_texts.add(blocks[-1].text.strip())

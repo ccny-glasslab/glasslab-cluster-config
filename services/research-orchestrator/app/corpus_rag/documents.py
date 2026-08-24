@@ -33,6 +33,8 @@ _NUMBERED_HEADING = re.compile(r'^(\d+(?:\.\d+)*)[.)]?\s+(\S.*)$')
 # A heading candidate must be clearly larger than body text.
 _HEADING_SIZE_RATIO = 1.12
 _HEADING_MAX_CHARS = 120
+_TOC_DOT_LEADER = re.compile(r'(?:\.\s?){4,}|\.{5,}')
+_TOC_TRAILING_PAGE_NUMBER = re.compile(r'\s\d{1,4}$')
 
 _FRONT_MATTER_PATH = '0'
 _FRONT_MATTER_TITLE = 'Front matter'
@@ -54,19 +56,30 @@ class SectionNode:
     page_end: int | None = None
 
 
+_MIN_READABLE_FONT_SIZE = 5.0
+
+
 def _modal_body_font_size(blocks: list[Any]) -> float | None:
-    """Most common rounded font size across all blocks (ties: larger wins)."""
-    sizes = [
-        round(block.font_size)
-        for block in blocks
-        if block.font_size is not None
-    ]
-    if not sizes:
+    """Body font size = mode weighted by CHARACTER COUNT (ties: larger wins).
+
+    Weighting by characters matters: short large-font headings can tie a
+    body size on block count in small documents, which would misclassify
+    every real heading as body text. Sizes below
+    ``_MIN_READABLE_FONT_SIZE`` are ignored: born-digital textbooks carry
+    thousands of invisible watermark/overlay spans at ~2-3pt that would
+    otherwise define the body size and turn every normal block into a
+    candidate heading.
+    """
+    char_counts: Counter[int] = Counter()
+    for block in blocks:
+        if block.font_size is None or block.font_size < _MIN_READABLE_FONT_SIZE:
+            continue
+        char_counts[round(block.font_size)] += len(block.text)
+    if not char_counts:
         return None
-    counts = Counter(sizes)
-    top_count = max(counts.values())
+    top_count = max(char_counts.values())
     body_size = max(
-        size for size, count in counts.items() if count == top_count
+        size for size, count in char_counts.items() if count == top_count
     )
     return float(body_size)
 
@@ -105,7 +118,19 @@ def detect_sections(document: Any) -> list[SectionNode]:
     raw_drafts: list[tuple[str, _DraftSection]] = []
     for block in blocks:
         numbered = _numbered_heading(block.text)
-        if numbered is not None:
+        has_typographic_signal = (
+            block.font_size is not None
+            and body_font_size is not None
+            and block.font_size >= _HEADING_SIZE_RATIO * body_font_size
+        ) or block.bold
+        if numbered is not None and has_typographic_signal:
+            if _TOC_DOT_LEADER.search(block.text) or _TOC_TRAILING_PAGE_NUMBER.search(
+                block.text
+            ):
+                # Table-of-contents entries share the heading typography but
+                # precede their real in-body occurrence; dropping them here
+                # lets duplicate-path resolution keep the genuine heading.
+                continue
             number, title = numbered
             raw_drafts.append(
                 (
@@ -147,13 +172,21 @@ def detect_sections(document: Any) -> list[SectionNode]:
     }
     next_free = 1
     drafts: list[_DraftSection] = []
+    seen_paths: set[str] = set()
     for kind, draft in raw_drafts:
         if kind == 'numbered':
+            # Bibliography items and running heads can repeat a numbered path
+            # ('2. Smith...' after '2 Related Work'); first occurrence wins
+            # and repeats fold into the preceding section's body.
+            if draft.path in seen_paths:
+                continue
+            seen_paths.add(draft.path)
             drafts.append(draft)
             continue
-        while next_free in used_top_level:
+        while next_free in used_top_level or str(next_free) in seen_paths:
             next_free += 1
         draft.path = str(next_free)
+        seen_paths.add(draft.path)
         drafts.append(draft)
         next_free += 1
 
@@ -227,9 +260,41 @@ def document_id_for_source(source_id: str) -> str:
     return hashlib.sha256(f'rag-document:{source_id}'.encode('utf-8')).hexdigest()
 
 
-def assert_no_secrets(text: str) -> None:
-    """Fail-closed secret scan over extracted document text (reject-only)."""
+_LOOSE_BASE64_SOURCE = r'[A-Za-z0-9+/]{40,}={0,2}\s*$'
+_STRICT_BASE64 = re.compile(
+    (
+        r'(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z])'
+        r'(?=[A-Za-z0-9+/]*[0-9])[A-Za-z0-9+/]{40,}={0,2}\s*$'
+    ),
+    re.MULTILINE,
+)
+
+
+def _content_secret_patterns() -> list[re.Pattern[str]]:
+    refined = False
+    patterns: list[re.Pattern[str]] = []
     for pattern in SECRET_PATTERNS:
+        if pattern.pattern == _LOOSE_BASE64_SOURCE:
+            patterns.append(_STRICT_BASE64)
+            refined = True
+        else:
+            patterns.append(pattern)
+    if not refined:
+        patterns.append(_STRICT_BASE64)
+    return patterns
+
+
+def assert_no_secrets(text: str) -> None:
+    """Fail-closed secret scan over extracted document text (reject-only).
+
+    Uses a stricter long-token heuristic than the knowledge-manager default:
+    scientific prose (equations, hashes of the form found in references)
+    trips the loose ``[A-Za-z0-9+/]{40,}`` rule, so this layer requires
+    mixed upper/lower/digit classes before treating a long token as a
+    credential. Named secret patterns (password/api-key/private-key/...)
+    keep their original strength.
+    """
+    for pattern in _content_secret_patterns():
         if pattern.search(text):
             raise KnowledgeError(
                 f'document matches secret pattern {pattern.pattern!r}'
