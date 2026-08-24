@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import os
 from typing import TYPE_CHECKING, ClassVar, Protocol, runtime_checkable
 
 import numpy as np
@@ -138,8 +139,12 @@ class ArcticEmbedProvider:
     def _load_shared(cls, model_name: str) -> 'SentenceTransformer':
         model = cls._cache.get(model_name)
         if model is None:
+            import torch
             from sentence_transformers import SentenceTransformer
 
+            # torch's default can leave cores idle on CPU-only hosts; batch
+            # indexing wants every core available.
+            torch.set_num_threads(max(1, os.cpu_count() or 1))
             model = SentenceTransformer(model_name)
             cls._cache[model_name] = model
         return model
