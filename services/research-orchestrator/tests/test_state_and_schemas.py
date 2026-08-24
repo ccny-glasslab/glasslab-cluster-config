@@ -146,3 +146,78 @@ def test_postgres_backend_requires_an_explicit_dsn() -> None:
         store_postgres_dsn='postgresql://glasslab:test@localhost/glasslab',
     )
     assert settings.store_backend == 'postgres'
+
+
+def test_turn_finding_requires_known_classification() -> None:
+    from app.schemas import FindingClassification, TurnFinding
+
+    finding = TurnFinding(
+        classification=FindingClassification.METHODOLOGICAL_LIMITATION,
+        text='Single-linkage behaviour was not compared against other linkages.',
+    )
+    assert finding.evidence == []
+    with pytest.raises(ValidationError):
+        TurnFinding(classification='not-a-classification', text='x')  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        TurnFinding(
+            classification=FindingClassification.ADVISORY_DISAGREEMENT,
+            text='',
+        )
+
+
+def test_agent_turn_result_findings_default_and_legacy_payload() -> None:
+    from app.schemas import (
+        FindingClassification,
+        TurnFinding,
+        TurnKind,
+    )
+
+    bare = AgentTurnResult(kind=TurnKind.VERIFICATION, summary='ok', done=True)
+    assert bare.findings == []
+
+    # Structured outputs emitted before the findings channel existed must
+    # continue to validate unchanged (upgrade-in-place discipline).
+    legacy_payload = bare.model_dump(mode='json')
+    legacy_payload.pop('findings')
+    assert AgentTurnResult.model_validate(legacy_payload).findings == []
+
+    populated = AgentTurnResult(
+        kind=TurnKind.VERIFICATION,
+        summary='verified',
+        done=True,
+        findings=[
+            TurnFinding(
+                classification=FindingClassification.STRUCTURED_CONTRADICTION,
+                text=(
+                    'comparison.csv records dbscan noise_count=0 while '
+                    'metrics.json best-config search recorded 147.'
+                ),
+                evidence=[
+                    'artifact://run/tables/comparison.csv',
+                    'artifact://run/metrics.json',
+                ],
+            )
+        ],
+    )
+    assert (
+        populated.findings[0].classification
+        == FindingClassification.STRUCTURED_CONTRADICTION
+    )
+    round_tripped = AgentTurnResult.model_validate(
+        populated.model_dump(mode='json')
+    )
+    assert round_tripped.findings == populated.findings
+
+
+def test_approval_request_acknowledge_unresolved_findings_flag() -> None:
+    from app.schemas import ApprovalRequest
+
+    request = ApprovalRequest(reviewer='operator')
+    assert request.acknowledge_unresolved_findings is False
+    acknowledged = ApprovalRequest(
+        reviewer='operator',
+        acknowledge_unresolved_findings=True,
+    )
+    assert acknowledged.acknowledge_unresolved_findings is True
+    with pytest.raises(ValidationError):
+        ApprovalRequest(reviewer='operator', unknown_key='x')  # type: ignore[call-arg]

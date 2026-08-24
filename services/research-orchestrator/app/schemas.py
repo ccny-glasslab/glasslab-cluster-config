@@ -74,6 +74,24 @@ class TurnKind(StrEnum):
     FINAL_REPORT = 'final_report'
 
 
+def _clean_evidence_uris(value: list[str]) -> list[str]:
+    # Shared by every structured citation surface (claims, verifier findings):
+    # the scheme allowlist mirrors the pydantic Field pattern (defense in
+    # depth) and dedups URIs so the same evidence is never cited twice.
+    allowed = (
+        'artifact://',
+        'git://',
+        'event://',
+        'job://',
+        'contract://',
+        'knowledge://',
+    )
+    for uri in value:
+        if not uri.startswith(allowed):
+            raise ValueError(f'unsupported evidence URI: {uri}')
+    return list(dict.fromkeys(value))
+
+
 class Claim(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
@@ -90,20 +108,42 @@ class Claim(BaseModel):
     @field_validator('evidence')
     @classmethod
     def validate_evidence_uris(cls, value: list[str]) -> list[str]:
-        # The scheme allowlist mirrors the Field pattern (defense in depth)
-        # and dedups URIs so a claim never cites the same evidence twice.
-        allowed = (
-            'artifact://',
-            'git://',
-            'event://',
-            'job://',
-            'contract://',
-            'knowledge://',
-        )
-        for uri in value:
-            if not uri.startswith(allowed):
-                raise ValueError(f'unsupported evidence URI: {uri}')
-        return list(dict.fromkeys(value))
+        return _clean_evidence_uris(value)
+
+
+class FindingClassification(StrEnum):
+    """Closed vocabulary for unresolved concerns attached to a turn.
+
+    Findings are advisory: they never block the workflow on their own, but
+    approval gates surface them so acceptance acknowledges them explicitly
+    instead of silently discarding them.
+    """
+
+    STRUCTURED_CONTRADICTION = 'structured_contradiction'
+    MISSING_EVIDENCE = 'missing_evidence'
+    METHODOLOGICAL_LIMITATION = 'methodological_limitation'
+    ADVISORY_DISAGREEMENT = 'advisory_disagreement'
+    CONTRACT_FAILURE = 'contract_failure'
+
+
+class TurnFinding(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    classification: FindingClassification
+    text: str = Field(min_length=1)
+    evidence: list[
+        Annotated[
+            str,
+            Field(
+                pattern=r'^(artifact|git|event|job|contract|knowledge)://.+$',
+            ),
+        ]
+    ] = Field(default_factory=list)
+
+    @field_validator('evidence')
+    @classmethod
+    def validate_evidence_uris(cls, value: list[str]) -> list[str]:
+        return _clean_evidence_uris(value)
 
 
 class RequestedAction(BaseModel):
@@ -287,6 +327,7 @@ class AgentTurnResult(BaseModel):
     claims: list[Claim] = Field(default_factory=list)
     requested_actions: list[RequestedAction] = Field(default_factory=list)
     produced_files: list[ProducedFile] = Field(default_factory=list)
+    findings: list[TurnFinding] = Field(default_factory=list)
     message_to_other_agent: str = ''
     recommended_next_state: RunState | None = None
     done: bool = False
@@ -806,6 +847,10 @@ class ApprovalRequest(BaseModel):
 
     reviewer: str = Field(min_length=1)
     reason: str = Field(default='Approved by human reviewer.', min_length=1)
+    # Required (True) to approve an accept_final_report action whose recorded
+    # verification assessment still has unresolved findings. The engine keeps
+    # this False by default so silent override is impossible.
+    acknowledge_unresolved_findings: bool = False
 
 
 class RejectionRequest(BaseModel):
