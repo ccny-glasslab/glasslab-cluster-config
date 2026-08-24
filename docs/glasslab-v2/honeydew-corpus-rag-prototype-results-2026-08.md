@@ -123,8 +123,40 @@ OpenAI-compatible endpoint, so shipped examples use the deterministic
 extractive synthesizer; `advisory_llm.llm_advisory_or_none` activates
 automatically when `GLASSLAB_RAG_LLM_*` env vars point at one.
 
-## 5. Limitations & next steps
+## 5. Test-first evidence
 
+Every behavioral module landed test-first; representative RED → GREEN pairs
+from the build log:
+
+| Unit | RED failure observed | GREEN after |
+|---|---|---|
+| rag storage (both backends) | `test_rag_tables_exist` — tables absent | 14/14 incl. live pgvector twins |
+| two-tier chunking | `ModuleNotFoundError: chunking` | slice-invariant + deterministic-id tests pass |
+| embeddings provider | `ModuleNotFoundError: embeddings` | offline determinism + arctic metadata (live load) |
+| vector index source filter | `TypeError: unexpected keyword 'source_of'` | plain-hex id filtering test green |
+| query planner / LLM provider | `ModuleNotFoundError: llm_provider` | 5 planner tests |
+| advisory family gate | FDR/assumption families admitted on single keyword | suppression test green |
+| pipeline ghost rows | `IntegrityError: FOREIGN KEY constraint failed` | skip-with-warning test green |
+| benchmark metrics | collection error (module absent) | hand-computed nDCG/MRR goldens |
+| ask CLI json-out on insufficiency | `assert json_out.exists()` false | artifact written on all paths |
+| eval assets | asset files missing | manifest/qrels/rubric contract tests |
+
+Two integration defects were caught by composition tests *after* their
+constituent units were individually green, fixed, and pinned by new
+regression tests (documented here honestly as post-unit catches):
+(1) raw-PDF-bytes strict-UTF-8 decoding rejected every real book — secret
+scanning moved to extracted text (`assert_no_secrets`);
+(2) single-pass unnumbered-heading allocation collided with later numbered
+headings — replaced by two-pass free-number allocation plus TOC-line filters
+(ISLR: 53,857 phantom sections → 447).
+
+## 6. Limitations & next steps
+
+- **Benchmark findings location**: the dense-strongest and rerank-neutral
+  results are discussed under §3 (H1/H2); they are findings, not defects.
+- **Extractive advisory family table is coarse** (keyword-based): the S1
+  transcript shows it keeps one marginal candidate on multi-keyword evidence;
+  the env-gated LLM path exists to refine synthesis quality in deployment.
 - **OCR out of scope**: 2 of 19 candidate sources (gap statistic TR; Efron
   1975 bootstrap) are image-only scans and were excluded; OCR would recover
   them later.
