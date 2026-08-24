@@ -7,12 +7,14 @@ from pathlib import Path
 import pytest
 
 from app.runtime_replay import (
-    DOOM_LOOP_THRESHOLD,
-    OpenCodeCliRunner,
+    TrialUsage,
     count_doom_loop_events,
+    find_trial_database,
     prepare_trial_workspace,
     parse_opencode_usage,
 )
+from app.runtime_replay import OpenCodeCliRunner
+from app.runtime_replay import _usage_fields
 
 
 def _write_db(path: Path, messages: list[dict], parts: list[dict]) -> None:
@@ -54,7 +56,8 @@ def test_metadata_parser_counts_requests_tools_and_invalid_calls(tmp_path: Path)
     usage = parse_opencode_usage(db)
     assert usage.model_request_count == 2
     assert usage.tool_call_count == 3
-    assert usage.invalid_tool_call_count == 1
+    assert usage.tool_error_count == 1
+    assert usage.invalid_tool_call_count is None
     assert usage.tokens_input == 300
     assert usage.tokens_output == 130
     assert usage.provider_id == 'exo'
@@ -72,33 +75,35 @@ def test_metadata_parser_survives_missing_tables_and_absent_tokens(tmp_path: Pat
     usage = parse_opencode_usage(db)
     assert usage.model_request_count == 0
     assert usage.tool_call_count == 0
-    assert usage.invalid_tool_call_count == 0
+    assert usage.invalid_tool_call_count is None
+    assert usage.tool_error_count == 0
     assert usage.tokens_input is None
     assert usage.tokens_output is None
 
 
 def test_doom_loop_threshold_flags_identical_terminal_signatures() -> None:
-    same = [_tool_part(f't{i}', 'bash', command='same') for i in range(DOOM_LOOP_THRESHOLD)]
-    events = count_doom_loop_events(same)
+    threshold = 4
+    same = [_tool_part(f't{i}', 'bash', command='same') for i in range(threshold)]
+    events = count_doom_loop_events(same, threshold)
     assert len(events) == 1
 
     below = same[:-1]
-    assert count_doom_loop_events(below) == []
+    assert count_doom_loop_events(below, threshold) == []
 
     interleaved = []
-    for i in range(DOOM_LOOP_THRESHOLD):
+    for i in range(threshold):
         interleaved.append(_tool_part(f'a{i}', 'bash', command='same'))
         interleaved.append(_tool_part(f'b{i}', 'read', path='x'))
-    assert count_doom_loop_events(interleaved) == []
+    assert count_doom_loop_events(interleaved, threshold) == []
 
 
 def test_doom_loop_ignores_non_terminal_parts() -> None:
     pending = [
         {'id': f'p{i}', 'type': 'tool', 'tool': 'bash',
          'state': {'status': 'pending', 'input': {'command': 'same'}}}
-        for i in range(DOOM_LOOP_THRESHOLD + 2)
+        for i in range(6)
     ]
-    assert count_doom_loop_events(pending) == []
+    assert count_doom_loop_events(pending, 4) == []
 
 
 def test_trial_workspace_starts_pristine_per_repeat(tmp_path: Path) -> None:
@@ -370,3 +375,395 @@ def test_cli_end_to_end_uses_real_preflight_on_fixture(tmp_path: Path) -> None:
     assert all(r['correctness_passed'] is True for r in qwen)
     assert all(r['correctness_passed'] is False for r in wrong)
     assert {r['trial_index'] for r in rows} == {0, 1}
+
+
+def test_metadata_parser_distinguishes_tool_error_from_unknown_tool(tmp_path: Path) -> None:
+    db = tmp_path / 'opencode.db'
+    parts = [
+        _tool_part(
+            't1',
+            'grep',
+            status='error',
+        ),
+    ]
+    # valid tool, execution failure: error text carries no unknown-tool signal
+    parts[0]['state']['error'] = 'ripgrep execution failed'
+    _write_db(db, [{'id': 'a1', 'role': 'assistant'}], parts)
+
+    usage = parse_opencode_usage(db)
+    assert usage.tool_error_count == 1
+    assert usage.invalid_tool_call_count is None
+
+
+def test_invalid_tool_call_count_counts_only_matching_parts(tmp_path: Path) -> None:
+    db = tmp_path / 'opencode.db'
+    unknown = _tool_part('t1', 'run', status='error')
+    unknown['state']['error'] = 'Unknown tool: run'
+    exec_fail = _tool_part('t2', 'bash', status='error')
+    exec_fail['state']['error'] = 'exit code 1'
+    another_exec_fail = _tool_part('t3', 'grep', status='error')
+    another_exec_fail['state']['error'] = 'ripgrep execution failed'
+    _write_db(db, [{'id': 'a1', 'role': 'assistant'}], [unknown, exec_fail, another_exec_fail])
+
+    usage = parse_opencode_usage(db)
+    assert usage.tool_error_count == 3
+    assert usage.invalid_tool_call_count == 1
+
+
+def test_unknown_tool_patterns_match_case_insensitively(tmp_path: Path) -> None:
+    db = tmp_path / 'opencode.db'
+    part = _tool_part('t1', 'todo', status='error')
+    part['state']['error'] = 'No Such Tool: todo'
+    _write_db(db, [{'id': 'a1', 'role': 'assistant'}], [part])
+
+    usage = parse_opencode_usage(db)
+    assert usage.tool_error_count == 1
+    assert usage.invalid_tool_call_count == 1
+
+
+def test_usage_fields_emit_v2_schema_keys(tmp_path: Path) -> None:
+    from app.runtime_replay import _usage_fields
+
+    fields = _usage_fields(TrialUsage())
+    assert set(fields) == {
+        'model_request_count',
+        'tool_call_count',
+        'tool_error_count',
+        'invalid_tool_call_count',
+        'tokens_input',
+        'tokens_output',
+        'provider_id',
+        'model_id',
+    }
+
+
+def test_find_trial_database_prefers_newest_across_layouts(tmp_path: Path) -> None:
+    import os
+
+    xdg = tmp_path / 'data' / 'opencode' / 'opencode.db'
+    legacy = tmp_path / '.local' / 'share' / 'opencode' / 'opencode.db'
+    xdg.parent.mkdir(parents=True)
+    legacy.parent.mkdir(parents=True)
+    xdg.write_bytes(b'newer')
+    legacy.write_bytes(b'older')
+    older_ts = os.path.getmtime(xdg) - 100
+    os.utime(xdg, (older_ts, older_ts))
+
+    found = find_trial_database(tmp_path)
+    assert found is not None
+    assert found.layout == 'legacy'
+
+    newer_ts = os.path.getmtime(legacy) + 100
+    os.utime(xdg, (newer_ts, newer_ts))
+    found = find_trial_database(tmp_path)
+    assert found is not None
+    assert found.layout == 'xdg'
+
+
+def test_find_trial_database_returns_none_when_absent(tmp_path: Path) -> None:
+    assert find_trial_database(tmp_path) is None
+
+
+def test_parse_opencode_usage_reads_legacy_layout_copy(tmp_path: Path) -> None:
+    home = tmp_path / 'home'
+    db = home / '.local' / 'share' / 'opencode' / 'opencode.db'
+    _write_db(db, [{'id': 'a1', 'role': 'assistant', 'tokens': {'input': 5, 'output': 7}}], [])
+    found = find_trial_database(home)
+    assert found is not None and found.layout == 'legacy'
+    usage = parse_opencode_usage(found.path)
+    assert usage.model_request_count == 1
+
+
+def test_cli_runner_env_denies_unlisted_variables_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv('MY_SECRET_TOKEN', 'leak-me')
+    monkeypatch.setenv('OPENCODE_API_KEY', 'pass-me')
+    recorded: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        recorded['env'] = kwargs['env']
+        return subprocess_completed(returncode=0)
+
+    monkeypatch.setattr('app.runtime_replay.subprocess.run', fake_run)
+    runner = OpenCodeCliRunner()
+    runner.run(
+        prompt='p',
+        workspace=tmp_path / 'ws',
+        home=tmp_path / 'home',
+        model_provider='exo',
+        model_name='m',
+        timeout_seconds=10,
+    )
+    env = recorded['env']
+    assert 'MY_SECRET_TOKEN' not in env
+    assert 'OPENCODE_API_KEY' not in env
+
+
+def test_cli_runner_env_allowlist_passes_exact_name_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv('MY_SECRET_TOKEN', 'leak-me')
+    monkeypatch.setenv('OPENCODE_API_KEY', 'pass-me')
+    recorded: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        recorded['env'] = kwargs['env']
+        return subprocess_completed(returncode=0)
+
+    monkeypatch.setattr('app.runtime_replay.subprocess.run', fake_run)
+    runner = OpenCodeCliRunner(env_allowlist=frozenset({'OPENCODE_API_KEY'}))
+    runner.run(
+        prompt='p',
+        workspace=tmp_path / 'ws',
+        home=tmp_path / 'home',
+        model_provider='exo',
+        model_name='m',
+        timeout_seconds=10,
+    )
+    env = recorded['env']
+    assert env.get('OPENCODE_API_KEY') == 'pass-me'
+    assert 'MY_SECRET_TOKEN' not in env
+
+
+def test_cli_runner_rejects_reserved_env_keys() -> None:
+    with pytest.raises(ValueError):
+        OpenCodeCliRunner(env_allowlist=frozenset({'HOME'}))
+    with pytest.raises(ValueError):
+        OpenCodeCliRunner(env_allowlist=frozenset({'PATH'}))
+    with pytest.raises(ValueError):
+        OpenCodeCliRunner(env_allowlist=frozenset({'XDG_DATA_HOME'}))
+
+
+def test_seed_auth_file_copies_to_both_layouts_with_0600(tmp_path: Path) -> None:
+    from app.runtime_replay import seed_trial_auth
+
+    auth = tmp_path / 'operator-auth.json'
+    auth.write_text('{"opencode-go": {"type": "api", "key": "k"}}')
+    home = tmp_path / 'trial-home'
+
+    seed_trial_auth(home, auth)
+
+    for relative in (
+        '.local/share/opencode/auth.json',
+        'data/opencode/auth.json',
+    ):
+        seeded = home / relative
+        assert seeded.is_file(), relative
+        assert seeded.read_text() == auth.read_text()
+        assert (seeded.stat().st_mode & 0o777) == 0o600
+    assert (home / '.local/share/opencode').stat().st_mode & 0o777 == 0o700
+
+
+def test_cleanup_of_trial_home_removes_seeded_auth(tmp_path: Path) -> None:
+    import shutil
+
+    from app.runtime_replay import seed_trial_auth
+
+    auth = tmp_path / 'operator-auth.json'
+    auth.write_text('{}')
+    home = tmp_path / 'trial-home'
+    seed_trial_auth(home, auth)
+    shutil.rmtree(home)
+    assert not home.exists()
+
+
+def test_campaign_emits_null_doom_loop_count_without_threshold(
+    tmp_path: Path,
+) -> None:
+    from app.runtime_replay import RawRunResult, load_case, run_campaign
+
+    fixture_root = Path(__file__).resolve().parents[1] / 'fixtures' / 'runtime-replay' / 'wine-classification-v1'
+    case = load_case(fixture_root)
+
+    class NullRunner:
+        def run(self, *, prompt, workspace, home, model_provider, model_name, timeout_seconds):
+            return RawRunResult(exit_code=0, wall_clock_seconds=0.01, timed_out=False)
+
+    summary = run_campaign(
+        case_root=fixture_root,
+        candidates=[('exo', 'm')],
+        repeats=1,
+        runner_factory=lambda p, n: NullRunner(),
+        out_dir=tmp_path / 'out',
+        timeout_seconds=30,
+        doom_loop_threshold=None,
+    )
+    row = json.loads((tmp_path / 'out' / 'observations.jsonl').read_text().strip())
+    assert row['doom_loop_event_count'] is None
+    assert row['doom_loop_threshold'] is None
+    assert 'threshold not specified' in row['notes']
+    assert summary['winner'] is None
+
+
+def test_campaign_records_threshold_next_to_count(tmp_path: Path) -> None:
+    from app.runtime_replay import RawRunResult, run_campaign
+
+    fixture_root = Path(__file__).resolve().parents[1] / 'fixtures' / 'runtime-replay' / 'wine-classification-v1'
+
+    class LoopRunner:
+        def run(self, *, prompt, workspace, home, model_provider, model_name, timeout_seconds):
+            db = home / '.local' / 'share' / 'opencode' / 'opencode.db'
+            _write_db(db, [{'id': 'a1', 'role': 'assistant'}], [
+                _tool_part(f't{i}', 'bash', command='same') for i in range(5)
+            ])
+            return RawRunResult(exit_code=0, wall_clock_seconds=0.01, timed_out=False)
+
+    out = tmp_path / 'out2'
+    run_campaign(
+        case_root=fixture_root,
+        candidates=[('exo', 'm')],
+        repeats=1,
+        runner_factory=lambda p, n: LoopRunner(),
+        out_dir=out,
+        timeout_seconds=30,
+        doom_loop_threshold=6,
+    )
+    row = json.loads((out / 'observations.jsonl').read_text().strip())
+    assert row['doom_loop_threshold'] == 6
+    assert row['doom_loop_event_count'] == 0
+    assert row['session_db_layout'] == 'legacy'
+
+
+def test_campaign_parses_legacy_layout_session_db(tmp_path: Path) -> None:
+    from app.runtime_replay import RawRunResult, run_campaign
+
+    fixture_root = Path(__file__).resolve().parents[1] / 'fixtures' / 'runtime-replay' / 'wine-classification-v1'
+
+    class DbRunner:
+        def run(self, *, prompt, workspace, home, model_provider, model_name, timeout_seconds):
+            db = home / '.local' / 'share' / 'opencode' / 'opencode.db'
+            _write_db(db, [{'id': 'a1', 'role': 'assistant', 'tokens': {'input': 11, 'output': 3}}], [])
+            return RawRunResult(exit_code=0, wall_clock_seconds=0.01, timed_out=False)
+
+    out = tmp_path / 'out3'
+    run_campaign(
+        case_root=fixture_root,
+        candidates=[('exo', 'm')],
+        repeats=1,
+        runner_factory=lambda p, n: DbRunner(),
+        out_dir=out,
+        timeout_seconds=30,
+        doom_loop_threshold=None,
+    )
+    row = json.loads((out / 'observations.jsonl').read_text().strip())
+    assert row['model_request_count'] == 1
+    assert row['tokens_input'] == 11
+    assert row['session_db_layout'] == 'legacy'
+
+
+def test_campaign_survives_missing_session_db_with_nulls(tmp_path: Path) -> None:
+    from app.runtime_replay import RawRunResult, run_campaign
+
+    fixture_root = Path(__file__).resolve().parents[1] / 'fixtures' / 'runtime-replay' / 'wine-classification-v1'
+
+    class NoDbRunner:
+        def run(self, *, prompt, workspace, home, model_provider, model_name, timeout_seconds):
+            return RawRunResult(exit_code=0, wall_clock_seconds=0.01, timed_out=False)
+
+    out = tmp_path / 'out4'
+    run_campaign(
+        case_root=fixture_root,
+        candidates=[('exo', 'm')],
+        repeats=1,
+        runner_factory=lambda p, n: NoDbRunner(),
+        out_dir=out,
+        timeout_seconds=30,
+        doom_loop_threshold=None,
+    )
+    row = json.loads((out / 'observations.jsonl').read_text().strip())
+    assert row['model_request_count'] is None
+    assert row['tool_call_count'] is None
+    assert row['session_db_layout'] is None
+    assert 'usage unmeasured: no session database found' in row['notes']
+    assert row['correctness_passed'] is False
+
+
+def test_schema_version_is_v2_in_campaign_rows(tmp_path: Path) -> None:
+    from app.runtime_replay import RawRunResult, run_campaign
+
+    fixture_root = Path(__file__).resolve().parents[1] / 'fixtures' / 'runtime-replay' / 'wine-classification-v1'
+
+    class QuietRunner:
+        def run(self, *, prompt, workspace, home, model_provider, model_name, timeout_seconds):
+            return RawRunResult(exit_code=0, wall_clock_seconds=0.01, timed_out=False)
+
+    out = tmp_path / 'out5'
+    run_campaign(
+        case_root=fixture_root,
+        candidates=[('exo', 'm')],
+        repeats=1,
+        runner_factory=lambda p, n: QuietRunner(),
+        out_dir=out,
+        timeout_seconds=30,
+    )
+    row = json.loads((out / 'observations.jsonl').read_text().strip())
+    assert row['schema_version'] == 'glasslab-runtime-replay-observation-v2'
+
+
+def test_cli_threads_threshold_env_and_auth(tmp_path: Path) -> None:
+    import importlib
+
+    from app.runtime_replay import RawRunResult
+
+    fixture_root = Path(__file__).resolve().parents[1] / 'fixtures' / 'runtime-replay' / 'wine-classification-v1'
+    cli = importlib.import_module('scripts.replay-runtime-benchmark')
+    seen: dict[str, object] = {}
+
+    def fake_factory_builder(env_pass, seed_auth_file):
+        seen['env_pass'] = env_pass
+        seen['seed_auth_file'] = seed_auth_file
+
+        def factory(provider: str, name: str):
+            class _R:
+                def run(self, *, prompt, workspace, home, model_provider, model_name, timeout_seconds):
+                    return RawRunResult(exit_code=0, wall_clock_seconds=0.01, timed_out=False)
+            return _R()
+
+        return factory
+
+    auth = tmp_path / 'auth.json'
+    auth.write_text('{}')
+    code = cli.main(
+        [
+            '--fixture', str(fixture_root),
+            '--candidate', 'exo/m',
+            '--out-dir', str(tmp_path / 'o'),
+            '--timeout-seconds', '30',
+            '--doom-loop-threshold', '6',
+            '--env-pass', 'OPENCODE_API_KEY',
+            '--seed-auth-file', str(auth),
+        ],
+        runner_factory=fake_factory_builder('OPENCODE_API_KEY', auth),
+    )
+    assert code == 0
+    row = json.loads((tmp_path / 'o' / 'observations.jsonl').read_text().strip())
+    assert row['doom_loop_threshold'] == 6
+
+
+def test_cli_warns_when_threshold_omitted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import importlib
+
+    from app.runtime_replay import RawRunResult
+
+    fixture_root = Path(__file__).resolve().parents[1] / 'fixtures' / 'runtime-replay' / 'wine-classification-v1'
+    cli = importlib.import_module('scripts.replay-runtime-benchmark')
+
+    def factory(provider: str, name: str):
+        class _R:
+            def run(self, *, prompt, workspace, home, model_provider, model_name, timeout_seconds):
+                return RawRunResult(exit_code=0, wall_clock_seconds=0.01, timed_out=False)
+        return _R()
+
+    cli.main(
+        [
+            '--fixture', str(fixture_root),
+            '--candidate', 'exo/m',
+            '--out-dir', str(tmp_path / 'o2'),
+            '--timeout-seconds', '30',
+        ],
+        runner_factory=factory,
+    )
+    assert 'doom-loop-threshold omitted' in capsys.readouterr().out

@@ -18,9 +18,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-DOOM_LOOP_THRESHOLD = 4
-
 _TERMINAL_TOOL_STATUSES = {'completed', 'error'}
+
+# Error-text fragments that indicate the RUNTIME rejected an unavailable or
+# unknown tool name. Heuristic and deliberately narrow: a failed invocation of
+# a valid tool must not be counted here. When no pattern matches,
+# invalid_tool_call_count stays None (= unknown), never 0.
+UNKNOWN_TOOL_PATTERNS: tuple[str, ...] = (
+    'unknown tool',
+    'invalid tool',
+    'no such tool',
+    'tool not found',
+    'not a valid tool',
+    'unrecognized tool',
+)
+
+_DB_LAYOUT_CANDIDATES: tuple[tuple[str, str], ...] = (
+    ('xdg', 'data/opencode/opencode.db'),
+    ('legacy', '.local/share/opencode/opencode.db'),
+)
 
 
 @dataclass(frozen=True)
@@ -34,7 +50,8 @@ class RawRunResult:
 class TrialUsage:
     model_request_count: int = 0
     tool_call_count: int = 0
-    invalid_tool_call_count: int = 0
+    tool_error_count: int = 0
+    invalid_tool_call_count: int | None = None
     tokens_input: int | None = None
     tokens_output: int | None = None
     provider_id: str | None = None
@@ -57,7 +74,9 @@ class RuntimeCandidateRunner(Protocol):
         ...
 
 
-def parse_opencode_usage(db_path: Path) -> TrialUsage:
+def parse_opencode_usage(
+    db_path: Path, doom_loop_threshold: int | None = None
+) -> TrialUsage:
     """Extract usage metadata from a trial HOME's opencode sqlite database.
 
     Defensive by design: missing tables or absent token fields yield zeroed or
@@ -69,13 +88,15 @@ def parse_opencode_usage(db_path: Path) -> TrialUsage:
         return usage
     con = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
     try:
-        usage = _read_usage(con)
+        usage = _read_usage(con, doom_loop_threshold)
     finally:
         con.close()
     return usage
 
 
-def _read_usage(con: sqlite3.Connection) -> TrialUsage:
+def _read_usage(
+    con: sqlite3.Connection, doom_loop_threshold: int | None
+) -> TrialUsage:
     tables = {
         row[0]
         for row in con.execute(
@@ -118,18 +139,69 @@ def _read_usage(con: sqlite3.Connection) -> TrialUsage:
         and isinstance(p.get('state'), dict)
         and p['state'].get('status') in _TERMINAL_TOOL_STATUSES
     ]
-    invalid = [p for p in terminal_tools if p['state'].get('status') == 'error']
+    error_tools = [p for p in terminal_tools if p['state'].get('status') == 'error']
+    unknown_tool_hits = [
+        p
+        for p in error_tools
+        if _matches_unknown_tool_pattern(p['state'].get('error'))
+    ]
 
     return TrialUsage(
         model_request_count=len(assistant),
         tool_call_count=len(terminal_tools),
-        invalid_tool_call_count=len(invalid),
+        tool_error_count=len(error_tools),
+        invalid_tool_call_count=(
+            len(unknown_tool_hits) if unknown_tool_hits else None
+        ),
         tokens_input=sum(tokens_in) if tokens_in else None,
         tokens_output=sum(tokens_out) if tokens_out else None,
         provider_id=next(iter(provider_ids)) if len(provider_ids) == 1 else None,
         model_id=next(iter(model_ids)) if len(model_ids) == 1 else None,
-        doom_loop_events=count_doom_loop_events(parts),
+        doom_loop_events=(
+            count_doom_loop_events(parts, doom_loop_threshold)
+            if doom_loop_threshold is not None
+            else []
+        ),
     )
+
+
+def _matches_unknown_tool_pattern(error_text: Any) -> bool:
+    if not isinstance(error_text, str):
+        return False
+    lowered = error_text.lower()
+    return any(pattern in lowered for pattern in UNKNOWN_TOOL_PATTERNS)
+
+
+@dataclass(frozen=True)
+class TrialDatabase:
+    path: Path
+    layout: str
+
+
+def find_trial_database(home: Path) -> TrialDatabase | None:
+    """Locate the trial's opencode session database across known layouts.
+
+    OpenCode versions differ on whether the session store follows XDG_DATA_HOME
+    or the legacy ~/.local/share path; both are checked and the most recently
+    modified database wins.
+    """
+    candidates: list[tuple[float, str, Path]] = []
+    seen_inodes: set[tuple[int, int]] = set()
+    for layout, relative in _DB_LAYOUT_CANDIDATES:
+        path = home / relative
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        key = (stat.st_dev, stat.st_ino)
+        if key in seen_inodes:
+            continue
+        seen_inodes.add(key)
+        candidates.append((stat.st_mtime, layout, path))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    _, layout, path = candidates[0]
+    return TrialDatabase(path=path, layout=layout)
 
 
 def _tool_signature(part: dict[str, Any]) -> str | None:
@@ -148,7 +220,7 @@ def _tool_signature(part: dict[str, Any]) -> str | None:
 
 
 def count_doom_loop_events(
-    parts: list[dict[str, Any]], threshold: int = DOOM_LOOP_THRESHOLD
+    parts: list[dict[str, Any]], threshold: int
 ) -> list[dict[str, Any]]:
     """Count runs of >= threshold consecutive identical terminal tool calls."""
     events: list[dict[str, Any]] = []
@@ -189,11 +261,55 @@ def prepare_trial_workspace(fixture_workspace: Path, destination: Path) -> Path:
     return destination
 
 
-class OpenCodeCliRunner:
-    """Invoke one candidate through the same `opencode run` CLI used live."""
+_RESERVED_ENV_KEYS = frozenset(
+    {'PATH', 'HOME', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME'}
+)
 
-    def __init__(self, opencode_bin: str = 'opencode') -> None:
+
+def seed_trial_auth(trial_home: Path, auth_file: Path) -> None:
+    """Copy an operator-supplied auth file into one trial HOME.
+
+    The file is placed at both layouts OpenCode versions are known to read.
+    Contents are never logged; copies live inside the trial HOME so the usual
+    trial cleanup removes them.
+    """
+    data = auth_file.read_bytes()
+    for relative in (
+        '.local/share/opencode/auth.json',
+        'data/opencode/auth.json',
+    ):
+        destination = trial_home / relative
+        destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        destination.write_bytes(data)
+        destination.chmod(0o600)
+
+
+class OpenCodeCliRunner:
+    """Invoke one candidate through the same `opencode run` CLI used live.
+
+    env_allowlist names operator environment variables that may pass through
+    to the trial (deny-by-default; reserved trial-scoped keys are rejected at
+    construction so they can never be overridden).
+    """
+
+    def __init__(
+        self,
+        opencode_bin: str = 'opencode',
+        env_allowlist: frozenset[str] | None = None,
+        seed_auth_file: Path | None = None,
+    ) -> None:
+        allowlist = (
+            frozenset() if env_allowlist is None else env_allowlist
+        )
+        reserved = allowlist & _RESERVED_ENV_KEYS
+        if reserved:
+            raise ValueError(
+                'env_allowlist must not override trial-scoped keys: '
+                + ', '.join(sorted(reserved))
+            )
         self._opencode_bin = opencode_bin
+        self._env_allowlist = allowlist
+        self._seed_auth_file = seed_auth_file
 
     def run(
         self,
@@ -206,6 +322,8 @@ class OpenCodeCliRunner:
         timeout_seconds: int,
     ) -> RawRunResult:
         home.mkdir(parents=True, exist_ok=True)
+        if self._seed_auth_file is not None:
+            seed_trial_auth(home, self._seed_auth_file)
         stdout_path = home / 'trial-stdout.txt'
         stderr_path = home / 'trial-stderr.txt'
         env_home = str(home.resolve())
@@ -219,6 +337,10 @@ class OpenCodeCliRunner:
             )
             if value is not None
         }
+        for name in sorted(self._env_allowlist):
+            value = os.environ.get(name)
+            if value is not None:
+                base_env[name] = value
         argv = [
             self._opencode_bin,
             'run',
@@ -345,7 +467,7 @@ def score_correctness(report: Any, case: ReplayCase) -> CorrectnessVerdict:
     )
 
 
-_TRIAL_SCHEMA_VERSION = 'glasslab-runtime-replay-observation-v1'
+_TRIAL_SCHEMA_VERSION = 'glasslab-runtime-replay-observation-v2'
 
 
 def run_campaign(
@@ -356,6 +478,7 @@ def run_campaign(
     runner_factory: Any,
     out_dir: Path,
     timeout_seconds: int,
+    doom_loop_threshold: int | None = None,
 ) -> dict[str, Any]:
     """Execute bounded replays; write crash-safe JSONL rows plus a summary.
 
@@ -369,11 +492,9 @@ def run_campaign(
     for provider, model_name in candidates:
         candidate_label = f'{provider}/{model_name}'
         for repeat_index in range(repeats):
-            home = out_dir / 'trials' / f'{provider}-{model_name}-{repeat_index}' / 'home'
-            workspace = prepare_trial_workspace(
-                case._workspace_template(),
-                out_dir / 'trials' / f'{provider}-{model_name}-{repeat_index}' / 'ws',
-            )
+            trial_dir = out_dir / 'trials' / f'{provider}-{model_name}-{repeat_index}'
+            home = trial_dir / 'home'
+            workspace = prepare_trial_workspace(case._workspace_template(), trial_dir / 'ws')
             runner = runner_factory(provider, model_name)
             raw = runner.run(
                 prompt=case.prompt_text(),
@@ -383,7 +504,37 @@ def run_campaign(
                 model_name=model_name,
                 timeout_seconds=timeout_seconds,
             )
-            usage = parse_opencode_usage(home / 'data' / 'opencode' / 'opencode.db')
+            trial_db = find_trial_database(home)
+            if trial_db is None:
+                usage_fields: dict[str, Any] = {
+                    'model_request_count': None,
+                    'tool_call_count': None,
+                    'tool_error_count': None,
+                    'invalid_tool_call_count': None,
+                    'tokens_input': None,
+                    'tokens_output': None,
+                    'provider_id': None,
+                    'model_id': None,
+                }
+                usage_note = '; usage unmeasured: no session database found'
+                session_db_layout: str | None = None
+            else:
+                usage = parse_opencode_usage(
+                    trial_db.path, doom_loop_threshold=doom_loop_threshold
+                )
+                usage_fields = _usage_fields(usage)
+                usage_note = ''
+                session_db_layout = trial_db.layout
+            if doom_loop_threshold is None or trial_db is None:
+                threshold_note = (
+                    '; doom_loop_event_count null: threshold not specified'
+                    if doom_loop_threshold is None
+                    else '; doom_loop_event_count null: no session database found'
+                )
+                doom_loop_event_count: int | None = None
+            else:
+                threshold_note = ''
+                doom_loop_event_count = len(usage.doom_loop_events)
             report = acceptance_gate(case, workspace)
             verdict = score_correctness(report, case)
             outcome = _terminal_outcome(raw, verdict)
@@ -398,14 +549,16 @@ def run_campaign(
                 'wall_clock_seconds': round(raw.wall_clock_seconds, 3),
                 'correctness_passed': verdict.correct,
                 'preflight_errors': verdict.preflight_errors[:4],
-                'doom_loop_event_count': len(usage.doom_loop_events),
-                **_usage_fields(usage),
+                'doom_loop_event_count': doom_loop_event_count,
+                'doom_loop_threshold': doom_loop_threshold,
+                'revision_cycles': None,
+                'session_db_layout': session_db_layout,
+                **usage_fields,
+                'notes': usage_note + threshold_note,
             }
             with jsonl_path.open('a', encoding='utf-8') as handle:
                 handle.write(json.dumps(observation, sort_keys=True) + '\n')
             trials += 1
-            if not (out_dir / 'trials').exists():
-                continue
     summary = {
         'schema_version': 'glasslab-runtime-replay-summary-v1',
         'case_id': case.case_id,
@@ -413,7 +566,7 @@ def run_campaign(
         'repeats': repeats,
         'trials': trials,
         'winner': None,
-        'note': 'raw observations only; correctness and latency are reported separately',
+        'note': 'raw observations only; correctness and latency are reported separately; observation schema v2',
     }
     (out_dir / 'summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
     return summary
@@ -423,6 +576,7 @@ def _usage_fields(usage: TrialUsage) -> dict[str, Any]:
     return {
         'model_request_count': usage.model_request_count,
         'tool_call_count': usage.tool_call_count,
+        'tool_error_count': usage.tool_error_count,
         'invalid_tool_call_count': usage.invalid_tool_call_count,
         'tokens_input': usage.tokens_input,
         'tokens_output': usage.tokens_output,
