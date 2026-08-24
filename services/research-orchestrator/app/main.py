@@ -684,6 +684,9 @@ def create_app(
                 action_id,
                 reviewer=request.reviewer,
                 reason=request.reason,
+                acknowledge_unresolved_findings=(
+                    request.acknowledge_unresolved_findings
+                ),
             )
         except Exception as exc:
             raise map_error(exc) from exc

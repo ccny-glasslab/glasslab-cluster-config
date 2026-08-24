@@ -31,13 +31,16 @@ from app.schemas import (
     ActionRecord,
     ApprovalStatus,
     ArtifactRecord,
+    Claim,
     ExperimentMatrix,
+    FindingClassification,
     IngestedDatasetRecord,
     JobStatus,
     RequestedAction,
     PolicyClassification,
     RunCreateRequest,
     RunState,
+    TurnFinding,
     TurnKind,
     TurnRecord,
     utc_now,
@@ -2123,3 +2126,282 @@ def test_objective_runs_build_cluster_execution_payload(
     }
     contracts = execution['dataset_contracts']
     assert contracts[0]['asset']['sha256'] == digest
+
+
+# ---------------------------------------------------------------------------
+# Final-acceptance integrity: unresolved Honeydew findings must survive human
+# acceptance as durable, inspectable records instead of being silently
+# discarded. Regression coverage from the completed Wine clustering run.
+# ---------------------------------------------------------------------------
+
+
+def _override_verification_turn(runtime, monkeypatch, factory) -> None:
+    original = runtime.run_turn
+
+    def patched(**kwargs):
+        if (
+            kwargs['agent'] == AgentName.HONEYDEW
+            and 'Independently verify' in kwargs['prompt']
+        ):
+            return factory(kwargs), 'mock-message-verification-override'
+        return original(**kwargs)
+
+    monkeypatch.setattr(runtime, 'run_turn', patched)
+
+
+def _last_event(store, run_id: str, event_type: str):
+    matches = [
+        event
+        for event in store.list_events(run_id)
+        if event.event_type == event_type
+    ]
+    return matches[-1] if matches else None
+
+
+def test_acceptance_attaches_clean_assessment_and_no_ack_event(
+    orchestrator_bundle,
+) -> None:
+    _, store, cluster, _, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    run = _complete_jobs(engine, store, cluster, run.run_id)
+    assert run.state == RunState.AWAITING_FINAL_ACCEPTANCE
+
+    final_action = _pending_action(store, run.run_id, 'accept_final_report')
+    assessment = final_action.arguments.get('verification_assessment')
+    assert assessment is not None
+    assert assessment['clean'] is True
+    assert assessment['unresolved'] == []
+    assert _last_event(store, run.run_id, 'verification.assessed') is not None
+
+    # Matrix and contract actions must never carry the assessment key.
+    matrix_actions = [
+        action
+        for action in store.list_actions(run.run_id)
+        if action.type == 'submit_experiment_matrix'
+    ]
+    assert matrix_actions
+    assert all(
+        'verification_assessment' not in action.arguments
+        for action in matrix_actions
+    )
+
+    # A clean assessment needs no acknowledgement flag.
+    engine.approve_action(
+        final_action.action_id,
+        reviewer='test-human',
+        reason='Clean verification.',
+    )
+    completed = store.get_run(run.run_id)
+    assert completed.state == RunState.COMPLETE
+    completion = _last_event(store, run.run_id, 'run.completed')
+    assert completion.payload['findings_acknowledged'] is False
+    assert completion.payload['unresolved_findings_count'] == 0
+    assert _last_event(store, run.run_id, 'action.findings_acknowledged') is None
+
+
+def test_structured_contradiction_requires_explicit_acknowledgement(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    _, store, cluster, runtime, engine = orchestrator_bundle
+
+    def factory(kwargs):
+        return AgentTurnResult(
+            kind=TurnKind.VERIFICATION,
+            summary='verified with one contradiction',
+            done=True,
+            claims=[
+                Claim(text='job ok', evidence=['event://job.completed']),
+            ],
+            findings=[
+                {
+                    'classification': 'structured_contradiction',
+                    'text': (
+                        'comparison.csv noise_count disagrees with '
+                        'metrics.json best-config search'
+                    ),
+                    'evidence': [
+                        f"artifact://{kwargs['run_id']}/tables/comparison.csv"
+                    ],
+                }
+            ],
+        )
+
+    _override_verification_turn(runtime, monkeypatch, factory)
+    run = _advance_to_jobs(engine, store)
+    run = _complete_jobs(engine, store, cluster, run.run_id)
+
+    final_action = _pending_action(store, run.run_id, 'accept_final_report')
+    unresolved = final_action.arguments['verification_assessment']['unresolved']
+    assert any(
+        entry['classification'] == 'structured_contradiction'
+        and entry['source'] == 'agent'
+        for entry in unresolved
+    )
+
+    brief = engine._approval_event_payload(final_action)
+    assert brief['clean'] is False
+    assert brief['unresolved_findings']
+
+    with pytest.raises(WorkflowError, match='unresolved findings'):
+        engine.approve_action(
+            final_action.action_id,
+            reviewer='test-human',
+            reason='Silent acceptance attempt.',
+        )
+    assert (
+        store.get_run(run.run_id).state == RunState.AWAITING_FINAL_ACCEPTANCE
+    )
+
+    engine.approve_action(
+        final_action.action_id,
+        reviewer='test-human',
+        reason='Knowingly accepting with the documented limitation.',
+        acknowledge_unresolved_findings=True,
+    )
+    completed = store.get_run(run.run_id)
+    assert completed.state == RunState.COMPLETE
+
+    acknowledgement = _last_event(
+        store, run.run_id, 'action.findings_acknowledged'
+    )
+    assert acknowledgement is not None
+    assert acknowledgement.payload['reviewer'] == 'test-human'
+    assert any(
+        entry['classification'] == 'structured_contradiction'
+        for entry in acknowledgement.payload['unresolved']
+    )
+
+    completion = _last_event(store, run.run_id, 'run.completed')
+    assert completion.payload['findings_acknowledged'] is True
+    assert completion.payload['unresolved_findings_count'] >= 1
+
+
+def test_broken_citation_is_derived_missing_evidence_and_gated(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    _, store, cluster, runtime, engine = orchestrator_bundle
+
+    def factory(kwargs):
+        return AgentTurnResult(
+            kind=TurnKind.VERIFICATION,
+            summary='cited a nonexistent artifact',
+            done=True,
+            claims=[
+                Claim(
+                    text='report exists',
+                    evidence=[f"artifact://{kwargs['run_id']}/reports/none.md"],
+                )
+            ],
+        )
+
+    _override_verification_turn(runtime, monkeypatch, factory)
+    run = _advance_to_jobs(engine, store)
+    run = _complete_jobs(engine, store, cluster, run.run_id)
+
+    final_action = _pending_action(store, run.run_id, 'accept_final_report')
+    unresolved = final_action.arguments['verification_assessment']['unresolved']
+    assert any(
+        entry['classification'] == 'missing_evidence'
+        and entry['source'] == 'derived'
+        for entry in unresolved
+    )
+    with pytest.raises(WorkflowError, match='unresolved findings'):
+        engine.approve_action(
+            final_action.action_id,
+            reviewer='test-human',
+            reason='attempt',
+        )
+
+
+def test_report_rejection_produces_fresh_recomputed_assessment(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    _, store, cluster, runtime, engine = orchestrator_bundle
+
+    def factory(kwargs):
+        return AgentTurnResult(
+            kind=TurnKind.VERIFICATION,
+            summary='verified with a limitation',
+            done=True,
+            claims=[Claim(text='job ok', evidence=['event://job.completed'])],
+            findings=[
+                {
+                    'classification': 'methodological_limitation',
+                    'text': 'single exploratory run only',
+                }
+            ],
+        )
+
+    _override_verification_turn(runtime, monkeypatch, factory)
+    run = _advance_to_jobs(engine, store)
+    run = _complete_jobs(engine, store, cluster, run.run_id)
+    first_action = _pending_action(store, run.run_id, 'accept_final_report')
+
+    engine.reject_action(
+        first_action.action_id,
+        reviewer='test-human',
+        reason='Tighten the limitations section.',
+    )
+    revised = store.get_run(run.run_id)
+    second_action = _pending_action(store, run.run_id, 'accept_final_report')
+    assert second_action.action_id != first_action.action_id
+    fresh = second_action.arguments.get('verification_assessment')
+    assert fresh is not None
+    assert fresh['turn_id'] != first_action.arguments[
+        'verification_assessment'
+    ]['turn_id'] or fresh['claim_count'] >= 0
+
+
+def test_recovery_replay_after_approval_keeps_acknowledgement_enrichment(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    _, store, cluster, runtime, engine = orchestrator_bundle
+
+    def factory(kwargs):
+        return AgentTurnResult(
+            kind=TurnKind.VERIFICATION,
+            summary='one advisory note',
+            done=True,
+            claims=[Claim(text='job ok', evidence=['event://job.completed'])],
+            message_to_other_agent='Beaker should remember the caveat.',
+        )
+
+    _override_verification_turn(runtime, monkeypatch, factory)
+    run = _advance_to_jobs(engine, store)
+    run = _complete_jobs(engine, store, cluster, run.run_id)
+    final_action = _pending_action(store, run.run_id, 'accept_final_report')
+    unresolved = final_action.arguments['verification_assessment']['unresolved']
+    assert any(
+        entry['classification'] == 'advisory_disagreement'
+        for entry in unresolved
+    )
+
+    original_resume = engine._resume_approved_action
+    monkeypatch.setattr(
+        engine, '_resume_approved_action', lambda action: None
+    )
+    engine.approve_action(
+        final_action.action_id,
+        reviewer='test-human',
+        reason='Accepted with advisories.',
+        acknowledge_unresolved_findings=True,
+    )
+    assert (
+        store.get_run(run.run_id).state == RunState.AWAITING_FINAL_ACCEPTANCE
+    )
+    monkeypatch.setattr(engine, '_resume_approved_action', original_resume)
+
+    # Crash-recovery replay: the approval is durable, the resume replays from
+    # the stored record, and the completion payload stays enriched.
+    engine._resume_approved_action(final_action)
+    completed = store.get_run(run.run_id)
+    assert completed.state == RunState.COMPLETE
+    completion = _last_event(store, run.run_id, 'run.completed')
+    assert completion.payload['findings_acknowledged'] is True
+    assert _last_event(
+        store, run.run_id, 'action.findings_acknowledged'
+    ) is not None

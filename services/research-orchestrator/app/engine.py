@@ -40,6 +40,7 @@ from .schemas import (
     EvaluationContractDescriptor,
     EvaluationContractProposal,
     ExperimentMatrix,
+    FindingClassification,
     JOB_TERMINAL_STATUSES,
     JobRecord,
     JobStatus,
@@ -62,6 +63,11 @@ from .task_bundles import (
 )
 from .workspaces import WorkspaceManager
 from .knowledge_manager import KnowledgeManager
+from .verification_assessment import (
+    UnresolvedFinding,
+    VerificationAssessment,
+    assess_verification,
+)
 
 
 class WorkflowError(RuntimeError):
@@ -1115,6 +1121,14 @@ class ResearchOrchestrator:
                 }
         if action.type == 'approve_protocol':
             payload['protocol_version'] = run.protocol_version
+        if action.type == 'accept_final_report':
+            assessment = action.arguments.get('verification_assessment')
+            if isinstance(assessment, dict):
+                payload['verification_assessment'] = assessment
+                payload['clean'] = bool(assessment.get('clean'))
+                payload['unresolved_findings'] = assessment.get(
+                    'unresolved', []
+                )
         return payload
 
     def _create_human_action(
@@ -1123,11 +1137,12 @@ class ResearchOrchestrator:
         run_id: str,
         action_type: str,
         reason: str,
+        arguments: dict[str, Any] | None = None,
     ) -> ActionRecord:
         run = self.store.get_run(run_id)
         requested = RequestedAction(
             type=action_type,
-            arguments={},
+            arguments=arguments or {},
             reason=reason,
         )
         candidate = self.policy.build_record(
@@ -1904,12 +1919,85 @@ class ResearchOrchestrator:
             }
         )
 
+    def _latest_verification_result(
+        self, run_id: str,
+    ) -> tuple[str, AgentTurnResult | None]:
+        for turn in reversed(self.store.list_turns(run_id)):
+            output = turn.structured_output
+            if (
+                turn.agent == AgentName.HONEYDEW
+                and turn.status == 'completed'
+                and output is not None
+                and output.kind == TurnKind.VERIFICATION
+            ):
+                return turn.turn_id, output
+        return '', None
+
+    def _verification_assessment(
+        self,
+        run_id: str,
+        *,
+        final_result: AgentTurnResult | None = None,
+    ) -> VerificationAssessment:
+        turn_id, result = self._latest_verification_result(run_id)
+        if result is None:
+            return VerificationAssessment(
+                turn_id='',
+                done=False,
+                claim_count=0,
+                clean=False,
+                unresolved=[
+                    UnresolvedFinding(
+                        classification=(
+                            FindingClassification.MISSING_EVIDENCE
+                        ),
+                        text=(
+                            'run reached final acceptance without a '
+                            'completed verification turn'
+                        ),
+                        source='derived',
+                    )
+                ],
+            )
+        base = assess_verification(
+            turn_id,
+            result,
+            artifact_uris={
+                artifact.uri
+                for artifact in self.store.list_artifacts(run_id)
+            },
+            job_ids={
+                job.job_id for job in self.store.list_jobs(run_id)
+            },
+            knowledge_ids={
+                source.source_id
+                for source in self.store.list_knowledge_sources()
+            },
+            evaluation_contract_id=self.store.get_run(
+                run_id
+            ).evaluation_contract_id,
+        )
+        merged = list(base.unresolved)
+        if final_result is not None:
+            merged.extend(
+                UnresolvedFinding(
+                    classification=finding.classification,
+                    text=finding.text[:200],
+                    source='agent',
+                    evidence=list(finding.evidence),
+                )
+                for finding in final_result.findings
+            )
+        merged.sort(key=lambda entry: (entry.classification.value, entry.text))
+        return base.model_copy(update={'unresolved': merged, 'clean': not merged})
+
     def approve_action(
         self,
         action_id: str,
         *,
         reviewer: str,
         reason: str,
+        acknowledge_unresolved_findings: bool = False,
     ) -> ActionRecord:
         with self._advance_lock:
             action = self.store.get_action(action_id)
@@ -1931,12 +2019,42 @@ class ResearchOrchestrator:
                 and not action.honeydew_approved
             ):
                 raise WorkflowError('Honeydew has not approved this action')
+            unresolved: list[dict[str, Any]] = []
+            if action.type == 'accept_final_report':
+                recorded = action.arguments.get('verification_assessment')
+                if isinstance(recorded, dict):
+                    unresolved = recorded.get('unresolved') or []
+                if unresolved and not acknowledge_unresolved_findings:
+                    detail = '; '.join(
+                        f"[{entry.get('classification')}] "
+                        f"{entry.get('text')}"
+                        for entry in unresolved
+                    )
+                    raise WorkflowError(
+                        'accept_final_report has unresolved findings; '
+                        'acknowledge them to accept knowingly: ' + detail
+                    )
             approved = self.store.update_action(
                 action_id,
                 approval_status=ApprovalStatus.APPROVED,
                 reviewer=reviewer,
                 reason=reason,
             )
+            if unresolved and not any(
+                event.event_type == 'action.findings_acknowledged'
+                and event.payload.get('action_id') == action_id
+                for event in self.store.list_events(action.run_id)
+            ):
+                self._event(
+                    action.run_id,
+                    source='orchestrator',
+                    event_type='action.findings_acknowledged',
+                    payload={
+                        'action_id': action_id,
+                        'reviewer': reviewer,
+                        'unresolved': unresolved,
+                    },
+                )
             self._event(
                 action.run_id,
                 source='orchestrator',
@@ -2053,12 +2171,18 @@ class ResearchOrchestrator:
         elif action.type == 'accept_final_report':
             if run.state != RunState.AWAITING_FINAL_ACCEPTANCE:
                 return
+            recorded = action.arguments.get('verification_assessment') or {}
+            unresolved = recorded.get('unresolved') or []
             self._transition(action.run_id, RunState.COMPLETE)
             self._event(
                 action.run_id,
                 source='orchestrator',
                 event_type='run.completed',
-                payload={'accepted_by': action.reviewer},
+                payload={
+                    'accepted_by': action.reviewer,
+                    'findings_acknowledged': bool(unresolved),
+                    'unresolved_findings_count': len(unresolved),
+                },
             )
 
     def reject_action(
@@ -4171,10 +4295,22 @@ class ResearchOrchestrator:
                 'turn_id': turn.turn_id,
             },
         )
+        assessment = self._verification_assessment(
+            run_id, final_result=result
+        )
+        self._event(
+            run_id,
+            source='orchestrator',
+            event_type='verification.assessed',
+            payload=assessment.model_dump(mode='json'),
+        )
         self._create_human_action(
             run_id=run_id,
             action_type='accept_final_report',
             reason='Human acceptance is required to complete the research run.',
+            arguments={
+                'verification_assessment': assessment.model_dump(mode='json')
+            },
         )
         self._transition(run_id, RunState.AWAITING_FINAL_ACCEPTANCE)
 
