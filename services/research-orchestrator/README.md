@@ -18,6 +18,11 @@ reviewed, pinned Hermes executable and satisfy the isolation gates in
 
 Local checks:
 
+A bounded agent-runtime replay benchmark (frozen #98 repair case, real
+preflight scoring, no cluster contact) lives in
+`scripts/replay-runtime-benchmark.py`; see
+`docs/glasslab-v2/runtime-replay-report.md`.
+
 ```bash
 python -m pip install -r requirements-dev.txt
 PYTHONPATH=. pytest -p no:cacheprovider -q

@@ -182,6 +182,27 @@ def test_complete_workflow_injects_retrieved_context_into_later_turns(
     assert 'Write report.md' in report_prompt
 
 
+def test_report_prompt_requires_new_workspace_file(
+    orchestrator_bundle,
+) -> None:
+    # Pins the live incident where runs 4be29763/f12cbc14 failed three times:
+    # Honeydew returned purpose='report' pointing at 'reports/report.md'
+    # without creating any file in its workspace, so copy_agent_output raised
+    # 'agent output is not a real file'. The prompt must demand creation.
+    _, store, cluster, runtime, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    _complete_jobs(engine, store, cluster, run.run_id)
+    report_prompt = next(
+        prompt
+        for agent, prompt in runtime.prompts
+        if agent == AgentName.HONEYDEW and 'Write report.md' in prompt
+    )
+    assert 'create' in report_prompt.lower()
+    assert 'your own workspace' in report_prompt.lower()
+    assert 'must exist as a real file' in report_prompt.lower()
+    assert 'do not reference job artifacts' in report_prompt.lower()
+
+
 def test_context_attached_event_records_packet_id(
     orchestrator_bundle,
 ) -> None:

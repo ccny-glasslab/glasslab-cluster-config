@@ -4119,8 +4119,14 @@ class ResearchOrchestrator:
         prompt = (
             'Write report.md for the human. Separate observations from '
             'inferences, cite authoritative evidence URIs, include failed runs '
-            'and limitations, and do not overstate single-run results. Return '
-            'the file with purpose "report".\n\n'
+            'and limitations, and do not overstate single-run results. Create '
+            'report.md yourself as a new file at the top level of your own '
+            'workspace using the workspace file tool before returning the '
+            'structured result. The produced_files entry with purpose '
+            '"report" must name that newly created file, which must exist as '
+            'a real file in your own workspace when the turn ends; do not '
+            'reference job artifacts or files from other locations as your '
+            'produced file.\n\n'
             + serialize_evidence(evidence)
         )
         if feedback:
