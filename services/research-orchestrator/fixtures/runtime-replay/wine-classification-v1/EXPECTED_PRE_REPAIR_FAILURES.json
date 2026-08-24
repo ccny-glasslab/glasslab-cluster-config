@@ -1,0 +1,6 @@
+{
+  "schema_version": "glasslab-runtime-replay-expected-v1",
+  "error_substrings": [
+    "src/train.py"
+  ]
+}
