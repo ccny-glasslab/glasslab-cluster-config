@@ -261,6 +261,30 @@ def _render_action_context(payload: dict[str, Any]) -> str:
                 ),
             ]
         )
+        unresolved = payload.get('unresolved_findings')
+        if isinstance(unresolved, list) and unresolved:
+            # Rendered before anything else variable-length: the message
+            # truncation cap must never be able to hide these.
+            lines.extend(['', '**Unresolved verification findings**'])
+            for entry in unresolved[:5]:
+                if isinstance(entry, dict):
+                    label = str(entry.get('classification', 'unclassified'))
+                    text = str(entry.get('text', ''))[:160]
+                else:
+                    label = 'unclassified'
+                    text = str(entry)[:180]
+                lines.append(f'- [{label}] {text}')
+            hidden = len(unresolved) - min(len(unresolved), 5)
+            if hidden > 0:
+                lines.append(f'- ...and {hidden} more (see run events)')
+            lines.append(
+                'Approving acknowledges these findings; the '
+                'acknowledgement is recorded on the run.'
+            )
+        elif payload.get('verification_assessment') is not None:
+            lines.extend(
+                ['', 'Verification assessment: no unresolved findings.']
+            )
 
     contract = payload.get('evaluation_contract')
     if isinstance(contract, dict):

@@ -328,7 +328,11 @@ def test_discord_control_dispatch_records_immutable_identity() -> None:
     engine.approve_action.assert_called_once_with(
         'action-1',
         reviewer='discord:142100176322953216:Tyler',
-        reason='Approved through Discord controls.',
+        reason=(
+            'Approved through Discord controls. Acknowledges any unresolved '
+            'findings disclosed above.'
+        ),
+        acknowledge_unresolved_findings=True,
     )
     engine.reject_action.assert_not_called()
 
@@ -1231,3 +1235,98 @@ def test_opencode_repairs_missing_structured_output(
     assert 'Return only the structured result' in (
         repair_payload['parts'][0]['text']
     )
+
+
+def test_discord_final_acceptance_discloses_unresolved_findings() -> None:
+    # The Wine incident: findings must render before any variable-length
+    # section so the truncation cap can never hide them from the approver.
+    message = DiscordRenderer().render(
+        EventRecord(
+            sequence_number=9,
+            run_id='run-1',
+            source='orchestrator',
+            event_type='action.proposed',
+            payload={
+                'action_id': 'action-final',
+                'type': 'accept_final_report',
+                'policy_classification': 'human_approval',
+                'approval_status': 'pending',
+                'human_approval_ready': True,
+                'objective': 'Complete the corrected Wine clustering run.',
+                'reason': 'Human acceptance is required to complete the run.',
+                'effect': 'Accept the report and mark the run complete.',
+                'artifact': {
+                    'uri': 'artifact://run-1/reports/report.md',
+                    'sha256': 'c' * 64,
+                },
+                'clean': False,
+                'unresolved_findings': [
+                    {
+                        'classification': 'structured_contradiction',
+                        'text': (
+                            'comparison.csv noise_count disagrees with '
+                            'metrics.json'
+                        ),
+                        'source': 'agent',
+                    },
+                    {
+                        'classification': 'methodological_limitation',
+                        'text': 'single exploratory execution only',
+                        'source': 'agent',
+                    },
+                ],
+                'evaluation_contract': {
+                    'contract_id': 'wine-clustering-v1',
+                    'version': '1.0.0',
+                    'digest': 'd' * 64,
+                },
+            },
+        )
+    )
+    assert '**Unresolved verification findings**' in message.content
+    assert '[structured_contradiction]' in message.content
+    assert '[methodological_limitation]' in message.content
+    assert 'comparison.csv noise_count disagrees' in message.content
+    assert 'Acknowledgement is recorded' in message.content or (
+        'acknowledgement is recorded' in message.content
+    )
+    # Findings precede the boilerplate sections so truncation hides those
+    # first, never the findings themselves.
+    assert message.content.index('Unresolved verification findings') < message.content.index(
+        'Why this gate exists'
+    )
+
+
+def test_discord_final_acceptance_states_clean_assessment() -> None:
+    message = DiscordRenderer().render(
+        EventRecord(
+            sequence_number=10,
+            run_id='run-1',
+            source='orchestrator',
+            event_type='action.proposed',
+            payload={
+                'action_id': 'action-clean',
+                'type': 'accept_final_report',
+                'policy_classification': 'human_approval',
+                'approval_status': 'pending',
+                'human_approval_ready': True,
+                'objective': 'Complete a clean run.',
+                'reason': 'Human acceptance is required.',
+                'effect': 'Accept the report and mark the run complete.',
+                'artifact': {
+                    'uri': 'artifact://run-1/reports/report.md',
+                    'sha256': 'e' * 64,
+                },
+                'verification_assessment': {
+                    'turn_id': 'turn-1',
+                    'done': True,
+                    'claim_count': 3,
+                    'clean': True,
+                    'unresolved': [],
+                },
+                'clean': True,
+                'unresolved_findings': [],
+            },
+        )
+    )
+    assert 'no unresolved findings' in message.content

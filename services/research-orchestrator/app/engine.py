@@ -4214,7 +4214,12 @@ class ResearchOrchestrator:
                 'Independently verify Beaker\'s important claims against these '
                 'authoritative records and the approved program.md. Set '
                 'done=true only if the evidence supports a final report. Cite '
-                'artifact, job, event, Git, or contract URIs.\n\n'
+                'artifact, job, event, Git, or contract URIs. Report anything '
+                'you could not fully confirm as structured `findings` entries '
+                'classified as structured_contradiction, missing_evidence, '
+                'methodological_limitation, or advisory_disagreement; '
+                'findings never block the report, but they are recorded for '
+                'the human acceptance gate.\n\n'
                 + serialize_evidence(evidence)
             ),
             expected_kind=TurnKind.VERIFICATION,

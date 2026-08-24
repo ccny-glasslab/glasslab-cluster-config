@@ -92,7 +92,11 @@ def execute_discord_action(
         engine.approve_action(
             action_id,
             reviewer=actor.reviewer,
-            reason=reason or 'Approved through Discord controls.',
+            reason=(
+                reason or 'Approved through Discord controls.'
+            )
+            + ' Acknowledges any unresolved findings disclosed above.',
+            acknowledge_unresolved_findings=True,
         )
     elif operation == 'reject':
         engine.reject_action(
