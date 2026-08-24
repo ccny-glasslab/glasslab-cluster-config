@@ -77,8 +77,8 @@ def _emit(payload: dict[str, object], json_out: str | None) -> None:
         Path(json_out).write_text(text + '\n')
 
 
-def _emit_insufficient(reason: str) -> None:
-    print(json.dumps({'kind': 'insufficient_evidence', 'reason': reason}))
+def _emit_insufficient(reason: str, json_out: str | None = None) -> None:
+    _emit({'kind': 'insufficient_evidence', 'reason': reason}, json_out)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -94,7 +94,9 @@ def main(argv: list[str] | None = None) -> int:
             store.list_corpus_sources(corpus.corpus_id) if corpus else []
         )
         if not members:
-            _emit_insufficient(f'corpus {args.corpus!r} has no member sources')
+            _emit_insufficient(
+                f'corpus {args.corpus!r} has no member sources', args.json_out
+            )
             return 0
         source_ids = members
 
@@ -144,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
             f'no chunks retrieved for question {args.question!r}'
             + (f' within corpus {args.corpus!r}' if args.corpus else '')
         )
-        _emit_insufficient(reason)
+        _emit_insufficient(reason, args.json_out)
         return 0
 
     # S1 guarantee: every emitted citation must resolve against the store.

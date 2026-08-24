@@ -389,15 +389,20 @@ def test_ask_cli_json_citations_resolve(mismatch_store, tmp_path: Path, capsys) 
 def test_ask_cli_insufficient_corpus_exit_zero(tmp_path: Path, capsys) -> None:
     store_path = tmp_path / 'empty.db'
     SqliteStore(str(store_path))  # fresh empty store
+    json_out = tmp_path / 'insufficient.json'
     rc = ask.main(
         [
             '--store', str(store_path),
             '--question', 'cohesive groups unknown geometry',
             '--mode', 'hybrid',
             '--corpus', 'missing',
+            '--json-out', str(json_out),
         ]
     )
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload['kind'] == 'insufficient_evidence'
     assert payload['reason']
+    # The --json-out contract holds on EVERY exit path, including insufficiency.
+    assert json_out.exists()
+    assert json.loads(json_out.read_text())['kind'] == 'insufficient_evidence'
