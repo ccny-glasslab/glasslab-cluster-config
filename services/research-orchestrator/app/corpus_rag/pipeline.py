@@ -12,6 +12,8 @@ from __future__ import annotations
 import bisect
 import hashlib
 import json
+import sqlite3
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -144,6 +146,7 @@ def build_index(
     todo = [row for row in rows if force or row['chunk_id'] not in existing]
 
     indexed = 0
+    skipped = 0
     for start in range(0, len(todo), _EMBED_BATCH):
         batch = todo[start : start + _EMBED_BATCH]
         vectors = provider.embed_passages([row['text'] for row in batch])
@@ -155,13 +158,26 @@ def build_index(
                 dims=int(provider.dims),
                 index_version=RAG_INDEX_VERSION,
             )
-            store.upsert_rag_chunk_vectors(meta, encode_vector(vector))
+            try:
+                store.upsert_rag_chunk_vectors(meta, encode_vector(vector))
+            except sqlite3.IntegrityError:
+                # A row whose parent chunk vanished between listing and write
+                # must not kill a multi-hour unattended indexing run; skipping
+                # is safe because citation resolution independently verifies
+                # every chunk against the store before anything is emitted.
+                skipped += 1
+                print(
+                    f'[build_index] skipping unresolvable chunk {meta.chunk_id}',
+                    file=sys.stderr,
+                )
+                continue
             indexed += 1
     return {
         'model_id': provider.model_id,
         'revision': provider.revision,
         'dims': int(provider.dims),
         'n_vectors': indexed,
+        'skipped': skipped,
     }
 
 

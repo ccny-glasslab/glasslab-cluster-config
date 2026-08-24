@@ -203,3 +203,37 @@ def test_ingest_corpus_cli_smoke(
     payload = json.loads(capsys.readouterr().out)
     assert len(payload['reports']) == 1
     assert payload['errors'] == []
+
+
+def test_build_index_skips_ghost_rows_with_warning(
+    store: SqliteStore,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Indexing must survive rows whose chunk vanished between listing and
+    write during long unattended runs: skip loudly instead of aborting."""
+    report = ingest_document(
+        store=store,
+        data=_make_pdf(),
+        canonical_uri='file://fixture.pdf',
+        doc_type='paper',
+    )
+    provider = OfflineDeterministicEmbedding(dims=16)
+    real_rows = store.list_rag_chunks(
+        source_ids=[report.source_id], kinds=['evidence_span'], limit=None
+    )
+    ghost = dict(real_rows[0])
+    ghost['chunk_id'] = 'ghost-chunk-that-vanished'
+    original = store.list_rag_chunks
+
+    def listing_with_ghost(**kwargs):
+        return [*original(**kwargs), ghost]
+
+    monkeypatch.setattr(store, 'list_rag_chunks', listing_with_ghost)
+
+    summary = build_index(store=store, source_ids=[report.source_id], provider=provider)
+
+    assert summary['n_vectors'] == len(real_rows)
+    assert summary['skipped'] == 1
+    captured = capsys.readouterr()
+    assert 'ghost-chunk-that-vanished' in captured.err
