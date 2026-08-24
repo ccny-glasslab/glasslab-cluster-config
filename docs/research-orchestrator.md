@@ -737,6 +737,15 @@ demonstrates knowledge ingestion and retrieval, objective, protocol approval,
 implementation, review, fake job approval and completion, analysis,
 verification, context-cited report, final acceptance, and `COMPLETE`.
 
+Final acceptance carries an explicit integrity semantic: the acceptance gate
+records a deterministic assessment of the verification turn (agent-declared
+findings plus mechanically resolvable citations), discloses unresolved
+entries in the approval brief, and requires acknowledgement when any remain.
+`COMPLETE` therefore guarantees process integrity with durable,
+inspectable records of anything the human knowingly accepted past — not
+scientific flawlessness. See the operator surface documentation for the
+exact event names and acknowledgement flow.
+
 Configuration is documented in
 `services/research-orchestrator/.env.example`. Never commit the Discord token or
 other live credentials.
