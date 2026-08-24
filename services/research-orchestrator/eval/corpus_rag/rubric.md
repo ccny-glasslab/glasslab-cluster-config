@@ -27,5 +27,7 @@ consensus.
 (e.g., `glmnet-jss`) because stable `source_id`s only exist after ingestion.
 The benchmark runner resolves manifest id -> ingested `source_id` at runtime
 via corpus membership (`rag_documents.source_id`). Grades: 0 irrelevant,
-1 supporting context, 2 directly answers the question. The paywalled entries
-(`he-garcia-imbalanced`, `monti-consensus`) are excluded from qrels by design.
+1 supporting context, 2 directly answers the question. Excluded from qrels by
+design: the paywalled entries (`he-garcia-imbalanced`, `monti-consensus`) and
+the image-only scans (`gap-statistic`, `efron-bootstrap`), which contain no
+extractable text and are skipped at ingestion.

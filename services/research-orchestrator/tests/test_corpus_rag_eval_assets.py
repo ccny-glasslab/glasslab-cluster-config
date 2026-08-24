@@ -33,8 +33,8 @@ def test_manifest_parses_and_is_complete() -> None:
     entries = _manifest()
     assert len(entries) >= 19
     skipped = [entry for entry in entries if entry.skip]
-    assert len(skipped) == 2
-    assert all(entry.skip_reason == 'paywalled' for entry in skipped)
+    assert len(skipped) == 4
+    assert {entry.skip_reason for entry in skipped} == {'paywalled', 'image-only scan'}
     for entry in entries:
         assert entry.url.startswith(('https://', 'http://'))
         if not entry.skip:

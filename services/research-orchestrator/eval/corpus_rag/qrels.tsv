@@ -1,8 +1,8 @@
 qid	key	grade
-q-clustering-geometry	gap-statistic	2
 q-clustering-geometry	islr2	1
 q-clustering-geometry	esl	1
-q-clustering-geometry	luxburg-stability	1
+q-clustering-geometry	luxburg-stability	2
+q-clustering-geometry	senbabaoglu-consensus	1
 q-cluster-stability	luxburg-stability	2
 q-cluster-stability	senbabaoglu-consensus	2
 q-cluster-stability	stability-selection	1
@@ -15,7 +15,6 @@ q-nested-cv	cawley-talbot	2
 q-nested-cv	islr2	1
 q-nested-cv	esl	1
 q-linear-alternatives	koenker-quantile	2
-q-linear-alternatives	efron-bootstrap	1
 q-linear-alternatives	esl	1
 q-calibration	guo-calibration	2
 q-calibration	islr2	1
