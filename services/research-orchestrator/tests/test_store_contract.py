@@ -389,6 +389,38 @@ def test_knowledge_and_context_records_round_trip(store) -> None:
     assert store.list_context_packets(run.run_id)[0].packet_id == packet.packet_id
 
 
+def test_knowledge_search_matches_partial_term_overlap(store) -> None:
+    """Long agent-context queries must still hit chunks sharing any term.
+
+    Retrieval queries combine turn kind, objective, and prompt prefixes into
+    one string. AND-ing every token against short chunks returns nothing, so
+    the lexical search treats whitespace-separated terms as alternatives.
+    """
+    run = store.create_run(_run(), one_active_run=False)
+    source = KnowledgeSource(
+        source_type=SourceType.DOCUMENTATION,
+        canonical_uri='repo://docs/arbitration.md',
+        digest=uuid4().hex + uuid4().hex,
+        run_scope=run.run_id,
+    )
+    store.save_knowledge_source(source)
+    chunk = KnowledgeChunk(
+        source_id=source.source_id,
+        chunk_index=0,
+        text='wine clustering stability analysis runs inside one job',
+        digest='4' * 64,
+        token_count=9,
+    )
+    store.replace_knowledge_chunks(source.source_id, [chunk])
+
+    long_query = (
+        'revision Complete and evaluate the imported UCI Wine Multi-Algorithm '
+        'Clustering benchmark revision candidate.yaml seeds matrix'
+    )
+    hits = store.search_knowledge_chunks(long_query, source_ids=[source.source_id], limit=5)
+    assert [h['chunk_id'] for h in hits] == [chunk.chunk_id]
+
+
 def test_restart_recovery_marks_running_turns_failed(store) -> None:
     run = store.create_run(_run(), one_active_run=False)
     turn = TurnRecord(run_id=run.run_id, agent=AgentName.BEAKER, status='running', created_at=datetime.now(UTC), updated_at=datetime.now(UTC))
