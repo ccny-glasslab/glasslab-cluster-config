@@ -18,9 +18,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-DOOM_LOOP_THRESHOLD = 4
-
 _TERMINAL_TOOL_STATUSES = {'completed', 'error'}
+
+# Error-text fragments that indicate the RUNTIME rejected an unavailable or
+# unknown tool name. Heuristic and deliberately narrow: a failed invocation of
+# a valid tool must not be counted here. When no pattern matches,
+# invalid_tool_call_count stays None (= unknown), never 0.
+UNKNOWN_TOOL_PATTERNS: tuple[str, ...] = (
+    'unknown tool',
+    'invalid tool',
+    'no such tool',
+    'tool not found',
+    'not a valid tool',
+    'unrecognized tool',
+)
+
+_DB_LAYOUT_CANDIDATES: tuple[tuple[str, str], ...] = (
+    ('xdg', 'data/opencode/opencode.db'),
+    ('legacy', '.local/share/opencode/opencode.db'),
+)
 
 
 @dataclass(frozen=True)
@@ -34,7 +50,8 @@ class RawRunResult:
 class TrialUsage:
     model_request_count: int = 0
     tool_call_count: int = 0
-    invalid_tool_call_count: int = 0
+    tool_error_count: int = 0
+    invalid_tool_call_count: int | None = None
     tokens_input: int | None = None
     tokens_output: int | None = None
     provider_id: str | None = None
@@ -57,7 +74,9 @@ class RuntimeCandidateRunner(Protocol):
         ...
 
 
-def parse_opencode_usage(db_path: Path) -> TrialUsage:
+def parse_opencode_usage(
+    db_path: Path, doom_loop_threshold: int | None = None
+) -> TrialUsage:
     """Extract usage metadata from a trial HOME's opencode sqlite database.
 
     Defensive by design: missing tables or absent token fields yield zeroed or
@@ -69,13 +88,15 @@ def parse_opencode_usage(db_path: Path) -> TrialUsage:
         return usage
     con = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
     try:
-        usage = _read_usage(con)
+        usage = _read_usage(con, doom_loop_threshold)
     finally:
         con.close()
     return usage
 
 
-def _read_usage(con: sqlite3.Connection) -> TrialUsage:
+def _read_usage(
+    con: sqlite3.Connection, doom_loop_threshold: int | None
+) -> TrialUsage:
     tables = {
         row[0]
         for row in con.execute(
@@ -118,18 +139,69 @@ def _read_usage(con: sqlite3.Connection) -> TrialUsage:
         and isinstance(p.get('state'), dict)
         and p['state'].get('status') in _TERMINAL_TOOL_STATUSES
     ]
-    invalid = [p for p in terminal_tools if p['state'].get('status') == 'error']
+    error_tools = [p for p in terminal_tools if p['state'].get('status') == 'error']
+    unknown_tool_hits = [
+        p
+        for p in error_tools
+        if _matches_unknown_tool_pattern(p['state'].get('error'))
+    ]
 
     return TrialUsage(
         model_request_count=len(assistant),
         tool_call_count=len(terminal_tools),
-        invalid_tool_call_count=len(invalid),
+        tool_error_count=len(error_tools),
+        invalid_tool_call_count=(
+            len(unknown_tool_hits) if unknown_tool_hits else None
+        ),
         tokens_input=sum(tokens_in) if tokens_in else None,
         tokens_output=sum(tokens_out) if tokens_out else None,
         provider_id=next(iter(provider_ids)) if len(provider_ids) == 1 else None,
         model_id=next(iter(model_ids)) if len(model_ids) == 1 else None,
-        doom_loop_events=count_doom_loop_events(parts),
+        doom_loop_events=(
+            count_doom_loop_events(parts, doom_loop_threshold)
+            if doom_loop_threshold is not None
+            else []
+        ),
     )
+
+
+def _matches_unknown_tool_pattern(error_text: Any) -> bool:
+    if not isinstance(error_text, str):
+        return False
+    lowered = error_text.lower()
+    return any(pattern in lowered for pattern in UNKNOWN_TOOL_PATTERNS)
+
+
+@dataclass(frozen=True)
+class TrialDatabase:
+    path: Path
+    layout: str
+
+
+def find_trial_database(home: Path) -> TrialDatabase | None:
+    """Locate the trial's opencode session database across known layouts.
+
+    OpenCode versions differ on whether the session store follows XDG_DATA_HOME
+    or the legacy ~/.local/share path; both are checked and the most recently
+    modified database wins.
+    """
+    candidates: list[tuple[float, str, Path]] = []
+    seen_inodes: set[tuple[int, int]] = set()
+    for layout, relative in _DB_LAYOUT_CANDIDATES:
+        path = home / relative
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        key = (stat.st_dev, stat.st_ino)
+        if key in seen_inodes:
+            continue
+        seen_inodes.add(key)
+        candidates.append((stat.st_mtime, layout, path))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    _, layout, path = candidates[0]
+    return TrialDatabase(path=path, layout=layout)
 
 
 def _tool_signature(part: dict[str, Any]) -> str | None:
@@ -148,7 +220,7 @@ def _tool_signature(part: dict[str, Any]) -> str | None:
 
 
 def count_doom_loop_events(
-    parts: list[dict[str, Any]], threshold: int = DOOM_LOOP_THRESHOLD
+    parts: list[dict[str, Any]], threshold: int
 ) -> list[dict[str, Any]]:
     """Count runs of >= threshold consecutive identical terminal tool calls."""
     events: list[dict[str, Any]] = []
@@ -423,6 +495,7 @@ def _usage_fields(usage: TrialUsage) -> dict[str, Any]:
     return {
         'model_request_count': usage.model_request_count,
         'tool_call_count': usage.tool_call_count,
+        'tool_error_count': usage.tool_error_count,
         'invalid_tool_call_count': usage.invalid_tool_call_count,
         'tokens_input': usage.tokens_input,
         'tokens_output': usage.tokens_output,

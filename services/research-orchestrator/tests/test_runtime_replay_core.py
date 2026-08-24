@@ -7,12 +7,14 @@ from pathlib import Path
 import pytest
 
 from app.runtime_replay import (
-    DOOM_LOOP_THRESHOLD,
-    OpenCodeCliRunner,
+    TrialUsage,
     count_doom_loop_events,
+    find_trial_database,
     prepare_trial_workspace,
     parse_opencode_usage,
 )
+from app.runtime_replay import OpenCodeCliRunner
+from app.runtime_replay import _usage_fields
 
 
 def _write_db(path: Path, messages: list[dict], parts: list[dict]) -> None:
@@ -54,7 +56,8 @@ def test_metadata_parser_counts_requests_tools_and_invalid_calls(tmp_path: Path)
     usage = parse_opencode_usage(db)
     assert usage.model_request_count == 2
     assert usage.tool_call_count == 3
-    assert usage.invalid_tool_call_count == 1
+    assert usage.tool_error_count == 1
+    assert usage.invalid_tool_call_count is None
     assert usage.tokens_input == 300
     assert usage.tokens_output == 130
     assert usage.provider_id == 'exo'
@@ -72,33 +75,35 @@ def test_metadata_parser_survives_missing_tables_and_absent_tokens(tmp_path: Pat
     usage = parse_opencode_usage(db)
     assert usage.model_request_count == 0
     assert usage.tool_call_count == 0
-    assert usage.invalid_tool_call_count == 0
+    assert usage.invalid_tool_call_count is None
+    assert usage.tool_error_count == 0
     assert usage.tokens_input is None
     assert usage.tokens_output is None
 
 
 def test_doom_loop_threshold_flags_identical_terminal_signatures() -> None:
-    same = [_tool_part(f't{i}', 'bash', command='same') for i in range(DOOM_LOOP_THRESHOLD)]
-    events = count_doom_loop_events(same)
+    threshold = 4
+    same = [_tool_part(f't{i}', 'bash', command='same') for i in range(threshold)]
+    events = count_doom_loop_events(same, threshold)
     assert len(events) == 1
 
     below = same[:-1]
-    assert count_doom_loop_events(below) == []
+    assert count_doom_loop_events(below, threshold) == []
 
     interleaved = []
-    for i in range(DOOM_LOOP_THRESHOLD):
+    for i in range(threshold):
         interleaved.append(_tool_part(f'a{i}', 'bash', command='same'))
         interleaved.append(_tool_part(f'b{i}', 'read', path='x'))
-    assert count_doom_loop_events(interleaved) == []
+    assert count_doom_loop_events(interleaved, threshold) == []
 
 
 def test_doom_loop_ignores_non_terminal_parts() -> None:
     pending = [
         {'id': f'p{i}', 'type': 'tool', 'tool': 'bash',
          'state': {'status': 'pending', 'input': {'command': 'same'}}}
-        for i in range(DOOM_LOOP_THRESHOLD + 2)
+        for i in range(6)
     ]
-    assert count_doom_loop_events(pending) == []
+    assert count_doom_loop_events(pending, 4) == []
 
 
 def test_trial_workspace_starts_pristine_per_repeat(tmp_path: Path) -> None:
@@ -370,3 +375,100 @@ def test_cli_end_to_end_uses_real_preflight_on_fixture(tmp_path: Path) -> None:
     assert all(r['correctness_passed'] is True for r in qwen)
     assert all(r['correctness_passed'] is False for r in wrong)
     assert {r['trial_index'] for r in rows} == {0, 1}
+
+
+def test_metadata_parser_distinguishes_tool_error_from_unknown_tool(tmp_path: Path) -> None:
+    db = tmp_path / 'opencode.db'
+    parts = [
+        _tool_part(
+            't1',
+            'grep',
+            status='error',
+        ),
+    ]
+    # valid tool, execution failure: error text carries no unknown-tool signal
+    parts[0]['state']['error'] = 'ripgrep execution failed'
+    _write_db(db, [{'id': 'a1', 'role': 'assistant'}], parts)
+
+    usage = parse_opencode_usage(db)
+    assert usage.tool_error_count == 1
+    assert usage.invalid_tool_call_count is None
+
+
+def test_invalid_tool_call_count_counts_only_matching_parts(tmp_path: Path) -> None:
+    db = tmp_path / 'opencode.db'
+    unknown = _tool_part('t1', 'run', status='error')
+    unknown['state']['error'] = 'Unknown tool: run'
+    exec_fail = _tool_part('t2', 'bash', status='error')
+    exec_fail['state']['error'] = 'exit code 1'
+    another_exec_fail = _tool_part('t3', 'grep', status='error')
+    another_exec_fail['state']['error'] = 'ripgrep execution failed'
+    _write_db(db, [{'id': 'a1', 'role': 'assistant'}], [unknown, exec_fail, another_exec_fail])
+
+    usage = parse_opencode_usage(db)
+    assert usage.tool_error_count == 3
+    assert usage.invalid_tool_call_count == 1
+
+
+def test_unknown_tool_patterns_match_case_insensitively(tmp_path: Path) -> None:
+    db = tmp_path / 'opencode.db'
+    part = _tool_part('t1', 'todo', status='error')
+    part['state']['error'] = 'No Such Tool: todo'
+    _write_db(db, [{'id': 'a1', 'role': 'assistant'}], [part])
+
+    usage = parse_opencode_usage(db)
+    assert usage.tool_error_count == 1
+    assert usage.invalid_tool_call_count == 1
+
+
+def test_usage_fields_emit_v2_schema_keys(tmp_path: Path) -> None:
+    from app.runtime_replay import _usage_fields
+
+    fields = _usage_fields(TrialUsage())
+    assert set(fields) == {
+        'model_request_count',
+        'tool_call_count',
+        'tool_error_count',
+        'invalid_tool_call_count',
+        'tokens_input',
+        'tokens_output',
+        'provider_id',
+        'model_id',
+    }
+
+
+def test_find_trial_database_prefers_newest_across_layouts(tmp_path: Path) -> None:
+    import os
+
+    xdg = tmp_path / 'data' / 'opencode' / 'opencode.db'
+    legacy = tmp_path / '.local' / 'share' / 'opencode' / 'opencode.db'
+    xdg.parent.mkdir(parents=True)
+    legacy.parent.mkdir(parents=True)
+    xdg.write_bytes(b'newer')
+    legacy.write_bytes(b'older')
+    older_ts = os.path.getmtime(xdg) - 100
+    os.utime(xdg, (older_ts, older_ts))
+
+    found = find_trial_database(tmp_path)
+    assert found is not None
+    assert found.layout == 'legacy'
+
+    newer_ts = os.path.getmtime(legacy) + 100
+    os.utime(xdg, (newer_ts, newer_ts))
+    found = find_trial_database(tmp_path)
+    assert found is not None
+    assert found.layout == 'xdg'
+
+
+def test_find_trial_database_returns_none_when_absent(tmp_path: Path) -> None:
+    assert find_trial_database(tmp_path) is None
+
+
+def test_parse_opencode_usage_reads_legacy_layout_copy(tmp_path: Path) -> None:
+    home = tmp_path / 'home'
+    db = home / '.local' / 'share' / 'opencode' / 'opencode.db'
+    _write_db(db, [{'id': 'a1', 'role': 'assistant', 'tokens': {'input': 5, 'output': 7}}], [])
+    found = find_trial_database(home)
+    assert found is not None and found.layout == 'legacy'
+    usage = parse_opencode_usage(found.path)
+    assert usage.model_request_count == 1
