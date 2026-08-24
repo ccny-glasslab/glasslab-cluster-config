@@ -261,11 +261,55 @@ def prepare_trial_workspace(fixture_workspace: Path, destination: Path) -> Path:
     return destination
 
 
-class OpenCodeCliRunner:
-    """Invoke one candidate through the same `opencode run` CLI used live."""
+_RESERVED_ENV_KEYS = frozenset(
+    {'PATH', 'HOME', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME'}
+)
 
-    def __init__(self, opencode_bin: str = 'opencode') -> None:
+
+def seed_trial_auth(trial_home: Path, auth_file: Path) -> None:
+    """Copy an operator-supplied auth file into one trial HOME.
+
+    The file is placed at both layouts OpenCode versions are known to read.
+    Contents are never logged; copies live inside the trial HOME so the usual
+    trial cleanup removes them.
+    """
+    data = auth_file.read_bytes()
+    for relative in (
+        '.local/share/opencode/auth.json',
+        'data/opencode/auth.json',
+    ):
+        destination = trial_home / relative
+        destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        destination.write_bytes(data)
+        destination.chmod(0o600)
+
+
+class OpenCodeCliRunner:
+    """Invoke one candidate through the same `opencode run` CLI used live.
+
+    env_allowlist names operator environment variables that may pass through
+    to the trial (deny-by-default; reserved trial-scoped keys are rejected at
+    construction so they can never be overridden).
+    """
+
+    def __init__(
+        self,
+        opencode_bin: str = 'opencode',
+        env_allowlist: frozenset[str] | None = None,
+        seed_auth_file: Path | None = None,
+    ) -> None:
+        allowlist = (
+            frozenset() if env_allowlist is None else env_allowlist
+        )
+        reserved = allowlist & _RESERVED_ENV_KEYS
+        if reserved:
+            raise ValueError(
+                'env_allowlist must not override trial-scoped keys: '
+                + ', '.join(sorted(reserved))
+            )
         self._opencode_bin = opencode_bin
+        self._env_allowlist = allowlist
+        self._seed_auth_file = seed_auth_file
 
     def run(
         self,
@@ -278,6 +322,8 @@ class OpenCodeCliRunner:
         timeout_seconds: int,
     ) -> RawRunResult:
         home.mkdir(parents=True, exist_ok=True)
+        if self._seed_auth_file is not None:
+            seed_trial_auth(home, self._seed_auth_file)
         stdout_path = home / 'trial-stdout.txt'
         stderr_path = home / 'trial-stderr.txt'
         env_home = str(home.resolve())
@@ -291,6 +337,10 @@ class OpenCodeCliRunner:
             )
             if value is not None
         }
+        for name in sorted(self._env_allowlist):
+            value = os.environ.get(name)
+            if value is not None:
+                base_env[name] = value
         argv = [
             self._opencode_bin,
             'run',

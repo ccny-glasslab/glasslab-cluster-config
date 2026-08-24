@@ -472,3 +472,97 @@ def test_parse_opencode_usage_reads_legacy_layout_copy(tmp_path: Path) -> None:
     assert found is not None and found.layout == 'legacy'
     usage = parse_opencode_usage(found.path)
     assert usage.model_request_count == 1
+
+
+def test_cli_runner_env_denies_unlisted_variables_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv('MY_SECRET_TOKEN', 'leak-me')
+    monkeypatch.setenv('OPENCODE_API_KEY', 'pass-me')
+    recorded: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        recorded['env'] = kwargs['env']
+        return subprocess_completed(returncode=0)
+
+    monkeypatch.setattr('app.runtime_replay.subprocess.run', fake_run)
+    runner = OpenCodeCliRunner()
+    runner.run(
+        prompt='p',
+        workspace=tmp_path / 'ws',
+        home=tmp_path / 'home',
+        model_provider='exo',
+        model_name='m',
+        timeout_seconds=10,
+    )
+    env = recorded['env']
+    assert 'MY_SECRET_TOKEN' not in env
+    assert 'OPENCODE_API_KEY' not in env
+
+
+def test_cli_runner_env_allowlist_passes_exact_name_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv('MY_SECRET_TOKEN', 'leak-me')
+    monkeypatch.setenv('OPENCODE_API_KEY', 'pass-me')
+    recorded: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        recorded['env'] = kwargs['env']
+        return subprocess_completed(returncode=0)
+
+    monkeypatch.setattr('app.runtime_replay.subprocess.run', fake_run)
+    runner = OpenCodeCliRunner(env_allowlist=frozenset({'OPENCODE_API_KEY'}))
+    runner.run(
+        prompt='p',
+        workspace=tmp_path / 'ws',
+        home=tmp_path / 'home',
+        model_provider='exo',
+        model_name='m',
+        timeout_seconds=10,
+    )
+    env = recorded['env']
+    assert env.get('OPENCODE_API_KEY') == 'pass-me'
+    assert 'MY_SECRET_TOKEN' not in env
+
+
+def test_cli_runner_rejects_reserved_env_keys() -> None:
+    with pytest.raises(ValueError):
+        OpenCodeCliRunner(env_allowlist=frozenset({'HOME'}))
+    with pytest.raises(ValueError):
+        OpenCodeCliRunner(env_allowlist=frozenset({'PATH'}))
+    with pytest.raises(ValueError):
+        OpenCodeCliRunner(env_allowlist=frozenset({'XDG_DATA_HOME'}))
+
+
+def test_seed_auth_file_copies_to_both_layouts_with_0600(tmp_path: Path) -> None:
+    from app.runtime_replay import seed_trial_auth
+
+    auth = tmp_path / 'operator-auth.json'
+    auth.write_text('{"opencode-go": {"type": "api", "key": "k"}}')
+    home = tmp_path / 'trial-home'
+
+    seed_trial_auth(home, auth)
+
+    for relative in (
+        '.local/share/opencode/auth.json',
+        'data/opencode/auth.json',
+    ):
+        seeded = home / relative
+        assert seeded.is_file(), relative
+        assert seeded.read_text() == auth.read_text()
+        assert (seeded.stat().st_mode & 0o777) == 0o600
+    assert (home / '.local/share/opencode').stat().st_mode & 0o777 == 0o700
+
+
+def test_cleanup_of_trial_home_removes_seeded_auth(tmp_path: Path) -> None:
+    import shutil
+
+    from app.runtime_replay import seed_trial_auth
+
+    auth = tmp_path / 'operator-auth.json'
+    auth.write_text('{}')
+    home = tmp_path / 'trial-home'
+    seed_trial_auth(home, auth)
+    shutil.rmtree(home)
+    assert not home.exists()
