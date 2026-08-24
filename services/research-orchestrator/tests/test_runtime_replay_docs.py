@@ -26,9 +26,11 @@ def test_committed_observations_are_v2_golden() -> None:
         for line in OBSERVATIONS.read_text().splitlines()
         if line.strip()
     ]
-    assert len(rows) == 2
+    assert len(rows) == 3
     for row in rows:
         assert row['schema_version'] == 'glasslab-runtime-replay-observation-v2'
+    manual = [row for row in rows if row['capture_mode'].startswith('manual')]
+    for row in manual:
         # manual captures recorded no session database: usage stays unknown
         assert row['model_request_count'] is None
         assert row['tool_call_count'] is None
@@ -36,9 +38,8 @@ def test_committed_observations_are_v2_golden() -> None:
         assert row['invalid_tool_call_count'] is None
         assert row['doom_loop_event_count'] is None
         assert row['doom_loop_threshold'] is None
-    by_candidate = {row['candidate']: row for row in rows}
-    qwen = by_candidate['exo/mlx-community/Qwen3-Coder-Next-4bit']
-    ox = by_candidate['opencode-go/ox-alpha-free']
+    qwen = next(r for r in rows if r['candidate'] == 'exo/mlx-community/Qwen3-Coder-Next-4bit')
+    ox = next(r for r in rows if r['capture_mode'].startswith('manual') and r['candidate'] == 'opencode-go/ox-alpha-free')
     assert qwen['wall_clock_seconds'] == 1560.0
     assert qwen['timed_out'] is True
     assert qwen['correctness_passed'] is True
@@ -47,6 +48,12 @@ def test_committed_observations_are_v2_golden() -> None:
     assert ox['timed_out'] is False
     assert ox['correctness_passed'] is True
     assert ox['revision_cycles'] == 1
+    smoke = rows[-1]
+    assert smoke['capture_mode'] == 'harness_smoke_2026-08-24'
+    assert smoke['candidate'] == 'opencode-go/ox-alpha-free'
+    assert smoke['correctness_passed'] is True
+    assert smoke['session_db_layout'] == 'xdg'
+    assert smoke['tool_error_count'] == 0
 
 
 def test_report_states_corrected_timings() -> None:

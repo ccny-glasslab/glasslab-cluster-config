@@ -44,6 +44,7 @@ Earlier informal write-ups misstated these figures. Corrected values:
 |---|---|---|---|
 | `exo/mlx-community/Qwen3-Coder-Next-4bit` | wrapper timeout at **1560 s (~26 min)**; the correct workspace repair appeared ~1590 s (~26.5 min) after start per recorded observation | timeout → post-hoc verified | **yes** |
 | `opencode-go/ox-alpha-free` | **285 s (= 4 min 45 s)** | accepted | **yes** |
+| `opencode-go/ox-alpha-free` (harness smoke, 2026-08-24) | 158 s (= 2 min 38 s) | accepted | **yes** |
 
 Notes on these numbers:
 
@@ -115,10 +116,16 @@ inputs: `--seed-auth-file PATH` copies an operator-supplied auth file into each
 trial HOME (both known layouts, `0600`) where ordinary trial cleanup removes
 it. Tests prove unlisted environment variables do not reach the subprocess.
 
-Because provider credentials were not available in environment-variable form,
-no live smoke trial is asserted from CI or this report; the harness's
-end-to-end path is exercised by fake-runner tests, and any live smoke result
-must be produced by an operator running the documented command.
+A single bounded live smoke trial (operator-seeded auth file, pristine HOME,
+600 s cap, no cluster contact) confirmed the full chain end to end:
+`opencode-go/ox-alpha-free` launched from the isolated environment and its
+correct repair was accepted by the real gate in 158 s. The trial also settled
+the storage-layout question empirically: the CLI wrote its session database
+under the XDG layout (`session_db_layout: xdg`). Provider credentials were
+supplied only as the explicit seeded auth file — never via wholesale
+environment inheritance — and the trial directory (including the seeded auth
+copies) was destroyed afterwards. Fake-runner tests keep CI credential-free;
+live trials remain explicit operator actions using the documented command.
 
 ## Non-claims
 
