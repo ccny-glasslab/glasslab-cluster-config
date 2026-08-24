@@ -1329,8 +1329,11 @@ class SqliteStore:
         source_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        terms = [term for term in query.split() if len(term) > 1]
-        fts_query = ' OR '.join(f'"{term}"' for term in terms[:6]) or None
+        # Agent-context queries concatenate turn kind, objective, and prompt
+        # prefixes into long strings; matching only a fixed prefix of terms
+        # missed the distinctive words entirely, so every term competes.
+        terms = [term for term in query.split() if len(term) > 1][:24]
+        fts_query = ' OR '.join(f'"{term}"' for term in terms) or None
         with self._connect() as connection:
             if fts_query and source_ids:
                 placeholders = ', '.join('?' * len(source_ids))

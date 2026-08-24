@@ -360,7 +360,11 @@ class PostgresStore:
         # The rank expression and the WHERE predicate each bind the search
         # query. Keep both parameters explicit; psycopg does not reuse a
         # positional placeholder automatically.
-        params: list[Any] = [query, query]
+        # websearch_to_tsquery ANDs every token; long agent-context queries
+        # would never match short chunks. OR the tokens instead and let
+        # ts_rank_cd prefer chunks that contain more of them.
+        or_query = ' OR '.join(token for token in query.split() if len(token) > 1) or query
+        params: list[Any] = [or_query, or_query]
         clause = "to_tsvector('simple', text) @@ websearch_to_tsquery('simple', %s)"
         if source_ids: clause += ' AND source_id = ANY(%s)'; params.append(source_ids)
         params.append(limit)
