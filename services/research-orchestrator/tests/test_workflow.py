@@ -2253,11 +2253,26 @@ def test_structured_contradiction_requires_explicit_acknowledgement(
         store.get_run(run.run_id).state == RunState.AWAITING_FINAL_ACCEPTANCE
     )
 
+    stored_digest = final_action.arguments['final_acceptance_assessment'][
+        'assessment_digest'
+    ]
+    with pytest.raises(WorkflowError, match='assessment digest'):
+        engine.approve_action(
+            final_action.action_id,
+            reviewer='test-human',
+            reason='Stale acknowledgement attempt.',
+            acknowledge_unresolved_findings=True,
+            acknowledged_findings_digest='f' * 64,
+        )
+    assert (
+        store.get_run(run.run_id).state == RunState.AWAITING_FINAL_ACCEPTANCE
+    )
     engine.approve_action(
         final_action.action_id,
         reviewer='test-human',
         reason='Knowingly accepting with the documented limitation.',
         acknowledge_unresolved_findings=True,
+        acknowledged_findings_digest=stored_digest,
     )
     completed = store.get_run(run.run_id)
     assert completed.state == RunState.COMPLETE
@@ -2350,9 +2365,16 @@ def test_report_rejection_produces_fresh_recomputed_assessment(
     assert second_action.action_id != first_action.action_id
     fresh = second_action.arguments.get('final_acceptance_assessment')
     assert fresh is not None
-    assert fresh['turn_id'] != first_action.arguments[
-        'final_acceptance_assessment'
-    ]['turn_id'] or fresh['claim_count'] >= 0
+    previous = first_action.arguments['final_acceptance_assessment']
+    assert (
+        fresh['final_report_turn_id']
+        != previous['final_report_turn_id']
+    )
+    assert any(
+        entry['classification'] == 'methodological_limitation'
+        and entry['source_turn_kind'] == 'verification'
+        for entry in fresh['unresolved']
+    )
 
 
 def test_recovery_replay_after_approval_keeps_acknowledgement_enrichment(
@@ -2364,10 +2386,15 @@ def test_recovery_replay_after_approval_keeps_acknowledgement_enrichment(
     def factory(kwargs):
         return AgentTurnResult(
             kind=TurnKind.VERIFICATION,
-            summary='one advisory note',
+            summary='verified with a limitation',
             done=True,
             claims=[Claim(text='job ok', evidence=['event://job.completed'])],
-            message_to_other_agent='Beaker should remember the caveat.',
+            findings=[
+                {
+                    'classification': 'methodological_limitation',
+                    'text': 'single exploratory execution only',
+                }
+            ],
         )
 
     _override_verification_turn(runtime, monkeypatch, factory)
@@ -2376,7 +2403,7 @@ def test_recovery_replay_after_approval_keeps_acknowledgement_enrichment(
     final_action = _pending_action(store, run.run_id, 'accept_final_report')
     unresolved = final_action.arguments['final_acceptance_assessment']['unresolved']
     assert any(
-        entry['classification'] == 'advisory_disagreement'
+        entry['classification'] == 'methodological_limitation'
         for entry in unresolved
     )
 

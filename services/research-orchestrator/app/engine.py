@@ -1937,12 +1937,17 @@ class ResearchOrchestrator:
         self,
         run_id: str,
         *,
-        final_result: AgentTurnResult | None = None,
+        final_turn: TurnRecord | None = None,
     ) -> FinalAcceptanceAssessment:
-        turn_id, result = self._latest_verification_result(run_id)
-        if result is None:
+        verification_turn_id, verification_result = (
+            self._latest_verification_result(run_id)
+        )
+        if verification_result is None:
             return FinalAcceptanceAssessment(
-                turn_id='',
+                verification_turn_id='',
+                final_report_turn_id=(
+                    final_turn.turn_id if final_turn else ''
+                ),
                 done=False,
                 claim_count=0,
                 clean=False,
@@ -1956,12 +1961,27 @@ class ResearchOrchestrator:
                             'completed verification turn'
                         ),
                         source='derived',
+                        source_turn_id=(
+                            final_turn.turn_id if final_turn else None
+                        ),
+                        source_turn_kind=(
+                            'final_report' if final_turn else None
+                        ),
                     )
                 ],
+                unchecked_citations=[],
+                assessment_digest='',
             )
-        base = build_final_acceptance_assessment(
-            turn_id,
-            result,
+        run = self.store.get_run(run_id)
+        return build_final_acceptance_assessment(
+            verification_turn_id=verification_turn_id,
+            verification_result=verification_result,
+            final_report_turn_id=(
+                final_turn.turn_id if final_turn else ''
+            ),
+            final_report_result=(
+                final_turn.structured_output if final_turn else None
+            ),
             artifact_uris={
                 artifact.uri
                 for artifact in self.store.list_artifacts(run_id)
@@ -1969,27 +1989,18 @@ class ResearchOrchestrator:
             job_ids={
                 job.job_id for job in self.store.list_jobs(run_id)
             },
-            knowledge_ids={
+            knowledge_source_ids={
                 source.source_id
                 for source in self.store.list_knowledge_sources()
             },
-            evaluation_contract_id=self.store.get_run(
-                run_id
-            ).evaluation_contract_id,
+            context_packet_ids={
+                packet.packet_id
+                for packet in self.store.list_context_packets(run_id)
+            },
+            evaluation_contract_id=run.evaluation_contract_id,
+            evaluation_contract_version=run.evaluation_contract_version,
+            evaluation_contract_digest=run.evaluation_contract_digest,
         )
-        merged = list(base.unresolved)
-        if final_result is not None:
-            merged.extend(
-                UnresolvedFinding(
-                    classification=finding.classification,
-                    text=finding.text[:200],
-                    source='agent',
-                    evidence=list(finding.evidence),
-                )
-                for finding in final_result.findings
-            )
-        merged.sort(key=lambda entry: (entry.classification.value, entry.text))
-        return base.model_copy(update={'unresolved': merged, 'clean': not merged})
 
     def approve_action(
         self,
@@ -1998,6 +2009,7 @@ class ResearchOrchestrator:
         reviewer: str,
         reason: str,
         acknowledge_unresolved_findings: bool = False,
+        acknowledged_findings_digest: str | None = None,
     ) -> ActionRecord:
         with self._advance_lock:
             action = self.store.get_action(action_id)
@@ -2020,10 +2032,12 @@ class ResearchOrchestrator:
             ):
                 raise WorkflowError('Honeydew has not approved this action')
             unresolved: list[dict[str, Any]] = []
+            stored_digest: str | None = None
             if action.type == 'accept_final_report':
                 recorded = action.arguments.get('final_acceptance_assessment')
                 if isinstance(recorded, dict):
                     unresolved = recorded.get('unresolved') or []
+                    stored_digest = recorded.get('assessment_digest')
                 if unresolved and not acknowledge_unresolved_findings:
                     detail = '; '.join(
                         f"[{entry.get('classification')}] "
@@ -2033,6 +2047,16 @@ class ResearchOrchestrator:
                     raise WorkflowError(
                         'accept_final_report has unresolved findings; '
                         'acknowledge them to accept knowingly: ' + detail
+                    )
+                if (
+                    unresolved
+                    and acknowledged_findings_digest is not None
+                    and acknowledged_findings_digest != stored_digest
+                ):
+                    raise WorkflowError(
+                        'acknowledged assessment digest '
+                        f'{acknowledged_findings_digest} does not match the '
+                        f'stored assessment digest {stored_digest}'
                     )
             approved = self.store.update_action(
                 action_id,
@@ -2052,6 +2076,8 @@ class ResearchOrchestrator:
                     payload={
                         'action_id': action_id,
                         'reviewer': reviewer,
+                        'assessment_digest': stored_digest,
+                        'unresolved_count': len(unresolved),
                         'unresolved': unresolved,
                     },
                 )
@@ -4301,7 +4327,7 @@ class ResearchOrchestrator:
             },
         )
         assessment = self._final_acceptance_assessment(
-            run_id, final_result=result
+            run_id, final_turn=turn
         )
         self._event(
             run_id,

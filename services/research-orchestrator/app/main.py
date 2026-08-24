@@ -687,6 +687,9 @@ def create_app(
                 acknowledge_unresolved_findings=(
                     request.acknowledge_unresolved_findings
                 ),
+                acknowledged_findings_digest=(
+                    request.acknowledged_findings_digest
+                ),
             )
         except Exception as exc:
             raise map_error(exc) from exc

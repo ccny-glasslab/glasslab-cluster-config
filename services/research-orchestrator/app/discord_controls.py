@@ -87,15 +87,25 @@ def execute_discord_action(
     reason: str | None = None,
 ) -> None:
     # Whitelist the operation so a malformed custom_id can never reach the
-    # engine as anything other than approve or reject.
+    # engine as anything other than approve, explicit acknowledge-and-approve,
+    # or reject.
     if operation == 'approve':
+        engine.approve_action(
+            action_id,
+            reviewer=actor.reviewer,
+            reason=reason or 'Approved through Discord controls.',
+        )
+    elif operation == 'approve-ack':
+        # Distinct control for final acceptance with disclosed unresolved
+        # findings: clicking it IS the acknowledgement, and the engine
+        # records it durably against the stored assessment digest.
         engine.approve_action(
             action_id,
             reviewer=actor.reviewer,
             reason=(
                 reason or 'Approved through Discord controls.'
             )
-            + ' Acknowledges any unresolved findings disclosed above.',
+            + ' Acknowledges the disclosed unresolved findings.',
             acknowledge_unresolved_findings=True,
         )
     elif operation == 'reject':

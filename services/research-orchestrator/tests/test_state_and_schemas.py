@@ -217,7 +217,34 @@ def test_approval_request_acknowledge_unresolved_findings_flag() -> None:
     acknowledged = ApprovalRequest(
         reviewer='operator',
         acknowledge_unresolved_findings=True,
+        acknowledged_findings_digest='d' * 64,
     )
     assert acknowledged.acknowledge_unresolved_findings is True
+    # The bare flag is the silent-override path and stays invalid.
+    with pytest.raises(ValidationError):
+        ApprovalRequest(
+            reviewer='operator',
+            acknowledge_unresolved_findings=True,
+        )
     with pytest.raises(ValidationError):
         ApprovalRequest(reviewer='operator', unknown_key='x')  # type: ignore[call-arg]
+
+
+def test_acknowledge_flag_requires_assessment_digest() -> None:
+    from app.schemas import ApprovalRequest
+
+    # A bare acknowledgement flag would let a stale client override findings
+    # without naming the assessment it reviewed; the digest binds them.
+    with pytest.raises(ValidationError):
+        ApprovalRequest(
+            reviewer='operator',
+            acknowledge_unresolved_findings=True,
+        )
+    bound = ApprovalRequest(
+        reviewer='operator',
+        acknowledge_unresolved_findings=True,
+        acknowledged_findings_digest='d' * 64,
+    )
+    assert bound.acknowledged_findings_digest == 'd' * 64
+    plain = ApprovalRequest(reviewer='operator')
+    assert plain.acknowledged_findings_digest is None

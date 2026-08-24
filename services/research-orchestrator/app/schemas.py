@@ -848,9 +848,27 @@ class ApprovalRequest(BaseModel):
     reviewer: str = Field(min_length=1)
     reason: str = Field(default='Approved by human reviewer.', min_length=1)
     # Required (True) to approve an accept_final_report action whose recorded
-    # verification assessment still has unresolved findings. The engine keeps
-    # this False by default so silent override is impossible.
+    # assessment still has unresolved findings. The engine keeps this False
+    # by default so silent override is impossible.
     acknowledge_unresolved_findings: bool = False
+    # Binds an acknowledgement to the exact stored assessment; a stale client
+    # acknowledging a different assessment is rejected by the engine.
+    acknowledged_findings_digest: str | None = Field(
+        default=None,
+        pattern=r'^[a-f0-9]{64}$',
+    )
+
+    @model_validator(mode='after')
+    def acknowledgement_names_its_assessment(self) -> 'ApprovalRequest':
+        if (
+            self.acknowledge_unresolved_findings
+            and not self.acknowledged_findings_digest
+        ):
+            raise ValueError(
+                'acknowledge_unresolved_findings requires '
+                'acknowledged_findings_digest naming the assessed state'
+            )
+        return self
 
 
 class RejectionRequest(BaseModel):

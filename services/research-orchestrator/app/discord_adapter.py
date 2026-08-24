@@ -380,6 +380,18 @@ class DiscordRenderer:
                 arguments = payload.get('arguments')
                 if not isinstance(arguments, dict):
                     arguments = {}
+                unresolved = payload.get('unresolved_findings')
+                has_unresolved = isinstance(unresolved, list) and bool(
+                    unresolved
+                )
+                action_type = str(payload.get('type', ''))
+                approve_custom_id = f'glasslab:approve:{action_id}'
+                approve_label = _button_label(action_type, arguments)
+                if has_unresolved:
+                    count = len(unresolved)
+                    noun = 'finding' if count == 1 else 'findings'
+                    approve_custom_id = f'glasslab:approve-ack:{action_id}'
+                    approve_label = f'Approve & acknowledge {count} {noun}'
                 components = [
                     {
                         'type': 1,
@@ -387,13 +399,8 @@ class DiscordRenderer:
                             {
                                 'type': 2,
                                 'style': 3,
-                                'label': _button_label(
-                                    str(payload.get('type', '')),
-                                    arguments,
-                                ),
-                                'custom_id': (
-                                    f'glasslab:approve:{action_id}'
-                                ),
+                                'label': approve_label,
+                                'custom_id': approve_custom_id,
                             },
                             {
                                 'type': 2,

@@ -325,16 +325,38 @@ def test_discord_control_dispatch_records_immutable_identity() -> None:
         actor=actor,
     )
 
+    # Ordinary approve never acknowledges findings; that is the distinct
+    # approve-ack control's job.
     engine.approve_action.assert_called_once_with(
         'action-1',
         reviewer='discord:142100176322953216:Tyler',
-        reason=(
-            'Approved through Discord controls. Acknowledges any unresolved '
-            'findings disclosed above.'
-        ),
-        acknowledge_unresolved_findings=True,
+        reason='Approved through Discord controls.',
     )
     engine.reject_action.assert_not_called()
+
+
+def test_discord_acknowledge_operation_requires_explicit_flag() -> None:
+    engine = Mock()
+    actor = DiscordControlActor(
+        user_id='142100176322953216',
+        display_name='Tyler',
+        guild_id='guild-1',
+        role_ids=frozenset(),
+    )
+
+    execute_discord_action(
+        engine,
+        operation='approve-ack',
+        action_id='action-final',
+        actor=actor,
+    )
+
+    assert engine.approve_action.call_args.kwargs[
+        'acknowledge_unresolved_findings'
+    ] is True
+    assert 'Acknowledges the disclosed unresolved findings.' in (
+        engine.approve_action.call_args.kwargs['reason']
+    )
 
 
 def test_discord_rejection_passes_human_revision_feedback() -> None:
@@ -1330,3 +1352,75 @@ def test_discord_final_acceptance_states_clean_assessment() -> None:
         )
     )
     assert 'no unresolved findings' in message.content
+
+
+def _acceptance_event(unresolved, clean):
+    return EventRecord(
+        sequence_number=11,
+        run_id='run-1',
+        source='orchestrator',
+        event_type='action.proposed',
+        payload={
+            'action_id': 'action-gate',
+            'type': 'accept_final_report',
+            'policy_classification': 'human_approval',
+            'approval_status': 'pending',
+            'human_approval_ready': True,
+            'objective': 'Complete a Wine-style run.',
+            'reason': 'Human acceptance is required.',
+            'effect': 'Accept the report and mark the run complete.',
+            'arguments': {},
+            'artifact': {
+                'uri': 'artifact://run-1/reports/report.md',
+                'sha256': 'f' * 64,
+            },
+            'clean': clean,
+            'unresolved_findings': unresolved,
+            'verification_assessment': {'clean': clean},
+        },
+    )
+
+
+def test_discord_unresolved_acceptance_swaps_approve_for_ack_button() -> None:
+    message = DiscordRenderer().render(
+        _acceptance_event(
+            [
+                {
+                    'classification': 'structured_contradiction',
+                    'text': 'csv vs metrics mismatch',
+                },
+                {
+                    'classification': 'methodological_limitation',
+                    'text': 'single run only',
+                },
+            ],
+            False,
+        )
+    )
+    buttons = [
+        component
+        for row in (message.components or [])
+        for component in row['components']
+    ]
+    custom_ids = {button['custom_id'] for button in buttons}
+    assert f'glasslab:approve:action-gate' not in custom_ids
+    assert f'glasslab:approve-ack:action-gate' in custom_ids
+    ack_button = next(
+        button
+        for button in buttons
+        if button['custom_id'] == 'glasslab:approve-ack:action-gate'
+    )
+    assert '2 findings' in ack_button['label']
+    assert 'Approve & acknowledge' in ack_button['label']
+
+
+def test_discord_clean_acceptance_keeps_ordinary_approve_button() -> None:
+    message = DiscordRenderer().render(_acceptance_event([], True))
+    buttons = [
+        component
+        for row in (message.components or [])
+        for component in row['components']
+    ]
+    custom_ids = {button['custom_id'] for button in buttons}
+    assert 'glasslab:approve:action-gate' in custom_ids
+    assert not any('approve-ack' in cid for cid in custom_ids)
