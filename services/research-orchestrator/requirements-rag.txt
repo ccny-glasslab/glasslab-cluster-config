@@ -1,0 +1,18 @@
+# Dev-only extras for the corpus_rag prototype tooling and tests.
+# NOT part of the research-orchestrator service runtime dependencies
+# (see requirements.txt) and NOT added to the CI matrix.
+# Install manually into a dev venv, e.g.:
+#   pip install -r requirements-rag.txt
+#
+# Pins captured from the rag-prototype venv:
+#   /home/gr66ss/.venvs/rag-prototype/bin/pip freeze
+torch==2.13.0+cpu
+sentence-transformers==6.0.0
+transformers==5.15.1
+PyMuPDF==1.28.2
+psycopg==3.2.9
+psycopg-binary==3.2.9
+numpy==2.0.1
+tokenizers==0.22.2
+safetensors==0.8.0
+huggingface_hub==1.28.0
