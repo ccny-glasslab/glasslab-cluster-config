@@ -19,6 +19,13 @@ import sqlite3
 from threading import RLock
 from typing import Any, Iterator
 
+from .corpus_rag import (
+    ChunkVectorMeta,
+    CorpusRecord,
+    RagChunkRecord,
+    RagDocumentRecord,
+    RagSectionRecord,
+)
 from .schemas import (
     ActionRecord,
     AgentName,
@@ -272,6 +279,83 @@ class SqliteStore:
                 -- URIs) even long after the turn finished.
                 CREATE INDEX IF NOT EXISTS context_packets_run_idx
                 ON context_packets(run_id, created_at);
+
+                -- Corpus-RAG prototype tables (additive; frozen record shapes
+                -- live in app/corpus_rag/contracts.py). Documents, sections,
+                -- and chunks keep the full validated record in payload JSON;
+                -- typed columns exist only for foreign keys, filtering, and
+                -- ordering. rag_documents.source_id is UNIQUE because one
+                -- source extracts to exactly one document.
+                CREATE TABLE IF NOT EXISTS rag_corpora (
+                    corpus_id TEXT PRIMARY KEY,
+                    slug TEXT NOT NULL UNIQUE,
+                    title TEXT,
+                    created_at TEXT NOT NULL,
+                    metadata TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS rag_corpus_sources (
+                    corpus_id TEXT NOT NULL
+                        REFERENCES rag_corpora(corpus_id)
+                        ON DELETE CASCADE,
+                    source_id TEXT NOT NULL
+                        REFERENCES knowledge_sources(source_id)
+                        ON DELETE CASCADE,
+                    added_at TEXT NOT NULL,
+                    UNIQUE(corpus_id, source_id)
+                );
+                CREATE INDEX IF NOT EXISTS rag_corpus_sources_corpus_idx
+                ON rag_corpus_sources(corpus_id);
+
+                CREATE TABLE IF NOT EXISTS rag_documents (
+                    doc_id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL UNIQUE
+                        REFERENCES knowledge_sources(source_id)
+                        ON DELETE CASCADE,
+                    payload TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS rag_sections (
+                    section_id TEXT PRIMARY KEY,
+                    doc_id TEXT NOT NULL
+                        REFERENCES rag_documents(doc_id)
+                        ON DELETE CASCADE,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS rag_sections_doc_idx
+                ON rag_sections(doc_id);
+
+                CREATE TABLE IF NOT EXISTS rag_chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL
+                        REFERENCES knowledge_sources(source_id)
+                        ON DELETE CASCADE,
+                    kind TEXT NOT NULL CHECK(kind IN ('evidence_span', 'section_unit')),
+                    chunk_index INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS rag_chunks_source_idx
+                ON rag_chunks(source_id, chunk_index);
+
+                -- Lexical half of hybrid retrieval over RAG chunks; mirrors
+                -- knowledge_chunks_fts mechanics. chunk_id is UNINDEXED so it
+                -- is stored but never tokenized into the matchable text.
+                CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts
+                USING fts5(chunk_id UNINDEXED, text);
+
+                CREATE TABLE IF NOT EXISTS rag_chunk_vectors (
+                    chunk_id TEXT PRIMARY KEY
+                        REFERENCES rag_chunks(chunk_id)
+                        ON DELETE CASCADE,
+                    vec BLOB NOT NULL,
+                    model_id TEXT NOT NULL,
+                    revision TEXT NOT NULL,
+                    dims INTEGER NOT NULL,
+                    index_version TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS rag_chunk_vectors_model_idx
+                ON rag_chunk_vectors(model_id);
                 '''
             )
 
@@ -1381,6 +1465,284 @@ class SqliteStore:
                 'rank': row['rank'],
             }
             for row in rows[:limit]
+        ]
+
+    def create_corpus(self, record: CorpusRecord) -> CorpusRecord:
+        with self.transaction() as connection:
+            connection.execute(
+                '''
+                INSERT INTO rag_corpora (corpus_id, slug, title, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(corpus_id) DO UPDATE SET
+                    slug = excluded.slug,
+                    title = excluded.title,
+                    metadata = excluded.metadata
+                ''',
+                (
+                    record.corpus_id,
+                    record.slug,
+                    record.title,
+                    record.created_at.isoformat(),
+                    json.dumps(record.metadata, sort_keys=True),
+                ),
+            )
+        return record
+
+    def get_corpus(self, slug: str) -> CorpusRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                'SELECT * FROM rag_corpora WHERE slug = ?',
+                (slug,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._corpus_from_row(row)
+
+    def list_corpora(self) -> list[CorpusRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT * FROM rag_corpora ORDER BY created_at, corpus_id'
+            ).fetchall()
+        return [self._corpus_from_row(row) for row in rows]
+
+    @staticmethod
+    def _corpus_from_row(row: sqlite3.Row) -> CorpusRecord:
+        return CorpusRecord(
+            corpus_id=row['corpus_id'],
+            slug=row['slug'],
+            title=row['title'],
+            created_at=datetime.fromisoformat(row['created_at']),
+            metadata=json.loads(row['metadata']),
+        )
+
+    def add_corpus_source(self, corpus_id: str, source_id: str) -> bool:
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                '''
+                INSERT INTO rag_corpus_sources (corpus_id, source_id, added_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(corpus_id, source_id) DO NOTHING
+                ''',
+                (corpus_id, source_id, utc_now().isoformat()),
+            )
+        return cursor.rowcount == 1
+
+    def list_corpus_sources(self, corpus_id: str) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                '''
+                SELECT source_id FROM rag_corpus_sources
+                WHERE corpus_id = ? ORDER BY added_at, source_id
+                ''',
+                (corpus_id,),
+            ).fetchall()
+        return [row['source_id'] for row in rows]
+
+    def upsert_rag_document(self, record: RagDocumentRecord) -> RagDocumentRecord:
+        with self.transaction() as connection:
+            connection.execute(
+                '''
+                INSERT INTO rag_documents (doc_id, source_id, payload)
+                VALUES (?, ?, ?)
+                ON CONFLICT(doc_id) DO UPDATE SET
+                    source_id = excluded.source_id,
+                    payload = excluded.payload
+                ''',
+                (record.doc_id, record.source_id, _dump(record)),
+            )
+        return record
+
+    def replace_rag_sections(
+        self,
+        doc_id: str,
+        sections: list[RagSectionRecord],
+    ) -> int:
+        with self.transaction() as connection:
+            connection.execute('DELETE FROM rag_sections WHERE doc_id = ?', (doc_id,))
+            for section in sections:
+                connection.execute(
+                    '''
+                    INSERT INTO rag_sections (section_id, doc_id, payload)
+                    VALUES (?, ?, ?)
+                    ''',
+                    (section.section_id, section.doc_id, _dump(section)),
+                )
+        return len(sections)
+
+    def replace_rag_chunks(
+        self,
+        source_id: str,
+        chunks: list[RagChunkRecord],
+    ) -> int:
+        # Same transactional shape as replace_knowledge_chunks: stale FTS
+        # rows are removed and fresh ones inserted inside one transaction so
+        # search never observes a half-replaced index.
+        with self.transaction() as connection:
+            connection.execute(
+                'DELETE FROM rag_chunks_fts '
+                'WHERE chunk_id IN ('
+                '  SELECT chunk_id FROM rag_chunks WHERE source_id = ?'
+                ')',
+                (source_id,),
+            )
+            connection.execute(
+                'DELETE FROM rag_chunks WHERE source_id = ?',
+                (source_id,),
+            )
+            for chunk in chunks:
+                connection.execute(
+                    '''
+                    INSERT INTO rag_chunks (
+                        chunk_id, source_id, kind, chunk_index, text, payload
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ''',
+                    (
+                        chunk.chunk_id,
+                        chunk.source_id,
+                        chunk.kind,
+                        chunk.chunk_index,
+                        chunk.text,
+                        _dump(chunk),
+                    ),
+                )
+                connection.execute(
+                    '''
+                    INSERT INTO rag_chunks_fts (chunk_id, text)
+                    VALUES (?, ?)
+                    ''',
+                    (chunk.chunk_id, chunk.text),
+                )
+        return len(chunks)
+
+    def search_rag_chunks_fts(
+        self,
+        query: str,
+        *,
+        source_ids: list[str] | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        # Identical term handling to search_knowledge_chunks: every
+        # whitespace-separated term longer than one character competes via
+        # OR, capped at 24 terms.
+        terms = [term for term in query.split() if len(term) > 1][:24]
+        fts_query = ' OR '.join(f'"{term}"' for term in terms) or None
+        with self._connect() as connection:
+            if fts_query and source_ids:
+                placeholders = ', '.join('?' * len(source_ids))
+                rows = connection.execute(
+                    f'''
+                    SELECT c.payload, bm25(rag_chunks_fts) AS rank
+                    FROM rag_chunks c
+                    JOIN rag_chunks_fts
+                      ON rag_chunks_fts.chunk_id = c.chunk_id
+                    WHERE rag_chunks_fts MATCH ?
+                      AND c.source_id IN ({placeholders})
+                    ORDER BY rank
+                    LIMIT ?
+                    ''',
+                    (fts_query, *source_ids, limit * 3),
+                ).fetchall()
+            elif fts_query:
+                rows = connection.execute(
+                    '''
+                    SELECT c.payload, bm25(rag_chunks_fts) AS rank
+                    FROM rag_chunks c
+                    JOIN rag_chunks_fts
+                      ON rag_chunks_fts.chunk_id = c.chunk_id
+                    WHERE rag_chunks_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                    ''',
+                    (fts_query, limit * 3),
+                ).fetchall()
+            else:
+                rows = []
+        hits: list[dict[str, Any]] = []
+        for row in rows[:limit]:
+            hit = json.loads(row['payload'])
+            hit['rank'] = row['rank']
+            hits.append(hit)
+        return hits
+
+    def list_rag_chunks(
+        self,
+        *,
+        source_ids: list[str] | None = None,
+        kinds: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        query = 'SELECT payload FROM rag_chunks'
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if source_ids:
+            clauses.append(
+                'source_id IN (' + ','.join('?' for _ in source_ids) + ')'
+            )
+            parameters.extend(source_ids)
+        if kinds:
+            clauses.append('kind IN (' + ','.join('?' for _ in kinds) + ')')
+            parameters.extend(kinds)
+        if clauses:
+            query += ' WHERE ' + ' AND '.join(clauses)
+        query += ' ORDER BY source_id, chunk_index'
+        if limit is not None:
+            query += ' LIMIT ?'
+            parameters.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [json.loads(row['payload']) for row in rows]
+
+    def upsert_rag_chunk_vectors(self, meta: ChunkVectorMeta, vec_bytes: bytes) -> None:
+        with self.transaction() as connection:
+            connection.execute(
+                '''
+                INSERT INTO rag_chunk_vectors (
+                    chunk_id, vec, model_id, revision, dims, index_version
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                    vec = excluded.vec,
+                    model_id = excluded.model_id,
+                    revision = excluded.revision,
+                    dims = excluded.dims,
+                    index_version = excluded.index_version
+                ''',
+                (
+                    meta.chunk_id,
+                    sqlite3.Binary(vec_bytes),
+                    meta.model_id,
+                    meta.revision,
+                    meta.dims,
+                    meta.index_version,
+                ),
+            )
+
+    def list_rag_chunk_vectors(
+        self,
+        model_id: str | None = None,
+    ) -> list[tuple[ChunkVectorMeta, bytes]]:
+        query = (
+            'SELECT chunk_id, vec, model_id, revision, dims, index_version '
+            'FROM rag_chunk_vectors'
+        )
+        parameters: list[Any] = []
+        if model_id is not None:
+            query += ' WHERE model_id = ?'
+            parameters.append(model_id)
+        query += ' ORDER BY chunk_id'
+        with self._connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [
+            (
+                ChunkVectorMeta(
+                    chunk_id=row['chunk_id'],
+                    model_id=row['model_id'],
+                    revision=row['revision'],
+                    dims=row['dims'],
+                    index_version=row['index_version'],
+                ),
+                bytes(row['vec']),
+            )
+            for row in rows
         ]
 
     def save_context_packet(self, packet: ContextPacket) -> ContextPacket:
