@@ -281,7 +281,7 @@ def _render_action_context(payload: dict[str, Any]) -> str:
                 'Approving acknowledges these findings; the '
                 'acknowledgement is recorded on the run.'
             )
-        elif payload.get('verification_assessment') is not None:
+        elif payload.get('final_acceptance_assessment') is not None:
             lines.extend(
                 ['', 'Verification assessment: no unresolved findings.']
             )

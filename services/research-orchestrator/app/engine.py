@@ -63,10 +63,10 @@ from .task_bundles import (
 )
 from .workspaces import WorkspaceManager
 from .knowledge_manager import KnowledgeManager
-from .verification_assessment import (
+from .final_acceptance_assessment import (
     UnresolvedFinding,
-    VerificationAssessment,
-    assess_verification,
+    FinalAcceptanceAssessment,
+    build_final_acceptance_assessment,
 )
 
 
@@ -1122,9 +1122,9 @@ class ResearchOrchestrator:
         if action.type == 'approve_protocol':
             payload['protocol_version'] = run.protocol_version
         if action.type == 'accept_final_report':
-            assessment = action.arguments.get('verification_assessment')
+            assessment = action.arguments.get('final_acceptance_assessment')
             if isinstance(assessment, dict):
-                payload['verification_assessment'] = assessment
+                payload['final_acceptance_assessment'] = assessment
                 payload['clean'] = bool(assessment.get('clean'))
                 payload['unresolved_findings'] = assessment.get(
                     'unresolved', []
@@ -1933,15 +1933,15 @@ class ResearchOrchestrator:
                 return turn.turn_id, output
         return '', None
 
-    def _verification_assessment(
+    def _final_acceptance_assessment(
         self,
         run_id: str,
         *,
         final_result: AgentTurnResult | None = None,
-    ) -> VerificationAssessment:
+    ) -> FinalAcceptanceAssessment:
         turn_id, result = self._latest_verification_result(run_id)
         if result is None:
-            return VerificationAssessment(
+            return FinalAcceptanceAssessment(
                 turn_id='',
                 done=False,
                 claim_count=0,
@@ -1959,7 +1959,7 @@ class ResearchOrchestrator:
                     )
                 ],
             )
-        base = assess_verification(
+        base = build_final_acceptance_assessment(
             turn_id,
             result,
             artifact_uris={
@@ -2021,7 +2021,7 @@ class ResearchOrchestrator:
                 raise WorkflowError('Honeydew has not approved this action')
             unresolved: list[dict[str, Any]] = []
             if action.type == 'accept_final_report':
-                recorded = action.arguments.get('verification_assessment')
+                recorded = action.arguments.get('final_acceptance_assessment')
                 if isinstance(recorded, dict):
                     unresolved = recorded.get('unresolved') or []
                 if unresolved and not acknowledge_unresolved_findings:
@@ -2171,7 +2171,7 @@ class ResearchOrchestrator:
         elif action.type == 'accept_final_report':
             if run.state != RunState.AWAITING_FINAL_ACCEPTANCE:
                 return
-            recorded = action.arguments.get('verification_assessment') or {}
+            recorded = action.arguments.get('final_acceptance_assessment') or {}
             unresolved = recorded.get('unresolved') or []
             self._transition(action.run_id, RunState.COMPLETE)
             self._event(
@@ -4300,13 +4300,13 @@ class ResearchOrchestrator:
                 'turn_id': turn.turn_id,
             },
         )
-        assessment = self._verification_assessment(
+        assessment = self._final_acceptance_assessment(
             run_id, final_result=result
         )
         self._event(
             run_id,
             source='orchestrator',
-            event_type='verification.assessed',
+            event_type='final_acceptance.assessment_recorded',
             payload=assessment.model_dump(mode='json'),
         )
         self._create_human_action(
@@ -4314,7 +4314,7 @@ class ResearchOrchestrator:
             action_type='accept_final_report',
             reason='Human acceptance is required to complete the research run.',
             arguments={
-                'verification_assessment': assessment.model_dump(mode='json')
+                'final_acceptance_assessment': assessment.model_dump(mode='json')
             },
         )
         self._transition(run_id, RunState.AWAITING_FINAL_ACCEPTANCE)

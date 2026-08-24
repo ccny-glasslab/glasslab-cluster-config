@@ -2167,11 +2167,11 @@ def test_acceptance_attaches_clean_assessment_and_no_ack_event(
     assert run.state == RunState.AWAITING_FINAL_ACCEPTANCE
 
     final_action = _pending_action(store, run.run_id, 'accept_final_report')
-    assessment = final_action.arguments.get('verification_assessment')
+    assessment = final_action.arguments.get('final_acceptance_assessment')
     assert assessment is not None
     assert assessment['clean'] is True
     assert assessment['unresolved'] == []
-    assert _last_event(store, run.run_id, 'verification.assessed') is not None
+    assert _last_event(store, run.run_id, 'final_acceptance.assessment_recorded') is not None
 
     # Matrix and contract actions must never carry the assessment key.
     matrix_actions = [
@@ -2181,7 +2181,7 @@ def test_acceptance_attaches_clean_assessment_and_no_ack_event(
     ]
     assert matrix_actions
     assert all(
-        'verification_assessment' not in action.arguments
+        'final_acceptance_assessment' not in action.arguments
         for action in matrix_actions
     )
 
@@ -2232,7 +2232,7 @@ def test_structured_contradiction_requires_explicit_acknowledgement(
     run = _complete_jobs(engine, store, cluster, run.run_id)
 
     final_action = _pending_action(store, run.run_id, 'accept_final_report')
-    unresolved = final_action.arguments['verification_assessment']['unresolved']
+    unresolved = final_action.arguments['final_acceptance_assessment']['unresolved']
     assert any(
         entry['classification'] == 'structured_contradiction'
         and entry['source'] == 'agent'
@@ -2301,7 +2301,7 @@ def test_broken_citation_is_derived_missing_evidence_and_gated(
     run = _complete_jobs(engine, store, cluster, run.run_id)
 
     final_action = _pending_action(store, run.run_id, 'accept_final_report')
-    unresolved = final_action.arguments['verification_assessment']['unresolved']
+    unresolved = final_action.arguments['final_acceptance_assessment']['unresolved']
     assert any(
         entry['classification'] == 'missing_evidence'
         and entry['source'] == 'derived'
@@ -2348,10 +2348,10 @@ def test_report_rejection_produces_fresh_recomputed_assessment(
     revised = store.get_run(run.run_id)
     second_action = _pending_action(store, run.run_id, 'accept_final_report')
     assert second_action.action_id != first_action.action_id
-    fresh = second_action.arguments.get('verification_assessment')
+    fresh = second_action.arguments.get('final_acceptance_assessment')
     assert fresh is not None
     assert fresh['turn_id'] != first_action.arguments[
-        'verification_assessment'
+        'final_acceptance_assessment'
     ]['turn_id'] or fresh['claim_count'] >= 0
 
 
@@ -2374,7 +2374,7 @@ def test_recovery_replay_after_approval_keeps_acknowledgement_enrichment(
     run = _advance_to_jobs(engine, store)
     run = _complete_jobs(engine, store, cluster, run.run_id)
     final_action = _pending_action(store, run.run_id, 'accept_final_report')
-    unresolved = final_action.arguments['verification_assessment']['unresolved']
+    unresolved = final_action.arguments['final_acceptance_assessment']['unresolved']
     assert any(
         entry['classification'] == 'advisory_disagreement'
         for entry in unresolved

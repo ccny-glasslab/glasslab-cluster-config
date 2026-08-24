@@ -33,7 +33,7 @@ class UnresolvedFinding(BaseModel):
     evidence: list[str] = []
 
 
-class VerificationAssessment(BaseModel):
+class FinalAcceptanceAssessment(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     turn_id: str
@@ -68,7 +68,7 @@ def _agent(finding: TurnFinding) -> UnresolvedFinding:
     )
 
 
-def assess_verification(
+def build_final_acceptance_assessment(
     turn_id: str,
     result: AgentTurnResult,
     *,
@@ -76,7 +76,7 @@ def assess_verification(
     job_ids: set[str],
     knowledge_ids: set[str],
     evaluation_contract_id: str | None,
-) -> VerificationAssessment:
+) -> FinalAcceptanceAssessment:
     unresolved: list[UnresolvedFinding] = []
 
     for claim in result.claims:
@@ -112,7 +112,7 @@ def assess_verification(
         )
 
     unresolved.sort(key=lambda entry: (entry.classification.value, entry.text))
-    return VerificationAssessment(
+    return FinalAcceptanceAssessment(
         turn_id=turn_id,
         done=result.done,
         claim_count=len(result.claims),

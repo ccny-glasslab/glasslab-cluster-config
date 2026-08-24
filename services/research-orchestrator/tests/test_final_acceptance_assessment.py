@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from app.schemas import AgentTurnResult, Claim, FindingClassification, TurnKind
-from app.verification_assessment import assess_verification
+from app.final_acceptance_assessment import build_final_acceptance_assessment
 
 
 def _result(**overrides) -> AgentTurnResult:
@@ -51,7 +51,7 @@ def test_clean_verification_yields_empty_unresolved() -> None:
             ),
         ],
     )
-    assessment = assess_verification('turn-1', result, **RESOLVED_SETS)
+    assessment = build_final_acceptance_assessment('turn-1', result, **RESOLVED_SETS)
     assert assessment.clean is True
     assert assessment.unresolved == []
     assert assessment.claim_count == 3
@@ -59,7 +59,7 @@ def test_clean_verification_yields_empty_unresolved() -> None:
 
 def test_claim_without_evidence_is_derived_missing_evidence() -> None:
     result = _result(claims=[Claim(text='the clusters are stable')])
-    assessment = assess_verification('turn-1', result, **RESOLVED_SETS)
+    assessment = build_final_acceptance_assessment('turn-1', result, **RESOLVED_SETS)
     assert assessment.clean is False
     entry = assessment.unresolved[0]
     assert (
@@ -78,7 +78,7 @@ def test_broken_artifact_citation_is_derived_missing_evidence() -> None:
             )
         ]
     )
-    assessment = assess_verification('turn-1', result, **RESOLVED_SETS)
+    assessment = build_final_acceptance_assessment('turn-1', result, **RESOLVED_SETS)
     assert assessment.clean is False
     entry = assessment.unresolved[0]
     assert entry.classification == FindingClassification.MISSING_EVIDENCE
@@ -89,7 +89,7 @@ def test_contract_mismatch_is_derived_missing_evidence() -> None:
     result = _result(
         claims=[Claim(text='bound', evidence=['contract://other-contract'])]
     )
-    assessment = assess_verification('turn-1', result, **RESOLVED_SETS)
+    assessment = build_final_acceptance_assessment('turn-1', result, **RESOLVED_SETS)
     assert assessment.clean is False
     assert (
         assessment.unresolved[0].classification
@@ -101,7 +101,7 @@ def test_knowledge_citation_resolves_against_source_ids() -> None:
     result = _result(
         claims=[Claim(text='arbitration', evidence=['knowledge://src-1'])]
     )
-    assessment = assess_verification('turn-1', result, **RESOLVED_SETS)
+    assessment = build_final_acceptance_assessment('turn-1', result, **RESOLVED_SETS)
     assert assessment.clean is True
 
 
@@ -119,7 +119,7 @@ def test_agent_findings_pass_through_verbatim() -> None:
             },
         ]
     )
-    assessment = assess_verification('turn-1', result, **RESOLVED_SETS)
+    assessment = build_final_acceptance_assessment('turn-1', result, **RESOLVED_SETS)
     assert assessment.clean is False
     assert [entry.source for entry in assessment.unresolved] == [
         'agent',
@@ -141,7 +141,7 @@ def test_agent_findings_pass_through_verbatim() -> None:
 
 def test_message_to_other_agent_on_done_turn_is_advisory_signal() -> None:
     result = _result(message_to_other_agent='Beaker should note X.')
-    assessment = assess_verification('turn-1', result, **RESOLVED_SETS)
+    assessment = build_final_acceptance_assessment('turn-1', result, **RESOLVED_SETS)
     assert assessment.clean is False
     assert (
         assessment.unresolved[0].classification
@@ -157,7 +157,7 @@ def test_git_and_event_schemes_pass_without_resolution_v1() -> None:
             Claim(text='event', evidence=['event://seq/7']),
         ]
     )
-    assessment = assess_verification('turn-1', result, **RESOLVED_SETS)
+    assessment = build_final_acceptance_assessment('turn-1', result, **RESOLVED_SETS)
     assert assessment.clean is True
 
 
@@ -167,8 +167,8 @@ def test_assessment_is_deterministic_for_identical_inputs() -> None:
         Claim(text='alpha claim'),
         Claim(text='mid claim'),
     ]
-    first = assess_verification('turn-1', _result(claims=claims), **RESOLVED_SETS)
-    second = assess_verification(
+    first = build_final_acceptance_assessment('turn-1', _result(claims=claims), **RESOLVED_SETS)
+    second = build_final_acceptance_assessment(
         'turn-1', _result(claims=list(reversed(claims))), **RESOLVED_SETS
     )
     assert first.model_dump_json() == second.model_dump_json()
@@ -180,5 +180,5 @@ def test_assessment_is_deterministic_for_identical_inputs() -> None:
 )
 def test_artifact_double_prefix_tolerance(cited: str) -> None:
     result = _result(claims=[Claim(text='m', evidence=[cited])])
-    assessment = assess_verification('turn-1', result, **RESOLVED_SETS)
+    assessment = build_final_acceptance_assessment('turn-1', result, **RESOLVED_SETS)
     assert assessment.clean is True

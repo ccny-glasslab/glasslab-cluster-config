@@ -1317,7 +1317,7 @@ def test_discord_final_acceptance_states_clean_assessment() -> None:
                     'uri': 'artifact://run-1/reports/report.md',
                     'sha256': 'e' * 64,
                 },
-                'verification_assessment': {
+                'final_acceptance_assessment': {
                     'turn_id': 'turn-1',
                     'done': True,
                     'claim_count': 3,
