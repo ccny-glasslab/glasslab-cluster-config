@@ -36,6 +36,8 @@ from app.schemas import (
     FindingClassification,
     IngestedDatasetRecord,
     JobStatus,
+    KnowledgeSource,
+    SourceType,
     RequestedAction,
     PolicyClassification,
     RunCreateRequest,
@@ -2432,3 +2434,61 @@ def test_recovery_replay_after_approval_keeps_acknowledgement_enrichment(
     assert _last_event(
         store, run.run_id, 'action.findings_acknowledged'
     ) is not None
+
+
+def test_knowledge_citation_respects_run_scope_isolation(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # Evidence isolation: a private knowledge source scoped to another run
+    # must not satisfy this run's citations, while same-run and global
+    # sources do. Regression from review of PR #215.
+    _, store, cluster, runtime, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+
+    def _source(source_id: str, scope: str | None) -> KnowledgeSource:
+        return KnowledgeSource(
+            source_id=source_id,
+            source_type=SourceType.DOCUMENTATION,
+            canonical_uri=f'file:///approved/{source_id}.md',
+            run_scope=scope,
+            digest='a' * 64,
+        )
+
+    store.save_knowledge_source(_source('src-current', run.run_id))
+    store.save_knowledge_source(_source('src-global', None))
+    store.save_knowledge_source(
+        _source('src-private-other', 'some-other-run')
+    )
+
+    def factory(kwargs):
+        return AgentTurnResult(
+            kind=TurnKind.VERIFICATION,
+            summary='cites knowledge across scopes',
+            done=True,
+            claims=[
+                Claim(text='same-run', evidence=['knowledge://src-current']),
+                Claim(text='global', evidence=['knowledge://src-global']),
+                Claim(
+                    text='foreign private',
+                    evidence=['knowledge://src-private-other'],
+                ),
+            ],
+        )
+
+    _override_verification_turn(runtime, monkeypatch, factory)
+    run = _complete_jobs(engine, store, cluster, run.run_id)
+
+    final_action = _pending_action(store, run.run_id, 'accept_final_report')
+    assessment = final_action.arguments['final_acceptance_assessment']
+    assert any(
+        entry['classification'] == 'missing_evidence'
+        and 'src-private-other' in entry['text']
+        and entry['source'] == 'derived'
+        for entry in assessment['unresolved']
+    ), assessment['unresolved']
+    assert all(
+        'src-global' not in entry['text']
+        and 'src-current' not in entry['text']
+        for entry in assessment['unresolved']
+    )

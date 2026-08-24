@@ -1991,7 +1991,11 @@ class ResearchOrchestrator:
             },
             knowledge_source_ids={
                 source.source_id
-                for source in self.store.list_knowledge_sources()
+                # Run-scoped filter keeps another run's private sources out
+                # of this run's citation resolution; globals stay visible.
+                for source in self.store.list_knowledge_sources(
+                    run_scope=run_id
+                )
             },
             context_packet_ids={
                 packet.packet_id
