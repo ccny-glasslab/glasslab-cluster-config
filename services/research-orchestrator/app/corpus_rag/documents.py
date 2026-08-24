@@ -102,23 +102,21 @@ def detect_sections(document: Any) -> list[SectionNode]:
     )
     body_font_size = _modal_body_font_size(blocks)
 
-    drafts: list[_DraftSection] = []
-    highest_allocated_number = 0
-
+    raw_drafts: list[tuple[str, _DraftSection]] = []
     for block in blocks:
         numbered = _numbered_heading(block.text)
         if numbered is not None:
             number, title = numbered
-            drafts.append(
-                _DraftSection(
-                    path=number,
-                    title=title,
-                    level=number.count('.') + 1,
-                    start_char=block.char_start,
+            raw_drafts.append(
+                (
+                    'numbered',
+                    _DraftSection(
+                        path=number,
+                        title=title,
+                        level=number.count('.') + 1,
+                        start_char=block.char_start,
+                    ),
                 )
-            )
-            highest_allocated_number = max(
-                highest_allocated_number, int(number.split('.')[0])
             )
             continue
         if (
@@ -127,16 +125,37 @@ def detect_sections(document: Any) -> list[SectionNode]:
             and len(block.text) < _HEADING_MAX_CHARS
             and block.font_size >= _HEADING_SIZE_RATIO * body_font_size
         ):
-            highest_allocated_number += 1
-            drafts.append(
-                _DraftSection(
-                    path=str(highest_allocated_number),
-                    title=block.text.strip(),
-                    level=0,  # resolved from size rank below
-                    start_char=block.char_start,
-                    heading_size=float(block.font_size),
+            raw_drafts.append(
+                (
+                    'size',
+                    _DraftSection(
+                        path='',
+                        title=block.text.strip(),
+                        level=0,  # resolved from size rank below
+                        start_char=block.char_start,
+                        heading_size=float(block.font_size),
+                    ),
                 )
             )
+
+    # Unnumbered headings take free top-level numbers AFTER the full scan so
+    # they can never collide with numbered paths appearing later in the doc.
+    used_top_level = {
+        int(kind_path[1].path.split('.')[0])
+        for kind_path in raw_drafts
+        if kind_path[0] == 'numbered'
+    }
+    next_free = 1
+    drafts: list[_DraftSection] = []
+    for kind, draft in raw_drafts:
+        if kind == 'numbered':
+            drafts.append(draft)
+            continue
+        while next_free in used_top_level:
+            next_free += 1
+        draft.path = str(next_free)
+        drafts.append(draft)
+        next_free += 1
 
     size_rank = {
         size: rank + 1
@@ -208,6 +227,15 @@ def document_id_for_source(source_id: str) -> str:
     return hashlib.sha256(f'rag-document:{source_id}'.encode('utf-8')).hexdigest()
 
 
+def assert_no_secrets(text: str) -> None:
+    """Fail-closed secret scan over extracted document text (reject-only)."""
+    for pattern in SECRET_PATTERNS:
+        if pattern.search(text):
+            raise KnowledgeError(
+                f'document matches secret pattern {pattern.pattern!r}'
+            )
+
+
 def ingest_document_bytes(
     *,
     store: Any,
@@ -222,28 +250,28 @@ def ingest_document_bytes(
 ) -> tuple[KnowledgeSource, RagDocumentRecord]:
     """Fail-closed ingestion of one document into the knowledge store.
 
-    Raises ``KnowledgeError`` on non-UTF-8 bytes or secret-pattern matches in
-    either the decoded text or the canonical URI, before any store write.
-    Re-ingesting identical bytes under the same URI preserves the original
-    source identity (source_id, ingested_at) while refreshing metadata.
+    Raises ``KnowledgeError`` on non-UTF-8 text input or secret-pattern
+    matches in either the decoded text or the canonical URI, before any
+    store write. Binary PDF payloads (``%PDF`` magic) defer content scanning
+    to :func:`assert_no_secrets` over the EXTRACTED text — raw PDF bytes are
+    binary and must never be strict-decoded. Re-ingesting identical bytes
+    under the same URI preserves the original source identity (source_id,
+    ingested_at) while refreshing metadata.
     """
-    try:
-        text = data.decode('utf-8', errors='strict')
-    except UnicodeDecodeError as error:
-        raise KnowledgeError(
-            'document bytes fail UTF-8 decode; treating as secret-suspect'
-        ) from error
-
-    for pattern in SECRET_PATTERNS:
-        if pattern.search(text):
-            raise KnowledgeError(
-                f'document matches secret pattern {pattern.pattern!r}'
-            )
     for pattern in SECRET_PATH_PATTERNS:
         if pattern.search(canonical_uri):
             raise KnowledgeError(
                 f'document matches secret pattern {pattern.pattern!r}'
             )
+
+    if not data.startswith(b'%PDF'):
+        try:
+            text = data.decode('utf-8', errors='strict')
+        except UnicodeDecodeError as error:
+            raise KnowledgeError(
+                'document bytes fail UTF-8 decode; treating as secret-suspect'
+            ) from error
+        assert_no_secrets(text)
 
     digest = hashlib.sha256(data).hexdigest()
     incoming_metadata: dict[str, Any] = {
