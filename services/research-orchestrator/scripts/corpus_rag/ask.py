@@ -8,6 +8,10 @@ contract; T11 upgrades this to ``InsufficientCorpusAdvisory``. The CLI never
 emits a citation that fails resolution: every cited chunk is re-verified
 against the store before output (S1), otherwise it exits nonzero.
 
+With ``--advisory``, a successful retrieval additionally carries an
+extractive ``advisory`` document plus its ``advisory_markdown`` rendering;
+the insufficient path is unchanged.
+
 The DSN environment variable is read, never logged.
 """
 
@@ -61,7 +65,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--json-out', default=None, help='also write JSON here')
     parser.add_argument(
         '--advisory', action='store_true',
-        help='reserved; advisory generation lands in T11',
+        help='also build an extractive method advisory over the hits',
     )
     return parser
 
@@ -80,13 +84,6 @@ def _emit_insufficient(reason: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-
-    if args.advisory:
-        # Reserved flag: not an error, advisory generation lands in T11.
-        print(
-            'note: --advisory is reserved; advisory generation lands in T11',
-            file=sys.stderr,
-        )
 
     store = SqliteStore(args.store)
 
@@ -191,6 +188,18 @@ def main(argv: list[str] | None = None) -> int:
         'citations': [citation.model_dump() for citation in result.citations],
         'timings': result.timings,
     }
+    if args.advisory:
+        from app.corpus_rag.advisory import build_method_advisory, render_markdown
+
+        advisory = build_method_advisory(
+            objective=args.question,
+            corpus_slug=args.corpus or 'default',
+            retrieval=result,
+            store=store,
+            llm=None,
+        )
+        payload['advisory'] = advisory.model_dump(mode='json')
+        payload['advisory_markdown'] = render_markdown(advisory)
     _emit(payload, args.json_out)
     return 0
 
