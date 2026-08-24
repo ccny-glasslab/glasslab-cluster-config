@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from app.corpus_rag.advisory import build_method_advisory
 from app.corpus_rag.contracts import QueryPlan, RagChunkRecord
 from app.corpus_rag.retrieval import HybridRetriever, RetrievalOptions, RetrievalResult
 from app.schemas import KnowledgeSource, SourceType
@@ -162,3 +163,43 @@ def test_ask_cli_advisory_flag_end_to_end(tmp_path: Path) -> None:
     payload = json.loads(out.read_text())
     assert payload['advisory']['kind'] == 'method_advisory'
     assert 'CITATIONS' in payload['advisory_markdown']
+
+
+def test_extractive_candidates_require_multi_hit_family_evidence() -> None:
+    from types import SimpleNamespace
+
+    from app.corpus_rag import RagChunkRecord, RetrievedHit
+
+    def hit(cid: str, sid: str, text: str) -> RetrievedHit:
+        return RetrievedHit(
+            chunk=RagChunkRecord(
+                source_id=sid,
+                kind='evidence_span',
+                chunk_index=0,
+                text=text,
+                digest='a' * 64,
+                token_count=max(1, len(text.split())),
+            ),
+            score=1.0,
+            stage_scores={},
+            dense_rank=None,
+            lexical_rank=None,
+            rerank_score=None,
+        )
+
+    hits = [
+        hit('c1', 's1', 'Clustering stability assessment via resampling: bootstrap stability of k-means under initialization perturbations.'),
+        hit('c2', 's2', 'Consensus clustering critique: resampling-based stability claims can be unstable across initializations and random permutations; assumptions behind consensus deserve scrutiny.'),
+        hit('c3', 's3', 'A passage that merely mentions false discovery rate once when surveying hypotheses.'),
+    ]
+    advisory = build_method_advisory(
+        objective='clustering stability assessment',
+        corpus_slug='t',
+        retrieval=SimpleNamespace(hits=hits),
+        store=None,
+    )
+    labels = [candidate.method_name for candidate in advisory.candidates]
+    assert 'Resampling-based clustering validation' in labels
+    # Single-keyword coincidences in one chunk must not spawn families.
+    assert 'False-discovery-rate control' not in labels
+    assert 'Assumption-light regression alternatives' not in labels

@@ -30,6 +30,7 @@ from app.corpus_rag.contracts import (
 _EXTRACTIVE_BY = 'extractive-fallback'
 _MAX_CANDIDATES = 5
 _MAX_CITATIONS_PER_CANDIDATE = 3
+_MIN_FAMILY_KEYWORDS = 2
 _QUOTE_LIMIT = 240
 _WHY_FRAGMENT_LIMIT = 200
 
@@ -84,16 +85,25 @@ def _matches(text_lower: str, fam: _Family) -> bool:
 
 
 def _group_by_family(hits: list[RetrievedHit]) -> dict[str, list[RetrievedHit]]:
-    grouped: dict[str, list[RetrievedHit]] = {}
-    seen: set[str] = set()
+    unique: dict[str, RetrievedHit] = {}
     for hit in hits:
-        if hit.chunk.chunk_id in seen:
-            continue
-        seen.add(hit.chunk.chunk_id)
-        text = hit.chunk.text.lower()
-        for fam in _FAMILIES:
-            if _matches(text, fam):
-                grouped.setdefault(fam.label, []).append(hit)
+        unique.setdefault(hit.chunk.chunk_id, hit)
+
+    texts = {cid: hit.chunk.text.lower() for cid, hit in unique.items()}
+
+    grouped: dict[str, list[RetrievedHit]] = {}
+    for fam in _FAMILIES:
+        matched_terms = {
+            kw for kw in fam.any_of if any(kw in text for text in texts.values())
+        }
+        # Requiring several DISTINCT family keywords separates genuine topical
+        # coverage from one incidental word inside long textbook prose.
+        if len(matched_terms) >= _MIN_FAMILY_KEYWORDS:
+            grouped[fam.label] = [
+                hit
+                for cid, hit in unique.items()
+                if any(kw in texts[cid] for kw in fam.any_of)
+            ]
     return grouped
 
 
@@ -121,9 +131,10 @@ def _detect_contradictions(grouped: dict[str, list[RetrievedHit]]) -> list[dict[
 
 
 def _extractive_candidate(fam: _Family, hits: list[RetrievedHit]) -> MethodCandidate:
+    unique_hits = list({hit.chunk.chunk_id: hit for hit in hits}.values())
     return MethodCandidate(
         method_name=fam.label,
-        why=_why_from_hits(hits),
+        why=_why_from_hits(unique_hits),
         assumptions=list(fam.assumptions),
         preprocessing=list(fam.preprocessing),
         diagnostics=list(fam.diagnostics),
@@ -131,7 +142,9 @@ def _extractive_candidate(fam: _Family, hits: list[RetrievedHit]) -> MethodCandi
         failure_modes=list(fam.failure_modes),
         baselines=list(fam.baselines),
         comparisons=list(fam.comparisons),
-        citations=[_citation_for_hit(h) for h in hits[:_MAX_CITATIONS_PER_CANDIDATE]],
+        citations=[
+            _citation_for_hit(h) for h in unique_hits[:_MAX_CITATIONS_PER_CANDIDATE]
+        ],
         confidence='low',
     )
 
