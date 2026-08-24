@@ -99,6 +99,31 @@ def test_numpy_topk_matches_reference() -> None:
     assert self_hits[0][1] == pytest.approx(1.0, abs=1e-5)
 
 
+def test_numpy_source_map_for_plain_chunk_ids() -> None:
+    """Production chunk ids are bare hex without any delimiter, so filtered
+    search must honor an explicit chunk_id -> source_id mapping."""
+    rng = np.random.default_rng(11)
+    dim = 8
+    source_of: dict[str, str] = {}
+    index = NumpyVectorIndex()
+    for i in range(6):
+        cid = uuid4().hex
+        source_of[cid] = 'src-a' if i < 3 else 'src-b'
+        index.add(_meta(cid, dim), rng.standard_normal(dim).astype(np.float32))
+    query = rng.standard_normal(dim).astype(np.float32)
+
+    mapped = NumpyVectorIndex(source_of=source_of)
+    for cid in source_of:
+        mapped.add(_meta(cid, dim), index._rows[cid])
+
+    filtered = mapped.search(query, k=10, source_ids=['src-b'])
+    assert {cid for cid, _ in filtered} == {
+        cid for cid, src in source_of.items() if src == 'src-b'
+    }
+    # Unfiltered search still sees everything.
+    assert len(mapped.search(query, k=10)) == 6
+
+
 def test_numpy_source_filter() -> None:
     rng = np.random.default_rng(7)
     dim, per_source = 8, 6

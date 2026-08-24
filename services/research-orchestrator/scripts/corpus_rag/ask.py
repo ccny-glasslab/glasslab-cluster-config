@@ -81,6 +81,13 @@ def _emit_insufficient(reason: str, json_out: str | None = None) -> None:
     _emit({'kind': 'insufficient_evidence', 'reason': reason}, json_out)
 
 
+def _chunk_source_map(store) -> dict[str, str]:
+    return {
+        row['chunk_id']: row['source_id']
+        for row in store.list_rag_chunks(limit=None)
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -118,7 +125,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             entries = store.list_rag_chunk_vectors(args.model_id)
             dims = entries[0][0].dims if entries else _FALLBACK_DIMS
-            vector_index = NumpyVectorIndex(entries=entries)
+            vector_index = NumpyVectorIndex(
+                entries=entries,
+                source_of=_chunk_source_map(store),
+            )
             embedding_provider = OfflineDeterministicEmbedding(dims=dims)
 
     reranker = CrossEncoderReranker() if args.reranker == 'cross-encoder' else OfflineReranker()

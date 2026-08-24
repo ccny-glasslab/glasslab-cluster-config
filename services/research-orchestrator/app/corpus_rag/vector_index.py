@@ -17,7 +17,7 @@ callers never touch it.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
@@ -100,15 +100,21 @@ class NumpyVectorIndex:
     def __init__(
         self,
         entries: Iterable[tuple[ChunkVectorMeta, bytes]] | None = None,
+        *,
+        source_of: Mapping[str, str] | None = None,
     ) -> None:
         self._rows: dict[str, np.ndarray] = {}
         self._metas: dict[str, ChunkVectorMeta] = {}
         self._cache: tuple[list[str], np.ndarray] | None = None
+        # Explicit mapping wins: production chunk ids are bare hex with no
+        # delimiter, so callers must hydrate membership from the store.
+        self._source_map = dict(source_of) if source_of else None
         for meta, blob in entries or ():
             self.add(meta, decode_vector(blob))
 
-    @staticmethod
-    def _source_of(chunk_id: str) -> str | None:
+    def _source_for(self, chunk_id: str) -> str | None:
+        if self._source_map is not None:
+            return self._source_map.get(chunk_id)
         return chunk_id.split('::', 1)[0] if '::' in chunk_id else None
 
     def add(self, meta: ChunkVectorMeta, vec: np.ndarray) -> None:
@@ -139,7 +145,7 @@ class NumpyVectorIndex:
         if source_ids:
             allowed = set(source_ids)
             mask = np.array(
-                [self._source_of(cid) in allowed for cid in ids], dtype=bool
+                [self._source_for(cid) in allowed for cid in ids], dtype=bool
             )
         candidates = np.flatnonzero(mask)
         if candidates.size == 0:

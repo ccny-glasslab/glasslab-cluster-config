@@ -106,7 +106,11 @@ def main(argv: list[str] | None = None) -> int:
         for meta, blob in store.list_rag_chunk_vectors(provider.model_id)
         if meta.index_version == RAG_INDEX_VERSION
     ]
-    vector_index = NumpyVectorIndex(vectors)
+    chunk_sources = {
+        row['chunk_id']: row['source_id']
+        for row in store.list_rag_chunks(limit=None)
+    }
+    vector_index = NumpyVectorIndex(vectors, source_of=chunk_sources)
     reranker = OfflineReranker() if args.reranker == 'offline' else None
     retriever = HybridRetriever(
         store,
