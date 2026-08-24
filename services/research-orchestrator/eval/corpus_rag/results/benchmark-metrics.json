@@ -1,0 +1,60 @@
+{
+  "modes": {
+    "lexical": {
+      "recall@k": 0.78125,
+      "recall@10": 0.78125,
+      "mrr@10": 0.8125,
+      "ndcg@10": 0.7391106165837805,
+      "precision@10": 0.1875,
+      "distinct_sources@10": 3.375,
+      "duplicate_rate@10": 0.0,
+      "latency_ms": 1880.0942889938597,
+      "latency_ms_per_question": 235.01178612423246
+    },
+    "dense": {
+      "recall@k": 0.90625,
+      "recall@10": 0.90625,
+      "mrr@10": 0.875,
+      "ndcg@10": 0.8399626150599384,
+      "precision@10": 0.225,
+      "distinct_sources@10": 3.75,
+      "duplicate_rate@10": 0.0,
+      "latency_ms": 12279.520746000344,
+      "latency_ms_per_question": 1534.940093250043
+    },
+    "hybrid": {
+      "recall@k": 0.8645833333333334,
+      "recall@10": 0.8645833333333334,
+      "mrr@10": 0.875,
+      "ndcg@10": 0.7945733174477255,
+      "precision@10": 0.2125,
+      "distinct_sources@10": 3.625,
+      "duplicate_rate@10": 0.0,
+      "latency_ms": 3821.1035410058685,
+      "latency_ms_per_question": 477.63794262573356
+    },
+    "hybrid+rerank": {
+      "recall@k": 0.8645833333333334,
+      "recall@10": 0.8645833333333334,
+      "mrr@10": 0.875,
+      "ndcg@10": 0.7945733174477255,
+      "precision@10": 0.2125,
+      "distinct_sources@10": 3.625,
+      "duplicate_rate@10": 0.0,
+      "latency_ms": 4044.3100150150713,
+      "latency_ms_per_question": 505.5387518768839
+    }
+  },
+  "environment": {
+    "k": 10,
+    "n_questions": 8,
+    "embedding_model": "Snowflake/snowflake-arctic-embed-m-v1.5",
+    "embedding_revision": "e58a8f756156a1293d763f17e3aae643474e9b8a",
+    "index_version": "rag-v1",
+    "vectors_loaded": 3152,
+    "reranker": "cross-encoder",
+    "expand": false,
+    "store": "/home/gr66ss/rag-data/orchestrator-rag.db",
+    "corpus": "statistical-learning-methods"
+  }
+}

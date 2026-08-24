@@ -1,0 +1,392 @@
+{
+  "question": "How should we assess whether clusters are stable rather than artifacts of initialization?",
+  "corpus": "statistical-learning-methods",
+  "mode": "hybrid+rerank",
+  "model_id": "offline-deterministic",
+  "plan": {
+    "original_query": "How should we assess whether clusters are stable rather than artifacts of initialization?",
+    "subqueries": [
+      "assess whether clusters stable artifacts initialization",
+      "methods for assess whether clusters stable",
+      "stability assessment for assess whether clusters stable",
+      "validation diagnostics for assess whether clusters stable"
+    ],
+    "planner_mode": "heuristic"
+  },
+  "hits": [
+    {
+      "chunk_id": "ce1d15ec3be9c4dff5e39a984d2401c1",
+      "source_id": "03edd07d8b474c8c98c8caed47274cb0",
+      "score": 0.015873015873015872,
+      "section_path": "6",
+      "page_start": 2,
+      "page_end": 4,
+      "text_preview": "Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctes"
+    },
+    {
+      "chunk_id": "990b4ae2fa6e7d92d44f90bd2eaf4e16",
+      "source_id": "03edd07d8b474c8c98c8caed47274cb0",
+      "score": 0.015384615384615385,
+      "section_path": "6",
+      "page_start": 2,
+      "page_end": 3,
+      "text_preview": "Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctes"
+    },
+    {
+      "chunk_id": "cbfda13e915eca983d21536a9e02b647",
+      "source_id": "03edd07d8b474c8c98c8caed47274cb0",
+      "score": 0.014285714285714285,
+      "section_path": "11",
+      "page_start": 25,
+      "page_end": 27,
+      "text_preview": "In particular, if we\ncall the number of initial centers per cluster the initial con\ufb01guration,\none can say that each initial con\ufb01guration leads to a unique clustering,\nand di\ufb00erent con\ufb01gurations lead t"
+    },
+    {
+      "chunk_id": "35cb5f659b63768e360af4632d49ac57",
+      "source_id": "c84ff93e738f4020836320b964514c3d",
+      "score": 0.015151515151515152,
+      "section_path": "4",
+      "page_start": 3,
+      "page_end": 4,
+      "text_preview": "bution is to populate an ensemble of n-p matrices\u2014for n samples\nand p genes\u2014using random values from a univariate uniform or\nAlthough the pcNormal datasets have a known lack of substructure,\nunimodal "
+    },
+    {
+      "chunk_id": "ae5ec7cc16a36994f8c789e17e99f5f0",
+      "source_id": "c84ff93e738f4020836320b964514c3d",
+      "score": 0.015384615384615385,
+      "section_path": "4",
+      "page_start": 1,
+      "page_end": 2,
+      "text_preview": "is grouped together in multiple clustering runs, each with a certain\ndegree of permutation either by random initialization or by random\nAn early example that motivated this reassessment is the analysi"
+    },
+    {
+      "chunk_id": "1660444f1ff04f4868fc099708415f55",
+      "source_id": "9a83d9bc9cbd4b799b0c40325feda720",
+      "score": 0.01639344262295082,
+      "section_path": "427",
+      "page_start": 413,
+      "page_end": 414,
+      "text_preview": "Practical Issues in Clustering\nClustering can be a very useful tool for data analysis in the unsupervised\nsetting. However, there are a number of issues that arise in performing\nclustering. We describ"
+    }
+  ],
+  "citations": [
+    {
+      "chunk_id": "ce1d15ec3be9c4dff5e39a984d2401c1",
+      "source_id": "03edd07d8b474c8c98c8caed47274cb0",
+      "evidence_uri": "knowledge://03edd07d8b474c8c98c8caed47274cb0",
+      "section_path": "6",
+      "page_start": 2,
+      "page_end": 4,
+      "char_span": [
+        1131,
+        5310
+      ],
+      "quote": "Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctest\u201d our clustering results.\nOne of the mo"
+    },
+    {
+      "chunk_id": "990b4ae2fa6e7d92d44f90bd2eaf4e16",
+      "source_id": "03edd07d8b474c8c98c8caed47274cb0",
+      "evidence_uri": "knowledge://03edd07d8b474c8c98c8caed47274cb0",
+      "section_path": "6",
+      "page_start": 2,
+      "page_end": 3,
+      "char_span": [
+        1131,
+        3141
+      ],
+      "quote": "Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctest\u201d our clustering results.\nOne of the mo"
+    },
+    {
+      "chunk_id": "cbfda13e915eca983d21536a9e02b647",
+      "source_id": "03edd07d8b474c8c98c8caed47274cb0",
+      "evidence_uri": "knowledge://03edd07d8b474c8c98c8caed47274cb0",
+      "section_path": "11",
+      "page_start": 25,
+      "page_end": 27,
+      "char_span": [
+        41894,
+        44528
+      ],
+      "quote": "In particular, if we\ncall the number of initial centers per cluster the initial con\ufb01guration,\none can say that each initial con\ufb01guration leads to a unique clustering,\nand di\ufb00erent con\ufb01gurations lead to di\ufb00erent clusterings; see Figure 3.3\n\n"
+    },
+    {
+      "chunk_id": "35cb5f659b63768e360af4632d49ac57",
+      "source_id": "c84ff93e738f4020836320b964514c3d",
+      "evidence_uri": "knowledge://c84ff93e738f4020836320b964514c3d",
+      "section_path": "4",
+      "page_start": 3,
+      "page_end": 4,
+      "char_span": [
+        13075,
+        15793
+      ],
+      "quote": "bution is to populate an ensemble of n-p matrices\u2014for n samples\nand p genes\u2014using random values from a univariate uniform or\nAlthough the pcNormal datasets have a known lack of substructure,\nunimodal distribution15. However, the gene-gene c"
+    },
+    {
+      "chunk_id": "ae5ec7cc16a36994f8c789e17e99f5f0",
+      "source_id": "c84ff93e738f4020836320b964514c3d",
+      "evidence_uri": "knowledge://c84ff93e738f4020836320b964514c3d",
+      "section_path": "4",
+      "page_start": 1,
+      "page_end": 2,
+      "char_span": [
+        6192,
+        8964
+      ],
+      "quote": "is grouped together in multiple clustering runs, each with a certain\ndegree of permutation either by random initialization or by random\nAn early example that motivated this reassessment is the analysis\nsample- or gene-subsampling. The resul"
+    },
+    {
+      "chunk_id": "1660444f1ff04f4868fc099708415f55",
+      "source_id": "9a83d9bc9cbd4b799b0c40325feda720",
+      "evidence_uri": "knowledge://9a83d9bc9cbd4b799b0c40325feda720",
+      "section_path": "427",
+      "page_start": 413,
+      "page_end": 414,
+      "char_span": [
+        935301,
+        937306
+      ],
+      "quote": "Practical Issues in Clustering\nClustering can be a very useful tool for data analysis in the unsupervised\nsetting. However, there are a number of issues that arise in performing\nclustering. We describe some of these issues here.\nSmall Decis"
+    }
+  ],
+  "timings": {
+    "lexical": 66.07810701825656,
+    "dense": 5.281934019876644,
+    "fuse": 0.11393899330869317,
+    "rerank": 23967.588976986008,
+    "expand": 0.0,
+    "total": 24177.846273989417
+  },
+  "advisory": {
+    "kind": "method_advisory",
+    "objective": "How should we assess whether clusters are stable rather than artifacts of initialization?",
+    "corpus_slug": "statistical-learning-methods",
+    "candidates": [
+      {
+        "method_name": "Resampling-based clustering validation",
+        "why": "Evidence [03edd07d8b474c8c98c8caed47274cb0] states: \"Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctes\" A corroborating span [03edd07d8b474c8c98c8caed47274cb0] adds: \"Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctes\"",
+        "assumptions": [
+          "Clusters correspond to a stable latent structure rather than sampling noise.",
+          "The chosen distance/linkage reflects domain similarity."
+        ],
+        "preprocessing": [
+          "Scale features before any distance-based step."
+        ],
+        "diagnostics": [
+          "Inspect consensus matrices across resamples.",
+          "Track cluster-count selection stability."
+        ],
+        "metrics": [
+          "Adjusted Rand index across resamples.",
+          "Silhouette on consensus labels."
+        ],
+        "failure_modes": [
+          "Resampling can mask genuine small-cluster instability."
+        ],
+        "baselines": [
+          "Fixed-k k-means without a stability check."
+        ],
+        "comparisons": [
+          "Compare against gap-statistic cluster-count selection."
+        ],
+        "citations": [
+          {
+            "chunk_id": "ce1d15ec3be9c4dff5e39a984d2401c1",
+            "source_id": "03edd07d8b474c8c98c8caed47274cb0",
+            "evidence_uri": "knowledge://03edd07d8b474c8c98c8caed47274cb0",
+            "section_path": "6",
+            "page_start": 2,
+            "page_end": 4,
+            "char_span": [
+              1131,
+              5310
+            ],
+            "quote": "Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctest\u201d our clustering results.\nOne of the mo"
+          },
+          {
+            "chunk_id": "990b4ae2fa6e7d92d44f90bd2eaf4e16",
+            "source_id": "03edd07d8b474c8c98c8caed47274cb0",
+            "evidence_uri": "knowledge://03edd07d8b474c8c98c8caed47274cb0",
+            "section_path": "6",
+            "page_start": 2,
+            "page_end": 3,
+            "char_span": [
+              1131,
+              3141
+            ],
+            "quote": "Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctest\u201d our clustering results.\nOne of the mo"
+          },
+          {
+            "chunk_id": "cbfda13e915eca983d21536a9e02b647",
+            "source_id": "03edd07d8b474c8c98c8caed47274cb0",
+            "evidence_uri": "knowledge://03edd07d8b474c8c98c8caed47274cb0",
+            "section_path": "11",
+            "page_start": 25,
+            "page_end": 27,
+            "char_span": [
+              41894,
+              44528
+            ],
+            "quote": "In particular, if we\ncall the number of initial centers per cluster the initial con\ufb01guration,\none can say that each initial con\ufb01guration leads to a unique clustering,\nand di\ufb00erent con\ufb01gurations lead to di\ufb00erent clusterings; see Figure 3.3\n\n"
+          }
+        ],
+        "confidence": "low"
+      },
+      {
+        "method_name": "False-discovery-rate control",
+        "why": "Evidence [03edd07d8b474c8c98c8caed47274cb0] states: \"Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctes\" A corroborating span [c84ff93e738f4020836320b964514c3d] adds: \"bution is to populate an ensemble of n-p matrices\u2014for n samples\nand p genes\u2014using random values from a univariate uniform or\nAlthough the pcNormal datasets have a known lack of substructure,\nunimodal\"",
+        "assumptions": [
+          "Tests are exchangedable enough for adaptive procedures."
+        ],
+        "preprocessing": [
+          "Fix the hypothesis family before looking at p-values."
+        ],
+        "diagnostics": [
+          "Plot sorted p-values against the Benjamini-Hochberg line."
+        ],
+        "metrics": [
+          "Number of discoveries at target FDR q."
+        ],
+        "failure_modes": [
+          "Dependent tests can break FDR control guarantees."
+        ],
+        "baselines": [
+          "Uncorrected per-test alpha as the naive baseline."
+        ],
+        "comparisons": [
+          "Compare BH against Bonferroni power at matched error."
+        ],
+        "citations": [
+          {
+            "chunk_id": "ce1d15ec3be9c4dff5e39a984d2401c1",
+            "source_id": "03edd07d8b474c8c98c8caed47274cb0",
+            "evidence_uri": "knowledge://03edd07d8b474c8c98c8caed47274cb0",
+            "section_path": "6",
+            "page_start": 2,
+            "page_end": 4,
+            "char_span": [
+              1131,
+              5310
+            ],
+            "quote": "Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctest\u201d our clustering results.\nOne of the mo"
+          },
+          {
+            "chunk_id": "35cb5f659b63768e360af4632d49ac57",
+            "source_id": "c84ff93e738f4020836320b964514c3d",
+            "evidence_uri": "knowledge://c84ff93e738f4020836320b964514c3d",
+            "section_path": "4",
+            "page_start": 3,
+            "page_end": 4,
+            "char_span": [
+              13075,
+              15793
+            ],
+            "quote": "bution is to populate an ensemble of n-p matrices\u2014for n samples\nand p genes\u2014using random values from a univariate uniform or\nAlthough the pcNormal datasets have a known lack of substructure,\nunimodal distribution15. However, the gene-gene c"
+          },
+          {
+            "chunk_id": "ae5ec7cc16a36994f8c789e17e99f5f0",
+            "source_id": "c84ff93e738f4020836320b964514c3d",
+            "evidence_uri": "knowledge://c84ff93e738f4020836320b964514c3d",
+            "section_path": "4",
+            "page_start": 1,
+            "page_end": 2,
+            "char_span": [
+              6192,
+              8964
+            ],
+            "quote": "is grouped together in multiple clustering runs, each with a certain\ndegree of permutation either by random initialization or by random\nAn early example that motivated this reassessment is the analysis\nsample- or gene-subsampling. The resul"
+          }
+        ],
+        "confidence": "low"
+      }
+    ],
+    "contradiction_pairs": [
+      {
+        "a": "03edd07d8b474c8c98c8caed47274cb0",
+        "b": "c84ff93e738f4020836320b964514c3d",
+        "topic": "Resampling-based clustering validation"
+      },
+      {
+        "a": "c84ff93e738f4020836320b964514c3d",
+        "b": "9a83d9bc9cbd4b799b0c40325feda720",
+        "topic": "Resampling-based clustering validation"
+      },
+      {
+        "a": "03edd07d8b474c8c98c8caed47274cb0",
+        "b": "c84ff93e738f4020836320b964514c3d",
+        "topic": "False-discovery-rate control"
+      }
+    ],
+    "uncertainty_statement": "The supplied corpus (statistical-learning-methods) supports these candidates only partially; 6 evidence spans were retrieved. Statements beyond cited spans are not supported.",
+    "citations_all": [
+      {
+        "chunk_id": "ce1d15ec3be9c4dff5e39a984d2401c1",
+        "source_id": "03edd07d8b474c8c98c8caed47274cb0",
+        "evidence_uri": "knowledge://03edd07d8b474c8c98c8caed47274cb0",
+        "section_path": "6",
+        "page_start": 2,
+        "page_end": 4,
+        "char_span": [
+          1131,
+          5310
+        ],
+        "quote": "Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctest\u201d our clustering results.\nOne of the mo"
+      },
+      {
+        "chunk_id": "990b4ae2fa6e7d92d44f90bd2eaf4e16",
+        "source_id": "03edd07d8b474c8c98c8caed47274cb0",
+        "evidence_uri": "knowledge://03edd07d8b474c8c98c8caed47274cb0",
+        "section_path": "6",
+        "page_start": 2,
+        "page_end": 3,
+        "char_span": [
+          1131,
+          3141
+        ],
+        "quote": "Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctest\u201d our clustering results.\nOne of the mo"
+      },
+      {
+        "chunk_id": "cbfda13e915eca983d21536a9e02b647",
+        "source_id": "03edd07d8b474c8c98c8caed47274cb0",
+        "evidence_uri": "knowledge://03edd07d8b474c8c98c8caed47274cb0",
+        "section_path": "11",
+        "page_start": 25,
+        "page_end": 27,
+        "char_span": [
+          41894,
+          44528
+        ],
+        "quote": "In particular, if we\ncall the number of initial centers per cluster the initial con\ufb01guration,\none can say that each initial con\ufb01guration leads to a unique clustering,\nand di\ufb00erent con\ufb01gurations lead to di\ufb00erent clusterings; see Figure 3.3\n\n"
+      },
+      {
+        "chunk_id": "35cb5f659b63768e360af4632d49ac57",
+        "source_id": "c84ff93e738f4020836320b964514c3d",
+        "evidence_uri": "knowledge://c84ff93e738f4020836320b964514c3d",
+        "section_path": "4",
+        "page_start": 3,
+        "page_end": 4,
+        "char_span": [
+          13075,
+          15793
+        ],
+        "quote": "bution is to populate an ensemble of n-p matrices\u2014for n samples\nand p genes\u2014using random values from a univariate uniform or\nAlthough the pcNormal datasets have a known lack of substructure,\nunimodal distribution15. However, the gene-gene c"
+      },
+      {
+        "chunk_id": "ae5ec7cc16a36994f8c789e17e99f5f0",
+        "source_id": "c84ff93e738f4020836320b964514c3d",
+        "evidence_uri": "knowledge://c84ff93e738f4020836320b964514c3d",
+        "section_path": "4",
+        "page_start": 1,
+        "page_end": 2,
+        "char_span": [
+          6192,
+          8964
+        ],
+        "quote": "is grouped together in multiple clustering runs, each with a certain\ndegree of permutation either by random initialization or by random\nAn early example that motivated this reassessment is the analysis\nsample- or gene-subsampling. The resul"
+      }
+    ],
+    "generated_by": "extractive-fallback",
+    "index_version": "rag-v1"
+  },
+  "advisory_markdown": "# Methodology Advisory\n\nObjective: How should we assess whether clusters are stable rather than artifacts of initialization?\nCorpus: statistical-learning-methods (generated_by=extractive-fallback, index_version=rag-v1)\n\nUncertainty: The supplied corpus (statistical-learning-methods) supports these candidates only partially; 6 evidence spans were retrieved. Statements beyond cited spans are not supported.\n\n## 1. Resampling-based clustering validation\n\nWhy: Evidence [03edd07d8b474c8c98c8caed47274cb0] states: \"Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctes\" A corroborating span [03edd07d8b474c8c98c8caed47274cb0] adds: \"Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctes\"\n\nAssumptions:\n- Clusters correspond to a stable latent structure rather than sampling noise.\n- The chosen distance/linkage reflects domain similarity.\nPreprocessing:\n- Scale features before any distance-based step.\nDiagnostics:\n- Inspect consensus matrices across resamples.\n- Track cluster-count selection stability.\nMetrics:\n- Adjusted Rand index across resamples.\n- Silhouette on consensus labels.\nFailure modes:\n- Resampling can mask genuine small-cluster instability.\nBaselines:\n- Fixed-k k-means without a stability check.\nComparisons:\n- Compare against gap-statistic cluster-count selection.\n\nCitations: [1] [2] [3]\n\n## 2. False-discovery-rate control\n\nWhy: Evidence [03edd07d8b474c8c98c8caed47274cb0] states: \"Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctes\" A corroborating span [c84ff93e738f4020836320b964514c3d] adds: \"bution is to populate an ensemble of n-p matrices\u2014for n samples\nand p genes\u2014using random values from a univariate uniform or\nAlthough the pcNormal datasets have a known lack of substructure,\nunimodal\"\n\nAssumptions:\n- Tests are exchangedable enough for adaptive procedures.\nPreprocessing:\n- Fix the hypothesis family before looking at p-values.\nDiagnostics:\n- Plot sorted p-values against the Benjamini-Hochberg line.\nMetrics:\n- Number of discoveries at target FDR q.\nFailure modes:\n- Dependent tests can break FDR control guarantees.\nBaselines:\n- Uncorrected per-test alpha as the naive baseline.\nComparisons:\n- Compare BH against Bonferroni power at matched error.\n\nCitations: [4] [5] [6]\n\n## CITATIONS\n\n[1] knowledge://03edd07d8b474c8c98c8caed47274cb0 \u2014 section_path=6, pages 2-4, chars 1131-5310\n    \"Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctest\u201d our clustering results.\nOne of the mo\"\n[2] knowledge://03edd07d8b474c8c98c8caed47274cb0 \u2014 section_path=6, pages 2-3, chars 1131-3141\n    \"Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctest\u201d our clustering results.\nOne of the mo\"\n[3] knowledge://03edd07d8b474c8c98c8caed47274cb0 \u2014 section_path=11, pages 25-27, chars 41894-44528\n    \"In particular, if we\ncall the number of initial centers per cluster the initial con\ufb01guration,\none can say that each initial con\ufb01guration leads to a unique clustering,\nand di\ufb00erent con\ufb01gurations lead to di\ufb00erent clusterings; see Figure 3.3\n\n\"\n[4] knowledge://03edd07d8b474c8c98c8caed47274cb0 \u2014 section_path=6, pages 2-4, chars 1131-5310\n    \"Introduction\nModel selection is a di\ufb03cult problem in non-parametric clustering. The\nobvious reason is that, as opposed to supervised classi\ufb01cation, there is\nno ground truth against which we could \u201ctest\u201d our clustering results.\nOne of the mo\"\n[5] knowledge://c84ff93e738f4020836320b964514c3d \u2014 section_path=4, pages 3-4, chars 13075-15793\n    \"bution is to populate an ensemble of n-p matrices\u2014for n samples\nand p genes\u2014using random values from a univariate uniform or\nAlthough the pcNormal datasets have a known lack of substructure,\nunimodal distribution15. However, the gene-gene c\"\n[6] knowledge://c84ff93e738f4020836320b964514c3d \u2014 section_path=4, pages 1-2, chars 6192-8964\n    \"is grouped together in multiple clustering runs, each with a certain\ndegree of permutation either by random initialization or by random\nAn early example that motivated this reassessment is the analysis\nsample- or gene-subsampling. The resul\"\n"
+}
