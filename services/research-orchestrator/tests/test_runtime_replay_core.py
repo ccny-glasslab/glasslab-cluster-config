@@ -566,3 +566,204 @@ def test_cleanup_of_trial_home_removes_seeded_auth(tmp_path: Path) -> None:
     seed_trial_auth(home, auth)
     shutil.rmtree(home)
     assert not home.exists()
+
+
+def test_campaign_emits_null_doom_loop_count_without_threshold(
+    tmp_path: Path,
+) -> None:
+    from app.runtime_replay import RawRunResult, load_case, run_campaign
+
+    fixture_root = Path(__file__).resolve().parents[1] / 'fixtures' / 'runtime-replay' / 'wine-classification-v1'
+    case = load_case(fixture_root)
+
+    class NullRunner:
+        def run(self, *, prompt, workspace, home, model_provider, model_name, timeout_seconds):
+            return RawRunResult(exit_code=0, wall_clock_seconds=0.01, timed_out=False)
+
+    summary = run_campaign(
+        case_root=fixture_root,
+        candidates=[('exo', 'm')],
+        repeats=1,
+        runner_factory=lambda p, n: NullRunner(),
+        out_dir=tmp_path / 'out',
+        timeout_seconds=30,
+        doom_loop_threshold=None,
+    )
+    row = json.loads((tmp_path / 'out' / 'observations.jsonl').read_text().strip())
+    assert row['doom_loop_event_count'] is None
+    assert row['doom_loop_threshold'] is None
+    assert 'threshold not specified' in row['notes']
+    assert summary['winner'] is None
+
+
+def test_campaign_records_threshold_next_to_count(tmp_path: Path) -> None:
+    from app.runtime_replay import RawRunResult, run_campaign
+
+    fixture_root = Path(__file__).resolve().parents[1] / 'fixtures' / 'runtime-replay' / 'wine-classification-v1'
+
+    class LoopRunner:
+        def run(self, *, prompt, workspace, home, model_provider, model_name, timeout_seconds):
+            db = home / '.local' / 'share' / 'opencode' / 'opencode.db'
+            _write_db(db, [{'id': 'a1', 'role': 'assistant'}], [
+                _tool_part(f't{i}', 'bash', command='same') for i in range(5)
+            ])
+            return RawRunResult(exit_code=0, wall_clock_seconds=0.01, timed_out=False)
+
+    out = tmp_path / 'out2'
+    run_campaign(
+        case_root=fixture_root,
+        candidates=[('exo', 'm')],
+        repeats=1,
+        runner_factory=lambda p, n: LoopRunner(),
+        out_dir=out,
+        timeout_seconds=30,
+        doom_loop_threshold=6,
+    )
+    row = json.loads((out / 'observations.jsonl').read_text().strip())
+    assert row['doom_loop_threshold'] == 6
+    assert row['doom_loop_event_count'] == 0
+    assert row['session_db_layout'] == 'legacy'
+
+
+def test_campaign_parses_legacy_layout_session_db(tmp_path: Path) -> None:
+    from app.runtime_replay import RawRunResult, run_campaign
+
+    fixture_root = Path(__file__).resolve().parents[1] / 'fixtures' / 'runtime-replay' / 'wine-classification-v1'
+
+    class DbRunner:
+        def run(self, *, prompt, workspace, home, model_provider, model_name, timeout_seconds):
+            db = home / '.local' / 'share' / 'opencode' / 'opencode.db'
+            _write_db(db, [{'id': 'a1', 'role': 'assistant', 'tokens': {'input': 11, 'output': 3}}], [])
+            return RawRunResult(exit_code=0, wall_clock_seconds=0.01, timed_out=False)
+
+    out = tmp_path / 'out3'
+    run_campaign(
+        case_root=fixture_root,
+        candidates=[('exo', 'm')],
+        repeats=1,
+        runner_factory=lambda p, n: DbRunner(),
+        out_dir=out,
+        timeout_seconds=30,
+        doom_loop_threshold=None,
+    )
+    row = json.loads((out / 'observations.jsonl').read_text().strip())
+    assert row['model_request_count'] == 1
+    assert row['tokens_input'] == 11
+    assert row['session_db_layout'] == 'legacy'
+
+
+def test_campaign_survives_missing_session_db_with_nulls(tmp_path: Path) -> None:
+    from app.runtime_replay import RawRunResult, run_campaign
+
+    fixture_root = Path(__file__).resolve().parents[1] / 'fixtures' / 'runtime-replay' / 'wine-classification-v1'
+
+    class NoDbRunner:
+        def run(self, *, prompt, workspace, home, model_provider, model_name, timeout_seconds):
+            return RawRunResult(exit_code=0, wall_clock_seconds=0.01, timed_out=False)
+
+    out = tmp_path / 'out4'
+    run_campaign(
+        case_root=fixture_root,
+        candidates=[('exo', 'm')],
+        repeats=1,
+        runner_factory=lambda p, n: NoDbRunner(),
+        out_dir=out,
+        timeout_seconds=30,
+        doom_loop_threshold=None,
+    )
+    row = json.loads((out / 'observations.jsonl').read_text().strip())
+    assert row['model_request_count'] is None
+    assert row['tool_call_count'] is None
+    assert row['session_db_layout'] is None
+    assert 'usage unmeasured: no session database found' in row['notes']
+    assert row['correctness_passed'] is False
+
+
+def test_schema_version_is_v2_in_campaign_rows(tmp_path: Path) -> None:
+    from app.runtime_replay import RawRunResult, run_campaign
+
+    fixture_root = Path(__file__).resolve().parents[1] / 'fixtures' / 'runtime-replay' / 'wine-classification-v1'
+
+    class QuietRunner:
+        def run(self, *, prompt, workspace, home, model_provider, model_name, timeout_seconds):
+            return RawRunResult(exit_code=0, wall_clock_seconds=0.01, timed_out=False)
+
+    out = tmp_path / 'out5'
+    run_campaign(
+        case_root=fixture_root,
+        candidates=[('exo', 'm')],
+        repeats=1,
+        runner_factory=lambda p, n: QuietRunner(),
+        out_dir=out,
+        timeout_seconds=30,
+    )
+    row = json.loads((out / 'observations.jsonl').read_text().strip())
+    assert row['schema_version'] == 'glasslab-runtime-replay-observation-v2'
+
+
+def test_cli_threads_threshold_env_and_auth(tmp_path: Path) -> None:
+    import importlib
+
+    from app.runtime_replay import RawRunResult
+
+    fixture_root = Path(__file__).resolve().parents[1] / 'fixtures' / 'runtime-replay' / 'wine-classification-v1'
+    cli = importlib.import_module('scripts.replay-runtime-benchmark')
+    seen: dict[str, object] = {}
+
+    def fake_factory_builder(env_pass, seed_auth_file):
+        seen['env_pass'] = env_pass
+        seen['seed_auth_file'] = seed_auth_file
+
+        def factory(provider: str, name: str):
+            class _R:
+                def run(self, *, prompt, workspace, home, model_provider, model_name, timeout_seconds):
+                    return RawRunResult(exit_code=0, wall_clock_seconds=0.01, timed_out=False)
+            return _R()
+
+        return factory
+
+    auth = tmp_path / 'auth.json'
+    auth.write_text('{}')
+    code = cli.main(
+        [
+            '--fixture', str(fixture_root),
+            '--candidate', 'exo/m',
+            '--out-dir', str(tmp_path / 'o'),
+            '--timeout-seconds', '30',
+            '--doom-loop-threshold', '6',
+            '--env-pass', 'OPENCODE_API_KEY',
+            '--seed-auth-file', str(auth),
+        ],
+        runner_factory=fake_factory_builder('OPENCODE_API_KEY', auth),
+    )
+    assert code == 0
+    row = json.loads((tmp_path / 'o' / 'observations.jsonl').read_text().strip())
+    assert row['doom_loop_threshold'] == 6
+
+
+def test_cli_warns_when_threshold_omitted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import importlib
+
+    from app.runtime_replay import RawRunResult
+
+    fixture_root = Path(__file__).resolve().parents[1] / 'fixtures' / 'runtime-replay' / 'wine-classification-v1'
+    cli = importlib.import_module('scripts.replay-runtime-benchmark')
+
+    def factory(provider: str, name: str):
+        class _R:
+            def run(self, *, prompt, workspace, home, model_provider, model_name, timeout_seconds):
+                return RawRunResult(exit_code=0, wall_clock_seconds=0.01, timed_out=False)
+        return _R()
+
+    cli.main(
+        [
+            '--fixture', str(fixture_root),
+            '--candidate', 'exo/m',
+            '--out-dir', str(tmp_path / 'o2'),
+            '--timeout-seconds', '30',
+        ],
+        runner_factory=factory,
+    )
+    assert 'doom-loop-threshold omitted' in capsys.readouterr().out

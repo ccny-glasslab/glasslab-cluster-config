@@ -467,7 +467,7 @@ def score_correctness(report: Any, case: ReplayCase) -> CorrectnessVerdict:
     )
 
 
-_TRIAL_SCHEMA_VERSION = 'glasslab-runtime-replay-observation-v1'
+_TRIAL_SCHEMA_VERSION = 'glasslab-runtime-replay-observation-v2'
 
 
 def run_campaign(
@@ -478,6 +478,7 @@ def run_campaign(
     runner_factory: Any,
     out_dir: Path,
     timeout_seconds: int,
+    doom_loop_threshold: int | None = None,
 ) -> dict[str, Any]:
     """Execute bounded replays; write crash-safe JSONL rows plus a summary.
 
@@ -491,11 +492,9 @@ def run_campaign(
     for provider, model_name in candidates:
         candidate_label = f'{provider}/{model_name}'
         for repeat_index in range(repeats):
-            home = out_dir / 'trials' / f'{provider}-{model_name}-{repeat_index}' / 'home'
-            workspace = prepare_trial_workspace(
-                case._workspace_template(),
-                out_dir / 'trials' / f'{provider}-{model_name}-{repeat_index}' / 'ws',
-            )
+            trial_dir = out_dir / 'trials' / f'{provider}-{model_name}-{repeat_index}'
+            home = trial_dir / 'home'
+            workspace = prepare_trial_workspace(case._workspace_template(), trial_dir / 'ws')
             runner = runner_factory(provider, model_name)
             raw = runner.run(
                 prompt=case.prompt_text(),
@@ -505,7 +504,37 @@ def run_campaign(
                 model_name=model_name,
                 timeout_seconds=timeout_seconds,
             )
-            usage = parse_opencode_usage(home / 'data' / 'opencode' / 'opencode.db')
+            trial_db = find_trial_database(home)
+            if trial_db is None:
+                usage_fields: dict[str, Any] = {
+                    'model_request_count': None,
+                    'tool_call_count': None,
+                    'tool_error_count': None,
+                    'invalid_tool_call_count': None,
+                    'tokens_input': None,
+                    'tokens_output': None,
+                    'provider_id': None,
+                    'model_id': None,
+                }
+                usage_note = '; usage unmeasured: no session database found'
+                session_db_layout: str | None = None
+            else:
+                usage = parse_opencode_usage(
+                    trial_db.path, doom_loop_threshold=doom_loop_threshold
+                )
+                usage_fields = _usage_fields(usage)
+                usage_note = ''
+                session_db_layout = trial_db.layout
+            if doom_loop_threshold is None or trial_db is None:
+                threshold_note = (
+                    '; doom_loop_event_count null: threshold not specified'
+                    if doom_loop_threshold is None
+                    else '; doom_loop_event_count null: no session database found'
+                )
+                doom_loop_event_count: int | None = None
+            else:
+                threshold_note = ''
+                doom_loop_event_count = len(usage.doom_loop_events)
             report = acceptance_gate(case, workspace)
             verdict = score_correctness(report, case)
             outcome = _terminal_outcome(raw, verdict)
@@ -520,14 +549,16 @@ def run_campaign(
                 'wall_clock_seconds': round(raw.wall_clock_seconds, 3),
                 'correctness_passed': verdict.correct,
                 'preflight_errors': verdict.preflight_errors[:4],
-                'doom_loop_event_count': len(usage.doom_loop_events),
-                **_usage_fields(usage),
+                'doom_loop_event_count': doom_loop_event_count,
+                'doom_loop_threshold': doom_loop_threshold,
+                'revision_cycles': None,
+                'session_db_layout': session_db_layout,
+                **usage_fields,
+                'notes': usage_note + threshold_note,
             }
             with jsonl_path.open('a', encoding='utf-8') as handle:
                 handle.write(json.dumps(observation, sort_keys=True) + '\n')
             trials += 1
-            if not (out_dir / 'trials').exists():
-                continue
     summary = {
         'schema_version': 'glasslab-runtime-replay-summary-v1',
         'case_id': case.case_id,
@@ -535,7 +566,7 @@ def run_campaign(
         'repeats': repeats,
         'trials': trials,
         'winner': None,
-        'note': 'raw observations only; correctness and latency are reported separately',
+        'note': 'raw observations only; correctness and latency are reported separately; observation schema v2',
     }
     (out_dir / 'summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
     return summary
