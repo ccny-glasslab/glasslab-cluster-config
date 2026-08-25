@@ -2,9 +2,9 @@
 
 Pins the serialization contract (float32 little-endian blobs), the
 ``EmbeddingProvider`` protocol, the offline deterministic provider, the
-factory choices, and (when the weights are already in the local HF cache)
-the arctic-m provider metadata. Every test except the cached-model one runs
-networkless with no downloads.
+factory choices, and (when the model runtime and cached weights are both
+available locally) the arctic-m provider metadata. Every test except the
+cached-model one runs networkless with no downloads.
 """
 
 from __future__ import annotations
@@ -28,8 +28,19 @@ from app.corpus_rag.embeddings import (
 ARCTIC_M = 'Snowflake/snowflake-arctic-embed-m-v1.5'
 
 
+def _arctic_runtime_available() -> bool:
+    try:
+        import sentence_transformers  # noqa: F401
+
+    except ImportError:
+        return False
+    return _arctic_m_cached()
+
+
 def _arctic_m_cached() -> bool:
-    hub = Path(os.environ.get('HF_HOME', '/home/gr66ss/.cache/huggingface')) / 'hub'
+    hub = Path(
+        os.environ.get('HF_HOME', Path.home() / '.cache' / 'huggingface')
+    ) / 'hub'
     return hub.is_dir() and any(
         entry.name.startswith('models--Snowflake--snowflake-arctic-embed-m-v1.5')
         for entry in hub.iterdir()
@@ -84,7 +95,7 @@ def test_factory_choices_and_errors():
 
 
 @pytest.mark.skipif(
-    not _arctic_m_cached(),
+    not _arctic_runtime_available(),
     reason='snowflake-arctic-embed-m-v1.5 weights not present in local HF cache',
 )
 def test_arctic_provider_metadata():
