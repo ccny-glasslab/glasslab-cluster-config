@@ -1,7 +1,7 @@
-# Optional dense-retrieval stack for the research-orchestrator image
-# (corpus-RAG method advisory). Installed in addition to requirements.txt;
-# the application imports torch/sentence-transformers lazily, so it stays
-# fully functional (lexical-only mode) if these are absent.
+# Dense-retrieval stack for the research-orchestrator image (corpus-RAG
+# method advisory). Installed unconditionally in the image; the application
+# imports torch/sentence-transformers lazily, so it stays fully functional
+# (lexical-only mode) if model weights are absent at runtime.
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.13.0+cpu
 sentence-transformers==6.0.0

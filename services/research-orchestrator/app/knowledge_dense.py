@@ -181,6 +181,7 @@ class NumpyChunkIndex:
         # store rather than vector metadata; hydrate lazily in batches until
         # k in-scope hits are confirmed (never returning out-of-scope rows).
         out: list[tuple[str, float]] = []
+        allowed_sources = set(source_ids) if source_ids is not None else None
         pending = [cid for cid, _ in ranked]
         step = max(k * 3, 24)
         ranked_by_id = dict(ranked)
@@ -194,7 +195,7 @@ class NumpyChunkIndex:
                 row = rows.get(cid)
                 if row is None:
                     continue
-                if source_ids is not None and row['source_id'] not in set(source_ids):
+                if allowed_sources is not None and row['source_id'] not in allowed_sources:
                     continue
                 out.append((cid, ranked_by_id[cid]))
                 if len(out) >= k:
