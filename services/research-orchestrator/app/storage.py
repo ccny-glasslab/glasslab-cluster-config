@@ -254,6 +254,20 @@ class SqliteStore:
                 CREATE INDEX IF NOT EXISTS knowledge_chunks_source_idx
                 ON knowledge_chunks(source_id);
 
+                -- Production dense-retrieval vectors. They attach to the
+                -- EXISTING knowledge_chunks identity: no secondary chunk
+                -- namespace exists for embeddings.
+                CREATE TABLE IF NOT EXISTS knowledge_chunk_vectors (
+                    chunk_id TEXT PRIMARY KEY REFERENCES knowledge_chunks(chunk_id) ON DELETE CASCADE,
+                    vec BLOB NOT NULL,
+                    model_id TEXT NOT NULL,
+                    revision TEXT NOT NULL,
+                    dims INTEGER NOT NULL,
+                    index_version TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS knowledge_chunk_vectors_model_idx
+                ON knowledge_chunk_vectors(model_id);
+
                 -- FTS5 is the lexical half of hybrid retrieval. chunk_id is
                 -- the rowid-style key linking to knowledge_chunks; the rank is
                 -- read back to feed the combined lexical/BM25 score in the
@@ -1723,6 +1737,60 @@ class SqliteStore:
         query = (
             'SELECT chunk_id, vec, model_id, revision, dims, index_version '
             'FROM rag_chunk_vectors'
+        )
+        parameters: list[Any] = []
+        if model_id is not None:
+            query += ' WHERE model_id = ?'
+            parameters.append(model_id)
+        query += ' ORDER BY chunk_id'
+        with self._connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [
+            (
+                ChunkVectorMeta(
+                    chunk_id=row['chunk_id'],
+                    model_id=row['model_id'],
+                    revision=row['revision'],
+                    dims=row['dims'],
+                    index_version=row['index_version'],
+                ),
+                bytes(row['vec']),
+            )
+            for row in rows
+        ]
+
+    def upsert_knowledge_chunk_vectors(
+        self, meta: ChunkVectorMeta, vec_bytes: bytes
+    ) -> None:
+        with self.transaction() as connection:
+            connection.execute(
+                '''
+                INSERT INTO knowledge_chunk_vectors (
+                    chunk_id, vec, model_id, revision, dims, index_version
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                    vec = excluded.vec,
+                    model_id = excluded.model_id,
+                    revision = excluded.revision,
+                    dims = excluded.dims,
+                    index_version = excluded.index_version
+                ''',
+                (
+                    meta.chunk_id,
+                    sqlite3.Binary(vec_bytes),
+                    meta.model_id,
+                    meta.revision,
+                    meta.dims,
+                    meta.index_version,
+                ),
+            )
+
+    def list_knowledge_chunk_vectors(
+        self, model_id: str | None = None
+    ) -> list[tuple[ChunkVectorMeta, bytes]]:
+        query = (
+            'SELECT chunk_id, vec, model_id, revision, dims, index_version'
+            ' FROM knowledge_chunk_vectors'
         )
         parameters: list[Any] = []
         if model_id is not None:

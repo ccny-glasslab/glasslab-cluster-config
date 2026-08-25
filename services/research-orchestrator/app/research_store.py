@@ -121,3 +121,11 @@ class ResearchStore(Protocol):
     def list_rag_chunk_vectors(
         self, model_id: str | None = None,
     ) -> list[tuple[ChunkVectorMeta, bytes]]: ...
+
+    # Production dense-retrieval surface. Vectors attach to the EXISTING
+    # knowledge_chunks identity — there is no secondary chunk namespace.
+    def upsert_knowledge_chunk_vectors(self, meta: ChunkVectorMeta,
+                                       vec_bytes: bytes) -> None: ...
+    def list_knowledge_chunk_vectors(
+        self, model_id: str | None = None,
+    ) -> list[tuple[ChunkVectorMeta, bytes]]: ...

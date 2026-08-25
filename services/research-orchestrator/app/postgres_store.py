@@ -123,6 +123,12 @@ class PostgresStore:
           chunk_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES orchestrator_knowledge_sources(source_id) ON DELETE CASCADE,
           chunk_index INTEGER NOT NULL, text TEXT NOT NULL, payload JSONB NOT NULL);
         CREATE INDEX IF NOT EXISTS orchestrator_knowledge_chunks_source_idx ON orchestrator_knowledge_chunks(source_id, chunk_index);
+        CREATE TABLE IF NOT EXISTS orchestrator_knowledge_chunk_vectors (
+          chunk_id TEXT PRIMARY KEY REFERENCES orchestrator_knowledge_chunks(chunk_id) ON DELETE CASCADE,
+          vec BYTEA NOT NULL, model_id TEXT NOT NULL, revision TEXT NOT NULL,
+          dims INTEGER NOT NULL, index_version TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS orchestrator_knowledge_chunk_vectors_model_idx
+          ON orchestrator_knowledge_chunk_vectors(model_id);
         CREATE INDEX IF NOT EXISTS orchestrator_knowledge_chunks_fts_idx ON orchestrator_knowledge_chunks USING GIN (to_tsvector('simple', text));
         CREATE TABLE IF NOT EXISTS orchestrator_context_packets (
           packet_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES orchestrator_runs(run_id),
@@ -173,12 +179,21 @@ class PostgresStore:
           ON orchestrator_rag_chunk_vectors USING hnsw (embedding halfvec_cosine_ops)
           WITH (m = 16, ef_construction = 64);
         '''
+        knowledge_vectors_ddl = '''
+        CREATE EXTENSION IF NOT EXISTS vector;
+        ALTER TABLE orchestrator_knowledge_chunk_vectors
+          ADD COLUMN IF NOT EXISTS embedding halfvec(768);
+        CREATE INDEX IF NOT EXISTS orchestrator_knowledge_chunk_vectors_embedding_idx
+          ON orchestrator_knowledge_chunk_vectors USING hnsw (embedding halfvec_cosine_ops)
+          WITH (m = 16, ef_construction = 64);
+        '''
         try:
             with self._connect() as conn:
                 with conn.cursor() as cur:
-                    for statement in vectors_ddl.split(';'):
-                        if statement.strip():
-                            cur.execute(statement)
+                    for ddl in (vectors_ddl, knowledge_vectors_ddl):
+                        for statement in ddl.split(';'):
+                            if statement.strip():
+                                cur.execute(statement)
                 conn.commit()
         except Exception:
             logger.warning(
@@ -535,6 +550,30 @@ class PostgresStore:
                  ' FROM orchestrator_rag_chunk_vectors')
         params: list[Any] = []
         if model_id is not None: query += ' WHERE model_id=%s'; params.append(model_id)
+        query += ' ORDER BY chunk_id'
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            (
+                ChunkVectorMeta(chunk_id=r['chunk_id'], model_id=r['model_id'], revision=r['revision'], dims=r['dims'], index_version=r['index_version']),
+                bytes(r['vec']),
+            )
+            for r in rows
+        ]
+
+    def upsert_knowledge_chunk_vectors(self, meta: ChunkVectorMeta, vec_bytes: bytes) -> None:
+        # The halfvec embedding column is populated by PgVectorChunkIndex;
+        # this surface stores canonical vector bytes plus lineage.
+        with self.transaction() as conn:
+            conn.execute('INSERT INTO orchestrator_knowledge_chunk_vectors (chunk_id, vec, model_id, revision, dims, index_version) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (chunk_id) DO UPDATE SET vec=EXCLUDED.vec, model_id=EXCLUDED.model_id, revision=EXCLUDED.revision, dims=EXCLUDED.dims, index_version=EXCLUDED.index_version', (meta.chunk_id, vec_bytes, meta.model_id, meta.revision, meta.dims, meta.index_version))
+
+    def list_knowledge_chunk_vectors(self, model_id: str | None = None) -> list[tuple[ChunkVectorMeta, bytes]]:
+        query = ('SELECT chunk_id, vec, model_id, revision, dims, index_version'
+                 ' FROM orchestrator_knowledge_chunk_vectors')
+        params: list[Any] = []
+        if model_id is not None:
+            query += ' WHERE model_id=%s'
+            params.append(model_id)
         query += ' ORDER BY chunk_id'
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()

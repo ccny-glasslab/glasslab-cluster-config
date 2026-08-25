@@ -329,3 +329,43 @@ def test_pg_list_rag_chunks_filters_by_kind_and_limit(pg_store) -> None:
     assert [row['chunk_id'] for row in units] == [unit.chunk_id]
     limited = pg_store.list_rag_chunks(source_ids=[source.source_id], kinds=None, limit=1)
     assert len(limited) == 1
+
+
+def test_knowledge_chunk_vectors_roundtrip(store) -> None:
+    """Dense vectors attach to EXISTING knowledge_chunks identity."""
+    source = _source('repo://docs/vec.md')
+    store.save_knowledge_source(source)
+    chunk = _chunk(source.source_id, 0, 'dense retrieval over existing chunks')
+    store.replace_knowledge_chunks(source.source_id, [chunk])
+
+    meta = ChunkVectorMeta(
+        chunk_id=chunk.chunk_id,
+        model_id='model-a',
+        revision='r1',
+        dims=4,
+        index_version=RAG_INDEX_VERSION,
+    )
+    store.upsert_knowledge_chunk_vectors(meta, b'\x01\x02')
+    store.upsert_knowledge_chunk_vectors(meta, b'\x03\x04')
+
+    vectors = store.list_knowledge_chunk_vectors('model-a')
+    assert len(vectors) == 1
+    got_meta, blob = vectors[0]
+    assert got_meta.chunk_id == chunk.chunk_id
+    assert got_meta.model_id == 'model-a'
+    assert blob == b'\x03\x04'
+    assert store.list_knowledge_chunk_vectors('other-model') == []
+
+
+def test_knowledge_chunk_vector_requires_existing_chunk(store) -> None:
+    source = _source('repo://docs/vec-orphan.md')
+    store.save_knowledge_source(source)
+    orphan = ChunkVectorMeta(
+        chunk_id='f' * 32,
+        model_id='model-a',
+        revision='r1',
+        dims=4,
+        index_version=RAG_INDEX_VERSION,
+    )
+    with pytest.raises(Exception):
+        store.upsert_knowledge_chunk_vectors(orphan, b'\x00')
