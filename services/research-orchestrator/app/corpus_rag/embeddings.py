@@ -115,8 +115,10 @@ class ArcticEmbedProvider:
     """Snowflake arctic-embed provider backed by sentence-transformers.
 
     The model loads lazily on the first embed call (never at construction or
-    module import). ``dims`` and ``revision`` are resolved from the loaded
-    model at that point; before the first call they hold placeholders.
+    module import). ``dims`` and ``revision`` are declared eagerly from the
+    static model table and the configured pin so index reloads after a
+    process restart see the true lineage before any embedding happens; the
+    first load verifies the probed output width against the declaration.
     Instances sharing a ``model_name`` reuse one loaded model via a
     class-level cache. Callers must :meth:`unload` before loading rerankers
     to keep peak RAM bounded.
@@ -126,12 +128,26 @@ class ArcticEmbedProvider:
     QUERY_PREFIX = 'Represent this sentence for searching relevant passages: '
     BATCH_SIZE = 32
 
+    # Published output widths per supported model, so lineage checks work
+    # before weights are loaded. A model absent from this table reports
+    # dims=0 until first load, which readiness surfaces as unavailable
+    # rather than silently mismatching stored vectors.
+    _KNOWN_DIMS: ClassVar[dict[str, int]] = {
+        'Snowflake/snowflake-arctic-embed-m-v1.5': 768,
+        DEFAULT_MODEL_NAME: 768,
+        'Snowflake/snowflake-arctic-embed-s': 384,
+    }
+
     _cache: ClassVar[dict[str, 'SentenceTransformer']] = {}
 
-    def __init__(self, model_name: str = DEFAULT_MODEL_NAME) -> None:
+    def __init__(
+        self,
+        model_name: str = DEFAULT_MODEL_NAME,
+        revision: str = '',
+    ) -> None:
         self.model_id = model_name
-        self.revision = ''
-        self.dims = 0
+        self.revision = revision
+        self.dims = type(self)._KNOWN_DIMS.get(model_name, 0)
         self._model_name = model_name
         self._loaded: SentenceTransformer | None = None
 
@@ -154,9 +170,17 @@ class ArcticEmbedProvider:
             return self._loaded
         model = type(self)._load_shared(self._model_name)
         probe = model.encode(['dims probe'], normalize_embeddings=True)
-        self.dims = int(probe.shape[1])
-        commit_hash = getattr(getattr(model, 'config', None), '_commit_hash', None)
-        self.revision = str(commit_hash) if commit_hash else 'main'
+        probed_dims = int(probe.shape[1])
+        if self.dims and probed_dims != self.dims:
+            raise RuntimeError(
+                f'embedding model {self._model_name!r} produces '
+                f'{probed_dims} dims but {self.dims} were declared; '
+                'refusing to mix vector lineages'
+            )
+        self.dims = probed_dims
+        if not self.revision:
+            commit_hash = getattr(getattr(model, 'config', None), '_commit_hash', None)
+            self.revision = str(commit_hash) if commit_hash else 'main'
         self._loaded = model
         return model
 

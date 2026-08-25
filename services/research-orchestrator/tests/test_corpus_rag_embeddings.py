@@ -48,6 +48,17 @@ def _arctic_m_cached() -> bool:
     )
 
 
+def test_arctic_declares_lineage_before_weights_load():
+    provider = ArcticEmbedProvider(ARCTIC_M, revision='pin-123')
+    assert provider.dims == 768
+    assert provider.revision == 'pin-123'
+
+
+def test_arctic_unknown_model_reports_zero_dims_until_load():
+    provider = ArcticEmbedProvider('example/unlisted-embed-model')
+    assert provider.dims == 0
+
+
 def test_offline_provider_deterministic_and_normalized():
     provider = OfflineDeterministicEmbedding(dims=64)
     assert isinstance(provider, EmbeddingProvider)

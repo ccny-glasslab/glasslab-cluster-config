@@ -129,7 +129,8 @@ class ResearchOrchestrator:
                 )
 
                 provider = create_embedding_provider(
-                    settings.knowledge_embedding_model
+                    settings.knowledge_embedding_model,
+                    revision=settings.knowledge_embedding_revision,
                 )
                 if settings.knowledge_dense_pg_dsn:
                     dense_index: Any = PgVectorChunkIndex(

@@ -54,7 +54,7 @@ class DenseModelError(Exception):
     """An operation would mix incompatible embedding lineages."""
 
 
-def create_embedding_provider(model_name: str) -> Any:
+def create_embedding_provider(model_name: str, revision: str = '') -> Any:
     """Resolve an embedding provider from a configured model name."""
     if model_name == 'offline-deterministic':
         from .corpus_rag.embeddings import OfflineDeterministicEmbedding
@@ -62,7 +62,7 @@ def create_embedding_provider(model_name: str) -> Any:
         return OfflineDeterministicEmbedding(dims=768)
     from .corpus_rag.embeddings import ArcticEmbedProvider
 
-    return ArcticEmbedProvider(model_name=model_name)
+    return ArcticEmbedProvider(model_name=model_name, revision=revision)
 
 
 @dataclass(frozen=True)

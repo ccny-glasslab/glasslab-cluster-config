@@ -192,6 +192,49 @@ def test_rebuild_keeps_single_lineage_per_chunk(store) -> None:
     assert len(rows) == len(ids)
 
 
+def test_index_ready_after_restart_without_embedding_first(store) -> None:
+    """A process restart must not brick dense retrieval.
+
+    The provider declares its true dims at construction (as the arctic
+    lineage now does), so the index reloads stored vectors before any
+    embedding call; ensure_index_built() then finds existing coverage and
+    embeds nothing. Readiness is available on the very first check.
+    """
+    ids = _seed_chunks(store, ['alpha passage text', 'beta passage text'])
+    provider = OfflineDeterministicEmbedding(dims=8)
+    build_dense_index(store, provider, model_id=MODEL_ID)
+    embed_calls = {'count': 0}
+
+    class RestartedProvider:
+        model_id = MODEL_ID
+        revision = 'r1'
+        dims = 8
+
+        def _track(self, texts):
+            embed_calls['count'] += len(texts)
+            return provider.embed_queries(texts)
+
+        def embed_queries(self, texts):
+            return self._track(texts)
+
+        def embed_passages(self, texts):
+            return provider.embed_passages(texts)
+
+    restarted = RestartedProvider()
+    index = NumpyChunkIndex(store, restarted, model_id=MODEL_ID)
+    readiness = index.readiness()
+    assert readiness.available is True
+    assert readiness.indexed_count == len(ids)
+    from app.knowledge_dense import ensure_index_built
+
+    assert ensure_index_built(index, store) is None
+    assert embed_calls['count'] == 0
+
+    hits = index.search(index.embed_query('alpha passage text'), k=1)
+    assert hits and hits[0][0] == ids[0]
+    assert embed_calls['count'] == 1
+
+
 @pytest.mark.skipif(not PG_DSN, reason='CORPUS_RAG_PG_DSN not configured')
 def test_pg_backend_roundtrip_and_order(pg_store) -> None:
     from app.knowledge_dense import PgVectorChunkIndex
