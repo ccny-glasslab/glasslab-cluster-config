@@ -12,7 +12,9 @@ Design notes
 - ``classify_response`` maps an httpx response to a frozen category. Cloudflare
   1010 is detected from the response body ("error code: 1010") because live
   observations show 403 responses with that body and no ``cf-error-code``
-  header; the header is honored when present.
+  header; the header is honored when present. Ordinary application-level 4xx
+  (400/404/...) map to ``client_error``: they are observed but never treated
+  as transport failures and never open the circuit.
 - Retries are bounded and category-aware: HTTP 429 honors ``Retry-After``
   (capped), 5xx/network use exponential backoff, and 401/403/1010 are never
   retried. A total-sleep budget caps the added wall-clock time per guarded
@@ -42,6 +44,7 @@ logger = logging.getLogger(__name__)
 CATEGORY_OK = "ok"
 CATEGORY_RATE_LIMITED = "rate_limited"
 CATEGORY_UNAUTHORIZED = "unauthorized"
+CATEGORY_CLIENT_ERROR = "client_error"
 CATEGORY_BLOCKED = "blocked"
 CATEGORY_CLOUDFLARE_1010 = "cloudflare_1010"
 CATEGORY_SERVER_ERROR = "server_error"
@@ -159,9 +162,14 @@ def classify_response(response: httpx.Response) -> DiscordRestOutcome:
                 category=CATEGORY_CLOUDFLARE_1010, status_code=status
             )
         return DiscordRestOutcome(category=CATEGORY_BLOCKED, status_code=status)
+    if 400 <= status < 500:
+        # Ordinary application-level 4xx (400/404/422/...): a rejected request,
+        # not a transport or Cloudflare block. Never retried and never opens
+        # the circuit.
+        return DiscordRestOutcome(category=CATEGORY_CLIENT_ERROR, status_code=status)
     if 500 <= status < 600:
         return DiscordRestOutcome(category=CATEGORY_SERVER_ERROR, status_code=status)
-    return DiscordRestOutcome(category=CATEGORY_BLOCKED, status_code=status)
+    return DiscordRestOutcome(category=CATEGORY_CLIENT_ERROR, status_code=status)
 
 
 def classify_exception(exc: Exception) -> DiscordRestOutcome:
@@ -248,6 +256,8 @@ class DiscordRestCircuit:
                     self._half_open_in_flight = False
                 return
             if outcome.category not in TERMINAL_FAILURE_CATEGORIES:
+                # Observed but not a transport failure (e.g. a rejected
+                # application-level 4xx): no circuit impact.
                 return
             self._total_failures += 1
             self._consecutive_failures += 1

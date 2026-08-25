@@ -108,6 +108,19 @@ class TestClassifyResponse:
         outcome = discord_rest.classify_response(_response(403, body="Forbidden"))
         assert outcome.category == discord_rest.CATEGORY_BLOCKED
 
+    def test_client_error_400(self) -> None:
+        outcome = discord_rest.classify_response(_response(400))
+        assert outcome.category == discord_rest.CATEGORY_CLIENT_ERROR
+        assert outcome.status_code == 400
+
+    def test_client_error_404(self) -> None:
+        outcome = discord_rest.classify_response(_response(404))
+        assert outcome.category == discord_rest.CATEGORY_CLIENT_ERROR
+
+    def test_client_error_422(self) -> None:
+        outcome = discord_rest.classify_response(_response(422))
+        assert outcome.category == discord_rest.CATEGORY_CLIENT_ERROR
+
     def test_server_error(self) -> None:
         outcome = discord_rest.classify_response(_response(503))
         assert outcome.category == discord_rest.CATEGORY_SERVER_ERROR
@@ -294,3 +307,70 @@ class TestCircuitStateMachine:
             DiscordRestPolicy(cooldown_seconds=0)
         with pytest.raises(ValueError):
             DiscordRestPolicy(total_sleep_budget_seconds=0)
+
+
+class TestClientErrorsDoNotOpenCircuit:
+    """Ordinary application-level 4xx must never open the global circuit."""
+
+    def test_repeated_400_does_not_open_circuit(self) -> None:
+        policy = DiscordRestPolicy(circuit_open_failures=3, sleep=CollectingSleep())
+        transport, calls = _sequence_transport(
+            [_response(400), _response(400), _response(400), _response(400)]
+        )
+        circuit = DiscordRestCircuit(policy=policy)
+        for _ in range(4):
+            with pytest.raises(httpx.HTTPStatusError):
+                execute_guarded(
+                    circuit=circuit,
+                    policy=policy,
+                    attempt=_attempt(transport),
+                    raise_failure=_raise_failure,
+                )
+        assert circuit.state == discord_rest.STATE_CLOSED
+        assert circuit.snapshot()["consecutive_failures"] == 0
+        assert circuit.snapshot()["total_failures"] == 0
+
+    def test_repeated_404_does_not_open_circuit(self) -> None:
+        policy = DiscordRestPolicy(circuit_open_failures=1, sleep=CollectingSleep())
+        transport, calls = _sequence_transport(
+            [_response(404), _response(404), _response(404)]
+        )
+        circuit = DiscordRestCircuit(policy=policy)
+        for _ in range(3):
+            with pytest.raises(httpx.HTTPStatusError):
+                execute_guarded(
+                    circuit=circuit,
+                    policy=policy,
+                    attempt=_attempt(transport),
+                    raise_failure=_raise_failure,
+                )
+        assert circuit.state == discord_rest.STATE_CLOSED
+        assert circuit.snapshot()["consecutive_failures"] == 0
+
+    def test_client_error_is_not_retried(self) -> None:
+        sleep = CollectingSleep()
+        policy = DiscordRestPolicy(sleep=sleep)
+        transport, calls = _sequence_transport([_response(400)])
+        circuit = DiscordRestCircuit(policy=policy)
+        with pytest.raises(httpx.HTTPStatusError):
+            execute_guarded(
+                circuit=circuit,
+                policy=policy,
+                attempt=_attempt(transport),
+                raise_failure=_raise_failure,
+            )
+        assert len(calls) == 1
+        assert sleep.sleeps == []
+
+    def test_client_error_observable_in_snapshot_without_circuit_impact(self) -> None:
+        policy = DiscordRestPolicy(circuit_open_failures=3, sleep=CollectingSleep())
+        circuit = DiscordRestCircuit(policy=policy)
+        circuit.record(
+            DiscordRestOutcome(category=discord_rest.CATEGORY_CLIENT_ERROR, status_code=400)
+        )
+        snapshot = circuit.snapshot()
+        assert snapshot["state"] == discord_rest.STATE_CLOSED
+        assert snapshot["consecutive_failures"] == 0
+        assert snapshot["total_failures"] == 0
+        assert snapshot["last_outcome_category"] == discord_rest.CATEGORY_CLIENT_ERROR
+        assert snapshot["last_outcome_status_code"] == 400

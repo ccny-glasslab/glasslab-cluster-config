@@ -644,9 +644,12 @@ by ID. Discord role membership is therefore the operational approval policy.
 
 Outbound REST calls (thread creation, message post/edit, webhook posts) are
 guarded by a bounded circuit breaker (`app/discord_rest.py`). Failures are
-classified as `ok | rate_limited | unauthorized | blocked | cloudflare_1010 |
-server_error | network`; Cloudflare 1010 is detected from the response body
-(`error code: 1010`) because observed 403s carry no `cf-error-code` header.
+classified as `ok | rate_limited | unauthorized | client_error | blocked |
+cloudflare_1010 | server_error | network`; Cloudflare 1010 is detected from
+the response body (`error code: 1010`) because observed 403s carry no
+`cf-error-code` header. Ordinary application-level 4xx (400/404/422/...) map
+to `client_error`: they are observed but never treated as transport failures
+and never open the circuit.
 
 - HTTP 429 honors `Retry-After` (capped at 30s); 5xx/network retry with
   bounded exponential backoff (1/2/4s); 401/403/1010 are never retried. A
