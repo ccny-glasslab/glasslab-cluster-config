@@ -164,11 +164,24 @@ class PostgresStore:
             conn.commit()
         self._ensure_vector_schema()
 
+    def _pgvector_extension_available(self) -> bool:
+        # Probed against pg_available_extensions rather than attempting DDL:
+        # on a server without pgvector, CREATE EXTENSION would abort its
+        # transaction and log an exception traceback on every store
+        # construction. Availability changes require a restart to be picked
+        # up, which is acceptable for an install-once extension.
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'"
+            ).fetchone()
+        return row is not None
+
     def _ensure_vector_schema(self) -> None:
         # Dense-retrieval pieces depend on the pgvector extension. A
         # deployment without it must still start and serve every lexical
-        # operation; the degradation surfaces only when vectors are stored
-        # or searched, so the whole phase is best-effort with a warning.
+        # operation; availability is checked once per store construction so
+        # absence never leaves an aborted transaction behind, and the
+        # degradation surfaces only when vectors are stored or searched.
         vectors_ddl = '''
         CREATE EXTENSION IF NOT EXISTS vector;
         CREATE TABLE IF NOT EXISTS orchestrator_rag_chunk_vectors (
@@ -188,6 +201,13 @@ class PostgresStore:
           WITH (m = 16, ef_construction = 64);
         '''
         try:
+            if not self._pgvector_extension_available():
+                logger.warning(
+                    'pgvector extension unavailable; orchestrator_rag_chunk_vectors'
+                    ' and its HNSW index were not created (dense retrieval'
+                    ' degraded)'
+                )
+                return
             with self._connect() as conn:
                 with conn.cursor() as cur:
                     for ddl in (vectors_ddl, knowledge_vectors_ddl):
@@ -197,9 +217,7 @@ class PostgresStore:
                 conn.commit()
         except Exception:
             logger.warning(
-                'pgvector extension unavailable; orchestrator_rag_chunk_vectors'
-                ' and its HNSW index were not created (dense retrieval'
-                ' degraded)',
+                'pgvector vector-schema setup failed; dense retrieval degraded',
                 exc_info=True,
             )
 
@@ -563,28 +581,29 @@ class PostgresStore:
 
     def upsert_knowledge_chunk_vectors(self, meta: ChunkVectorMeta, vec_bytes: bytes) -> None:
         # The store owns both representations: canonical vector bytes plus
-        # the halfvec column HNSW search reads. The literal is zero-padded
-        # to halfvec(768) (cosine-invariant) and always bound as a parameter.
+        # the halfvec column HNSW search reads. The bytes are opaque
+        # lineage-carrying payloads (the store contract round-trips arbitrary
+        # blobs), so the halfvec projection applies only when the blob is
+        # exactly dims float32 values — the encoding build_dense_index
+        # produces via encode_vector. Anything else degrades to byte-only
+        # storage, and readiness() surfaces it as unusable at query time.
         import struct
 
         from .knowledge_dense import _halfvec_literal
 
-        count = len(vec_bytes) // 4
-        if meta.dims not in (0, count):
-            raise ValueError(
-                f'vector byte length {len(vec_bytes)} does not match dims {meta.dims}'
-            )
-        values = struct.unpack(f'<{count}f', vec_bytes[:count * 4])
-        literal = _halfvec_literal(values)
         with self.transaction() as conn:
             conn.execute('INSERT INTO orchestrator_knowledge_chunk_vectors (chunk_id, vec, model_id, revision, dims, index_version) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (chunk_id) DO UPDATE SET vec=EXCLUDED.vec, model_id=EXCLUDED.model_id, revision=EXCLUDED.revision, dims=EXCLUDED.dims, index_version=EXCLUDED.index_version', (meta.chunk_id, vec_bytes, meta.model_id, meta.revision, meta.dims, meta.index_version))
-            try:
-                # Savepoint-scoped so a failed halfvec write (extension absent)
-                # cannot roll back the canonical byte insert above.
-                with conn.transaction():
-                    conn.execute('UPDATE orchestrator_knowledge_chunk_vectors SET embedding = %s::halfvec WHERE chunk_id = %s', (literal, meta.chunk_id))
-            except Exception:
-                pass
+            if meta.dims > 0 and len(vec_bytes) == meta.dims * 4:
+                try:
+                    # Savepoint-scoped so a failed halfvec write (extension absent)
+                    # cannot roll back the canonical byte insert above.
+                    with conn.transaction():
+                        literal = _halfvec_literal(
+                            struct.unpack(f'<{meta.dims}f', vec_bytes)
+                        )
+                        conn.execute('UPDATE orchestrator_knowledge_chunk_vectors SET embedding = %s::halfvec WHERE chunk_id = %s', (literal, meta.chunk_id))
+                except Exception:
+                    pass
 
     def list_knowledge_chunk_vectors(self, model_id: str | None = None) -> list[tuple[ChunkVectorMeta, bytes]]:
         query = ('SELECT chunk_id, vec, model_id, revision, dims, index_version'

@@ -196,17 +196,32 @@ def test_rebuild_keeps_single_lineage_per_chunk(store) -> None:
 def test_pg_backend_roundtrip_and_order(pg_store) -> None:
     from app.knowledge_dense import PgVectorChunkIndex
 
-    ids = _seed_chunks(pg_store, [
+    source = _source(f'repo://dense/{uuid4().hex[:8]}.md')
+    pg_store.save_knowledge_source(source)
+    texts = [
         'consensus matrices across bootstrap resamples',
         'unrelated passage about quantile regression',
-    ])
+    ]
+    chunks = [
+        KnowledgeChunk(
+            source_id=source.source_id,
+            chunk_index=index,
+            text=text,
+            digest=hashlib.sha256(text.encode()).hexdigest(),
+            token_count=max(1, len(text.split())),
+        )
+        for index, text in enumerate(texts)
+    ]
+    pg_store.replace_knowledge_chunks(source.source_id, chunks)
+    ids = [chunk.chunk_id for chunk in chunks]
+
     provider = OfflineDeterministicEmbedding(dims=8)
     build_dense_index(pg_store, provider)
 
     index = PgVectorChunkIndex(pg_store, provider)
     hits = index.search(
         index.embed_query('consensus resampling'),
-        allowed_chunk_ids=set(ids),
+        source_ids=[source.source_id],
         k=2,
     )
     assert hits[0][0] == ids[0]
