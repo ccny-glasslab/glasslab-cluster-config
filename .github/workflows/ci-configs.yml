@@ -13,7 +13,9 @@ on:
       - "**/*.yaml"
       - "scripts/validate-configs.py"
       - "scripts/check-credential-hygiene.py"
+      - "scripts/resolve_runner_image.py"
       - "tests/security/**"
+      - "tests/scripts/**"
   workflow_dispatch:
 
 permissions:
@@ -53,6 +55,9 @@ jobs:
           tests.security.test_secret_backup_restore
           tests.security.test_workflow_security_manifests
           -v
+
+      - name: Run runner image resolution regression tests
+        run: python -m unittest tests.scripts.test_resolve_runner_image -v
 
       - name: Scan repository credential hygiene
         run: python scripts/check-credential-hygiene.py .

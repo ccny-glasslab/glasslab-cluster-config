@@ -43,34 +43,13 @@ jobs:
         id: image
         shell: bash
         run: |
-          python <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          from pathlib import Path
-
-          definition = json.loads(
-              Path(
-                  "services/workflow-registry/definitions/"
-                  "${{ matrix.definition }}"
-              ).read_text()
-          )
-          image_ref = definition["runner_image"]
-          image, separator, tag = image_ref.rpartition(":")
-          expected = (
-              "ghcr.io/"
-              + "${{ github.repository_owner }}".lower()
-              + "/glasslab-research-workspace-runner"
-          )
-          if not separator or not tag:
-              raise SystemExit("runner_image must contain an explicit tag")
-          if image != expected:
-              raise SystemExit(
-                  f"runner_image repository mismatch: {image!r} != {expected!r}"
-              )
-          print(f"image={image}")
-          print(f"tag={tag}")
-          print(f"image_ref={image_ref}")
-          print(f"sha_ref={image}:sha-${{ github.sha }}-${{ matrix.name }}")
-          PY
+          python3 scripts/resolve_runner_image.py \
+            --definition "services/workflow-registry/definitions/${{ matrix.definition }}" \
+            --owner "${{ github.repository_owner }}" \
+            --image glasslab-research-workspace-runner \
+            --sha "${{ github.sha }}" \
+            --matrix-name "${{ matrix.name }}" \
+            >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -89,8 +68,10 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
+          # The digest embedded in the workflow definitions is authoritative
+          # and cannot be re-pushed; publish only the immutable commit-derived
+          # publication alias (see scripts/resolve_runner_image.py).
           tags: |
-            ${{ steps.image.outputs.image_ref }}
             ${{ steps.image.outputs.sha_ref }}
           build-args: |
             GLASSLAB_GIT_SHA=${{ github.sha }}
@@ -105,8 +86,8 @@ jobs:
           {
             echo "### Research workspace runner: ${{ matrix.name }}"
             echo
-            echo "- Version: \`${{ steps.image.outputs.tag }}\`"
-            echo "- Image: \`${{ steps.image.outputs.image_ref }}\`"
-            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "- Authoritative digest: \`${{ steps.image.outputs.digest }}\`"
+            echo "- Published tag: \`${{ steps.image.outputs.sha_ref }}\`"
+            echo "- Built digest: \`${{ steps.build.outputs.digest }}\`"
             echo "- Source: \`${{ github.sha }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
