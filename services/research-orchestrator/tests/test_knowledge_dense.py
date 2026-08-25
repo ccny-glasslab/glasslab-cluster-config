@@ -150,7 +150,8 @@ def test_search_honors_allowlist_and_cosine_order(store) -> None:
     vec_b = _unit([0, 1, 0, 0, 0, 0, 0, 0])
     for cid, vec in ((ids[0], vec_a), (ids[1], vec_b)):
         meta = ChunkVectorMeta(
-            chunk_id=cid, model_id=MODEL_ID, revision='r1',
+            chunk_id=cid, model_id=MODEL_ID,
+            revision=provider.revision,
             dims=dim, index_version='v1',
         )
         store.upsert_knowledge_chunk_vectors(meta, vec.astype('<f4').tobytes())
@@ -180,6 +181,67 @@ def test_dimension_mismatch_fails_cleanly(store) -> None:
     ) == []
 
 
+def test_declared_revision_mismatch_degrades_readiness(store) -> None:
+    """Vectors from another revision must never serve under a new pin."""
+    ids = _seed_chunks(store, ['alpha passage text'])
+    vec = np.zeros(8, dtype='<f4')
+    vec[0] = 1.0
+    store.upsert_knowledge_chunk_vectors(
+        ChunkVectorMeta(
+            chunk_id=ids[0],
+            model_id=MODEL_ID,
+            revision='rev-a',
+            dims=8,
+            index_version=DENSE_INDEX_VERSION,
+        ),
+        vec.tobytes(),
+    )
+
+    class PinnedOther:
+        model_id = MODEL_ID
+        revision = 'rev-b'
+        dims = 8
+
+        def embed_queries(self, texts):
+            raise AssertionError('lineage-rejected provider must not embed')
+
+        def embed_passages(self, texts):
+            raise AssertionError('lineage-rejected provider must not embed')
+
+    stale = NumpyChunkIndex(store, PinnedOther(), model_id=MODEL_ID)
+    readiness = stale.readiness()
+    assert readiness.available is False
+    assert 'revision' in readiness.reason.lower()
+
+    class PinnedMatch:
+        model_id = MODEL_ID
+        revision = 'rev-a'
+        dims = 8
+
+        def embed_queries(self, texts):
+            return OfflineDeterministicEmbedding(dims=8).embed_queries(texts)
+
+        def embed_passages(self, texts):
+            raise AssertionError('not used')
+
+    matching = NumpyChunkIndex(store, PinnedMatch(), model_id=MODEL_ID)
+    assert matching.readiness().available is True
+
+    class Unpinned:
+        model_id = MODEL_ID
+        revision = ''
+        dims = 8
+
+        def embed_queries(self, texts):
+            return OfflineDeterministicEmbedding(dims=8).embed_queries(texts)
+
+        def embed_passages(self, texts):
+            raise AssertionError('not used')
+
+    unverifiable = NumpyChunkIndex(store, Unpinned(), model_id=MODEL_ID)
+    assert unverifiable.readiness().available is True
+
+
 def test_rebuild_keeps_single_lineage_per_chunk(store) -> None:
     ids = _seed_chunks(store, ['stability text'])
     provider = OfflineDeterministicEmbedding(dims=8)
@@ -207,7 +269,7 @@ def test_index_ready_after_restart_without_embedding_first(store) -> None:
 
     class RestartedProvider:
         model_id = MODEL_ID
-        revision = 'r1'
+        revision = OfflineDeterministicEmbedding(dims=8).revision
         dims = 8
 
         def _track(self, texts):
@@ -269,6 +331,29 @@ def test_pg_backend_roundtrip_and_order(pg_store) -> None:
     )
     assert hits[0][0] == ids[0]
     assert all(cid in ids for cid, _ in hits)
+
+    # A provider pinned to a different revision must not serve stored rows.
+    class OtherPin:
+        model_id = MODEL_ID
+        revision = 'other-pin'
+        dims = 8
+
+        def __init__(self):
+            self._inner = provider
+
+        def embed_queries(self, texts):
+            return self._inner.embed_queries(texts)
+
+        def embed_passages(self, texts):
+            return self._inner.embed_passages(texts)
+
+    stale_pg = PgVectorChunkIndex(pg_store, OtherPin())
+    assert stale_pg.readiness().available is False
+    assert stale_pg.search(
+        stale_pg.embed_query('consensus resampling'),
+        source_ids=[source.source_id],
+        k=2,
+    ) == []
 
 
 # ---------------------------------------------------------------------------

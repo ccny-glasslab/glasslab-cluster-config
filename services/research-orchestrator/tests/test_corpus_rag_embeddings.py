@@ -59,6 +59,48 @@ def test_arctic_unknown_model_reports_zero_dims_until_load():
     assert provider.dims == 0
 
 
+def test_loader_honors_revision_pin_and_caches_per_revision(monkeypatch):
+    import sys
+    import types
+
+    constructed: list[tuple[str, str | None]] = []
+
+    class FakeModel:
+        def __init__(self, name, revision=None):
+            self.name = name
+            self.revision = revision
+            constructed.append((name, revision))
+
+        def encode(self, texts, normalize_embeddings=False, **kwargs):
+            return np.zeros((len(texts), 768), dtype='float32')
+
+    fake_st = types.ModuleType('sentence_transformers')
+    fake_st.SentenceTransformer = FakeModel
+    fake_torch = types.ModuleType('torch')
+    fake_torch.set_num_threads = lambda n: None
+    monkeypatch.setitem(sys.modules, 'sentence_transformers', fake_st)
+    monkeypatch.setitem(sys.modules, 'torch', fake_torch)
+
+    ArcticEmbedProvider._cache.clear()
+    try:
+        first = ArcticEmbedProvider(ARCTIC_M, revision='pin-1')
+        first.embed_queries(['q'])
+        assert constructed == [(ARCTIC_M, 'pin-1')]
+        assert first.revision == 'pin-1'
+
+        same_pin = ArcticEmbedProvider(ARCTIC_M, revision='pin-1')
+        same_pin.embed_queries(['q'])
+        assert len(constructed) == 1, 'same pin must reuse the cached model'
+
+        other_pin = ArcticEmbedProvider(ARCTIC_M, revision='pin-2')
+        other_pin.embed_queries(['q'])
+        assert (ARCTIC_M, 'pin-2') in constructed, (
+            'different pins must load separately, never silently share weights'
+        )
+    finally:
+        ArcticEmbedProvider._cache.clear()
+
+
 def test_offline_provider_deterministic_and_normalized():
     provider = OfflineDeterministicEmbedding(dims=64)
     assert isinstance(provider, EmbeddingProvider)

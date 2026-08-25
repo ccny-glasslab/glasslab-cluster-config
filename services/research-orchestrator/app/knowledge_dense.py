@@ -116,12 +116,19 @@ class NumpyChunkIndex:
     def reload(self) -> None:
         self._rows = {}
         self._mismatched = 0
+        self._revision_mismatched = 0
         self._cache = None
         expected = self._provider_dims()
+        declared_revision = _provider_revision(self._provider)
         for meta, blob in self._store.list_knowledge_chunk_vectors(self.model_id):
             vec = decode_vector(blob)
             if meta.dims != expected or vec.shape[0] != expected:
                 self._mismatched += 1
+                continue
+            # A declared revision must match the stored lineage exactly;
+            # an empty declaration cannot be verified and is not filtered.
+            if declared_revision and meta.revision != declared_revision:
+                self._revision_mismatched += 1
                 continue
             self._rows[meta.chunk_id] = _unit_row(vec)
 
@@ -132,19 +139,23 @@ class NumpyChunkIndex:
         return self._provider.embed_queries([text])[0]
 
     def readiness(self) -> DenseReadiness:
-        reason = ''
+        notes: list[str] = []
         available = bool(self._rows)
-        mismatch_note = (
-            f'{self._mismatched} row(s) ignored for dimension mismatch'
-            if self._mismatched
-            else ''
-        )
+        if self._mismatched:
+            notes.append(
+                f'{self._mismatched} row(s) ignored for dimension mismatch'
+            )
+        if self._revision_mismatched:
+            notes.append(
+                f'{self._revision_mismatched} row(s) ignored for '
+                'embedding-revision mismatch'
+            )
+        reason = ''
         if not available:
             reason = f'no usable vectors for model {self.model_id!r}'
-            if mismatch_note:
-                reason += f'; {mismatch_note}'
-        elif mismatch_note:
-            reason = mismatch_note
+            reason += ''.join(f'; {note}' for note in notes)
+        else:
+            reason = '; '.join(notes)
         return DenseReadiness(
             available=available,
             reason=reason,
@@ -230,10 +241,12 @@ class PgVectorChunkIndex:
     def readiness(self) -> DenseReadiness:
         rows = self._store.list_knowledge_chunk_vectors(self.model_id)
         expected = self._provider_dims()
+        declared_revision = _provider_revision(self._provider)
         usable = [
             (meta, blob) for meta, blob in rows
             if meta.dims == expected
             and decode_vector(blob).shape[0] == expected
+            and (not declared_revision or meta.revision == declared_revision)
         ]
         mismatched = len(rows) - len(usable)
         reason = ''
@@ -241,7 +254,9 @@ class PgVectorChunkIndex:
         if not available:
             reason = f'no usable pgvector rows for model {self.model_id!r}'
         elif mismatched:
-            reason = f'{mismatched} row(s) ignored for dimension mismatch'
+            reason = (
+                f'{mismatched} row(s) ignored for dimension/revision mismatch'
+            )
         return DenseReadiness(
             available=available,
             reason=reason,
@@ -262,12 +277,16 @@ class PgVectorChunkIndex:
         if k <= 0:
             return []
         literal = _halfvec_literal(query_vec)
+        declared_revision = _provider_revision(self._provider)
         sql = (
             'SELECT v.chunk_id, 1 - (v.embedding <=> %s::halfvec) AS score'
             ' FROM orchestrator_knowledge_chunk_vectors v'
             ' WHERE v.model_id = %s AND v.embedding IS NOT NULL'
         )
         params: list[Any] = [literal, self.model_id]
+        if declared_revision:
+            sql += ' AND v.revision = %s'
+            params.append(declared_revision)
         if source_ids:
             ids = list(source_ids)
             sql += ' AND v.chunk_id IN (SELECT chunk_id FROM orchestrator_knowledge_chunks WHERE source_id = ANY(%s))'

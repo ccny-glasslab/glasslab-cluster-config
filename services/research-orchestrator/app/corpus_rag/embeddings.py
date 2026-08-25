@@ -138,7 +138,7 @@ class ArcticEmbedProvider:
         'Snowflake/snowflake-arctic-embed-s': 384,
     }
 
-    _cache: ClassVar[dict[str, 'SentenceTransformer']] = {}
+    _cache: ClassVar[dict[tuple[str, str], 'SentenceTransformer']] = {}
 
     def __init__(
         self,
@@ -152,8 +152,9 @@ class ArcticEmbedProvider:
         self._loaded: SentenceTransformer | None = None
 
     @classmethod
-    def _load_shared(cls, model_name: str) -> 'SentenceTransformer':
-        model = cls._cache.get(model_name)
+    def _load_shared(cls, model_name: str, revision: str) -> 'SentenceTransformer':
+        cache_key = (model_name, revision)
+        model = cls._cache.get(cache_key)
         if model is None:
             import torch
             from sentence_transformers import SentenceTransformer
@@ -161,14 +162,17 @@ class ArcticEmbedProvider:
             # torch's default can leave cores idle on CPU-only hosts; batch
             # indexing wants every core available.
             torch.set_num_threads(max(1, os.cpu_count() or 1))
-            model = SentenceTransformer(model_name)
-            cls._cache[model_name] = model
+            # A pinned revision MUST reach the loader — otherwise the
+            # reported provenance would describe weights that were never
+            # loaded. Empty string means unpinned: defer to hub default.
+            model = SentenceTransformer(model_name, revision=revision or None)
+            cls._cache[cache_key] = model
         return model
 
     def _ensure_loaded(self) -> 'SentenceTransformer':
         if self._loaded is not None:
             return self._loaded
-        model = type(self)._load_shared(self._model_name)
+        model = type(self)._load_shared(self._model_name, self.revision)
         probe = model.encode(['dims probe'], normalize_embeddings=True)
         probed_dims = int(probe.shape[1])
         if self.dims and probed_dims != self.dims:
