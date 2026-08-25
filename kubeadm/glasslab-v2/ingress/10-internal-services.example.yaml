@@ -10,16 +10,6 @@ metadata:
 spec:
   ingressClassName: internal-nginx
   rules:
-    - host: whatsapp-gateway.glasslab.internal
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: glasslab-whatsapp-gateway
-                port:
-                  number: 8097
     - host: minio-console.glasslab.internal
       http:
         paths:
