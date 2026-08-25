@@ -485,14 +485,14 @@ def test_pgvector_absence_degrades_without_aborting_store(
 
     meta = ChunkVectorMeta(
         chunk_id=chunk.chunk_id,
-        model_id='probe-model',
+        model_id=f'probe-{uuid4().hex}',
         revision='r1',
         dims=4,
         index_version='dense-v1',
     )
     vector = struct.pack('<4f', 1.0, 0.0, 0.0, 0.0)
     store.upsert_knowledge_chunk_vectors(meta, vector)
-    listed = store.list_knowledge_chunk_vectors('probe-model')
+    listed = store.list_knowledge_chunk_vectors(meta.model_id)
     assert [m.chunk_id for m, _ in listed] == [chunk.chunk_id]
     assert bytes(listed[0][1]) == vector
 
