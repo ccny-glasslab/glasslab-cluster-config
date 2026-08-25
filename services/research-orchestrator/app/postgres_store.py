@@ -10,7 +10,7 @@ local locks.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 import json
@@ -562,10 +562,29 @@ class PostgresStore:
         ]
 
     def upsert_knowledge_chunk_vectors(self, meta: ChunkVectorMeta, vec_bytes: bytes) -> None:
-        # The halfvec embedding column is populated by PgVectorChunkIndex;
-        # this surface stores canonical vector bytes plus lineage.
+        # The store owns both representations: canonical vector bytes plus
+        # the halfvec column HNSW search reads. The literal is zero-padded
+        # to halfvec(768) (cosine-invariant) and always bound as a parameter.
+        import struct
+
+        from .knowledge_dense import _halfvec_literal
+
+        count = len(vec_bytes) // 4
+        if meta.dims not in (0, count):
+            raise ValueError(
+                f'vector byte length {len(vec_bytes)} does not match dims {meta.dims}'
+            )
+        values = struct.unpack(f'<{count}f', vec_bytes[:count * 4])
+        literal = _halfvec_literal(values)
         with self.transaction() as conn:
             conn.execute('INSERT INTO orchestrator_knowledge_chunk_vectors (chunk_id, vec, model_id, revision, dims, index_version) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (chunk_id) DO UPDATE SET vec=EXCLUDED.vec, model_id=EXCLUDED.model_id, revision=EXCLUDED.revision, dims=EXCLUDED.dims, index_version=EXCLUDED.index_version', (meta.chunk_id, vec_bytes, meta.model_id, meta.revision, meta.dims, meta.index_version))
+            try:
+                # Savepoint-scoped so a failed halfvec write (extension absent)
+                # cannot roll back the canonical byte insert above.
+                with conn.transaction():
+                    conn.execute('UPDATE orchestrator_knowledge_chunk_vectors SET embedding = %s::halfvec WHERE chunk_id = %s', (literal, meta.chunk_id))
+            except Exception:
+                pass
 
     def list_knowledge_chunk_vectors(self, model_id: str | None = None) -> list[tuple[ChunkVectorMeta, bytes]]:
         query = ('SELECT chunk_id, vec, model_id, revision, dims, index_version'
@@ -584,3 +603,27 @@ class PostgresStore:
             )
             for r in rows
         ]
+
+    def list_knowledge_chunks(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        query = ('SELECT payload FROM orchestrator_knowledge_chunks'
+                 ' ORDER BY source_id, chunk_index')
+        params: list[Any] = []
+        if limit is not None:
+            query += ' LIMIT %s'
+            params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(r['payload']) for r in rows]
+
+    def get_knowledge_chunks(self, chunk_ids: Sequence[str]) -> list[dict[str, Any]]:
+        if not chunk_ids:
+            return []
+        placeholders = ', '.join('%s' for _ in chunk_ids)
+        query = (
+            'SELECT chunk_id, payload FROM orchestrator_knowledge_chunks'
+            f' WHERE chunk_id IN ({placeholders})'
+        )
+        with self._connect() as conn:
+            rows = conn.execute(query, list(chunk_ids)).fetchall()
+        by_id = {row['chunk_id']: dict(row['payload']) for row in rows}
+        return [by_id[cid] for cid in chunk_ids if cid in by_id]

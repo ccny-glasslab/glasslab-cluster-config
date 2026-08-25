@@ -1813,6 +1813,58 @@ class SqliteStore:
             for row in rows
         ]
 
+    def list_knowledge_chunks(
+        self, *, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        query = (
+            'SELECT chunk_id, source_id, chunk_index, text, digest,'
+            ' token_count, index_version FROM knowledge_chunks'
+            ' ORDER BY source_id, chunk_index'
+        )
+        parameters: list[Any] = []
+        if limit is not None:
+            query += ' LIMIT ?'
+            parameters.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [
+            {
+                'chunk_id': row['chunk_id'],
+                'source_id': row['source_id'],
+                'chunk_index': row['chunk_index'],
+                'text': row['text'],
+                'digest': row['digest'],
+                'token_count': row['token_count'],
+                'index_version': row['index_version'],
+            }
+            for row in rows
+        ]
+
+    def get_knowledge_chunks(self, chunk_ids: Sequence[str]) -> list[dict[str, Any]]:
+        if not chunk_ids:
+            return []
+        placeholders = ', '.join('?' for _ in chunk_ids)
+        query = (
+            'SELECT chunk_id, source_id, chunk_index, text, digest,'
+            ' token_count, index_version FROM knowledge_chunks'
+            f' WHERE chunk_id IN ({placeholders})'
+        )
+        with self._connect() as connection:
+            rows = connection.execute(query, list(chunk_ids)).fetchall()
+        by_id = {
+            row['chunk_id']: {
+                'chunk_id': row['chunk_id'],
+                'source_id': row['source_id'],
+                'chunk_index': row['chunk_index'],
+                'text': row['text'],
+                'digest': row['digest'],
+                'token_count': row['token_count'],
+                'index_version': row['index_version'],
+            }
+            for row in rows
+        }
+        return [by_id[cid] for cid in chunk_ids if cid in by_id]
+
     def save_context_packet(self, packet: ContextPacket) -> ContextPacket:
         with self.transaction() as connection:
             connection.execute(

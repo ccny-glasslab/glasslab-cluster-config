@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from .corpus_rag import (
@@ -129,3 +129,7 @@ class ResearchStore(Protocol):
     def list_knowledge_chunk_vectors(
         self, model_id: str | None = None,
     ) -> list[tuple[ChunkVectorMeta, bytes]]: ...
+    def list_knowledge_chunks(self, *,
+                              limit: int | None = None) -> list[dict[str, Any]]: ...
+    def get_knowledge_chunks(self,
+                             chunk_ids: Sequence[str]) -> list[dict[str, Any]]: ...
