@@ -640,6 +640,42 @@ Application, guild, channel, and approval-role IDs are non-secret deployment
 configuration. Glasslab currently authorizes the `Mystic Arts Masters` role
 by ID. Discord role membership is therefore the operational approval policy.
 
+### Discord REST failure protection
+
+Outbound REST calls (thread creation, message post/edit, webhook posts) are
+guarded by a bounded circuit breaker (`app/discord_rest.py`). Failures are
+classified as `ok | rate_limited | unauthorized | blocked | cloudflare_1010 |
+server_error | network`; Cloudflare 1010 is detected from the response body
+(`error code: 1010`) because observed 403s carry no `cf-error-code` header.
+
+- HTTP 429 honors `Retry-After` (capped at 30s); 5xx/network retry with
+  bounded exponential backoff (1/2/4s); 401/403/1010 are never retried. A
+  total-sleep budget (default 60s) caps added latency per guarded call.
+- The circuit opens after three consecutive terminal failures (default,
+  `GLASSLAB_ORCHESTRATOR_DISCORD_REST_CIRCUIT_MAX_FAILURES`); while open, calls
+  fail fast with zero network attempts so a persistent block is not hammered.
+  After the cooldown (`..._DISCORD_REST_CIRCUIT_COOLDOWN_SECONDS`, default 60s)
+  one half-open probe is allowed; failure reopens with a fresh cooldown.
+- A background probe (`GET /applications/@me`, interval
+  `..._DISCORD_REST_PROBE_INTERVAL_SECONDS`, default 60s; `0` disables) keeps
+  the circuit warm even between runs. Probe and traffic share the same circuit.
+- The engine's "Discord is a replaceable projection and cannot fail the
+  workflow" semantics are unchanged: final failures raise the same exception
+  types as before and are still swallowed by the engine.
+
+`/ready` reports Gateway and REST health separately in its body (HTTP status
+remains driven only by database/contract health):
+
+```text
+discord_gateway: ready            discord_gateway: ready
+discord_rest: ready               discord_rest: blocked
+                                  discord_rest_reason: cloudflare_1010
+```
+
+`discord_rest_detail` carries the sanitized circuit snapshot (state, counters,
+last outcome category/status, cooldown remaining). No tokens, URLs containing
+interaction tokens, message content, or response bodies are ever emitted.
+
 ## HTTP API
 
 The service provides:
