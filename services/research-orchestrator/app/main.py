@@ -316,10 +316,27 @@ def create_app(
 
     @app.get('/health')
     def health() -> dict[str, object]:
+        knowledge_dense: dict[str, object] | None = None
+        try:
+            dense_index = getattr(engine.knowledge, 'dense_index', None)
+            if dense_index is not None:
+                readiness = dense_index.readiness()
+                knowledge_dense = {
+                    'available': readiness.available,
+                    'reason': readiness.reason,
+                    'backend': readiness.backend,
+                    'model_id': readiness.model_id,
+                    'revision': readiness.revision,
+                    'dims': readiness.dims,
+                    'indexed_chunks': readiness.indexed_count,
+                }
+        except Exception as exc:  # noqa: BLE001 - diagnostics never fail /health
+            knowledge_dense = {'available': False, 'reason': str(exc)}
         return {
             'status': 'ok',
             'service': settings.app_name,
             'version': settings.app_version,
+            'knowledge_dense': knowledge_dense,
         }
 
     @app.get('/ready')

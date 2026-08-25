@@ -23,6 +23,11 @@ WORKDIR /app
 COPY services/research-orchestrator/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Optional dense-retrieval stack (corpus-RAG method advisory). Lazy imports
+# keep the service lexical-only functional if model weights are unavailable.
+COPY services/research-orchestrator/requirements-dense.txt ./
+RUN pip install --no-cache-dir -r requirements-dense.txt
+
 # Shared task-fabric protocol package, installed from the checked-out source.
 COPY services/task-fabric /app/services/task-fabric
 RUN pip install --no-cache-dir /app/services/task-fabric
