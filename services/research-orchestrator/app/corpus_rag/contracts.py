@@ -193,7 +193,13 @@ class Citation(BaseModel):
 
 
 class MethodCandidate(BaseModel):
-    """One candidate method proposed by the advisory, with full rationale."""
+    """One candidate method proposed by the advisory, with full rationale.
+
+    Provenance is explicit: ``citations``/``why`` are anchored in retrieved
+    corpus spans, while the guidance fields listed in ``catalog_fields`` come
+    from the advisor's fixed family catalog — they are templates to consider,
+    not claims extracted from the cited text.
+    """
 
     model_config = ConfigDict(extra='forbid')
 
@@ -208,6 +214,10 @@ class MethodCandidate(BaseModel):
     comparisons: list[str] = Field(default_factory=list)
     citations: list[Citation] = Field(min_length=1)
     confidence: Literal['high', 'medium', 'low'] = 'low'
+    # Fields above populated from the family catalog rather than retrieved
+    # text (defaulted so PR #220 prototype payloads still validate).
+    catalog_fields: list[str] = Field(default_factory=list)
+    grounding_note: str = ''
 
 
 class MethodAdvisory(BaseModel):

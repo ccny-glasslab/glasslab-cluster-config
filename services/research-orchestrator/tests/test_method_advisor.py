@@ -8,10 +8,16 @@ from datetime import datetime, timezone
 import pytest
 
 from app.corpus_rag.embeddings import OfflineDeterministicEmbedding
-from app.knowledge_dense import NumpyChunkIndex
+from app.knowledge_dense import NumpyChunkIndex, build_dense_index
 from app.knowledge_manager import KnowledgeManager
 from app.method_advisor import MethodAdvisor
-from app.schemas import RunRecord, RunState, SourceType
+from app.schemas import (
+    KnowledgeChunk,
+    KnowledgeSource,
+    RunRecord,
+    RunState,
+    SourceType,
+)
 from app.storage import SqliteStore
 
 
@@ -89,6 +95,15 @@ def test_advisor_builds_grounded_candidates_with_resolvable_citations(
     assert payload is not None and payload['kind'] == 'method_advisory'
     assert len(payload['candidates']) >= 1
     assert len(payload['advisory_digest']) == 64
+    candidate = payload['candidates'][0]
+    assert candidate['catalog_fields'], 'template guidance must be labeled'
+    assert 'family catalog' in candidate['grounding_note']
+    assert 'templates' in candidate['why']
+    assert payload['generated_by'] == 'corpus-rag/dense'
+    metadata = payload['retrieval_metadata']
+    assert metadata['phase'] == 'protocol_draft'
+    assert metadata['mode_actual'] == 'dense'
+    assert metadata['executed_queries'], 'planned subqueries must be executed'
     chunk_ids = {row['chunk_id'] for row in store.list_all_knowledge_chunks()}
     for candidate in payload['candidates']:
         assert candidate['citations'], 'every candidate must carry evidence'
@@ -99,7 +114,7 @@ def test_advisor_builds_grounded_candidates_with_resolvable_citations(
     assert 'not instructions' in block
 
 
-def test_advisor_is_once_per_run_even_after_restart(tmp_path) -> None:
+def test_advisor_is_once_per_phase_across_restart(tmp_path) -> None:
     km, store = _make_km_with_corpus(tmp_path)
     advisor = MethodAdvisor(km)
 
@@ -112,7 +127,7 @@ def test_advisor_is_once_per_run_even_after_restart(tmp_path) -> None:
         retrieval_mode='dense',
     )
     # A restarted engine re-creates the advisor; the persisted event must
-    # make the second attempt a no-op rather than duplicating packets.
+    # make a same-phase retry a no-op rather than duplicating packets.
     rebuilt = MethodAdvisor(km)
     second_block, second_payload = rebuilt.build_and_render(
         run_id='run-adv-2',
@@ -124,6 +139,128 @@ def test_advisor_is_once_per_run_even_after_restart(tmp_path) -> None:
     assert first_payload is not None
     assert second_block == ''
     assert second_payload is None
+
+    # The later eligible phase gets its own advisory; a third attempt at
+    # that phase (post-restart) is again a no-op.
+    review_block, review_payload = rebuilt.build_and_render(
+        run_id='run-adv-2',
+        objective='methodology review: clustering stability',
+        turn_number=5,
+        turn_kind='methodology_review',
+        retrieval_mode='dense',
+    )
+    assert review_payload is not None
+    _, repeat_payload = rebuilt.build_and_render(
+        run_id='run-adv-2',
+        objective='methodology review: clustering stability',
+        turn_number=6,
+        turn_kind='methodology_review',
+        retrieval_mode='dense',
+    )
+    assert repeat_payload is None
+
+
+def test_advisor_never_retrieves_other_runs_private_sources(tmp_path) -> None:
+    km, store = _make_km_with_corpus(tmp_path)
+    _create_run(store, 'run-a')
+    _create_run(store, 'run-b')
+
+    private_b = KnowledgeSource(
+        source_type=SourceType.PAPER,
+        canonical_uri='file:///runs/run-b/private-notes.md',
+        digest='b' * 64,
+        run_scope='run-b',
+        access_policy='run-private',
+    )
+    store.save_knowledge_source(private_b)
+    store.replace_knowledge_chunks(
+        private_b.source_id,
+        [
+            KnowledgeChunk(
+                source_id=private_b.source_id,
+                chunk_index=0,
+                text=(
+                    'Run B internal note: cluster stability via bootstrap '
+                    'and consensus resampling with adjusted rand index.'
+                ),
+                digest='c' * 64,
+                token_count=18,
+            )
+        ],
+    )
+    # An operator bulk rebuild indexes every stored chunk, exactly like the
+    # lazy ensure_index_built() path would before the advisory runs.
+    provider = OfflineDeterministicEmbedding(dims=64)
+    build_dense_index(store, provider)
+
+    advisor = MethodAdvisor(km)
+    _block, payload = advisor.build_and_render(
+        run_id='run-a',
+        objective='cluster stability assessment',
+        turn_number=1,
+        turn_kind='protocol_draft',
+        retrieval_mode='dense',
+    )
+
+    assert payload is not None and payload['kind'] == 'method_advisory'
+    cited_sources = {
+        citation['source_id']
+        for candidate in payload['candidates']
+        for citation in candidate['citations']
+    }
+    assert private_b.source_id not in cited_sources
+    packet = store.get_context_packet(payload['packet_id'])
+    leaked = [
+        entry
+        for entry in packet.ranked_sources
+        if entry.get('source_id') == private_b.source_id
+    ]
+    assert leaked == [], 'run B private data leaked into run A context'
+
+
+def test_advisor_scopes_and_executes_plan_in_retrieval(
+    tmp_path, monkeypatch
+) -> None:
+    km, store = _make_km_with_corpus(tmp_path)
+    _create_run(store, 'run-plan')
+    captured: dict = {}
+    original = km.retrieve
+
+    def spy(**kwargs):
+        captured.update(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(km, 'retrieve', spy)
+    advisor = MethodAdvisor(km)
+    advisor.build_and_render(
+        run_id='run-plan',
+        objective='cluster stability assessment',
+        turn_number=1,
+        turn_kind='protocol_draft',
+        retrieval_mode='dense',
+    )
+    assert captured['run_scope'] == 'run-plan'
+    assert captured['additional_queries'], (
+        'planned subqueries must be handed to retrieval for execution'
+    )
+
+
+def test_generated_by_reflects_actual_retrieval_mode(tmp_path) -> None:
+    km, store = _make_km_with_corpus(tmp_path)
+    km.dense_index = None
+    advisor = MethodAdvisor(km)
+
+    _create_run(store, 'run-fallback')
+    _block, payload = advisor.build_and_render(
+        run_id='run-fallback',
+        objective='cluster stability assessment',
+        turn_number=1,
+        turn_kind='protocol_draft',
+        retrieval_mode='dense',
+    )
+
+    assert payload['retrieval_metadata']['mode_actual'] == 'lexical(fallback)'
+    assert payload['generated_by'] == 'corpus-rag/lexical(fallback)'
 
 
 def test_advisor_reports_insufficiency_on_empty_corpus(tmp_path) -> None:

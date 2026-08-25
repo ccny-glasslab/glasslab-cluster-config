@@ -9,8 +9,8 @@ then asserts the authoritative provenance trail:
    persisted ContextPacket containing role-approved chunks only.
 2. The advisory block was attached to the turn
    (``agent.method_advisory_attached``).
-3. Beaker never receives the advisory (no additional build events after
-   execution/analysis turns; hook condition excludes Beaker entirely).
+3. Only Honeydew's eligible phases (protocol_draft, methodology_review)
+   ever build advisories — Beaker gets none.
 4. A dense-backend outage degrades to lexical and the run still completes.
 """
 
@@ -178,8 +178,8 @@ def test_honeydew_protocol_turn_receives_audited_advisory(tmp_path: Path) -> Non
     }
     assert chunk_ids == stored
 
-    # Drive through approvals + fake execution + analysis turns: Beaker must
-    # never trigger another advisory build.
+    # Drive through approvals + fake execution + analysis turns: only
+    # Honeydew's two eligible phases may ever build an advisory.
     protocol_action = next(
         action for action in store.list_actions(run.run_id)
         if action.type == 'approve_protocol'
@@ -197,7 +197,10 @@ def test_honeydew_protocol_turn_receives_audited_advisory(tmp_path: Path) -> Non
     for job in store.list_jobs(run.run_id):
         assert job.external_run_id is not None
 
-    assert len(_built_events(store)) == 1
+    phases = sorted(
+        event.payload['phase'] for event in _built_events(store)
+    )
+    assert phases == ['methodology_review', 'protocol_draft']
 
 
 def test_dense_backend_failure_degrades_and_run_survives(tmp_path: Path) -> None:

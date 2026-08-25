@@ -35,6 +35,7 @@ from __future__ import annotations
 from hashlib import sha256
 import re
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Iterable
 
 from .schemas import (
@@ -355,13 +356,25 @@ class KnowledgeManager:
         run_scope: str | None = None,
         allowed_source_types: list[str] | None = None,
         retrieval_mode: str | None = None,
+        additional_queries: Sequence[str] | None = None,
     ) -> ContextPacket:
-        """Retrieve scoped, bounded context and persist a durable packet."""
+        """Retrieve scoped, bounded context and persist a durable packet.
+
+        ``additional_queries`` executes the bounded query plan: every query
+        runs through the same scoped retrieval, hits are merged per chunk
+        (best score wins), and one packet holds the merged ranking.
+        """
         max_results = max_results or self.max_results
         token_budget = token_budget or self.token_budget
         agent_enum = AgentName(agent)
         turn_kind_enum = TurnKind(turn_kind)
         allowed = self._default_source_types(agent_enum, turn_kind_enum)
+
+        queries = [query]
+        for extra in additional_queries or ():
+            extra = ' '.join(str(extra).split())
+            if extra and extra not in queries:
+                queries.append(extra)
 
         entries: list[dict[str, Any]] = []
         sources = self.store.list_knowledge_sources(
@@ -380,11 +393,20 @@ class KnowledgeManager:
 
         if mode_requested == 'dense' and mode_actual == 'dense':
             try:
-                entries = self._dense_entries(
-                    query=query,
-                    source_ids=source_ids,
-                    limit=max_results * 4,
-                    source_by_id=source_by_id,
+                merged: dict[str, dict[str, Any]] = {}
+                for candidate_query in queries:
+                    for entry in self._dense_entries(
+                        query=candidate_query,
+                        source_ids=source_ids,
+                        limit=max_results * 4,
+                        source_by_id=source_by_id,
+                    ):
+                        entry['matched_query'] = candidate_query
+                        prior = merged.get(entry['entry_id'])
+                        if prior is None or entry['score'] > prior['score']:
+                            merged[entry['entry_id']] = entry
+                entries = sorted(
+                    merged.values(), key=lambda e: e['score'], reverse=True
                 )
                 if not entries:
                     fallback_reason = 'no dense hits'
@@ -395,19 +417,22 @@ class KnowledgeManager:
                 mode_actual = 'lexical(fallback)'
 
         if mode_actual != 'dense':
-            hits: list[dict[str, Any]] = []
+            merged_lexical: dict[str, dict[str, Any]] = {}
             if source_ids:
-                # Over-fetch candidates (4x the final count) so that diversity
-                # filtering and the token budget still have headroom after ranking.
-                hits = self.store.search_knowledge_chunks(
-                    query,
-                    source_ids=source_ids,
-                    limit=max_results * 4,
-                )
-            entries.extend(
-                self._score_chunk_hit(hit, source_by_id, query)
-                for hit in hits
-            )
+                for candidate_query in queries:
+                    for hit in self.store.search_knowledge_chunks(
+                        candidate_query,
+                        source_ids=source_ids,
+                        limit=max_results * 4,
+                    ):
+                        scored_hit = self._score_chunk_hit(
+                            hit, source_by_id, candidate_query
+                        )
+                        scored_hit['matched_query'] = candidate_query
+                        prior = merged_lexical.get(scored_hit['entry_id'])
+                        if prior is None or scored_hit['score'] > prior['score']:
+                            merged_lexical[scored_hit['entry_id']] = scored_hit
+            entries.extend(merged_lexical.values())
         event_entries = self._retrieve_run_events(
             run_id=run_id,
             query=query,
@@ -446,6 +471,9 @@ class KnowledgeManager:
             ],
             exact_text_supplied=exact_text,
             token_budget=token_budget,
+            retrieval_mode_requested=mode_requested,
+            retrieval_mode_actual=mode_actual,
+            retrieval_fallback_reason=fallback_reason,
             created_at=utc_now(),
         )
         self.store.save_context_packet(packet)
@@ -463,6 +491,7 @@ class KnowledgeManager:
                 'token_count': packet.exact_text_supplied
                 and estimate_tokens(packet.exact_text_supplied)
                 or 0,
+                'executed_queries': queries,
                 'retrieval_mode_requested': mode_requested,
                 'retrieval_mode_actual': mode_actual,
                 **(

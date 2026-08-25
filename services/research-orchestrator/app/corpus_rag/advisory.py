@@ -146,6 +146,19 @@ def _extractive_candidate(fam: _Family, hits: list[RetrievedHit]) -> MethodCandi
             _citation_for_hit(h) for h in unique_hits[:_MAX_CITATIONS_PER_CANDIDATE]
         ],
         confidence='low',
+        catalog_fields=[
+            'assumptions',
+            'preprocessing',
+            'diagnostics',
+            'metrics',
+            'failure_modes',
+            'baselines',
+            'comparisons',
+        ],
+        grounding_note=(
+            'Guidance lists are the advisor family catalog for '
+            f'{fam.label}, not statements extracted from the cited spans.'
+        ),
     )
 
 

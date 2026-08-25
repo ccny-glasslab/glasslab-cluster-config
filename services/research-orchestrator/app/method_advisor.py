@@ -51,12 +51,18 @@ class MethodAdvisor:
         self._km = knowledge_manager
         self._corpus_slug = corpus_slug
 
-    def already_built(self, run_id: str) -> bool:
-        """Restart-safe guard: one advisory per run, even across recovery."""
-        return any(
-            event.event_type == ADVISORY_EVENT
-            for event in self._km.store.list_events(run_id)
-        )
+    def already_built(self, run_id: str, phase: str = 'protocol_draft') -> bool:
+        """Restart-safe guard: one advisory per (run, eligible Honeydew phase).
+
+        Events written before phases were recorded are treated as
+        ``protocol_draft`` so a restart never double-builds that phase.
+        """
+        for event in self._km.store.list_events(run_id):
+            if event.event_type != ADVISORY_EVENT:
+                continue
+            if event.payload.get('phase', 'protocol_draft') == phase:
+                return True
+        return False
 
     def build_and_render(
         self,
@@ -70,7 +76,7 @@ class MethodAdvisor:
         retrieval_mode: str | None = None,
     ) -> tuple[str, dict[str, Any] | None]:
         """Return (rendered_block, payload); ('', None) when skipped/duplicate."""
-        if self.already_built(run_id):
+        if self.already_built(run_id, phase=turn_kind):
             return '', None
 
         question = ' '.join(f'{objective} {problem_md_head}'.split()).strip()
@@ -94,7 +100,14 @@ class MethodAdvisor:
             query=question or objective,
             max_results=6,
             retrieval_mode=retrieval_mode,
+            # Scope to this run: run-private sources of OTHER runs must never
+            # enter an advisory; unscoped (run-approved) sources may.
+            run_scope=run_id,
+            # Execute the bounded query plan instead of only the headline
+            # question; hits merge inside retrieve() under one packet.
+            additional_queries=plan.subqueries,
         )
+        mode_actual = packet.retrieval_mode_actual or 'lexical'
         chunk_entries = [
             entry for entry in packet.ranked_sources
             if entry.get('kind') == 'chunk'
@@ -107,6 +120,15 @@ class MethodAdvisor:
         }
 
         candidates, matrix_rows, contradictions = [], [], []
+        _CATALOG_FIELD_NAMES = (
+            'assumptions',
+            'preprocessing',
+            'diagnostics',
+            'metrics',
+            'failure_modes',
+            'baselines',
+            'comparisons',
+        )
         for family, matched_chunks, matched_terms in self._match_families(rows):
             citations = [
                 Citation(
@@ -124,8 +146,10 @@ class MethodAdvisor:
             candidate = MethodCandidate(
                 method_name=family.label,
                 why=(
-                    'Retrieved corpus spans match this family on keywords '
-                    f'{sorted(matched_terms)}; see cited evidence.'
+                    f'Corpus spans cited below contain {sorted(matched_terms)}; '
+                    'the family matched on those keywords. The guidance lists '
+                    'are advisor catalog templates anchored by that match — '
+                    'they are not claims extracted from the cited text.'
                 ),
                 assumptions=list(family.assumptions),
                 preprocessing=list(family.preprocessing),
@@ -136,6 +160,12 @@ class MethodAdvisor:
                 comparisons=list(family.comparisons),
                 citations=citations,
                 confidence='low',
+                catalog_fields=list(_CATALOG_FIELD_NAMES),
+                grounding_note=(
+                    f'Only the keyword match to the cited spans is '
+                    f'corpus-derived; every guidance list is the fixed '
+                    f'{family.label!r} family catalog.'
+                ),
             )
             candidates.append(candidate)
             if family.baselines or family.comparisons:
@@ -153,11 +183,25 @@ class MethodAdvisor:
         # uncertainty statement flags the thin coverage.
         insufficient = not chunk_entries or not candidates
 
+        # The authoritative record of what actually ran lives in the
+        # retrieval event persist()ed alongside the packet.
+        executed_queries: list[str] = []
+        for event in self._km.store.list_events(run_id):
+            if (
+                event.event_type == 'agent.context_retrieved'
+                and event.payload.get('packet_id') == packet.packet_id
+            ):
+                executed_queries = list(event.payload.get('executed_queries', []))
+                break
+
         retrieval_metadata = {
             'packet_id': packet.packet_id,
+            'phase': turn_kind,
             'mode_requested': retrieval_mode,
-            'subqueries': plan.subqueries,
+            'mode_actual': mode_actual,
             'planner_mode': plan.planner_mode,
+            'subqueries_planned': plan.subqueries,
+            'executed_queries': executed_queries,
             'ranked_count': len(packet.ranked_sources),
         }
 
@@ -184,16 +228,17 @@ class MethodAdvisor:
                 candidates=candidates,
                 contradiction_pairs=contradictions,
                 uncertainty_statement=(
-                    f'The supplied corpus ({self._corpus_slug}) supports these '
-                    'candidates only partially; statements beyond cited spans '
-                    'are not supported.'
+                    f'The supplied corpus ({self._corpus_slug}) anchors each '
+                    'candidate only through its cited keyword matches; all '
+                    'guidance lists are family templates. Statements beyond '
+                    'cited spans are not corpus-supported.'
                 ),
                 citations_all=[
                     citation
                     for candidate in candidates
                     for citation in candidate.citations
                 ],
-                generated_by='corpus-rag/dense-v1',
+                generated_by=f'corpus-rag/{mode_actual}',
                 research_question=question,
                 subqueries=plan.subqueries,
                 experiment_matrix=matrix_rows,
@@ -211,6 +256,7 @@ class MethodAdvisor:
             payload={
                 'advisory_digest': digest,
                 'packet_id': packet.packet_id,
+                'phase': turn_kind,
                 'kind': payload['kind'],
                 'n_candidates': len(payload.get('candidates', [])),
                 'retrieval_metadata': retrieval_metadata,
@@ -280,6 +326,7 @@ class MethodAdvisor:
                 f"(confidence={candidate['confidence']})"
             )
             lines.append(f"   Why: {candidate['why']}")
+            lines.append('   Guidance (advisor family template, NOT corpus-extracted):')
             lines.append(f"   Assumptions: {'; '.join(candidate['assumptions'])}")
             lines.append(f"   Diagnostics: {'; '.join(candidate['diagnostics'])}")
             lines.append(f"   Failure modes: {'; '.join(candidate['failure_modes'])}")
