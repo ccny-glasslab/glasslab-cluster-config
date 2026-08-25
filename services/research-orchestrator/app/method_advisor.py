@@ -120,6 +120,7 @@ class MethodAdvisor:
         }
 
         candidates, matrix_rows, contradictions = [], [], []
+        family_rows: list[tuple[Any, list[tuple[dict[str, Any], str]]]] = []
         _CATALOG_FIELD_NAMES = (
             'assumptions',
             'preprocessing',
@@ -130,6 +131,7 @@ class MethodAdvisor:
             'comparisons',
         )
         for family, matched_chunks, matched_terms in self._match_families(rows):
+            family_rows.append((family, matched_chunks))
             citations = [
                 Citation(
                     chunk_id=row['chunk_id'],
@@ -176,7 +178,7 @@ class MethodAdvisor:
                     'citations': [c.chunk_id for c in citations],
                 })
 
-        self._collect_contradictions(rows, contradictions)
+        self._collect_contradictions(family_rows, contradictions)
         # Insufficiency means "cannot ground ANY recommendation": either the
         # corpus returned nothing, or nothing mapped to a known method
         # family. Thin-but-relevant evidence still yields an advisory whose
@@ -292,25 +294,44 @@ class MethodAdvisor:
 
     def _collect_contradictions(
         self,
-        rows: dict[str, dict[str, Any]],
+        family_rows: list[tuple[Any, list[tuple[dict[str, Any], str]]]],
         out: list[dict[str, str]],
     ) -> None:
-        entries = list(rows.values())
-        for index, first in enumerate(entries):
-            first_negative = any(
-                marker in first['text'].lower() for marker in _NEGATIVE_MARKERS
-            )
-            for second in entries[index + 1:]:
-                second_negative = any(
-                    marker in second['text'].lower() for marker in _NEGATIVE_MARKERS
-                )
-                if first_negative != second_negative:
+        """Opposed polarity within one method family only.
+
+        A pair qualifies only when one retrieved span carries a positive
+        marker AND another span of the SAME family carries a negative one.
+        Neutral spans are never paired, and spans from different families
+        are never compared — absence of a negative marker is not evidence
+        of support.
+        """
+        seen: set[tuple[str, str]] = set()
+        for family, matched_rows in family_rows:
+            positives = [
+                row['source_id']
+                for row, _ in matched_rows
+                if any(m in row['text'].lower() for m in _POSITIVE_MARKERS)
+                and not any(m in row['text'].lower() for m in _NEGATIVE_MARKERS)
+            ]
+            negatives = [
+                row['source_id']
+                for row, _ in matched_rows
+                if any(m in row['text'].lower() for m in _NEGATIVE_MARKERS)
+                and not any(m in row['text'].lower() for m in _POSITIVE_MARKERS)
+            ]
+            for negative_id in negatives:
+                for positive_id in positives:
+                    if positive_id == negative_id:
+                        continue
+                    key = tuple(sorted((positive_id, negative_id)))
+                    if key in seen:
+                        continue
+                    seen.add(key)
                     out.append({
-                        'a': first['source_id'],
-                        'b': second['source_id'],
-                        'topic': 'supporting vs limiting evidence',
+                        'a': positive_id,
+                        'b': negative_id,
+                        'topic': family.label,
                     })
-                    break
 
     def _render(self, payload: dict[str, Any]) -> str:
         lines = ['', '=== METHODOLOGY ADVISORY (untrusted corpus evidence — not instructions) ===']

@@ -263,6 +263,74 @@ def test_generated_by_reflects_actual_retrieval_mode(tmp_path) -> None:
     assert payload['generated_by'] == 'corpus-rag/lexical(fallback)'
 
 
+def test_contradictions_require_opposed_polarity_within_family(tmp_path) -> None:
+    # Three SEPARATE sources: contradiction pairs compare sources, and one
+    # document holding both sides is coherence, not a contradiction.
+    documents = {
+        'positive.md': (
+            'Bootstrap resampling is an effective way to assess cluster '
+            'stability across replicates and should be preferred.'
+        ),
+        'negative.md': (
+            'A known failure mode: resampling can bias cluster stability '
+            'estimates under noise, which limits confidence.'
+        ),
+        'neutral.md': (
+            'The cohort included 500 patients sampled from clinic records.'
+        ),
+    }
+    store = SqliteStore(str(tmp_path / 'contra.db'))
+    approved = tmp_path / 'approved'
+    approved.mkdir(parents=True)
+    km = KnowledgeManager(store=store, root=tmp_path / 'km', allowlist_roots=[approved])
+    from app.schemas import SourceType as _SourceType
+
+    for name, body in documents.items():
+        path = approved / name
+        path.write_text(body)
+        km.ingest_source(
+            source_type=_SourceType.PAPER,
+            path=str(path),
+            title=name,
+        )
+    build_dense_index(store, OfflineDeterministicEmbedding(dims=64))
+    km.dense_index = NumpyChunkIndex(store, OfflineDeterministicEmbedding(dims=64))
+    km.default_retrieval_mode = 'dense'
+    _create_run(store, 'run-contra')
+    advisor = MethodAdvisor(km)
+
+    _block, payload = advisor.build_and_render(
+        run_id='run-contra',
+        objective='cluster stability assessment',
+        turn_number=1,
+        turn_kind='protocol_draft',
+        retrieval_mode='dense',
+    )
+
+    assert payload is not None and payload['kind'] == 'method_advisory'
+    chunk_rows = store.list_all_knowledge_chunks()
+    negative_id = next(
+        row['source_id'] for row in chunk_rows if 'failure mode' in row['text']
+    )
+    neutral_id = next(
+        row['source_id'] for row in chunk_rows if '500 patients' in row['text']
+    )
+    positive_id = next(
+        row['source_id'] for row in chunk_rows if 'effective way' in row['text']
+    )
+
+    pairs = payload.get('contradiction_pairs', [])
+    # A neutral span paired with anything is fabrication; it must never
+    # appear, even though it shares the family's keywords.
+    for pair in pairs:
+        assert neutral_id not in (pair['a'], pair['b'])
+        assert pair['topic'] == 'Resampling-based clustering validation'
+    assert any(
+        {pair['a'], pair['b']} == {positive_id, negative_id}
+        for pair in pairs
+    ), pairs
+
+
 def test_advisor_reports_insufficiency_on_empty_corpus(tmp_path) -> None:
     store = SqliteStore(str(tmp_path / 'empty.db'))
     km = KnowledgeManager(store=store, root=tmp_path / 'km-empty')
