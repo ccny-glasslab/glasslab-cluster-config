@@ -12,11 +12,18 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
+
+# The minimal satisfiable evidence snapshot is the empty jobs/artifacts/
+# artifact_contents skeleton plus a count-only truncation note, which
+# serializes to ~251 bytes. A cap below this floor could never be honored, so
+# Settings rejects it at construction. 1024 bytes keeps a documented 4x margin
+# over the measured floor while still allowing tight test caps.
+EVIDENCE_SNAPSHOT_MIN_BYTES = 1024
 
 
 class Settings(BaseSettings):
@@ -55,6 +62,10 @@ class Settings(BaseSettings):
         '/workspace/cluster-config/services/research-orchestrator/evaluation-contracts',
     ]
     evidence_excerpt_max_bytes: int = 32 * 1024
+    # Verbatim tier for evaluator failures/metrics (larger than the general
+    # excerpt cap); the whole snapshot is bounded by the snapshot cap.
+    evidence_verbatim_max_bytes: int = 64 * 1024
+    evidence_snapshot_max_bytes: int = 512 * 1024
     approved_repo_path: str = '/workspace/cluster-config'
     approved_repo_ref: str = 'main'
     evaluation_contract_root: str = str(SERVICE_ROOT / 'evaluation-contracts')
@@ -125,11 +136,26 @@ class Settings(BaseSettings):
         'http://glasslab-workflow-api.glasslab-v2.svc.cluster.local:8080'
     )
     cluster_execution_mode: str = 'workflow-api'
-    cluster_execution_workload_id: str = 'metric-search-v0'
-    cluster_execution_experiment_type: str = 'gpu-training-job'
+    cluster_execution_workload_id: str = 'workspace-cpu-ml-v1'
+    cluster_execution_experiment_type: str = 'research-workspace-job'
+    workflow_api_caller_name: str = Field(
+        default='',
+        validation_alias=AliasChoices(
+            'GLASSLAB_WORKFLOW_API_CALLER_NAME',
+            'workflow_api_caller_name',
+        ),
+    )
+    workflow_api_token: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            'GLASSLAB_WORKFLOW_API_TOKEN',
+            'workflow_api_token',
+        ),
+    )
     kubernetes_namespace: str = 'glasslab-v2'
     permitted_job_images: Annotated[list[str], NoDecode] = [
-        'ghcr.io/ccny-glasslab/glasslab-metric-search:latest',
+        'ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:'
+        'dae5bc4967f5ac54edb6c6d63d8d3db9e4652cc46e035118b0c456eb70121061',
     ]
 
     maximum_turns: int = 20
@@ -158,6 +184,16 @@ class Settings(BaseSettings):
     def effective_agent_model_name(self) -> str:
         return self.agent_model_name or self.qwen_model_name
 
+    @field_validator('evidence_snapshot_max_bytes')
+    @classmethod
+    def enforce_evidence_snapshot_minimum(cls, value: int) -> int:
+        if value < EVIDENCE_SNAPSHOT_MIN_BYTES:
+            raise ValueError(
+                'evidence_snapshot_max_bytes must be at least '
+                f'{EVIDENCE_SNAPSHOT_MIN_BYTES} bytes'
+            )
+        return value
+
     @field_validator('store_postgres_dsn')
     @classmethod
     def require_postgres_dsn(cls, value: str | None, info) -> str | None:
@@ -171,6 +207,13 @@ class Settings(BaseSettings):
         # pydantic-settings passes the raw env string for list fields; NoDecode
         # stops its JSON attempt, and this validator splits the conventional
         # comma-separated spelling instead.
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(',') if item.strip()]
+        return value
+
+    @field_validator('knowledge_allowlist_roots', mode='before')
+    @classmethod
+    def parse_knowledge_allowlist(cls, value: object) -> object:
         if isinstance(value, str):
             return [item.strip() for item in value.split(',') if item.strip()]
         return value

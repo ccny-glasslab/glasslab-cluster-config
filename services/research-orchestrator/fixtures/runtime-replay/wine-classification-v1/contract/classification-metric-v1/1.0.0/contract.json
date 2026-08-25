@@ -1,0 +1,88 @@
+{
+  "contract_id": "classification-metric-v1",
+  "version": "1.0.0",
+  "manifest": {
+    "primary_metric": "roc_auc",
+    "primary_metric_direction": "maximize",
+    "methodology_requirements": [
+      {
+        "requirement_id": "baseline_comparison",
+        "config_path": "src/train.py",
+        "mode": "comparison",
+        "minimum_distinct_values": 2,
+        "maximum_distinct_values": 3,
+        "description": "Compare L2-regularized logistic regression baseline with non-linear ensembles (Random Forest, Gradient Boosting)"
+      },
+      {
+        "requirement_id": "threshold_optimization",
+        "config_path": "src/train.py",
+        "mode": "decision",
+        "minimum_distinct_values": 1,
+        "description": "Optimize classification threshold per fold to maximize F1 score"
+      },
+      {
+        "requirement_id": "cross_validation",
+        "config_path": "src/train.py",
+        "mode": "decision",
+        "minimum_distinct_values": 1,
+        "description": "Use stratified k-fold cross-validation (k=5) with fixed random seed"
+      },
+      {
+        "requirement_id": "class_weighting",
+        "config_path": "src/train.py",
+        "mode": "decision",
+        "minimum_distinct_values": 1,
+        "description": "Apply class weighting to address class imbalance in high-quality wine classification"
+      }
+    ],
+    "budget": {
+      "max_wallclock_minutes": 60
+    },
+    "guardrails": [
+      {
+        "name": "roc_auc",
+        "direction": "maximize",
+        "minimum": 0.85,
+        "required": true
+      },
+      {
+        "name": "f1",
+        "direction": "maximize",
+        "minimum": 0.80,
+        "required": true
+      },
+      {
+        "name": "calibration_ece",
+        "direction": "minimize",
+        "maximum": 0.10,
+        "required": false
+      },
+      {
+        "name": "training_wallclock_minutes",
+        "direction": "minimize",
+        "maximum": 60.0,
+        "required": true
+      }
+    ]
+  },
+  "execution_wrapper": "execution_wrapper.py",
+  "evaluation_entry_point": "train.py",
+  "expected_input_schema": "input_schema.json",
+  "expected_output_schema": "output_schema.json",
+  "required_artifacts": [
+    "reports/figures/roc_curves.png",
+    "reports/figures/calibration_plots.png",
+    "reports/tables/metrics_table.csv",
+    "reports/tables/feature_importance.csv",
+    "src/train.py",
+    "src/evaluate.py",
+    "src/plot.py"
+  ],
+  "resource_constraints": {
+    "cpu": 2.0,
+    "memory_gib": 8.0,
+    "gpus": 0,
+    "wallclock_minutes": 60
+  },
+  "container_image_digest": null
+}

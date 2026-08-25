@@ -41,6 +41,7 @@ from .hermes_runtime import HermesProcessRuntime
 from .knowledge_manager import KnowledgeError
 from .opencode_runtime import AgentRuntime, OpenCodeProcessRuntime
 from .policy import ActionPolicy
+from .research_store import ResearchStore
 from .schemas import (
     ActionRecord,
     ApprovalRequest,
@@ -89,7 +90,7 @@ def build_engine(
     # Composition root: wires every subsystem against the same store so all
     # mutations share one transaction boundary and one event log. The cluster
     # executor is swapped for a fake when running without a live API.
-    store = (
+    store: ResearchStore = (
         PostgresStore(settings.store_postgres_dsn)
         if settings.store_backend == 'postgres'
         else SqliteStore(settings.database_path)
@@ -104,6 +105,12 @@ def build_engine(
                 base_url=settings.cluster_execution_api_url,
                 workload_id=settings.cluster_execution_workload_id,
                 experiment_type=settings.cluster_execution_experiment_type,
+                caller_name=settings.workflow_api_caller_name,
+                token=(
+                    settings.workflow_api_token.get_secret_value()
+                    if settings.workflow_api_token
+                    else ''
+                ),
             )
         )
     if discord is None:

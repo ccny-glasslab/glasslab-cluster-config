@@ -1,0 +1,320 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glasslab-rabbitmq-topology
+  namespace: glasslab-v2
+  labels:
+    app.kubernetes.io/name: glasslab-rabbitmq
+data:
+  # Versioned task-fabric topology, owned by this repository. Applications
+  # must not declare exchanges or queues themselves. The boot-time import
+  # merges definitions: it creates missing entities and ignores argument
+  # changes to existing ones, so incompatible changes require new entity
+  # names plus a glasslab/topology-version bump (see README.md).
+  definitions.template.json: |
+    {
+      "global_parameters": [
+        {"name": "glasslab/topology-version", "value": 1}
+      ],
+      "vhosts": [
+        {"name": "glasslab"}
+      ],
+      "users": [
+        {"name": "glasslab-topology-admin", "password": "<glasslab-topology-admin-password>", "tags": ["administrator"]},
+        {"name": "glasslab-publisher", "password": "<glasslab-publisher-password>", "tags": []},
+        {"name": "glasslab-consumer", "password": "<glasslab-consumer-password>", "tags": []},
+        {"name": "glasslab-monitor", "password": "<glasslab-monitor-password>", "tags": ["monitoring"]}
+      ],
+      "permissions": [
+        {"user": "glasslab-topology-admin", "vhost": "glasslab", "configure": ".*", "write": ".*", "read": ".*"},
+        {"user": "glasslab-publisher", "vhost": "glasslab", "configure": "", "write": ".*", "read": ""},
+        {"user": "glasslab-consumer", "vhost": "glasslab", "configure": "", "write": ".*", "read": ".*"},
+        {"user": "glasslab-monitor", "vhost": "glasslab", "configure": "", "write": "", "read": ".*"}
+      ],
+      "exchanges": [
+        {"name": "glasslab.orchestrator.control", "vhost": "glasslab", "type": "topic", "durable": true, "auto_delete": false, "internal": false},
+        {"name": "glasslab.orchestrator.control.retry", "vhost": "glasslab", "type": "topic", "durable": true, "auto_delete": false, "internal": false},
+        {"name": "glasslab.orchestrator.control.dlx", "vhost": "glasslab", "type": "topic", "durable": true, "auto_delete": false, "internal": false},
+        {"name": "glasslab.workflow.execution", "vhost": "glasslab", "type": "topic", "durable": true, "auto_delete": false, "internal": false},
+        {"name": "glasslab.workflow.execution.retry", "vhost": "glasslab", "type": "topic", "durable": true, "auto_delete": false, "internal": false},
+        {"name": "glasslab.workflow.execution.dlx", "vhost": "glasslab", "type": "topic", "durable": true, "auto_delete": false, "internal": false}
+      ],
+      "queues": [
+        {
+          "name": "glasslab.orchestrator.control",
+          "vhost": "glasslab",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-queue-type": "quorum",
+            "x-max-length": 10000,
+            "x-max-length-bytes": 536870912,
+            "x-overflow": "reject-publish",
+            "x-dead-letter-exchange": "glasslab.orchestrator.control.dlx"
+          }
+        },
+        {
+          "name": "glasslab.orchestrator.control.retry",
+          "vhost": "glasslab",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-queue-type": "quorum",
+            "x-message-ttl": 30000,
+            "x-max-length": 10000,
+            "x-max-length-bytes": 536870912,
+            "x-overflow": "reject-publish",
+            "x-dead-letter-exchange": "glasslab.orchestrator.control"
+          }
+        },
+        {
+          "name": "glasslab.orchestrator.control.dlq",
+          "vhost": "glasslab",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-queue-type": "quorum",
+            "x-max-length": 10000,
+            "x-max-length-bytes": 536870912,
+            "x-overflow": "reject-publish"
+          }
+        },
+        {
+          "name": "glasslab.workflow.execution",
+          "vhost": "glasslab",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-queue-type": "quorum",
+            "x-max-length": 10000,
+            "x-max-length-bytes": 536870912,
+            "x-overflow": "reject-publish",
+            "x-dead-letter-exchange": "glasslab.workflow.execution.dlx"
+          }
+        },
+        {
+          "name": "glasslab.workflow.execution.retry",
+          "vhost": "glasslab",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-queue-type": "quorum",
+            "x-message-ttl": 30000,
+            "x-max-length": 10000,
+            "x-max-length-bytes": 536870912,
+            "x-overflow": "reject-publish",
+            "x-dead-letter-exchange": "glasslab.workflow.execution"
+          }
+        },
+        {
+          "name": "glasslab.workflow.execution.dlq",
+          "vhost": "glasslab",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-queue-type": "quorum",
+            "x-max-length": 10000,
+            "x-max-length-bytes": 536870912,
+            "x-overflow": "reject-publish"
+          }
+        }
+      ],
+      "bindings": [
+        {"source": "glasslab.orchestrator.control", "vhost": "glasslab", "destination": "glasslab.orchestrator.control", "destination_type": "queue", "routing_key": "#", "arguments": {}},
+        {"source": "glasslab.orchestrator.control.retry", "vhost": "glasslab", "destination": "glasslab.orchestrator.control.retry", "destination_type": "queue", "routing_key": "#", "arguments": {}},
+        {"source": "glasslab.orchestrator.control.dlx", "vhost": "glasslab", "destination": "glasslab.orchestrator.control.dlq", "destination_type": "queue", "routing_key": "#", "arguments": {}},
+        {"source": "glasslab.workflow.execution", "vhost": "glasslab", "destination": "glasslab.workflow.execution", "destination_type": "queue", "routing_key": "#", "arguments": {}},
+        {"source": "glasslab.workflow.execution.retry", "vhost": "glasslab", "destination": "glasslab.workflow.execution.retry", "destination_type": "queue", "routing_key": "#", "arguments": {}},
+        {"source": "glasslab.workflow.execution.dlx", "vhost": "glasslab", "destination": "glasslab.workflow.execution.dlq", "destination_type": "queue", "routing_key": "#", "arguments": {}}
+      ]
+    }
+  # Post-start verification script. Exports the live definitions and compares
+  # them against the rendered expected topology (verify.eval). A non-zero exit
+  # fails the postStart hook, which kills the container: drift surfaces as a
+  # CrashLoopBackOff and the rollout stops instead of continuing silently.
+  verify-topology.sh: |
+    #!/bin/sh
+    set -eu
+    i=0
+    # check_running waits for the rabbit application itself (definitions
+    # import included); plain ping succeeds earlier, during Erlang boot.
+    until rabbitmq-diagnostics -q check_running >/dev/null 2>&1; do
+        i=$((i+1))
+        if [ "$i" -ge 90 ]; then
+            echo "topology verify: broker did not become ready" >&2
+            exit 1
+        fi
+        sleep 2
+    done
+    rabbitmqctl export_definitions /tmp/glasslab-live-definitions.json >/dev/null
+    # Operator policies are not included in exported definitions, so they are
+    # checked directly against the broker. This deployment declares none.
+    if rabbitmqctl list_operator_policies -p glasslab 2>/dev/null | tail -n +2 | grep -q .; then
+        echo "topology drift: unexpected operator policies on vhost glasslab" >&2
+        exit 1
+    fi
+    rabbitmqctl eval "$(cat /etc/rabbitmq/glasslab-verify/verify.eval)"
+
+  # Deterministic topology conformance check, evaluated inside the broker via
+  # `rabbitmqctl eval`. Compares the live exported definitions against the
+  # rendered expected file: vhost, glasslab/topology-version global parameter
+  # (derived from the rendered file, never hard-coded), queues and exchanges
+  # (flags plus EXACT argument-map equality in both directions — an expected
+  # entity may not carry undeclared live arguments), and bindings as an exact
+  # set match (bindings are active routing state; an unexpected binding keeps
+  # routing new messages to a retired queue, so only whole queues/exchanges
+  # may drain as tolerated extras — never their bindings).
+  #
+  # Security identity state is enforced exactly: unexpected users, unexpected
+  # permission grants on the Glasslab vhost, and unexpected vhosts all fail
+  # verification. Only topology entities (queues, exchanges, bindings) get
+  # drain tolerance as tolerated extras; that exception never applies to
+  # identities. Password hashes are deliberately not compared; rotation is
+  # handled by re-import (see README.md).
+  verify.eval: |
+    begin
+        {ok, ExpBin} = file:read_file("/etc/rabbitmq/rendered/definitions.json"),
+        Expected = json:decode(ExpBin),
+        {ok, LiveBin} = file:read_file("/tmp/glasslab-live-definitions.json"),
+        Live = json:decode(LiveBin),
+        Vhost = <<"glasslab">>,
+        LiveVhosts = [maps:get(<<"name">>, V) || V <- maps:get(<<"vhosts">>, Live, [])],
+        ExpectedVersions = [Value || Entry <- maps:get(<<"global_parameters">>, Expected, []), is_map(Entry), maps:get(<<"name">>, Entry) =:= <<"glasslab/topology-version">>, Value <- [maps:get(<<"value">>, Entry)]],
+        WantVersion = case ExpectedVersions of
+            [V] when is_integer(V) -> V;
+            BadExpected -> erlang:error({invalid_expected_version, BadExpected})
+        end,
+        LiveVersions = [Value || Entry <- maps:get(<<"global_parameters">>, Live, []), is_map(Entry), maps:get(<<"name">>, Entry) =:= <<"glasslab/topology-version">>, Value <- [maps:get(<<"value">>, Entry)]],
+        VersionDrift = case LiveVersions of
+            [WantVersion] -> [];
+            LiveOther -> [{version, expected, WantVersion, live, LiveOther}]
+        end,
+        ByName = fun(Section) -> maps:from_list([{maps:get(<<"name">>, E), E} || E <- maps:get(Section, Live, []), maps:get(<<"vhost">>, E, none) =:= Vhost]) end,
+        ArgsDrift = fun(W, L) ->
+            WA = maps:get(<<"arguments">>, W, #{}),
+            LA = maps:get(<<"arguments">>, L, #{}),
+            lists:append([
+                case maps:get(K, LA, unmatched) of
+                    WV -> [];
+                    LiveValue -> [{arg_mismatch, K, expected, WV, live, LiveValue}]
+                end || {K, WV} <- maps:to_list(WA)
+            ]) ++ [{extra_arg, K} || K <- maps:keys(LA), not maps:is_key(K, WA)]
+        end,
+        Bool = fun(M, K) -> maps:get(K, M, false) end,
+        EntityDrift = fun(Kind, Section, Fields, CompareType) ->
+            Have = ByName(Section),
+            lists:append([case maps:find(maps:get(<<"name">>, W), Have) of
+                error -> [{Kind, maps:get(<<"name">>, W), missing}];
+                {ok, L} ->
+                    Name = maps:get(<<"name">>, W),
+                    FieldIssues = [{Kind, Name, F, expected, Bool(W, F), live, Bool(L, F)} || F <- Fields, Bool(W, F) =/= Bool(L, F)],
+                    ArgIssues = case ArgsDrift(W, L) of
+                        [] -> [];
+                        BadArgs -> [{Kind, Name, args_mismatch, BadArgs}]
+                    end,
+                    TypeIssues = case CompareType of
+                        false -> [];
+                        true -> case maps:get(<<"type">>, W, none) =:= maps:get(<<"type">>, L, none) of
+                            true -> [];
+                            false -> [{Kind, Name, type, expected, maps:get(<<"type">>, W, none), live, maps:get(<<"type">>, L, none)}]
+                        end
+                    end,
+                    FieldIssues ++ ArgIssues ++ TypeIssues
+            end || W <- maps:get(Section, Expected, [])])
+        end,
+        QueueDrift = EntityDrift(queue, <<"queues">>, [<<"durable">>, <<"auto_delete">>], false),
+        ExchangeDrift = EntityDrift(exchange, <<"exchanges">>, [<<"durable">>, <<"auto_delete">>, <<"internal">>], true),
+        %% Bindings are active routing state, not inert retained state: an
+        %% unexpected binding keeps delivering newly published messages to a
+        %% supposedly retired queue. The live Glasslab binding set must match
+        %% the expected set exactly; drain tolerance applies only to extra
+        %% queues/exchanges themselves, never to their bindings.
+        BindingKey = fun(B) ->
+            {maps:get(<<"source">>, B), maps:get(<<"destination">>, B), maps:get(<<"routing_key">>, B), maps:get(<<"destination_type">>, B, none), maps:get(<<"arguments">>, B, #{})}
+        end,
+        ExpectedBindingKeys = [BindingKey(B) || B <- maps:get(<<"bindings">>, Expected, [])],
+        LiveBindingKeys = [BindingKey(B) || B <- maps:get(<<"bindings">>, Live, []), maps:get(<<"vhost">>, B, none) =:= Vhost],
+        MissingBindings = [{binding_missing, element(1, K), element(2, K)} || K <- ExpectedBindingKeys, not lists:member(K, LiveBindingKeys)],
+        UnexpectedBindings = [{binding_unexpected, element(1, K), element(2, K)} || K <- LiveBindingKeys, not lists:member(K, ExpectedBindingKeys)],
+        BindingDrift = MissingBindings ++ UnexpectedBindings,
+        LiveUserNames = [maps:get(<<"name">>, U) || U <- maps:get(<<"users">>, Live, [])],
+        ExpectedUserNames = [maps:get(<<"name">>, U) || U <- maps:get(<<"users">>, Expected, [])],
+        UserDrift = [{user, N, missing} || N <- ExpectedUserNames, not lists:member(N, LiveUserNames)]
+            ++ [{user, N, unexpected} || N <- LiveUserNames, not lists:member(N, ExpectedUserNames)],
+        PermKey = fun(P) -> {maps:get(<<"user">>, P), maps:get(<<"configure">>, P), maps:get(<<"write">>, P), maps:get(<<"read">>, P)} end,
+        LivePermKeys = [PermKey(P) || P <- maps:get(<<"permissions">>, Live, []), maps:get(<<"vhost">>, P, none) =:= Vhost],
+        ExpectedPermKeys = [PermKey(P) || P <- maps:get(<<"permissions">>, Expected, [])],
+        PermDrift = [{permission, element(1, K), missing_or_changed} || K <- ExpectedPermKeys, not lists:member(K, LivePermKeys)]
+            ++ [{permission, element(1, K), unexpected_grant} || K <- LivePermKeys, not lists:member(K, ExpectedPermKeys)],
+        AllowedVhosts = [Vhost, <<"/">>],
+        UnexpectedVhosts = [V || V <- LiveVhosts, not lists:member(V, AllowedVhosts)],
+        VhostIssues = case lists:member(Vhost, LiveVhosts) of
+            true -> [];
+            false -> [{missing_vhost, Vhost}]
+        end,
+        VhostDrift = VhostIssues ++ [{unexpected_vhost, V} || V <- UnexpectedVhosts],
+        %% This deployment declares no policies; any policy or operator
+        %% policy on the Glasslab vhost can silently override quorum-queue
+        %% semantics (max-length, overflow, delivery limits, dead-lettering)
+        %% without touching declared queue arguments, so both are drift.
+        VhostPolicies = [P || P <- maps:get(<<"policies">>, Live, []), maps:get(<<"vhost">>, P, none) =:= Vhost],
+        RegularPolicyDrift = [{policy, maps:get(<<"name">>, P), unexpected} || P <- VhostPolicies],
+        VhostOperatorPolicies = [P || P <- maps:get(<<"operator_policies">>, Live, []), maps:get(<<"vhost">>, P, none) =:= Vhost],
+        OperatorPolicyDriftFromExport = [{operator_policy, maps:get(<<"name">>, P), unexpected} || P <- VhostOperatorPolicies],
+        Drift = VhostDrift ++ VersionDrift ++ QueueDrift ++ ExchangeDrift ++ BindingDrift ++ PermDrift ++ UserDrift ++ RegularPolicyDrift ++ OperatorPolicyDriftFromExport,
+        case Drift of
+            [] -> io:format("topology verified (glasslab/topology-version=~p)~n", [WantVersion]), ok;
+            _ -> erlang:error({topology_drift, Drift})
+        end
+    end.
+  render.py: |
+    """Render broker definitions from the versioned template and SOPS-managed
+    credentials. Fails closed: any unresolved placeholder aborts the pod before
+    RabbitMQ starts."""
+
+    from __future__ import annotations
+
+    import json
+    import os
+    from pathlib import Path
+
+    WORK = Path("/work")
+    TEMPLATE = WORK / "definitions.template.json"
+    RENDERED = WORK / "rendered" / "definitions.json"
+    COOKIE = Path("/var/lib/rabbitmq/.erlang.cookie")
+
+    PASSWORD_ENV = {
+        "glasslab-topology-admin": "topology_admin_password",
+        "glasslab-publisher": "publisher_password",
+        "glasslab-consumer": "consumer_password",
+        "glasslab-monitor": "monitoring_password",
+    }
+
+    def main() -> None:
+        document = json.loads(TEMPLATE.read_text(encoding="utf-8"))
+
+        for user in document["users"]:
+            env_name = PASSWORD_ENV[user["name"]]
+            password = os.environ[env_name]
+            if not password:
+                raise SystemExit(f"{env_name} is empty")
+            user["password"] = password
+
+        rendered = json.dumps(document, indent=2)
+        if "<glasslab-" in rendered:
+            raise SystemExit("unresolved credential placeholder in rendered definitions")
+
+        RENDERED.parent.mkdir(parents=True, exist_ok=True)
+        RENDERED.write_text(rendered + "\n", encoding="utf-8")
+        RENDERED.chmod(0o600)
+
+        cookie = os.environ["erlang_cookie"]
+        if not cookie:
+            raise SystemExit("erlang_cookie is empty")
+        COOKIE.write_text(cookie + "\n", encoding="ascii")
+        COOKIE.chmod(0o600)
+
+        print("rendered task-fabric definitions")
+
+    if __name__ == "__main__":
+        main()

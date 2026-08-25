@@ -41,7 +41,7 @@ Validated from `.44`:
   - `node49`
 - the 2026-03-24 provisioner diff confirms:
   - `chpasswd` removal from `default`, `node02`, `node48`, and `node49`
-  - removal of the explicit `clusteradmin:Glasslab@7311` late-command from `node48`
+  - removal of the explicit `clusteradmin:[removed shared password]` late-command from `node48`
 
 Implication:
 

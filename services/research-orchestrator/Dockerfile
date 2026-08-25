@@ -20,8 +20,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt ./
+COPY services/research-orchestrator/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Shared task-fabric protocol package, installed from the checked-out source.
+COPY services/task-fabric /app/services/task-fabric
+RUN pip install --no-cache-dir /app/services/task-fabric
 
 ARG GLASSLAB_GIT_SHA=unknown
 ARG GLASSLAB_BUILD_SOURCE=unspecified
@@ -29,12 +33,12 @@ LABEL org.opencontainers.image.revision="${GLASSLAB_GIT_SHA}"
 LABEL org.opencontainers.image.source="https://github.com/ccny-glasslab/glasslab-cluster-config"
 LABEL io.glasslab.build-source="${GLASSLAB_BUILD_SOURCE}"
 
-COPY app ./app
-COPY prompts ./prompts
-COPY evaluation-contracts ./evaluation-contracts
+COPY services/research-orchestrator/app ./app
+COPY services/research-orchestrator/prompts ./prompts
+COPY services/research-orchestrator/evaluation-contracts ./evaluation-contracts
 # Operational migration tooling is part of the reviewed image so a live store
 # cutover does not depend on copying executable files into a running pod.
-COPY scripts ./scripts
+COPY services/research-orchestrator/scripts ./scripts
 
 RUN useradd --uid 10001 --create-home orchestrator \
     && mkdir -p /var/lib/glasslab-research-orchestrator \

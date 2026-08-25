@@ -22,6 +22,13 @@ spec:
           image: ghcr.io/ccny-glasslab/glasslab-research-command-router:0.1.11-local
           imagePullPolicy: IfNotPresent
           env:
+            - name: GLASSLAB_WORKFLOW_API_CALLER_NAME
+              value: research-command-router
+            - name: GLASSLAB_WORKFLOW_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-workflow-api-research-command-router
+                  key: token
             - name: GLASSLAB_RESEARCH_COMMAND_ROUTER_WORKFLOW_API_URL
               value: http://glasslab-workflow-api.glasslab-v2.svc.cluster.local:8080
             - name: GLASSLAB_RESEARCH_COMMAND_ROUTER_TIMEOUT_SECONDS

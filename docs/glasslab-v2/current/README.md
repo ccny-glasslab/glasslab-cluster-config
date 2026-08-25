@@ -11,6 +11,7 @@ historical path that got the repo here.
 - `../learning-task-flow.md`
 - `../investigation-api-v1.md`
 - `../local-model-command-surface.md`
+- `../runtime-replay-report.md`
 - `../deprecated-api-surface-2026-07.md`
 - `../ci-policy-2026-07.md`
 - `../command-surface-spec.md`

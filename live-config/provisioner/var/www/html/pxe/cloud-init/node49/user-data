@@ -4,7 +4,7 @@ autoinstall:
   identity:
     hostname: cp01
     username: clusteradmin
-    password: $6$Dmi5hbO3MskX/nsw$JGQwPAgelyCCVi4KeA2kU6qfhPnmHyjR0JSyIKQYacgjSCH4C3eVo43XskQZAZrkC1uILDcTKJ6TcAilKjQ8Q/
+    password: '!'
   ssh:
     install-server: true
     allow-pw: false

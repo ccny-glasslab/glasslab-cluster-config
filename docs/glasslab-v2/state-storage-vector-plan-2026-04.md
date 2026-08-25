@@ -96,9 +96,13 @@ The database record should store paths/URIs, not file contents.
 
    ```bash
    python3 services/workflow-api/scripts/import-json-store-to-postgres.py \
-     --json-path /mnt/artifacts/workflow-api/state/run-store.json \
-     --dsn "$GLASSLAB_WORKFLOW_API_STORE_POSTGRES_DSN"
+     --json-path /mnt/artifacts/workflow-api/state/run-store.json
    ```
+
+   The importer reads the DSN from
+   `GLASSLAB_WORKFLOW_API_STORE_POSTGRES_DSN`. For a protected file or pipe,
+   pass an already-open descriptor with `--dsn-fd` instead. The legacy
+   secret-bearing `--dsn` argument is rejected.
 
 3. Apply the Postgres pgvector image and `workflow-api` ConfigMap updates.
 4. Restart `workflow-api`.

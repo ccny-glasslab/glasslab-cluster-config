@@ -151,20 +151,26 @@ class PostgresStore:
         return record
 
     def create_terminal_retry(self, record: RunRecord, *, parent_run_id: str, retry_key: str, checkpoint_digest: str, one_active_run: bool) -> tuple[RunRecord, bool]:
+        terminal = {state.value for state in TERMINAL_STATES}
         with self.transaction() as conn:
-            existing = conn.execute('SELECT child_run_id FROM orchestrator_terminal_run_retries WHERE parent_run_id=%s FOR UPDATE', (parent_run_id,)).fetchone()
-            if existing:
+            existing = conn.execute('SELECT r.child_run_id, r.retry_key, child.state AS child_state FROM orchestrator_terminal_run_retries r JOIN orchestrator_runs child ON child.run_id = r.child_run_id WHERE r.parent_run_id=%s FOR UPDATE OF r', (parent_run_id,)).fetchone()
+            if existing and (existing['child_state'] not in terminal or existing['retry_key'] == retry_key):
                 row = conn.execute('SELECT payload FROM orchestrator_runs WHERE run_id=%s', (existing['child_run_id'],)).fetchone()
                 return self._run(row, str(existing['child_run_id'])), False
             parent = conn.execute('SELECT state FROM orchestrator_runs WHERE run_id=%s FOR UPDATE', (parent_run_id,)).fetchone()
             if parent is None: raise RecordNotFound(parent_run_id)
-            if parent['state'] not in {state.value for state in TERMINAL_STATES}:
+            if parent['state'] not in terminal:
                 raise ConcurrencyConflict('terminal retry source is not terminal')
             if one_active_run:
                 active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) LIMIT 1', ([state.value for state in TERMINAL_STATES],)).fetchone()
                 if active: raise ConcurrencyConflict(f"active run already exists: {active['run_id']}")
             conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at))
-            conn.execute('INSERT INTO orchestrator_terminal_run_retries (parent_run_id, child_run_id, retry_key, checkpoint_digest, created_at) VALUES (%s,%s,%s,%s,%s)', (parent_run_id, record.run_id, retry_key, checkpoint_digest, record.created_at))
+            if existing is None:
+                conn.execute('INSERT INTO orchestrator_terminal_run_retries (parent_run_id, child_run_id, retry_key, checkpoint_digest, created_at) VALUES (%s,%s,%s,%s,%s)', (parent_run_id, record.run_id, retry_key, checkpoint_digest, record.created_at))
+            else:
+                conn.execute('UPDATE orchestrator_terminal_run_retries SET child_run_id=%s, retry_key=%s, checkpoint_digest=%s, created_at=%s WHERE parent_run_id=%s', (record.run_id, retry_key, checkpoint_digest, record.created_at, parent_run_id))
+                superseded_payload = {'parent_run_id': parent_run_id, 'child_run_id': str(existing['child_run_id']), 'superseded_by': record.run_id}
+                self._append_event_conn(conn, run_id=str(existing['child_run_id']), source='orchestrator', event_type='run.retry_superseded', payload=superseded_payload)
             payload = {'parent_run_id': parent_run_id, 'child_run_id': record.run_id, 'checkpoint_digest': checkpoint_digest}
             self._append_event_conn(conn, run_id=parent_run_id, source='orchestrator', event_type='run.retry_created', payload=payload)
             self._append_event_conn(conn, run_id=record.run_id, source='orchestrator', event_type='run.created', payload={'objective': record.objective, 'state': record.state.value, 'parent_run_id': parent_run_id})
@@ -298,7 +304,8 @@ class PostgresStore:
         if not row: raise RecordNotFound(job_id)
         return JobRecord.model_validate(row['payload'])
     def list_jobs(self, run_id: str, *, statuses: Iterable[JobStatus] | None = None) -> list[JobRecord]:
-        query, params = 'SELECT payload FROM orchestrator_jobs WHERE run_id=%s', [run_id]
+        query = 'SELECT payload FROM orchestrator_jobs WHERE run_id=%s'
+        params: list[Any] = [run_id]
         if statuses: query += ' AND status = ANY(%s)'; params.append([s.value for s in statuses])
         query += ' ORDER BY created_at'
         with self._connect() as conn: return [JobRecord.model_validate(r['payload']) for r in conn.execute(query, params).fetchall()]
@@ -330,7 +337,9 @@ class PostgresStore:
         with self._connect() as conn: row = conn.execute('SELECT payload FROM orchestrator_knowledge_sources WHERE digest=%s AND canonical_uri=%s', (digest, canonical_uri)).fetchone()
         return KnowledgeSource.model_validate(row['payload']) if row else None
     def list_knowledge_sources(self, *, source_types: Iterable[SourceType] | None = None, run_scope: str | None = None) -> list[KnowledgeSource]:
-        query, params, clauses = 'SELECT payload FROM orchestrator_knowledge_sources', [], []
+        query = 'SELECT payload FROM orchestrator_knowledge_sources'
+        params: list[Any] = []
+        clauses: list[str] = []
         if run_scope is not None: clauses.append('(run_scope=%s OR run_scope IS NULL)'); params.append(run_scope)
         if source_types: clauses.append('source_type = ANY(%s)'); params.append([x.value for x in source_types])
         if clauses: query += ' WHERE ' + ' AND '.join(clauses)
@@ -351,7 +360,11 @@ class PostgresStore:
         # The rank expression and the WHERE predicate each bind the search
         # query. Keep both parameters explicit; psycopg does not reuse a
         # positional placeholder automatically.
-        params: list[Any] = [query, query]
+        # websearch_to_tsquery ANDs every token; long agent-context queries
+        # would never match short chunks. OR the tokens instead and let
+        # ts_rank_cd prefer chunks that contain more of them.
+        or_query = ' OR '.join(token for token in query.split() if len(token) > 1) or query
+        params: list[Any] = [or_query, or_query]
         clause = "to_tsvector('simple', text) @@ websearch_to_tsquery('simple', %s)"
         if source_ids: clause += ' AND source_id = ANY(%s)'; params.append(source_ids)
         params.append(limit)

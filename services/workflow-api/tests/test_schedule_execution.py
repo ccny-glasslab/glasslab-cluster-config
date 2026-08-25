@@ -24,7 +24,24 @@ def build_settings() -> Settings:
 
 
 def build_registry() -> WorkflowRegistry:
-    return WorkflowRegistry(build_settings().registry_dir)
+    registry = WorkflowRegistry(build_settings().registry_dir)
+    workflow = registry.get_workflow('generic-tabular-benchmark')
+    assert workflow is not None
+    registry._entries[workflow.workflow_id] = type(workflow).model_validate(
+        {
+            **workflow.model_dump(mode='json'),
+            'runner_image': (
+                'ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:'
+                'dae5bc4967f5ac54edb6c6d63d8d3db9e4652cc46e035118b0c456eb70121061'
+            ),
+            'default_entrypoint': ['python3', '-m', 'runner'],
+            'execution_status': 'ready',
+            'submission_backend': 'kubernetes',
+            'execution_blockers': [],
+            'max_wallclock_minutes': 60,
+        }
+    )
+    return registry
 
 
 def cron_expr_for(now: datetime) -> str:

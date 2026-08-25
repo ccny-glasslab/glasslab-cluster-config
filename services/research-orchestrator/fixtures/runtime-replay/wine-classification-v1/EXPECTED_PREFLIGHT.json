@@ -1,0 +1,27 @@
+{
+  "comparisons": {
+    "baseline_comparison": [
+      "logistic_regression",
+      "random_forest",
+      "gradient_boosting"
+    ]
+  },
+  "decisions": {
+    "class_weighting": [
+      "logistic_regression",
+      "random_forest",
+      "gradient_boosting"
+    ],
+    "cross_validation": [
+      "logistic_regression",
+      "random_forest",
+      "gradient_boosting"
+    ],
+    "threshold_optimization": [
+      "logistic_regression",
+      "random_forest",
+      "gradient_boosting"
+    ]
+  },
+  "schema_version": "glasslab-runtime-replay-expected-v1"
+}

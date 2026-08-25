@@ -15,12 +15,13 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, status
+from pydantic import ValidationError
 
 from services.common.schemas import ArtifactIndexEntry, ArtifactsIndex, ExpectedArtifactsSpec, RunManifest, RunStatus
 
 from .config import Settings
 from .execution_preflight import build_execution_preflight_result
-from .job_submission import JobSubmitter, resolve_evaluation_contract
+from .job_submission import JobSubmitter, LiveStatusUnavailableError, resolve_evaluation_contract
 from .persistence import RunStore
 from .registry import WorkflowRegistry
 from .run_artifacts import (
@@ -36,6 +37,7 @@ from .schemas import (
     GenericExperimentCompareRequest,
     GenericExperimentResultIngestRequest,
     GenericExperimentRunRequest,
+    InvestigationWorkspaceSpec,
     LogEntry,
     RunArtifactsResponse,
     RunCreateRequest,
@@ -109,6 +111,16 @@ def register_execution_routes(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"workload {workflow.workflow_id} requires experiment_type {workflow.experiment_type}",
             )
+        preflight = build_execution_preflight_result(workflow, settings)
+        if not preflight.ready:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    'message': 'execution preflight failed',
+                    'workflow_id': workflow.workflow_id,
+                    'blocking_issues': preflight.blocking_issues,
+                },
+            )
         if (
             workflow.schema_ref == 'glasslab-investigation-workspace-v1'
             and not all(
@@ -129,15 +141,26 @@ def register_execution_routes(
                 ),
             )
 
-        runner_image = request.image_ref or workflow.runner_image
-        entrypoint = request.entrypoint or list(workflow.default_entrypoint or [])
-
-        if request.image_ref and request.image_ref != workflow.runner_image and not workflow.allow_custom_image:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='workload does not allow a custom image_ref')
-        if request.entrypoint and request.entrypoint != list(workflow.default_entrypoint or []) and not workflow.allow_custom_entrypoint:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='workload does not allow a custom entrypoint')
+        runner_image = workflow.runner_image
+        entrypoint = list(workflow.default_entrypoint or [])
         if not entrypoint:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='no entrypoint resolved for workload')
+
+        config_payload = dict(request.config_payload)
+        if workflow.schema_ref in {
+            'glasslab-investigation-workspace-v1',
+            'glasslab-benchmark-workspace-v1',
+        }:
+            try:
+                workspace = InvestigationWorkspaceSpec.model_validate(
+                    config_payload.get('workspace')
+                )
+            except ValidationError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail='invalid config_payload.workspace: ' + str(exc),
+                ) from exc
+            config_payload['workspace'] = workspace.model_dump(mode='json')
 
         if request.artifact_contract is None:
             expected_artifacts = workflow.expected_artifacts
@@ -176,6 +199,14 @@ def register_execution_routes(
                 status_code=status.HTTP_409_CONFLICT,
                 detail='budget.max_wallclock_minutes is required and must be a positive integer',
             )
+        if max_wallclock_minutes > workflow.max_wallclock_minutes:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    'budget.max_wallclock_minutes exceeds the registry ceiling '
+                    f'of {workflow.max_wallclock_minutes}'
+                ),
+            )
 
         now = datetime.now(timezone.utc)
         run_id = uuid4().hex
@@ -191,7 +222,6 @@ def register_execution_routes(
             inputs={
                 'parent_run_id': request.parent_run_id,
                 'campaign_id': request.campaign_id,
-                'resources': request.resources,
             },
             requested_models=workflow.allowed_models[:1],
             resource_profile=workflow.resource_profile.profile_name,
@@ -199,6 +229,8 @@ def register_execution_routes(
             resource_limits=workflow.resource_profile.limits,
             node_selector=workflow.resource_profile.node_selector,
             runner_image=runner_image,
+            runner_service_account_name=workflow.runner_service_account_name,
+            maximum_wallclock_minutes=workflow.max_wallclock_minutes,
             evaluator_type=workflow.evaluator_type,
             approval_tier=workflow.approval_tier,
             expected_artifacts=expected_artifacts.model_dump(mode='json'),
@@ -206,7 +238,7 @@ def register_execution_routes(
             workload_id=request.workload_id,
             schema_ref=workflow.schema_ref,
             entrypoint=entrypoint,
-            config_payload=request.config_payload,
+            config_payload=config_payload,
             dataset_bindings=request.dataset_bindings,
             budget=request.budget,
             metric_contract=metric_contract,
@@ -654,6 +686,37 @@ def register_execution_routes(
         if record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='run not found')
         return record.model_copy(update={'status': resolve_run_status(record, settings, submitter)})
+
+    @app.post('/runs/{run_id}/cancel', response_model=RunRecord)
+    def cancel_run(run_id: str) -> RunRecord:
+        record = store.get_run(run_id)
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='run not found')
+        if record.status.status == 'cancelled':
+            return record
+        if record.status.status in {'succeeded', 'failed', 'rejected'}:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='terminal run cannot be cancelled')
+        try:
+            submitter.cancel_run(record)
+        except (LiveStatusUnavailableError, NotImplementedError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail='workload cancellation could not be confirmed',
+            ) from exc
+        now = datetime.now(timezone.utc)
+        updated = record.model_copy(
+            update={
+                'updated_at': now,
+                'status': RunStatus(
+                    run_id=run_id,
+                    status='cancelled',
+                    updated_at=now,
+                    detail='Workload cancellation confirmed.',
+                ),
+            }
+        )
+        store.save_run(updated)
+        return updated
 
     @app.get('/runs/{run_id}/artifacts', response_model=RunArtifactsResponse)
     def get_run_artifacts(run_id: str) -> RunArtifactsResponse:

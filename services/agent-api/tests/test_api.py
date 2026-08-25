@@ -59,6 +59,7 @@ class FakeJobStatusService:
 
 def build_test_client(tmp_path):
     settings = Settings(
+        qwen_api_key='fixture-qwen-key',
         state_db_path=str(tmp_path / 'agent.db'),
         auto_monitor_submitted_jobs=False,
         llm_summary_enabled=False,

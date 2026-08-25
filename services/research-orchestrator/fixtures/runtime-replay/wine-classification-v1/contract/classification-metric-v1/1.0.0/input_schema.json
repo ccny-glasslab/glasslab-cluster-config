@@ -1,0 +1,44 @@
+{
+  "type": "object",
+  "properties": {
+    "y_true": {
+      "type": "array",
+      "items": {"type": "integer"},
+      "description": "True binary labels (0 or 1)"
+    },
+    "y_pred": {
+      "type": "array",
+      "items": {"type": "integer"},
+      "description": "Predicted binary labels"
+    },
+    "y_pred_optimized": {
+      "type": "array",
+      "items": {"type": "integer"},
+      "description": "Predicted labels using optimized threshold"
+    },
+    "y_prob": {
+      "type": "array",
+      "items": {"type": "number"},
+      "description": "Predicted probabilities"
+    },
+    "threshold": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Optimized classification threshold"
+    },
+    "auc": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "ROC-AUC score"
+    },
+    "f1": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "F1 score with optimized threshold"
+    }
+  },
+  "required": ["y_true", "y_pred", "y_pred_optimized", "y_prob", "threshold", "auc", "f1"]
+}

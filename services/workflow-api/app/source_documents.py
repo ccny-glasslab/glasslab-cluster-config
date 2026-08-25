@@ -12,10 +12,16 @@ from datetime import datetime, timezone
 from io import BytesIO
 import hashlib
 import html
+import http.client
+import ipaddress
 import mimetypes
 import re
+import socket
+import ssl
+import time
 from pathlib import Path
-from urllib import request as urllib_request
+from collections.abc import Callable, Iterable
+from urllib.parse import urljoin, urlsplit, urlunsplit
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, status
@@ -142,6 +148,115 @@ PYTHON_LIBRARY_KEYWORDS = [
     'jax',
     'flax',
 ]
+
+ALLOWED_SOURCE_DOCUMENT_MEDIA_TYPES = frozenset({
+    'application/pdf',
+    'application/xhtml+xml',
+    'text/html',
+    'text/plain',
+})
+SOURCE_DOCUMENT_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+class SourceDocumentFetchError(ValueError):
+    """Raised when a remote source violates the bounded-fetch policy."""
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection whose TCP destination is the address we validated."""
+
+    def __init__(self, host: str, port: int, address: str, timeout: float):
+        super().__init__(host=host, port=port, timeout=timeout)
+        self._validated_address = address
+
+    def connect(self) -> None:
+        raw_socket = socket.create_connection(
+            (self._validated_address, self.port), self.timeout, self.source_address
+        )
+        if self._tunnel_host:
+            self.sock = raw_socket
+            self._tunnel()
+        self.sock = self._context.wrap_socket(raw_socket, server_hostname=self.host)
+
+
+Resolver = Callable[..., list[tuple[object, ...]]]
+ConnectionFactory = Callable[[str, int, str, float], object]
+
+
+def _default_connection_factory(host: str, port: int, address: str, timeout: float) -> _PinnedHTTPSConnection:
+    return _PinnedHTTPSConnection(host, port, address, timeout)
+
+
+def _validate_source_url(
+    source_url: str,
+    *,
+    resolver: Resolver,
+    allowed_hosts: Iterable[str] | None,
+    deadline: float,
+    monotonic: Callable[[], float],
+) -> tuple[str, int, str, str, str]:
+    parsed = urlsplit(source_url)
+    if parsed.scheme.lower() != 'https':
+        raise SourceDocumentFetchError('source document URL must use HTTPS')
+    if parsed.username is not None or parsed.password is not None:
+        raise SourceDocumentFetchError('source document URL must not contain credentials')
+    if not parsed.hostname:
+        raise SourceDocumentFetchError('source document URL must contain a hostname')
+
+    host = parsed.hostname.rstrip('.').lower()
+    approved_hosts = {item.rstrip('.').lower() for item in (allowed_hosts or ()) if item.strip()}
+    if approved_hosts and host not in approved_hosts:
+        raise SourceDocumentFetchError(f'source document host is not allowed: {host}')
+
+    try:
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise SourceDocumentFetchError('source document URL contains an invalid port') from exc
+    try:
+        resolved = resolver(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise SourceDocumentFetchError(f'source document DNS resolution failed: {exc}') from exc
+    if not resolved:
+        raise SourceDocumentFetchError('source document hostname resolved to no addresses')
+    _remaining_fetch_time(deadline, monotonic)
+
+    addresses: list[str] = []
+    for result in resolved:
+        sockaddr = result[4]
+        address = str(sockaddr[0])
+        try:
+            parsed_address = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise SourceDocumentFetchError('source document DNS returned an invalid address') from exc
+        if (
+            not parsed_address.is_global
+            or parsed_address.is_multicast
+            or parsed_address.is_unspecified
+            or parsed_address.is_reserved
+        ):
+            raise SourceDocumentFetchError(
+                f'source document hostname resolved to a non-public address: {address}'
+            )
+        addresses.append(address)
+
+    path = parsed.path or '/'
+    if parsed.query:
+        path = f'{path}?{parsed.query}'
+    normalized_url = urlunsplit(('https', parsed.netloc, parsed.path, parsed.query, ''))
+    return host, port, addresses[0], path, normalized_url
+
+
+def _remaining_fetch_time(deadline: float, monotonic: Callable[[], float]) -> float:
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise SourceDocumentFetchError('source document fetch exceeded total deadline')
+    return remaining
+
+
+def _set_connection_timeout(connection: object, timeout: float) -> None:
+    sock = getattr(connection, 'sock', None)
+    if sock is not None:
+        sock.settimeout(timeout)
 
 
 def derive_arxiv_pdf_url(source_url: str | None) -> str | None:
@@ -357,19 +472,103 @@ def extract_text_excerpt(content: bytes, content_type: str | None, source_url: s
     return None
 
 
-def fetch_source_document_bytes(source_url: str) -> tuple[bytes, str | None]:
-    request_obj = urllib_request.Request(
-        source_url,
-        headers={
-            'User-Agent': 'glasslab-workflow-api/0.1.0',
-            'Accept': 'text/html,application/pdf,application/xhtml+xml;q=0.9,*/*;q=0.8',
-        },
-        method='GET',
-    )
-    with urllib_request.urlopen(request_obj, timeout=30.0) as response:
-        content = response.read()
-        content_type = response.headers.get('Content-Type')
-    return content, content_type
+def fetch_source_document_bytes(
+    source_url: str,
+    *,
+    timeout: float = 30.0,
+    max_bytes: int = 20 * 1024 * 1024,
+    max_redirects: int = 4,
+    chunk_size: int = 64 * 1024,
+    allowed_hosts: Iterable[str] | None = None,
+    resolver: Resolver = socket.getaddrinfo,
+    connection_factory: ConnectionFactory = _default_connection_factory,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> tuple[bytes, str | None]:
+    """Fetch one public HTTPS document through a validated, bounded stream.
+
+    The connection is pinned to an address returned by the validation lookup,
+    preventing a second DNS lookup from redirecting the socket to an internal
+    address. Every redirect starts the complete validation process again.
+    """
+    if timeout <= 0 or max_bytes <= 0 or max_redirects < 0 or chunk_size <= 0:
+        raise SourceDocumentFetchError('source document fetch limits must be positive')
+
+    deadline = monotonic() + timeout
+    current_url = source_url
+    for redirect_count in range(max_redirects + 1):
+        host, port, address, path, normalized_url = _validate_source_url(
+            current_url,
+            resolver=resolver,
+            allowed_hosts=allowed_hosts,
+            deadline=deadline,
+            monotonic=monotonic,
+        )
+        connection = connection_factory(
+            host, port, address, _remaining_fetch_time(deadline, monotonic)
+        )
+        response = None
+        try:
+            host_header = host if port == 443 else f'{host}:{port}'
+            connection.request(
+                'GET',
+                path,
+                headers={
+                    'Host': host_header,
+                    'User-Agent': 'glasslab-workflow-api/0.1.0',
+                    'Accept': 'text/html,application/pdf,application/xhtml+xml,text/plain;q=0.9',
+                    'Connection': 'close',
+                },
+            )
+            _remaining_fetch_time(deadline, monotonic)
+            _set_connection_timeout(connection, _remaining_fetch_time(deadline, monotonic))
+            response = connection.getresponse()
+            _remaining_fetch_time(deadline, monotonic)
+            if response.status in SOURCE_DOCUMENT_REDIRECT_STATUSES:
+                location = response.headers.get('Location')
+                if not location:
+                    raise SourceDocumentFetchError('source document redirect omitted Location')
+                if redirect_count >= max_redirects:
+                    raise SourceDocumentFetchError('source document redirect limit exceeded')
+                current_url = urljoin(normalized_url, location)
+                continue
+            if response.status < 200 or response.status >= 300:
+                raise SourceDocumentFetchError(f'source document server returned HTTP {response.status}')
+
+            content_type = response.headers.get('Content-Type')
+            media_type = (content_type or '').split(';', 1)[0].strip().lower()
+            if media_type not in ALLOWED_SOURCE_DOCUMENT_MEDIA_TYPES:
+                raise SourceDocumentFetchError(
+                    f'source document media type is not allowed: {media_type or "missing"}'
+                )
+            content_length = response.headers.get('Content-Length')
+            if content_length:
+                try:
+                    if int(content_length) > max_bytes:
+                        raise SourceDocumentFetchError('source document exceeds response byte limit')
+                except ValueError as exc:
+                    raise SourceDocumentFetchError('source document has invalid Content-Length') from exc
+
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                _set_connection_timeout(connection, _remaining_fetch_time(deadline, monotonic))
+                chunk = response.read(min(chunk_size, max_bytes - total + 1))
+                _remaining_fetch_time(deadline, monotonic)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise SourceDocumentFetchError('source document exceeds response byte limit')
+                chunks.append(chunk)
+            return b''.join(chunks), content_type
+        except (OSError, http.client.HTTPException, ssl.SSLError) as exc:
+            raise SourceDocumentFetchError(f'source document fetch failed: {exc}') from exc
+        finally:
+            if response is not None:
+                response.close()
+            connection.close()
+
+    raise SourceDocumentFetchError('source document redirect limit exceeded')
 
 
 def persist_source_document_bytes(
@@ -433,7 +632,13 @@ def ingest_source_document(
     now = datetime.now(timezone.utc)
     document_id = uuid4().hex
     try:
-        content, content_type = fetch_source_document_bytes(source_url)
+        content, content_type = fetch_source_document_bytes(
+            source_url,
+            timeout=settings.source_document_fetch_timeout_seconds,
+            max_bytes=settings.source_document_max_bytes,
+            max_redirects=settings.source_document_max_redirects,
+            allowed_hosts=settings.source_document_allowed_hosts,
+        )
         fetched_title = guess_document_title(source_url)
         media_type = (content_type or '').split(';', 1)[0].strip().lower()
         if media_type in {'text/html', 'application/xhtml+xml'} or source_url.lower().endswith(('.html', '.htm', '/')):

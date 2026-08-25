@@ -61,7 +61,18 @@ The launcher uses:
 - exo/OpenAI-compatible API: `GLASSLAB_EXO_API_BASE`
 - model id: `GLASSLAB_OPENCODE_MODEL`
 - default model: `mlx-community/Qwen3-Coder-Next-4bit`
-- fallback OpenCode binary: `/home/gr66ss/.npm-global/bin/opencode`
+- fallback OpenCode binary: `$HOME/.npm-global/bin/opencode`
+- key-only SSH fallback target: `glasslab-exo17`
+
+The launcher creates a temporary OpenCode configuration whose provider URL is
+the same endpoint it health-checked. If direct LAN access to `.17` is blocked,
+it creates and later removes an SSH tunnel automatically. It does not read an
+untracked `opencode-with-exo` helper or rely on a possibly stale global
+OpenCode provider URL.
+
+Run this on a contributor workstation, not the provisioner. Keeping OpenCode
+off `.44` preserves the boundary between an untrusted coding agent and the
+canonical apply tree, kubeconfig, and deployment credentials.
 
 If the 70B/Qwen-coder model is registered under a different exo model id, set
 it explicitly:

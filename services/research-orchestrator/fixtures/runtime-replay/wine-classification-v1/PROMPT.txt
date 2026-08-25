@@ -1,0 +1,47 @@
+Revise the implementation and experiment matrix in response to the review below. Run local checks and return a replacement submit_experiment_matrix action. Do not execute cluster work.
+
+
+This is a focused deterministic-preflight correction, not a new implementation pass. The validator has already inspected the implementation. Read the rejected base config `configs/candidate.yaml` and only the directly relevant protocol or source files. Every backticked config_path in the validator errors is an exact dotted path from the root of that config. For example, `experiment_dimensions.model` must be written beneath the top-level `experiment_dimensions` key, not beneath `methodology` or another wrapper. The exact path must directly contain its scalar or list of values; do not add `description` or `values` metadata wrappers. Correct every validator error exactly, then read back each required dotted path and run the narrowest applicable check before returning the replacement action. Do not browse unrelated repository files or redesign working code unless an error explicitly names that code.
+The workload must emit metrics and evidence only. Remove any workload code that creates, reads, or scores `evaluation.json`, `rubric_score`, or `integrity_pass`; the immutable contract owns those outputs.
+
+Permitted runner images: ["ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:9e7c18d186108847a485ab955194ced2dceee3ed8c8a624a2b0f3ee0e7628b60", "ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:dae5bc4967f5ac54edb6c6d63d8d3db9e4652cc46e035118b0c456eb70121061"]
+Resource ceilings: cpu=8, memory_gib=32, gpus=1, maximum_parallel_jobs=4.
+
+Required submit_experiment_matrix action shape:
+{
+  "arguments": {
+    "base_config": "configs/candidate.yaml",
+    "maximum_parallel_jobs": 1,
+    "required_artifacts": [
+      "metrics.json"
+    ],
+    "resources": {
+      "cpu": 1.0,
+      "gpus": 0,
+      "memory_gib": 2.0,
+      "wallclock_minutes": 30
+    },
+    "runner_image": "ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:9e7c18d186108847a485ab955194ced2dceee3ed8c8a624a2b0f3ee0e7628b60",
+    "seeds": [
+      17
+    ],
+    "variants": [
+      {
+        "name": "candidate",
+        "overrides": {}
+      }
+    ]
+  },
+  "reason": "Run the bounded candidate for methodology and human review.",
+  "type": "submit_experiment_matrix"
+}
+Keep reason beside type and arguments. Put the ExperimentMatrix fields directly in arguments; do not add a matrix or evaluator_type wrapper. Matrix seeds create separate cluster jobs. If the workload already runs an internal seed list for stability analysis, keep that list in the implementation and use one outer matrix seed; do not mirror the internal list into the matrix.
+
+Review feedback:
+Deterministic matrix preflight failed: missing methodology setting `src/train.py`: Compare L2-regularized logistic regression baseline with non-linear ensembles (Random Forest, Gradient Boosting); missing methodology setting `src/train.py`: Optimize classification threshold per fold to maximize F1 score; missing methodology setting `src/train.py`: Use stratified k-fold cross-validation (k=5) with fixed random seed; missing methodology setting `src/train.py`: Apply class weighting to address class imbalance in high-quality wine classification. Methodology requirements resolve against the YAML file at matrix.base_config inside your worktree: the resolver splits each requirement config_path ONLY on "." characters; every other character, including "/", is a literal part of a YAML key name. So config_path "src/train.py" means: split on the dot -> first key is literally "src/train", then nested key "py". A comparison requirement needs that final node to be a list of at least minimum_distinct_values distinct strings; decision requirements need at least one value. Exact YAML for config_path "src/train.py" with three model families:
+"src/train":
+  "py":
+    - logistic_regression
+    - random_forest
+    - gradient_boosting
+(quote the "src/train" key; it contains a slash, not a dot). Edit the base_config file so every listed requirement resolves, then re-propose the same matrix.

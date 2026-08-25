@@ -20,6 +20,16 @@ WORKFLOW_API_URL = os.environ.get(
     'http://glasslab-workflow-api.glasslab-v2.svc.cluster.local:8080',
 ).rstrip('/')
 TIMEOUT_SECONDS = float(os.environ.get('GLASSLAB_SCHEDULE_WORKER_TIMEOUT_SECONDS', '30'))
+def mutation_headers() -> dict[str, str]:
+    caller_name = os.environ.get('GLASSLAB_WORKFLOW_API_CALLER_NAME', '').strip()
+    token = os.environ.get('GLASSLAB_WORKFLOW_API_TOKEN', '')
+    if not caller_name or not token.strip():
+        raise RuntimeError('workflow API mutation credentials are not configured')
+    return {
+        'Content-Type': 'application/json',
+        'X-Glasslab-Caller': caller_name,
+        'X-Glasslab-Workflow-Token': token,
+    }
 
 
 def worker_config() -> WorkerConfigMetadata:
@@ -35,7 +45,7 @@ def run_due_digest_cycle() -> RunOnceResponse:
     request_obj = urllib_request.Request(
         f'{WORKFLOW_API_URL}/digest-schedules/run-due',
         data=b'',
-        headers={'Content-Type': 'application/json'},
+        headers=mutation_headers(),
         method='POST',
     )
     with urllib_request.urlopen(request_obj, timeout=TIMEOUT_SECONDS) as response:
@@ -53,7 +63,7 @@ def run_due_approved_rerun_cycle() -> list[ScheduledExecutionPayload]:
     request_obj = urllib_request.Request(
         f'{WORKFLOW_API_URL}/approved-rerun-schedules/run-due',
         data=b'',
-        headers={'Content-Type': 'application/json'},
+        headers=mutation_headers(),
         method='POST',
     )
     with urllib_request.urlopen(request_obj, timeout=TIMEOUT_SECONDS) as response:

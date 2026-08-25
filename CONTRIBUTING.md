@@ -50,9 +50,10 @@ The default check mirrors the default CI signal:
 
 ## Pull Request Flow
 
-Create one branch for one coherent change and open a pull request into `main`.
-Continue pushing revisions to the same branch; GitHub updates the pull request
-automatically.
+Create one branch for one coherent change and open a pull request into
+`testing`. Continue pushing revisions to the same branch; GitHub updates the
+pull request automatically. Promote `testing` to `main` only when the
+integration state is ready for production.
 
 Start substantive work from a GitHub issue. The issue is the authoritative
 record for scope, status, acceptance criteria, dependencies, and discussion;
@@ -67,12 +68,15 @@ Use `Closes #<issue>` in the pull request when the merge fully resolves the
 work. If it only contributes to a larger issue, use `Refs #<issue>` and leave
 the remaining acceptance criteria visible on the issue.
 
-`main` is protected. A merge requires:
+`testing` and `main` are protected. A merge requires:
 
 - the always-running `Glasslab PR Gate` check
 - one approval from someone other than the author
 - all review conversations resolved
 - a current approval after material revisions
+
+`main` is the production branch and receives changes only by promoting
+reviewed `testing` state.
 
 Use squash merge, then delete the feature branch. Direct administrator pushes
 are an incident-recovery bypass, not a normal development path.
@@ -81,8 +85,8 @@ are an incident-recovery bypass, not a normal development path.
 
 Every pull request runs the four reusable CI lanes below. Their results are
 combined into the required `Glasslab PR Gate` check. Path-aware copies still
-run after relevant changes land on `main`, and compatibility tests remain
-manual.
+run after relevant changes land on `testing` or `main`, and compatibility
+tests remain manual.
 
 | Lane | Purpose |
 | --- | --- |

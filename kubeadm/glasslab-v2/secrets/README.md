@@ -1,18 +1,29 @@
-# Secrets
+# Secret manifest examples
 
-Store non-committed local v2 secret manifests here.
+This tracked directory contains documentation contracts and non-secret
+examples only. Do not store live plaintext manifests or encrypted live SOPS
+payloads in the public checkout.
 
-Recommended local files:
-- `10-postgres.local.yaml`
-- `15-workflow-api.local.yaml`
-- `20-minio.local.yaml`
+The planned external vault lives at:
 
-Related non-v2 secret file still relevant to the live stack:
+```text
+/home/glasslab/.local/share/glasslab-secrets
+```
 
-- `../../agent-stack/12-agent-secrets.yaml`
+It contains a non-secret `inventory.yaml` and inventory-named `*.sops.yaml`
+documents. `scripts/backup-glasslab-secrets.sh` archives only those encrypted
+documents plus inventory, public SOPS policy, and checksums. The tracked
+provisioner snapshot does not capture the vault.
 
-These files are ignored by Git and should be applied from the provisioner only.
+The archive boundary accepts only structurally complete OpenPGP SOPS metadata
+and requires every Secret `data`/`stringData` scalar to be a complete encrypted
+envelope. It rejects mixed plaintext, unsupported recipient types, unreadable
+vault subtrees, and partial archive/checksum publication.
 
-Encrypted off-host backups should be created with:
+See:
 
-- `scripts/backup-glasslab-secrets.sh`
+- [`../../../docs/glasslab-v2/secrets-and-dr.md`](../../../docs/glasslab-v2/secrets-and-dr.md)
+- [`../../../docs/glasslab-v2/runbooks/restore-v2-secrets.md`](../../../docs/glasslab-v2/runbooks/restore-v2-secrets.md)
+
+Live migration and the recovery drill remain deferred until at least two
+administrators and the offline recovery recipient have passed SOPS enrollment.

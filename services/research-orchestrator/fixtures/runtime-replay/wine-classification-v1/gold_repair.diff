@@ -1,0 +1,15 @@
+--- a/configs/candidate.yaml
++++ b/configs/candidate.yaml
+@@ -76,6 +76,12 @@
+       - random_forest
+       - gradient_boosting
+ 
++"src/train":
++  "py":
++    - logistic_regression
++    - random_forest
++    - gradient_boosting
++
+ experiment_dimensions:
+   model:
+     - baseline
