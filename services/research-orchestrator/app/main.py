@@ -516,7 +516,11 @@ def create_app(
             content = await archive.read(
                 TaskBundleManager.MAX_ARCHIVE_BYTES + 1
             )
-            return engine.import_task_bundle(
+            # Offload the synchronous compile (a 40-90s OpenCode agent turn on
+            # first import) so the event loop — and therefore the Discord
+            # Gateway task and /ready probe — stays responsive.
+            return await asyncio.to_thread(
+                engine.import_task_bundle,
                 filename=archive.filename or '',
                 content=content,
             )
