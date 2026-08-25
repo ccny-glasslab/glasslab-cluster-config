@@ -56,10 +56,13 @@ in the `agent.context_retrieved` event as `retrieval_mode_actual`.
 | `knowledge_embedding_revision` | '' | optional pin |
 | `knowledge_dense_pg_dsn` | '' | use pgvector backend instead of in-process numpy |
 
-Heavy dependencies (torch/sentence-transformers/PyMuPDF) are installed by the
-image via `requirements-dense.txt` but imported lazily: without them (or
-without model weights) the service starts, serves lexical retrieval, and
-`/health` reports dense as unavailable with a reason.
+Dependency boundary: numpy and PyMuPDF are import-time dependencies of the
+dense surface and are pinned in `requirements.txt` (installed by the image
+and by every CI lane that validates the production import surface). The model
+runtime — torch/sentence-transformers — is installed by the image via
+`requirements-dense.txt` but imported lazily: without model weights (or in a
+slim environment without torch) the service starts, serves lexical retrieval,
+and `/health` reports dense as unavailable with a reason.
 
 ## Operator commands
 
