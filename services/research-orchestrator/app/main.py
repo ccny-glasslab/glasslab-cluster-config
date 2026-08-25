@@ -16,6 +16,8 @@ import json
 import secrets
 from typing import AsyncIterator
 
+import httpx
+
 from fastapi import (
     Depends,
     FastAPI,
@@ -35,6 +37,12 @@ from .contract_candidates import ContractCandidateManager
 from .contracts import ContractIntegrityError, EvaluationContractResolver
 from .discord_adapter import DisabledDiscordAdapter, DiscordHttpAdapter
 from .discord_controls import DiscordControlGateway
+from .discord_rest import (
+    DiscordCircuitOpen,
+    DiscordRestCircuit,
+    DiscordRestPolicy,
+    execute_guarded,
+)
 from .datasets import DatasetIngestionError, DatasetIngestionManager
 from .engine import ResearchOrchestrator, WorkflowError
 from .hermes_runtime import HermesProcessRuntime
@@ -119,13 +127,25 @@ def build_engine(
             and settings.discord_bot_token
             and settings.discord_channel_id
         ):
+            discord_rest_circuit = DiscordRestCircuit(
+                policy=DiscordRestPolicy(
+                    circuit_open_failures=(
+                        settings.discord_rest_circuit_max_failures
+                    ),
+                    cooldown_seconds=(
+                        settings.discord_rest_circuit_cooldown_seconds
+                    ),
+                )
+            )
             discord = DiscordHttpAdapter(
                 bot_token=settings.discord_bot_token,
                 channel_id=settings.discord_channel_id,
                 webhook_url=settings.discord_webhook_url,
+                circuit=discord_rest_circuit,
             )
         else:
             discord = DisabledDiscordAdapter()
+            discord_rest_circuit = None
     contract_candidates = ContractCandidateManager(
         sealed_root=settings.sealed_contract_candidate_root,
         promoted_root=settings.promoted_contract_root,
@@ -186,6 +206,70 @@ def build_engine(
     )
 
 
+def probe_discord_rest(
+    *,
+    circuit: DiscordRestCircuit,
+    token: str,
+    transport: httpx.BaseTransport | None = None,
+) -> None:
+    """Bounded, best-effort REST health probe.
+
+    Runs ``GET /applications/@me`` with the bot token through the same
+    guarded executor the projection adapter uses, so an open circuit fails
+    fast with zero network attempts and every outcome is recorded in the
+    circuit. Exceptions are intentionally swallowed: this is a diagnostic
+    probe, not workflow state.
+    """
+
+    def attempt() -> httpx.Response:
+        with httpx.Client(
+            base_url='https://discord.com/api/v10',
+            headers={'Authorization': f'Bot {token}'},
+            timeout=10,
+            transport=transport,
+        ) as client:
+            return client.get('/applications/@me')
+
+    try:
+        execute_guarded(circuit=circuit, policy=circuit.policy, attempt=attempt)
+    except (DiscordCircuitOpen, httpx.HTTPError):
+        pass
+
+
+async def _discord_rest_probe_loop(
+    circuit: DiscordRestCircuit,
+    token: str,
+    interval_seconds: float,
+) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        await asyncio.to_thread(
+            probe_discord_rest,
+            circuit=circuit,
+            token=token,
+        )
+
+
+def _discord_rest_status(circuit: DiscordRestCircuit | None) -> str:
+    if circuit is None:
+        return 'disabled'
+    snapshot = circuit.snapshot()
+    if snapshot['state'] != 'closed':
+        return 'blocked'
+    if snapshot['total_successes'] > 0:
+        return 'ready'
+    return 'unknown'
+
+
+def _discord_rest_reason(circuit: DiscordRestCircuit | None) -> str | None:
+    if circuit is None:
+        return None
+    snapshot = circuit.snapshot()
+    if snapshot['state'] == 'closed':
+        return None
+    return snapshot['last_outcome_category'] or 'circuit_open'
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -194,6 +278,12 @@ def create_app(
 ) -> FastAPI:
     settings = settings or get_settings()
     engine = engine or build_engine(settings)
+    discord_adapter = getattr(engine, 'discord', None)
+    discord_rest_circuit = (
+        discord_adapter.circuit
+        if isinstance(discord_adapter, DiscordHttpAdapter)
+        else None
+    )
     watcher = JobWatcher(
         engine,
         poll_interval_seconds=settings.job_poll_interval_seconds,
@@ -245,6 +335,19 @@ def create_app(
             if discord_controls is not None
             else None
         )
+        discord_rest_probe_task = (
+            asyncio.create_task(
+                _discord_rest_probe_loop(
+                    discord_rest_circuit,
+                    settings.discord_bot_token,
+                    settings.discord_rest_probe_interval_seconds,
+                ),
+                name='research-orchestrator-discord-rest-probe',
+            )
+            if discord_rest_circuit is not None
+            and settings.discord_rest_probe_interval_seconds > 0
+            else None
+        )
         try:
             yield
         finally:
@@ -257,6 +360,8 @@ def create_app(
                 tasks.append(watcher_task)
             if discord_task is not None:
                 tasks.append(discord_task)
+            if discord_rest_probe_task is not None:
+                tasks.append(discord_rest_probe_task)
             await asyncio.gather(*tasks, return_exceptions=True)
 
     app = FastAPI(
@@ -266,6 +371,7 @@ def create_app(
     )
     app.state.engine = engine
     app.state.discord_controls = discord_controls
+    app.state.discord_rest = discord_rest_circuit
 
     def require_operator(
         supplied_token: str | None = Header(
@@ -350,6 +456,25 @@ def create_app(
                 if discord_controls is None
                 else 'connecting'
             ),
+            'discord_gateway': (
+                'ready'
+                if discord_controls is not None
+                and discord_controls.client.is_ready()
+                else 'disabled'
+                if discord_controls is None
+                else 'connecting'
+            ),
+            'discord_rest': _discord_rest_status(
+                app.state.discord_rest
+            ),
+            'discord_rest_reason': _discord_rest_reason(
+                app.state.discord_rest
+            ),
+            'discord_rest_detail': (
+                app.state.discord_rest.snapshot()
+                if app.state.discord_rest is not None
+                else None
+            ),
             'evaluation_contract': {
                 'contract_id': contract.descriptor.contract_id,
                 'version': contract.descriptor.version,
@@ -391,7 +516,11 @@ def create_app(
             content = await archive.read(
                 TaskBundleManager.MAX_ARCHIVE_BYTES + 1
             )
-            return engine.import_task_bundle(
+            # Offload the synchronous compile (a 40-90s OpenCode agent turn on
+            # first import) so the event loop — and therefore the Discord
+            # Gateway task and /ready probe — stays responsive.
+            return await asyncio.to_thread(
+                engine.import_task_bundle,
                 filename=archive.filename or '',
                 content=content,
             )

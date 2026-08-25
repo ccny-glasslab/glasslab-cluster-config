@@ -179,6 +179,9 @@ class Settings(BaseSettings):
     discord_controls_enabled: bool = False
     discord_admin_role_id: str | None = None
     discord_admin_user_ids: Annotated[list[str], NoDecode] = []
+    discord_rest_circuit_max_failures: int = 3
+    discord_rest_circuit_cooldown_seconds: float = 60.0
+    discord_rest_probe_interval_seconds: float = 60.0
 
     @property
     def effective_agent_model_name(self) -> str:
@@ -209,6 +212,27 @@ class Settings(BaseSettings):
         # comma-separated spelling instead.
         if isinstance(value, str):
             return [item.strip() for item in value.split(',') if item.strip()]
+        return value
+
+    @field_validator('discord_rest_circuit_max_failures')
+    @classmethod
+    def enforce_discord_rest_circuit_minimum(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError('discord_rest_circuit_max_failures must be >= 1')
+        return value
+
+    @field_validator('discord_rest_circuit_cooldown_seconds')
+    @classmethod
+    def enforce_discord_rest_cooldown_positive(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError('discord_rest_circuit_cooldown_seconds must be > 0')
+        return value
+
+    @field_validator('discord_rest_probe_interval_seconds')
+    @classmethod
+    def enforce_discord_rest_probe_interval_nonnegative(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError('discord_rest_probe_interval_seconds must be >= 0')
         return value
 
     @field_validator('knowledge_allowlist_roots', mode='before')
