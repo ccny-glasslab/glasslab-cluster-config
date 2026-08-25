@@ -1,12 +1,13 @@
-# Dense-retrieval stack for the research-orchestrator image (corpus-RAG
-# method advisory). Installed unconditionally in the image; the application
-# imports torch/sentence-transformers lazily, so it stays fully functional
-# (lexical-only mode) if model weights are absent at runtime.
+# Model runtime for dense retrieval (corpus-RAG method advisory). Installed
+# unconditionally in the image; the application imports torch and
+# sentence-transformers lazily, so the service stays fully functional
+# (lexical retrieval, offline-deterministic embeddings) when model weights
+# are absent at runtime. The import-time dependencies of the dense surface
+# itself (numpy, PyMuPDF) are pinned in requirements.txt instead.
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.13.0+cpu
 sentence-transformers==6.0.0
 transformers==5.15.1
-PyMuPDF==1.28.2
 tokenizers==0.22.2
 safetensors==0.8.0
 huggingface_hub==1.28.0
