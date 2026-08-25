@@ -225,6 +225,14 @@ class MethodAdvisory(BaseModel):
     uncertainty_statement: str
     citations_all: list[Citation]
     generated_by: str
+    # Production integration fields (all defaulted so prototype payloads
+    # from PR #220 artifacts still validate unchanged).
+    research_question: str = ''
+    subqueries: list[str] = Field(default_factory=list)
+    experiment_matrix: list[dict[str, Any]] = Field(default_factory=list)
+    insufficient_evidence: bool = False
+    insufficiency_reason: str = ''
+    retrieval_metadata: dict[str, Any] = Field(default_factory=dict)
     index_version: str = RAG_INDEX_VERSION
 
 
