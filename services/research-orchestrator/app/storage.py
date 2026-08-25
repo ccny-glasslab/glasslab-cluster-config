@@ -10,7 +10,7 @@ for queries, ordering, and optimistic-versioning guards.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 import json
