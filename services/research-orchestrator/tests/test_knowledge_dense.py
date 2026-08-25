@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
@@ -18,9 +20,20 @@ import pytest
 
 from app.corpus_rag.contracts import ChunkVectorMeta
 from app.corpus_rag.embeddings import OfflineDeterministicEmbedding
-from app.knowledge_dense import NumpyChunkIndex, build_dense_index
+from app.knowledge_dense import (
+    DENSE_INDEX_VERSION,
+    NumpyChunkIndex,
+    build_dense_index,
+)
+from app.knowledge_manager import KnowledgeManager
 from app.postgres_store import PostgresStore
-from app.schemas import KnowledgeChunk, KnowledgeSource, SourceType
+from app.schemas import (
+    KnowledgeChunk,
+    KnowledgeSource,
+    RunRecord,
+    RunState,
+    SourceType,
+)
 from app.storage import SqliteStore
 
 PG_DSN = os.environ.get('CORPUS_RAG_PG_DSN')
@@ -87,11 +100,25 @@ def store(request: pytest.FixtureRequest, tmp_path):
 
 
 def test_build_is_idempotent_and_ready(store) -> None:
-    ids = _seed_chunks(store, [
+    source = _source('repo://dense/build.md')
+    store.save_knowledge_source(source)
+    texts = [
         'bootstrap resampling estimates uncertainty in clustering',
         'cross validation checks predictive stability of models',
         'quantile regression relaxes distributional assumptions',
-    ])
+    ]
+    chunks = [
+        KnowledgeChunk(
+            source_id=source.source_id,
+            chunk_index=index,
+            text=text,
+            digest=hashlib.sha256(text.encode()).hexdigest(),
+            token_count=max(1, len(text.split())),
+        )
+        for index, text in enumerate(texts)
+    ]
+    store.replace_knowledge_chunks(source.source_id, chunks)
+    ids = [chunk.chunk_id for chunk in chunks]
     provider = OfflineDeterministicEmbedding(dims=8)
 
     first = build_dense_index(store, provider, model_id=MODEL_ID)
@@ -109,7 +136,7 @@ def test_build_is_idempotent_and_ready(store) -> None:
 
     hits = index.search(
         index.embed_query('bootstrap resampling uncertainty'),
-        allowed_chunk_ids=set(ids),
+        source_ids=[source.source_id],
         k=3,
     )
     assert {chunk_id for chunk_id, _ in hits} == set(ids)
@@ -131,9 +158,11 @@ def test_search_honors_allowlist_and_cosine_order(store) -> None:
     index = NumpyChunkIndex(store, provider, model_id=MODEL_ID)
     hits = index.search(
         _unit([0.9, 0.1, 0, 0, 0, 0, 0, 0]),
-        allowed_chunk_ids=set(ids),
+        source_ids=None,
         k=2,
     )
+    assert [cid for cid, _ in hits] == [ids[0], ids[1]]
+    assert hits[0][1] > 0.9
     assert [cid for cid, _ in hits] == [ids[0], ids[1]]
     assert hits[0][1] > 0.9
 
@@ -147,7 +176,7 @@ def test_dimension_mismatch_fails_cleanly(store) -> None:
     assert readiness.available is False
     assert 'dimension' in readiness.reason.lower()
     assert stale.search(
-        stale.embed_query('anything'), allowed_chunk_ids=None, k=3
+        stale.embed_query('anything'), source_ids=None, k=3
     ) == []
 
 
@@ -182,3 +211,213 @@ def test_pg_backend_roundtrip_and_order(pg_store) -> None:
     )
     assert hits[0][0] == ids[0]
     assert all(cid in ids for cid, _ in hits)
+
+
+# ---------------------------------------------------------------------------
+# KnowledgeManager dense-mode integration (T4)
+# ---------------------------------------------------------------------------
+
+from app.knowledge_manager import KnowledgeManager  # noqa: E402
+
+
+class _ExplodingDenseIndex:
+    """readiness() claims health; search() always fails (backend outage)."""
+
+    def __init__(self, provider) -> None:
+        self._provider = provider
+
+    def readiness(self):
+        from app.knowledge_dense import DenseReadiness
+
+        return DenseReadiness(
+            available=True, reason='', backend='numpy',
+            model_id=self._provider.model_id,
+            revision=self._provider.revision,
+            dims=int(self._provider.dims), indexed_count=2,
+        )
+
+    def embed_query(self, text):
+        return self._provider.embed_queries([text])[0]
+
+    def search(self, query_vec, *, source_ids=None, k=10):
+        raise RuntimeError('dense backend exploded')
+
+    def hydrate(self, chunk_ids):
+        return []
+
+
+def _seed_km_pair(store) -> tuple[str, str]:
+    """paper (allowed for honeydew) + implementation_file (always disallowed)."""
+    sha = lambda t: hashlib.sha256(t.encode()).hexdigest()  # noqa: E731
+
+    paper = KnowledgeSource(
+        source_type=SourceType.PAPER,
+        canonical_uri='repo://km/paper.md',
+        digest=uuid4().hex + uuid4().hex,
+    )
+    store.save_knowledge_source(paper)
+    paper_text = 'guidance on cluster stability assessment using bootstrap resampling'
+    paper_chunk = KnowledgeChunk(
+        source_id=paper.source_id, chunk_index=0, text=paper_text,
+        digest=sha(paper_text), token_count=len(paper_text.split()),
+    )
+    store.replace_knowledge_chunks(paper.source_id, [paper_chunk])
+
+    impl = KnowledgeSource(
+        source_type=SourceType.IMPLEMENTATION_FILE,
+        canonical_uri='repo://km/impl.py',
+        digest=uuid4().hex + uuid4().hex,
+    )
+    store.save_knowledge_source(impl)
+    impl_text = 'internal implementation notes about stability heuristics'
+    impl_chunk = KnowledgeChunk(
+        source_id=impl.source_id, chunk_index=0, text=impl_text,
+        digest=sha(impl_text), token_count=len(impl_text.split()),
+    )
+    store.replace_knowledge_chunks(impl.source_id, [impl_chunk])
+    return paper_chunk.chunk_id, impl_chunk.chunk_id
+
+
+def _vector_for(store, chunk_id: str, direction: list[float], dims: int = 8) -> None:
+    from app.corpus_rag.embeddings import encode_vector
+
+    meta = ChunkVectorMeta(
+        chunk_id=chunk_id, model_id='km-dense', revision='r1',
+        dims=dims, index_version=DENSE_INDEX_VERSION,
+    )
+    store.upsert_knowledge_chunk_vectors(meta, _unit(direction).astype('<f4').tobytes())
+
+
+def _make_km(store, tmp_path, *, dense=True, failing=False):
+    import tempfile
+
+    km = KnowledgeManager(store=store, root=Path(tempfile.mkdtemp()) / 'km')
+    if dense:
+        provider = OfflineDeterministicEmbedding(dims=8)
+        km.dense_index = (
+            _ExplodingDenseIndex(provider) if failing
+            else NumpyChunkIndex(store, provider, model_id='km-dense')
+        )
+        km.default_retrieval_mode = 'dense'
+    return km
+
+
+def _create_run(store, run_id: str) -> None:
+    now = datetime.now(timezone.utc)
+    store.create_run(
+        RunRecord(
+            run_id=run_id,
+            objective='Exercise dense retrieval.',
+            state=RunState.CREATED,
+            evaluation_contract_id='example-research-v1',
+            evaluation_contract_version='1.0.0',
+            evaluation_contract_digest='a' * 64,
+            beaker_workspace='/tmp/beaker',
+            honeydew_workspace='/tmp/honeydew',
+            shared_artifacts_path='/tmp/shared',
+            reports_path='/tmp/reports',
+            maximum_turns=20,
+            maximum_runtime_seconds=3600,
+            maximum_parallel_jobs=2,
+            created_at=now,
+            updated_at=now,
+        ),
+        one_active_run=False,
+    )
+
+
+def test_km_dense_mode_respects_scoping_and_persists(tmp_path) -> None:
+    store = SqliteStore(str(tmp_path / 'km.db'))
+    paper_cid, impl_cid = _seed_km_pair(store)
+    _create_run(store, 'run-dense')
+
+    _vector_for(store, impl_cid, [0, 1, 0, 0, 0, 0, 0, 0])  # strongest, but banned
+    _vector_for(store, paper_cid, [1, 0, 0, 0, 0, 0, 0, 0])
+    km = _make_km(store, tmp_path)
+    query_vec_dir = [0, 1, 0, 0, 0, 0, 0, 0]
+
+    class _FixedProvider:
+        model_id = 'km-dense'
+        revision = 'r1'
+        dims = 8
+
+        @staticmethod
+        def embed_queries(texts):
+            return [_unit(query_vec_dir) for _ in texts]
+
+        @staticmethod
+        def embed_passages(texts):
+            raise AssertionError('not used here')
+
+    km.dense_index = NumpyChunkIndex(store, _FixedProvider(), model_id='km-dense')
+
+    packet = km.retrieve(
+        run_id='run-dense', agent='honeydew', turn_number=1,
+        turn_kind='protocol_draft', query='cluster stability assessment',
+        run_scope='run-dense', retrieval_mode='dense',
+    )
+    got_ids = {entry['entry_id'] for entry in packet.ranked_sources}
+    assert paper_cid in got_ids
+    assert impl_cid not in got_ids
+
+    events = [e for e in store.list_events('run-dense')
+              if e.event_type == 'agent.context_retrieved']
+    assert events and events[-1].payload.get('retrieval_mode_actual') == 'dense'
+
+    stored = store.get_knowledge_chunks(list(got_ids))
+    assert {row['chunk_id'] for row in stored} == got_ids
+
+
+def test_km_dense_falls_back_to_lexical_on_backend_failure(tmp_path) -> None:
+    store = SqliteStore(str(tmp_path / 'kmfb.db'))
+    paper_cid, _impl_cid = _seed_km_pair(store)
+    _create_run(store, 'run-fb')
+    km = _make_km(store, tmp_path, failing=True)
+
+    packet = km.retrieve(
+        run_id='run-fb', agent='honeydew', turn_number=1,
+        turn_kind='protocol_draft',
+        query='cluster stability assessment bootstrap resampling',
+        run_scope='run-fb',
+    )
+    assert packet.ranked_sources, 'lexical fallback must still return content'
+
+    events = [e for e in store.list_events('run-fb')
+              if e.event_type == 'agent.context_retrieved']
+    actual = events[-1].payload.get('retrieval_mode_actual', '')
+    assert actual.startswith('lexical(fallback)')
+    assert 'dense backend exploded' in events[-1].payload.get(
+        'retrieval_fallback_reason', ''
+    )
+    assert paper_cid  # sanity: seeded
+
+
+def test_km_token_budget_applies_in_dense_mode(tmp_path) -> None:
+    store = SqliteStore(str(tmp_path / 'kmbudget.db'))
+    paper_cid, _impl_cid = _seed_km_pair(store)
+    long_text = 'extra padding words ' * 60
+    extra = KnowledgeSource(
+        source_type=SourceType.PAPER,
+        canonical_uri='repo://km/long.md',
+        digest=uuid4().hex + uuid4().hex,
+    )
+    store.save_knowledge_source(extra)
+    long_chunk = KnowledgeChunk(
+        source_id=extra.source_id, chunk_index=0, text=long_text,
+        digest=hashlib.sha256(long_text.encode()).hexdigest(),
+        token_count=len(long_text.split()),
+    )
+    store.replace_knowledge_chunks(extra.source_id, [long_chunk])
+
+    _vector_for(store, paper_cid, [1, 0, 0, 0, 0, 0, 0, 0])
+    _vector_for(store, long_chunk.chunk_id, [0, 0, 1, 0, 0, 0, 0, 0])
+    _create_run(store, 'run-budget')
+
+    km = _make_km(store, tmp_path)
+    packet = km.retrieve(
+        run_id='run-budget', agent='honeydew', turn_number=1,
+        turn_kind='protocol_draft', query='cluster stability',
+        run_scope='run-budget', retrieval_mode='dense',
+        token_budget=30,
+    )
+    assert len(packet.ranked_sources) == 1

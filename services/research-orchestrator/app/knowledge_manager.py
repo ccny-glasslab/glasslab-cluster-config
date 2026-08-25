@@ -130,6 +130,8 @@ class KnowledgeManager:
         max_results: int = 10,
         token_budget: int = 4000,
         max_chunks_per_source: int = 3,
+        dense_index: Any | None = None,
+        default_retrieval_mode: str = 'lexical',
     ) -> None:
         self.store = store
         self.root = Path(root)
@@ -141,6 +143,9 @@ class KnowledgeManager:
         self.max_results = max_results
         self.token_budget = token_budget
         self.max_chunks_per_source = max_chunks_per_source
+        # Optional: an absent dense_index simply pins retrieval to lexical.
+        self.dense_index: Any | None = dense_index
+        self.default_retrieval_mode = default_retrieval_mode
 
     # ------------------------------------------------------------------ #
     # Ingestion
@@ -349,6 +354,7 @@ class KnowledgeManager:
         token_budget: int | None = None,
         run_scope: str | None = None,
         allowed_source_types: list[str] | None = None,
+        retrieval_mode: str | None = None,
     ) -> ContextPacket:
         """Retrieve scoped, bounded context and persist a durable packet."""
         max_results = max_results or self.max_results
@@ -363,20 +369,45 @@ class KnowledgeManager:
             run_scope=run_scope,
         )
         source_ids = [source.source_id for source in sources]
-        hits: list[dict[str, Any]] = []
-        if source_ids:
-            # Over-fetch candidates (4x the final count) so that diversity
-            # filtering and the token budget still have headroom after ranking.
-            hits = self.store.search_knowledge_chunks(
-                query,
-                source_ids=source_ids,
-                limit=max_results * 4,
+        source_by_id = {source.source_id: source for source in sources}
+
+        mode_requested = retrieval_mode or self.default_retrieval_mode
+        mode_actual = mode_requested
+        fallback_reason = ''
+        if mode_requested == 'dense' and self.dense_index is None:
+            mode_actual = 'lexical(fallback)'
+            fallback_reason = 'dense index not configured'
+
+        if mode_requested == 'dense' and mode_actual == 'dense':
+            try:
+                entries = self._dense_entries(
+                    query=query,
+                    source_ids=source_ids,
+                    limit=max_results * 4,
+                    source_by_id=source_by_id,
+                )
+                if not entries:
+                    fallback_reason = 'no dense hits'
+            except Exception as exc:  # noqa: BLE001 - resilience contract
+                fallback_reason = f'{type(exc).__name__}: {exc}'
+                entries = []
+            if fallback_reason:
+                mode_actual = 'lexical(fallback)'
+
+        if mode_actual != 'dense':
+            hits: list[dict[str, Any]] = []
+            if source_ids:
+                # Over-fetch candidates (4x the final count) so that diversity
+                # filtering and the token budget still have headroom after ranking.
+                hits = self.store.search_knowledge_chunks(
+                    query,
+                    source_ids=source_ids,
+                    limit=max_results * 4,
+                )
+            entries.extend(
+                self._score_chunk_hit(hit, source_by_id, query)
+                for hit in hits
             )
-            source_by_id = {source.source_id: source for source in sources}
-        entries.extend(
-            self._score_chunk_hit(hit, source_by_id, query)
-            for hit in hits
-        )
         event_entries = self._retrieve_run_events(
             run_id=run_id,
             query=query,
@@ -409,6 +440,7 @@ class KnowledgeManager:
                     'digest': entry['digest'],
                     'scope': entry.get('scope'),
                     'score': entry.get('score', 0),
+                    'mode': entry.get('mode', 'lexical'),
                 }
                 for entry in tokenized
             ],
@@ -431,6 +463,13 @@ class KnowledgeManager:
                 'token_count': packet.exact_text_supplied
                 and estimate_tokens(packet.exact_text_supplied)
                 or 0,
+                'retrieval_mode_requested': mode_requested,
+                'retrieval_mode_actual': mode_actual,
+                **(
+                    {'retrieval_fallback_reason': fallback_reason}
+                    if fallback_reason
+                    else {}
+                ),
             },
         )
         return packet
@@ -628,6 +667,60 @@ class KnowledgeManager:
             'token_count': hit['token_count'],
             'score': score,
         }
+
+    def _dense_entries(
+        self,
+        *,
+        query: str,
+        source_ids: list[str],
+        limit: int,
+        source_by_id: dict[str, KnowledgeSource],
+    ) -> list[dict[str, Any]]:
+        """Cosine-ranked chunk entries from the wired dense index."""
+        readiness = self.dense_index.readiness()
+        if not readiness.available:
+            raise RuntimeError(readiness.reason or 'dense index unavailable')
+
+        query_vec = self.dense_index.embed_query(query)
+        collected: dict[str, float] = {}
+        k = max(limit, 8)
+        for _attempt in range(3):
+            raw = self.dense_index.search(query_vec, source_ids=source_ids, k=k)
+            rows = self.dense_index.hydrate([cid for cid, _ in raw])
+            row_by_id = {row['chunk_id']: row for row in rows}
+            allowed_sources = set(source_ids)
+            for cid, score in raw:
+                row = row_by_id.get(cid)
+                if row is None or row['source_id'] not in allowed_sources:
+                    continue
+                collected.setdefault(cid, score)
+            if len(collected) >= min(limit, len(raw)) or k >= 4096:
+                break
+            k *= 4
+
+        top = sorted(collected.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+        rows = self.dense_index.hydrate([cid for cid, _ in top])
+        row_by_id = {row['chunk_id']: row for row in rows}
+
+        entries: list[dict[str, Any]] = []
+        for cid, score in top:
+            row = row_by_id.get(cid)
+            if row is None:
+                continue
+            source = source_by_id.get(row['source_id'])
+            entries.append({
+                'kind': 'chunk',
+                'entry_id': row['chunk_id'],
+                'source_id': row['source_id'],
+                'uri': source.canonical_uri if source else row['source_id'],
+                'digest': row['digest'],
+                'scope': source.run_scope if source else None,
+                'text': row['text'],
+                'token_count': row['token_count'],
+                'score': float(score),
+                'mode': 'dense',
+            })
+        return entries
 
     @staticmethod
     def _source_type_boost(source_type: SourceType) -> float:
