@@ -54,6 +54,17 @@ class DenseModelError(Exception):
     """An operation would mix incompatible embedding lineages."""
 
 
+def create_embedding_provider(model_name: str) -> Any:
+    """Resolve an embedding provider from a configured model name."""
+    if model_name == 'offline-deterministic':
+        from .corpus_rag.embeddings import OfflineDeterministicEmbedding
+
+        return OfflineDeterministicEmbedding(dims=768)
+    from .corpus_rag.embeddings import ArcticEmbedProvider
+
+    return ArcticEmbedProvider(model_name=model_name)
+
+
 @dataclass(frozen=True)
 class DenseReadiness:
     available: bool
@@ -148,7 +159,7 @@ class NumpyChunkIndex:
         self,
         query_vec: np.ndarray,
         *,
-        allowed_chunk_ids: set[str] | None = None,
+        source_ids: list[str] | None = None,
         k: int = 10,
     ) -> list[tuple[str, float]]:
         if k <= 0 or not self._rows:
@@ -162,25 +173,33 @@ class NumpyChunkIndex:
 
         q_unit = _unit_row(query_vec, dims=self._provider_dims())
         scores = matrix @ q_unit
-
-        mask = np.ones(len(ids), dtype=bool)
-        if allowed_chunk_ids is not None:
-            allowed = set(allowed_chunk_ids)
-            mask = np.array([cid in allowed for cid in ids], dtype=bool)
-        candidates = np.flatnonzero(mask)
-        if candidates.size == 0:
-            return []
-
-        k_eff = min(k, candidates.size)
-        top = np.argpartition(scores[candidates], -k_eff)[-k_eff:]
         ranked = sorted(
-            (
-                (ids[candidates[pos]], float(scores[candidates[pos]]))
-                for pos in top
-            ),
-            key=lambda item: (-item[1], item[0]),
+            zip(ids, scores.tolist()), key=lambda item: (-item[1], item[0])
         )
-        return ranked
+
+        # Source scoping needs chunk->source resolution, which lives in the
+        # store rather than vector metadata; hydrate lazily in batches until
+        # k in-scope hits are confirmed (never returning out-of-scope rows).
+        out: list[tuple[str, float]] = []
+        pending = [cid for cid, _ in ranked]
+        step = max(k * 3, 24)
+        ranked_by_id = dict(ranked)
+        for start in range(0, len(pending), step):
+            batch = pending[start:start + step]
+            rows = {
+                row['chunk_id']: row
+                for row in self._store.get_knowledge_chunks(batch)
+            }
+            for cid in batch:
+                row = rows.get(cid)
+                if row is None:
+                    continue
+                if source_ids is not None and row['source_id'] not in set(source_ids):
+                    continue
+                out.append((cid, ranked_by_id[cid]))
+                if len(out) >= k:
+                    return out
+        return out
 
     def hydrate(self, chunk_ids: list[str]) -> list[dict[str, Any]]:
         return self._store.get_knowledge_chunks(chunk_ids)
@@ -236,7 +255,7 @@ class PgVectorChunkIndex:
         self,
         query_vec: np.ndarray,
         *,
-        allowed_chunk_ids: set[str] | None = None,
+        source_ids: list[str] | None = None,
         k: int = 10,
     ) -> list[tuple[str, float]]:
         if k <= 0:
@@ -248,11 +267,9 @@ class PgVectorChunkIndex:
             ' WHERE v.model_id = %s AND v.embedding IS NOT NULL'
         )
         params: list[Any] = [literal, self.model_id]
-        if allowed_chunk_ids is not None:
-            ids = sorted(allowed_chunk_ids)
-            if not ids:
-                return []
-            sql += ' AND v.chunk_id = ANY(%s)'
+        if source_ids:
+            ids = list(source_ids)
+            sql += ' AND v.chunk_id IN (SELECT chunk_id FROM orchestrator_knowledge_chunks WHERE source_id = ANY(%s))'
             params.append(ids)
         sql += ' ORDER BY v.embedding <=> %s::halfvec LIMIT %s'
         params.extend([literal, k])
@@ -288,7 +305,7 @@ def build_dense_index(
     existing = {
         meta.chunk_id for meta, _ in store.list_knowledge_chunk_vectors(mid)
     }
-    chunks = store.list_knowledge_chunks()
+    chunks = store.list_all_knowledge_chunks()
     todo = [
         chunk for chunk in chunks
         if force or chunk['chunk_id'] not in existing
@@ -328,3 +345,20 @@ def build_dense_index(
         'skipped': skipped,
         'index_version': DENSE_INDEX_VERSION,
     }
+
+
+def ensure_index_built(
+    index: NumpyChunkIndex | PgVectorChunkIndex,
+    store: Any,
+    *,
+    force: bool = False,
+) -> dict[str, Any] | None:
+    """Lazily build the index when no usable vectors exist yet (idempotent)."""
+    summary = None
+    if index.readiness().indexed_count == 0 or force:
+        summary = build_dense_index(store, index._provider, force=force)
+    if hasattr(index, 'reload'):
+        # Refresh in-memory rows so a just-built index is immediately
+        # queryable without reconstructing the index object.
+        index.reload()
+    return summary

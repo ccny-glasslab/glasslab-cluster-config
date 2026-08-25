@@ -244,6 +244,10 @@ class InsufficientCorpusAdvisory(BaseModel):
     kind: Literal['insufficient_corpus'] = 'insufficient_corpus'
     reason: str = Field(min_length=1)
     details: str
+    # Production integration fields (defaulted; see MethodAdvisory note).
+    research_question: str = ''
+    subqueries: list[str] = Field(default_factory=list)
+    retrieval_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 AdvisoryResult = MethodAdvisory | InsufficientCorpusAdvisory
