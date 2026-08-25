@@ -89,6 +89,37 @@ def main(argv: list[str] | None = None) -> int:
     resolver = _build_source_resolver(store)
     km = KnowledgeManager(store=store, root=str(Path(args.store).parent / 'knowledge'))
 
+    # Packets reference runs(run_id); a synthetic benchmark run keeps the
+    # provenance chain intact without touching any real research run.
+    from datetime import datetime, timezone
+
+    from app.schemas import RunRecord, RunState
+
+    now = datetime.now(timezone.utc)
+    try:
+        store.create_run(
+            RunRecord(
+                run_id='benchmark',
+                objective='Corpus-RAG production retrieval benchmark.',
+                state=RunState.CREATED,
+                evaluation_contract_id='example-research-v1',
+                evaluation_contract_version='1.0.0',
+                evaluation_contract_digest='a' * 64,
+                beaker_workspace='/tmp/beaker',
+                honeydew_workspace='/tmp/honeydew',
+                shared_artifacts_path='/tmp/shared',
+                reports_path='/tmp/reports',
+                maximum_turns=20,
+                maximum_runtime_seconds=3600,
+                maximum_parallel_jobs=2,
+                created_at=now,
+                updated_at=now,
+            ),
+            one_active_run=False,
+        )
+    except Exception:
+        pass  # already exists from an earlier invocation
+
     per_mode: dict[str, list[dict[str, float]]] = {mode: [] for mode in MODES}
     started = time.perf_counter()
 
@@ -137,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     elapsed_ms = (time.perf_counter() - started) * 1000.0
 
     def _mean(values: list[float]) -> float:
+        values = list(values)
         return sum(values) / len(values) if values else 0.0
 
     results = {}

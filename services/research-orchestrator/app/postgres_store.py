@@ -604,7 +604,7 @@ class PostgresStore:
             for r in rows
         ]
 
-    def list_knowledge_chunks(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+    def list_all_knowledge_chunks(self, *, limit: int | None = None) -> list[dict[str, Any]]:
         query = ('SELECT payload FROM orchestrator_knowledge_chunks'
                  ' ORDER BY source_id, chunk_index')
         params: list[Any] = []

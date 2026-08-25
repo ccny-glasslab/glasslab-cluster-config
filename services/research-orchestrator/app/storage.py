@@ -1813,7 +1813,7 @@ class SqliteStore:
             for row in rows
         ]
 
-    def list_knowledge_chunks(
+    def list_all_knowledge_chunks(
         self, *, limit: int | None = None
     ) -> list[dict[str, Any]]:
         query = (
