@@ -10,7 +10,6 @@ on:
         type: choice
         options:
           - workflow-api
-          - whatsapp-gateway
           - research-ingress
           - research-command-router
           - research-orchestrator
@@ -53,11 +52,6 @@ jobs:
               echo "context=." >> "$GITHUB_OUTPUT"
               echo "dockerfile=services/workflow-api/Dockerfile" >> "$GITHUB_OUTPUT"
               echo "image=ghcr.io/${REPO_OWNER}/glasslab-workflow-api" >> "$GITHUB_OUTPUT"
-              ;;
-            whatsapp-gateway)
-              echo "context=services/whatsapp-gateway" >> "$GITHUB_OUTPUT"
-              echo "dockerfile=services/whatsapp-gateway/Dockerfile" >> "$GITHUB_OUTPUT"
-              echo "image=ghcr.io/${REPO_OWNER}/glasslab-whatsapp-gateway" >> "$GITHUB_OUTPUT"
               ;;
             research-ingress)
               echo "context=services/research-ingress" >> "$GITHUB_OUTPUT"

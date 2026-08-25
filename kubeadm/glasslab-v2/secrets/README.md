@@ -11,10 +11,6 @@ Related non-v2 secret file still relevant to the live stack:
 
 - `../../agent-stack/12-agent-secrets.yaml`
 
-Recommended WhatsApp gateway local secret keys:
-- `WHATSAPP_OWNER`
-- `WHATSAPP_ALLOW_FROM`
-
 These files are ignored by Git and should be applied from the provisioner only.
 
 Encrypted off-host backups should be created with:

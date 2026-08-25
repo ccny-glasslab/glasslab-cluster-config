@@ -148,11 +148,6 @@ jobs:
             requirements: services/research-command-router/requirements.txt
             pythonpath: .
             tests: tests/test_api.py
-          - name: whatsapp-gateway
-            workdir: services/whatsapp-gateway
-            requirements: services/whatsapp-gateway/requirements.txt
-            pythonpath: .
-            tests: tests/test_api.py
           - name: evaluator
             workdir: services/evaluator
             requirements: services/evaluator/requirements.txt
