@@ -147,5 +147,12 @@ class TestReadyDiscordObservability:
         app = self._build_app(orchestrator_bundle)
         with TestClient(app) as client:
             body = client.get("/health").json()
-            assert set(body) == {"status", "service", "version"}
+            # knowledge_dense is part of the stable /health contract since
+            # the corpus-RAG advisory integration (dense readiness block).
+            assert set(body) == {
+                "status",
+                "service",
+                "version",
+                "knowledge_dense",
+            }
             assert body["status"] == "ok"
