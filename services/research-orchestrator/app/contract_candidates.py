@@ -21,6 +21,7 @@ from .contracts import (
     ContractIntegrityError,
     compute_contract_digest,
 )
+from .preflight import MethodologyRequirement
 from .schemas import EvaluationContractDescriptor
 
 
@@ -135,6 +136,17 @@ class ContractCandidateManager:
             raise ContractCandidateError(
                 'manifest requires primary_metric and a valid direction'
             )
+        raw_requirements = descriptor.manifest.get(
+            'methodology_requirements',
+            [],
+        )
+        try:
+            for item in raw_requirements:
+                MethodologyRequirement.model_validate(item)
+        except ValueError as exc:
+            raise ContractCandidateError(
+                f'methodology_requirements are invalid: {exc}'
+            ) from exc
         try:
             for field in (
                 descriptor.execution_wrapper,

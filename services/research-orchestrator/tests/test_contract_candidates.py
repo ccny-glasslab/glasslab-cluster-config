@@ -186,3 +186,62 @@ def test_unknown_non_text_content_is_still_rejected(tmp_path: Path) -> None:
             contract_id='candidate-v1',
             version='1.0.0',
         )
+
+
+def test_candidate_methodology_requirements_missing_config_path_is_rejected(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / 'source'
+    _write_candidate(source)
+    descriptor_path = source / 'contract.json'
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor['manifest']['methodology_requirements'] = [
+        {
+            'requirement_id': 'calibration-metric-threshold',
+            'mode': 'decision',
+            'description': 'accuracy is the primary metric',
+        }
+    ]
+    descriptor_path.write_text(json.dumps(descriptor))
+    manager = ContractCandidateManager(
+        sealed_root=str(tmp_path / 'sealed'),
+        promoted_root=str(tmp_path / 'shared' / 'bundles'),
+        catalog_path=str(tmp_path / 'shared' / 'catalog.json'),
+        shared_mount_root=str(tmp_path),
+    )
+    with pytest.raises(ContractCandidateError, match='methodology_requirements'):
+        manager.seal(
+            source=source,
+            contract_id='candidate-v1',
+            version='1.0.0',
+        )
+
+
+def test_candidate_valid_methodology_requirements_seal_cleanly(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / 'source'
+    _write_candidate(source)
+    descriptor_path = source / 'contract.json'
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor['manifest']['methodology_requirements'] = [
+        {
+            'requirement_id': 'calibration-metric-threshold',
+            'config_path': 'configs/candidate.yaml',
+            'mode': 'decision',
+            'description': 'accuracy is the primary metric',
+        }
+    ]
+    descriptor_path.write_text(json.dumps(descriptor))
+    manager = ContractCandidateManager(
+        sealed_root=str(tmp_path / 'sealed'),
+        promoted_root=str(tmp_path / 'shared' / 'bundles'),
+        catalog_path=str(tmp_path / 'shared' / 'catalog.json'),
+        shared_mount_root=str(tmp_path),
+    )
+    sealed = manager.seal(
+        source=source,
+        contract_id='candidate-v1',
+        version='1.0.0',
+    )
+    assert sealed.digest
