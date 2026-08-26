@@ -66,6 +66,11 @@ and `/health` reports dense as unavailable with a reason.
 
 ## Operator commands
 
+The canonical, kept-current operator flow (folder of PDFs -> corpus ->
+advisories) lives in
+[`runbooks/knowledge-corpus.md`](runbooks/knowledge-corpus.md). The commands
+below remain valid for the advisory-specific tooling:
+
 ```bash
 # Build/rebuild the corpus store (fetch -> ingest -> embed; resumable):
 python services/research-orchestrator/scripts/build_knowledge_corpus.py \
