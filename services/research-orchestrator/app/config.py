@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     knowledge_max_source_bytes: int = 2 * 1024 * 1024
     knowledge_max_results: int = 10
     knowledge_token_budget: int = 4000
+    # Dense method-advisory retrieval (corpus-RAG productionization). Dense
+    # degrades to lexical automatically whenever the backend/model is not
+    # ready; advisory generation additionally requires these knobs only.
+    knowledge_advisory_enabled: bool = True
+    knowledge_dense_mode: Literal['dense', 'lexical'] = 'dense'
+    knowledge_embedding_model: str = 'Snowflake/snowflake-arctic-embed-m-v1.5'
+    knowledge_embedding_revision: str = ''
+    knowledge_dense_pg_dsn: str = ''
     knowledge_allowlist_roots: Annotated[list[str], NoDecode] = [
         '/workspace/cluster-config/docs',
         '/workspace/cluster-config/services/research-orchestrator/evaluation-contracts',

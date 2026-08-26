@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from .config import Settings
 from .opencode_runtime import AgentRuntime, RuntimeSession
+from .runtime_env import build_agent_environment
 from .schemas import AgentName, AgentTurnResult, TurnKind
 
 
@@ -291,16 +292,17 @@ class HermesProcessRuntime(AgentRuntime):
         )
         log_path = hermes_home / 'gateway.log'
         log_handle = log_path.open('a', encoding='utf-8')
-        environment = {
-            **__import__('os').environ,
-            'HERMES_HOME': str(hermes_home),
-            'HERMES_WRITE_SAFE_ROOT': str(workspace),
-            'HERMES_MAX_ITERATIONS': str(self.settings.hermes_max_iterations),
-            'API_SERVER_ENABLED': 'true',
-            'API_SERVER_HOST': self.settings.hermes_server_host,
-            'API_SERVER_PORT': str(port),
-            'API_SERVER_KEY': api_key,
-        }
+        environment = build_agent_environment(
+            runtime_vars={
+                'HERMES_HOME': str(hermes_home),
+                'HERMES_WRITE_SAFE_ROOT': str(workspace),
+                'HERMES_MAX_ITERATIONS': str(self.settings.hermes_max_iterations),
+                'API_SERVER_ENABLED': 'true',
+                'API_SERVER_HOST': self.settings.hermes_server_host,
+                'API_SERVER_PORT': str(port),
+                'API_SERVER_KEY': api_key,
+            },
+        )
         try:
             process = subprocess.Popen(
                 [self.settings.hermes_executable, 'gateway'],

@@ -23,6 +23,13 @@ WORKDIR /app
 COPY services/research-orchestrator/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Dense-retrieval model runtime (corpus-RAG method advisory). The import-time
+# dependencies of that surface (numpy, PyMuPDF) ship via requirements.txt;
+# torch/sentence-transformers are imported lazily so missing model weights at
+# runtime degrade to lexical retrieval instead of breaking startup.
+COPY services/research-orchestrator/requirements-dense.txt ./
+RUN pip install --no-cache-dir -r requirements-dense.txt
+
 # Shared task-fabric protocol package, installed from the checked-out source.
 COPY services/task-fabric /app/services/task-fabric
 RUN pip install --no-cache-dir /app/services/task-fabric

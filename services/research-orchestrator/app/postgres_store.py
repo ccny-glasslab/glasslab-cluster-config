@@ -10,13 +10,21 @@ local locks.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 import json
+import logging
 from types import ModuleType
 from typing import Any, Iterator
 
+from .corpus_rag import (
+    ChunkVectorMeta,
+    CorpusRecord,
+    RagChunkRecord,
+    RagDocumentRecord,
+    RagSectionRecord,
+)
 from .schemas import (
     ActionRecord, AgentName, ApprovalStatus, ArtifactRecord, ContextPacket,
     EventRecord, IngestedDatasetRecord, JobRecord, JobStatus, KnowledgeChunk,
@@ -25,6 +33,9 @@ from .schemas import (
 )
 from .state_machine import HUMAN_WAIT_STATES, validate_transition
 from .storage import ConcurrencyConflict, RecordNotFound
+
+
+logger = logging.getLogger(__name__)
 
 
 def _import_psycopg() -> ModuleType:
@@ -112,11 +123,38 @@ class PostgresStore:
           chunk_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES orchestrator_knowledge_sources(source_id) ON DELETE CASCADE,
           chunk_index INTEGER NOT NULL, text TEXT NOT NULL, payload JSONB NOT NULL);
         CREATE INDEX IF NOT EXISTS orchestrator_knowledge_chunks_source_idx ON orchestrator_knowledge_chunks(source_id, chunk_index);
+        CREATE TABLE IF NOT EXISTS orchestrator_knowledge_chunk_vectors (
+          chunk_id TEXT PRIMARY KEY REFERENCES orchestrator_knowledge_chunks(chunk_id) ON DELETE CASCADE,
+          vec BYTEA NOT NULL, model_id TEXT NOT NULL, revision TEXT NOT NULL,
+          dims INTEGER NOT NULL, index_version TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS orchestrator_knowledge_chunk_vectors_model_idx
+          ON orchestrator_knowledge_chunk_vectors(model_id);
         CREATE INDEX IF NOT EXISTS orchestrator_knowledge_chunks_fts_idx ON orchestrator_knowledge_chunks USING GIN (to_tsvector('simple', text));
         CREATE TABLE IF NOT EXISTS orchestrator_context_packets (
           packet_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES orchestrator_runs(run_id),
           payload JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL);
         CREATE INDEX IF NOT EXISTS orchestrator_context_packets_run_idx ON orchestrator_context_packets(run_id, created_at);
+        CREATE TABLE IF NOT EXISTS orchestrator_rag_corpora (
+          corpus_id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, title TEXT,
+          created_at TIMESTAMPTZ NOT NULL, metadata JSONB NOT NULL);
+        CREATE TABLE IF NOT EXISTS orchestrator_rag_corpus_sources (
+          corpus_id TEXT NOT NULL REFERENCES orchestrator_rag_corpora(corpus_id) ON DELETE CASCADE,
+          source_id TEXT NOT NULL REFERENCES orchestrator_knowledge_sources(source_id) ON DELETE CASCADE,
+          added_at TIMESTAMPTZ NOT NULL, UNIQUE(corpus_id, source_id));
+        CREATE INDEX IF NOT EXISTS orchestrator_rag_corpus_sources_corpus_idx ON orchestrator_rag_corpus_sources(corpus_id);
+        CREATE TABLE IF NOT EXISTS orchestrator_rag_documents (
+          doc_id TEXT PRIMARY KEY, source_id TEXT NOT NULL UNIQUE REFERENCES orchestrator_knowledge_sources(source_id) ON DELETE CASCADE,
+          payload JSONB NOT NULL);
+        CREATE TABLE IF NOT EXISTS orchestrator_rag_sections (
+          section_id TEXT PRIMARY KEY, doc_id TEXT NOT NULL REFERENCES orchestrator_rag_documents(doc_id) ON DELETE CASCADE,
+          payload JSONB NOT NULL);
+        CREATE INDEX IF NOT EXISTS orchestrator_rag_sections_doc_idx ON orchestrator_rag_sections(doc_id);
+        CREATE TABLE IF NOT EXISTS orchestrator_rag_chunks (
+          chunk_id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES orchestrator_knowledge_sources(source_id) ON DELETE CASCADE,
+          kind TEXT NOT NULL CHECK(kind IN ('evidence_span', 'section_unit')), chunk_index INTEGER NOT NULL,
+          text TEXT NOT NULL, payload JSONB NOT NULL);
+        CREATE INDEX IF NOT EXISTS orchestrator_rag_chunks_source_idx ON orchestrator_rag_chunks(source_id, chunk_index);
+        CREATE INDEX IF NOT EXISTS orchestrator_rag_chunks_fts_idx ON orchestrator_rag_chunks USING GIN (to_tsvector('simple', text));
         '''
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -124,6 +162,64 @@ class PostgresStore:
                     if statement.strip():
                         cur.execute(statement)
             conn.commit()
+        self._ensure_vector_schema()
+
+    def _pgvector_extension_available(self) -> bool:
+        # Probed against pg_available_extensions rather than attempting DDL:
+        # on a server without pgvector, CREATE EXTENSION would abort its
+        # transaction and log an exception traceback on every store
+        # construction. Availability changes require a restart to be picked
+        # up, which is acceptable for an install-once extension.
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'"
+            ).fetchone()
+        return row is not None
+
+    def _ensure_vector_schema(self) -> None:
+        # Dense-retrieval pieces depend on the pgvector extension. A
+        # deployment without it must still start and serve every lexical
+        # operation; availability is checked once per store construction so
+        # absence never leaves an aborted transaction behind, and the
+        # degradation surfaces only when vectors are stored or searched.
+        vectors_ddl = '''
+        CREATE EXTENSION IF NOT EXISTS vector;
+        CREATE TABLE IF NOT EXISTS orchestrator_rag_chunk_vectors (
+          chunk_id TEXT PRIMARY KEY REFERENCES orchestrator_rag_chunks(chunk_id) ON DELETE CASCADE,
+          embedding halfvec(768), vec BYTEA NOT NULL, model_id TEXT NOT NULL, revision TEXT NOT NULL,
+          dims INTEGER NOT NULL, index_version TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS orchestrator_rag_chunk_vectors_embedding_idx
+          ON orchestrator_rag_chunk_vectors USING hnsw (embedding halfvec_cosine_ops)
+          WITH (m = 16, ef_construction = 64);
+        '''
+        knowledge_vectors_ddl = '''
+        CREATE EXTENSION IF NOT EXISTS vector;
+        ALTER TABLE orchestrator_knowledge_chunk_vectors
+          ADD COLUMN IF NOT EXISTS embedding halfvec(768);
+        CREATE INDEX IF NOT EXISTS orchestrator_knowledge_chunk_vectors_embedding_idx
+          ON orchestrator_knowledge_chunk_vectors USING hnsw (embedding halfvec_cosine_ops)
+          WITH (m = 16, ef_construction = 64);
+        '''
+        try:
+            if not self._pgvector_extension_available():
+                logger.warning(
+                    'pgvector extension unavailable; orchestrator_rag_chunk_vectors'
+                    ' and its HNSW index were not created (dense retrieval'
+                    ' degraded)'
+                )
+                return
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    for ddl in (vectors_ddl, knowledge_vectors_ddl):
+                        for statement in ddl.split(';'):
+                            if statement.strip():
+                                cur.execute(statement)
+                conn.commit()
+        except Exception:
+            logger.warning(
+                'pgvector vector-schema setup failed; dense retrieval degraded',
+                exc_info=True,
+            )
 
     def ping(self) -> bool:
         with self._connect() as conn:
@@ -379,3 +475,174 @@ class PostgresStore:
         return ContextPacket.model_validate(row['payload'])
     def list_context_packets(self, run_id: str) -> list[ContextPacket]:
         with self._connect() as conn: return [ContextPacket.model_validate(r['payload']) for r in conn.execute('SELECT payload FROM orchestrator_context_packets WHERE run_id=%s ORDER BY created_at, packet_id', (run_id,)).fetchall()]
+
+    @staticmethod
+    def _jsonb(value: Any) -> Any:
+        from psycopg.types.json import Jsonb
+
+        return Jsonb(value)
+
+    def create_corpus(self, record: CorpusRecord) -> CorpusRecord:
+        with self.transaction() as conn:
+            conn.execute('INSERT INTO orchestrator_rag_corpora (corpus_id, slug, title, created_at, metadata) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (corpus_id) DO UPDATE SET slug=EXCLUDED.slug, title=EXCLUDED.title, metadata=EXCLUDED.metadata', (record.corpus_id, record.slug, record.title, record.created_at, self._jsonb(record.metadata)))
+        return record
+    def get_corpus(self, slug: str) -> CorpusRecord | None:
+        with self._connect() as conn:
+            row = conn.execute('SELECT corpus_id, slug, title, created_at, metadata FROM orchestrator_rag_corpora WHERE slug=%s', (slug,)).fetchone()
+        if row is None: return None
+        return CorpusRecord(corpus_id=row['corpus_id'], slug=row['slug'], title=row['title'], created_at=row['created_at'], metadata=row['metadata'])
+    def list_corpora(self) -> list[CorpusRecord]:
+        with self._connect() as conn:
+            rows = conn.execute('SELECT corpus_id, slug, title, created_at, metadata FROM orchestrator_rag_corpora ORDER BY created_at, corpus_id').fetchall()
+        return [CorpusRecord(corpus_id=r['corpus_id'], slug=r['slug'], title=r['title'], created_at=r['created_at'], metadata=r['metadata']) for r in rows]
+    def add_corpus_source(self, corpus_id: str, source_id: str) -> bool:
+        with self.transaction() as conn:
+            result = conn.execute('INSERT INTO orchestrator_rag_corpus_sources (corpus_id, source_id, added_at) VALUES (%s,%s,%s) ON CONFLICT (corpus_id, source_id) DO NOTHING', (corpus_id, source_id, utc_now()))
+        return result.rowcount == 1
+    def list_corpus_sources(self, corpus_id: str) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute('SELECT source_id FROM orchestrator_rag_corpus_sources WHERE corpus_id=%s ORDER BY added_at, source_id', (corpus_id,)).fetchall()
+        return [r['source_id'] for r in rows]
+
+    def upsert_rag_document(self, record: RagDocumentRecord) -> RagDocumentRecord:
+        with self.transaction() as conn:
+            conn.execute('INSERT INTO orchestrator_rag_documents (doc_id, source_id, payload) VALUES (%s,%s,%s) ON CONFLICT (doc_id) DO UPDATE SET source_id=EXCLUDED.source_id, payload=EXCLUDED.payload', (record.doc_id, record.source_id, self._payload(record)))
+        return record
+    def replace_rag_sections(self, doc_id: str, sections: list[RagSectionRecord]) -> int:
+        with self.transaction() as conn:
+            conn.execute('DELETE FROM orchestrator_rag_sections WHERE doc_id=%s', (doc_id,))
+            for section in sections:
+                conn.execute('INSERT INTO orchestrator_rag_sections (section_id, doc_id, payload) VALUES (%s,%s,%s)', (section.section_id, section.doc_id, self._payload(section)))
+        return len(sections)
+    def replace_rag_chunks(self, source_id: str, chunks: list[RagChunkRecord]) -> int:
+        # Lexical parity note: PostgreSQL has no separate FTS shadow table;
+        # the GIN to_tsvector index on orchestrator_rag_chunks tracks the
+        # rows transactionally, so delete+insert here updates search and
+        # index atomically, matching SqliteStore.replace_rag_chunks.
+        with self.transaction() as conn:
+            conn.execute('DELETE FROM orchestrator_rag_chunks WHERE source_id=%s', (source_id,))
+            for chunk in chunks:
+                conn.execute('INSERT INTO orchestrator_rag_chunks (chunk_id, source_id, kind, chunk_index, text, payload) VALUES (%s,%s,%s,%s,%s,%s)', (chunk.chunk_id, chunk.source_id, chunk.kind, chunk.chunk_index, chunk.text, self._payload(chunk)))
+        return len(chunks)
+    def search_rag_chunks_fts(self, query: str, *, source_ids: list[str] | None = None, limit: int = 10) -> list[dict[str, Any]]:
+        # Identical term handling to SqliteStore.search_rag_chunks_fts:
+        # OR-of-quoted-terms, terms longer than one character, capped at 24.
+        # The rank expression and the WHERE predicate each bind the search
+        # query; keep both parameters explicit.
+        terms = [term for term in query.split() if len(term) > 1][:24]
+        or_query = ' OR '.join(f'"{term}"' for term in terms)
+        if not or_query: return []
+        params: list[Any] = [or_query, or_query]
+        clause = "to_tsvector('simple', text) @@ websearch_to_tsquery('simple', %s)"
+        if source_ids: clause += ' AND source_id = ANY(%s)'; params.append(source_ids)
+        params.append(limit * 3)
+        sql = ("SELECT payload, ts_rank_cd(to_tsvector('simple', text), websearch_to_tsquery('simple', %s)) AS rank"
+               " FROM orchestrator_rag_chunks WHERE " + clause + " ORDER BY rank DESC, chunk_index LIMIT %s")
+        with self._connect() as conn: rows = conn.execute(sql, params).fetchall()
+        hits = []
+        for row in rows[:limit]:
+            hit = dict(RagChunkRecord.model_validate(row['payload']).model_dump(mode='json'))
+            hit['rank'] = float(row['rank'])
+            hits.append(hit)
+        return hits
+    def list_rag_chunks(self, *, source_ids: list[str] | None = None, kinds: list[str] | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+        query = 'SELECT payload FROM orchestrator_rag_chunks'
+        params: list[Any] = []
+        clauses: list[str] = []
+        if source_ids: clauses.append('source_id = ANY(%s)'); params.append(source_ids)
+        if kinds: clauses.append('kind = ANY(%s)'); params.append(kinds)
+        if clauses: query += ' WHERE ' + ' AND '.join(clauses)
+        query += ' ORDER BY source_id, chunk_index'
+        if limit is not None: query += ' LIMIT %s'; params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(RagChunkRecord.model_validate(r['payload']).model_dump(mode='json')) for r in rows]
+
+    def upsert_rag_chunk_vectors(self, meta: ChunkVectorMeta, vec_bytes: bytes) -> None:
+        # The halfvec embedding column is populated by the dense-indexing
+        # wave; this surface stores opaque vector bytes plus provenance.
+        with self.transaction() as conn:
+            conn.execute('INSERT INTO orchestrator_rag_chunk_vectors (chunk_id, vec, model_id, revision, dims, index_version) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (chunk_id) DO UPDATE SET vec=EXCLUDED.vec, model_id=EXCLUDED.model_id, revision=EXCLUDED.revision, dims=EXCLUDED.dims, index_version=EXCLUDED.index_version', (meta.chunk_id, vec_bytes, meta.model_id, meta.revision, meta.dims, meta.index_version))
+    def list_rag_chunk_vectors(self, model_id: str | None = None) -> list[tuple[ChunkVectorMeta, bytes]]:
+        query = ('SELECT chunk_id, vec, model_id, revision, dims, index_version'
+                 ' FROM orchestrator_rag_chunk_vectors')
+        params: list[Any] = []
+        if model_id is not None: query += ' WHERE model_id=%s'; params.append(model_id)
+        query += ' ORDER BY chunk_id'
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            (
+                ChunkVectorMeta(chunk_id=r['chunk_id'], model_id=r['model_id'], revision=r['revision'], dims=r['dims'], index_version=r['index_version']),
+                bytes(r['vec']),
+            )
+            for r in rows
+        ]
+
+    def upsert_knowledge_chunk_vectors(self, meta: ChunkVectorMeta, vec_bytes: bytes) -> None:
+        # The store owns both representations: canonical vector bytes plus
+        # the halfvec column HNSW search reads. The bytes are opaque
+        # lineage-carrying payloads (the store contract round-trips arbitrary
+        # blobs), so the halfvec projection applies only when the blob is
+        # exactly dims float32 values — the encoding build_dense_index
+        # produces via encode_vector. Anything else degrades to byte-only
+        # storage, and readiness() surfaces it as unusable at query time.
+        import struct
+
+        from .knowledge_dense import _halfvec_literal
+
+        with self.transaction() as conn:
+            conn.execute('INSERT INTO orchestrator_knowledge_chunk_vectors (chunk_id, vec, model_id, revision, dims, index_version) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (chunk_id) DO UPDATE SET vec=EXCLUDED.vec, model_id=EXCLUDED.model_id, revision=EXCLUDED.revision, dims=EXCLUDED.dims, index_version=EXCLUDED.index_version', (meta.chunk_id, vec_bytes, meta.model_id, meta.revision, meta.dims, meta.index_version))
+            if meta.dims > 0 and len(vec_bytes) == meta.dims * 4:
+                try:
+                    # Savepoint-scoped so a failed halfvec write (extension absent)
+                    # cannot roll back the canonical byte insert above.
+                    with conn.transaction():
+                        literal = _halfvec_literal(
+                            struct.unpack(f'<{meta.dims}f', vec_bytes)
+                        )
+                        conn.execute('UPDATE orchestrator_knowledge_chunk_vectors SET embedding = %s::halfvec WHERE chunk_id = %s', (literal, meta.chunk_id))
+                except Exception:
+                    pass
+
+    def list_knowledge_chunk_vectors(self, model_id: str | None = None) -> list[tuple[ChunkVectorMeta, bytes]]:
+        query = ('SELECT chunk_id, vec, model_id, revision, dims, index_version'
+                 ' FROM orchestrator_knowledge_chunk_vectors')
+        params: list[Any] = []
+        if model_id is not None:
+            query += ' WHERE model_id=%s'
+            params.append(model_id)
+        query += ' ORDER BY chunk_id'
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            (
+                ChunkVectorMeta(chunk_id=r['chunk_id'], model_id=r['model_id'], revision=r['revision'], dims=r['dims'], index_version=r['index_version']),
+                bytes(r['vec']),
+            )
+            for r in rows
+        ]
+
+    def list_all_knowledge_chunks(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        query = ('SELECT payload FROM orchestrator_knowledge_chunks'
+                 ' ORDER BY source_id, chunk_index')
+        params: list[Any] = []
+        if limit is not None:
+            query += ' LIMIT %s'
+            params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(r['payload']) for r in rows]
+
+    def get_knowledge_chunks(self, chunk_ids: Sequence[str]) -> list[dict[str, Any]]:
+        if not chunk_ids:
+            return []
+        placeholders = ', '.join('%s' for _ in chunk_ids)
+        query = (
+            'SELECT chunk_id, payload FROM orchestrator_knowledge_chunks'
+            f' WHERE chunk_id IN ({placeholders})'
+        )
+        with self._connect() as conn:
+            rows = conn.execute(query, list(chunk_ids)).fetchall()
+        by_id = {row['chunk_id']: dict(row['payload']) for row in rows}
+        return [by_id[cid] for cid in chunk_ids if cid in by_id]
