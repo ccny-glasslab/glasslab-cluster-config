@@ -2303,10 +2303,34 @@ class ResearchOrchestrator:
                 for action in actions
                 if action.type == 'propose_evaluation_contract'
             ]
-            raise WorkflowError(
+            feedback_message = (
                 'Beaker must propose exactly one valid contract candidate'
-                + (f': {"; ".join(denied)}' if denied else '')
+                + (
+                    f': {"; ".join(denied)}'
+                    if denied
+                    else '; the previous response contained no '
+                    'propose_evaluation_contract action'
+                )
             )
+            # Same deterministic-retry pattern as the seal-rejection path: the
+            # agent re-drafts with the concrete failure as feedback. The chain
+            # is bounded by the per-run turn budget (TIMED_OUT when exhausted),
+            # so a stuck agent cannot loop forever.
+            self._event(
+                run_id,
+                source='orchestrator',
+                event_type='contract.candidate_rejected',
+                payload={
+                    'action_id': None,
+                    'reason': feedback_message,
+                    'retrying': True,
+                },
+            )
+            self._beaker_draft_contract(
+                run_id,
+                feedback=feedback_message,
+            )
+            return
         action = candidates[0]
         request = ContractCandidateRequest.model_validate(action.arguments)
         workspace = Path(self.store.get_run(run_id).beaker_workspace).resolve()
