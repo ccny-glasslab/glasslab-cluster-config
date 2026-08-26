@@ -33,6 +33,7 @@ from .cluster import FakeClusterExecutor, WorkflowApiClusterExecutor
 from .config import SERVICE_ROOT, Settings, get_settings
 from .contract_candidates import ContractCandidateManager
 from .contracts import ContractIntegrityError, EvaluationContractResolver
+from .corpus_rag.pdf_backend import UnsupportedDocumentError
 from .discord_adapter import DisabledDiscordAdapter, DiscordHttpAdapter
 from .discord_controls import DiscordControlGateway
 from .datasets import DatasetIngestionError, DatasetIngestionManager
@@ -509,6 +510,52 @@ def create_app(
                 source_version=request.source_version,
                 metadata=request.metadata,
             )
+        except Exception as exc:
+            raise map_error(exc) from exc
+
+    @app.post(
+        '/knowledge/sources/upload',
+        response_model=KnowledgeSource,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def upload_knowledge_source(
+        file: UploadFile = File(...),
+        source_type: str = Form(default='documentation'),
+        title: str | None = Form(default=None),
+        _: None = Depends(require_operator),
+    ) -> KnowledgeSource:
+        # Operator-only content upload: the HTTP twin of path ingestion for
+        # material that lives outside the service filesystem (an operator
+        # laptop full of PDFs). The same size cap and fail-closed secret
+        # scanning apply to the extracted text; PDFs must be born-digital.
+        data = file.file.read(settings.knowledge_max_source_bytes + 1)
+        if len(data) > settings.knowledge_max_source_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    'upload exceeds knowledge_max_source_bytes '
+                    f'({settings.knowledge_max_source_bytes})'
+                ),
+            )
+        try:
+            resolved_type = SourceType(source_type)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f'unknown source_type {source_type!r}',
+            ) from None
+        try:
+            return engine.knowledge.ingest_bytes(
+                source_type=resolved_type,
+                filename=file.filename or 'upload',
+                data=data,
+                title=title,
+            )
+        except UnsupportedDocumentError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail=str(exc),
+            ) from exc
         except Exception as exc:
             raise map_error(exc) from exc
 

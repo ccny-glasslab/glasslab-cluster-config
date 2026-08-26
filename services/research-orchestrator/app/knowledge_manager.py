@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from collections.abc import Sequence
 from typing import Any, Iterable
 
@@ -221,6 +221,69 @@ class KnowledgeManager:
             metadata=metadata or {},
         )
         return self._commit_source(source, text, emit_event_for_run)
+
+    def ingest_bytes(
+        self,
+        *,
+        source_type: SourceType,
+        filename: str,
+        data: bytes,
+        title: str | None = None,
+        source_version: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        access_policy: str = 'run-approved',
+        emit_event_for_run: str | None = None,
+    ) -> KnowledgeSource:
+        """Ingest uploaded bytes (born-digital PDF or UTF-8 text).
+
+        The HTTP twin of :meth:`ingest_source` for material that lives
+        outside the service filesystem (an operator laptop, an upload form):
+        same size cap and fail-closed secret scanning applied to the
+        extracted text, but no allowlisted path — the canonical URI is
+        synthesized as ``upload://<filename>`` and the digest covers the raw
+        uploaded bytes so re-uploading the identical file deduplicates.
+        PDFs go through the born-digital PyMuPDF backend; scanned documents
+        are rejected (OCR out of scope). Uploads default to unscoped +
+        run-approved so they join the shared corpus both agents read.
+        """
+        if len(data) > self.max_source_bytes:
+            raise KnowledgeError(
+                f'source exceeds ingestion size limit '
+                f'({len(data)} > {self.max_source_bytes} bytes)'
+            )
+        safe_name = PurePosixPath(filename.replace('\\', '/')).name
+        if not safe_name or safe_name in ('.', '..'):
+            raise KnowledgeError('upload filename must name a file')
+        self._reject_secret_path(Path(safe_name))
+        text = self._extract_upload_text(safe_name, data)
+        if not text.strip():
+            raise KnowledgeError(
+                f'upload {safe_name!r} contains no extractable text'
+            )
+        if self._text_contains_secrets(text):
+            raise KnowledgeError('refusing to index suspected secret material')
+        source = KnowledgeSource(
+            source_type=source_type,
+            canonical_uri=f'upload://{safe_name}',
+            access_policy=access_policy,
+            source_version=source_version,
+            digest=digest_bytes(data),
+            title=title or safe_name,
+            metadata=metadata or {},
+        )
+        return self._commit_source(source, text, emit_event_for_run)
+
+    def _extract_upload_text(self, filename: str, data: bytes) -> str:
+        if data.startswith(b'%PDF'):
+            from .corpus_rag.pdf_backend import PyMuPdfBackend
+
+            return PyMuPdfBackend().extract(data).text
+        try:
+            return data.decode('utf-8')
+        except UnicodeDecodeError as exc:
+            raise KnowledgeError(
+                f'unsupported upload {filename!r}: not a PDF and not UTF-8 text'
+            ) from exc
 
     def _commit_source(
         self,

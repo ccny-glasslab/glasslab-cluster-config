@@ -71,6 +71,17 @@ and `/health` reports dense as unavailable with a reason.
 python services/research-orchestrator/scripts/build_knowledge_corpus.py \
     --store <dir>/knowledge-corpus.db --embedding arctic-m
 
+# Upload a local folder of PDFs/markdown/text into the LIVE corpus
+# (operator-token aware; rebuilds the dense index when done):
+python services/research-orchestrator/scripts/upload_knowledge_dir.py \
+    --url http://127.0.0.1:18080 --dir ~/Documents/methods-pdfs \
+    --source-type documentation
+
+# Single-file HTTP ingestion from a service-side allowlisted path:
+curl -X POST http://<orchestrator>/knowledge/sources \
+  -H "X-Glasslab-Operator-Token: $TOKEN" -H "Content-Type: application/json" \
+  -d '{"source_type":"documentation","path":"/var/lib/glasslab-knowledge/note.md"}'
+
 # Retrieval benchmark on the production surface (lexical/dense/hybrid):
 python services/research-orchestrator/scripts/corpus_rag/run_benchmark_km.py \
     --store <dir>/knowledge-corpus.db \
@@ -81,6 +92,11 @@ python services/research-orchestrator/scripts/corpus_rag/run_benchmark_km.py \
 # Diagnostics:
 curl -s http://<orchestrator>/health | jq .knowledge_dense
 ```
+
+Uploads accept born-digital PDFs and UTF-8 markdown/text up to
+`knowledge_max_source_bytes`; identical re-uploads deduplicate by content
+digest; scanned/image-only PDFs are rejected (OCR out of scope); secret
+material is refused fail-closed before indexing.
 
 `/health.knowledge_dense` reports availability, reason (when degraded),
 backend, active model id/revision/dims, and indexed chunk count.
