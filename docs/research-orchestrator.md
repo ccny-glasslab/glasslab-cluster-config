@@ -393,6 +393,10 @@ zero or one `eval_agent_prompt.md`; its filename has no semantic meaning.
 Honeydew reads the normalized files in a temporary isolated Hermes session
 and returns a validated `glasslab-task-spec-v1` containing:
 
+> **Authoring guidance:** see
+> [`research-orchestrator-task-bundle-guide.md`](research-orchestrator-task-bundle-guide.md)
+> for how to write a `problem.md` that compiles and passes preflight.
+
 - a human-facing name
 - one approved runtime profile
 - uploaded-dataset references or public asset requirements and checksums
