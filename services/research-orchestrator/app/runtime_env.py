@@ -38,18 +38,17 @@ BENIGN_RUNTIME_VARS = frozenset(
 )
 
 # Model-provider authentication variables the agent runtimes may need to
-# reach the model endpoint. OpenCode reads OPENCODE_API_KEY (the deployment
-# injects it via secretRef); Hermes' custom provider reads its key from an
-# ambient variable whose exact name is not documented in this repository,
-# so the bounded set below is forwarded. Every entry is a model-provider
-# credential — none are orchestrator control-plane secrets.
+# reach the model endpoint. Both names are documented: OpenCode reads
+# OPENCODE_API_KEY (the deployment injects it via secretRef; README states
+# the runtime requires it), and Hermes' `custom` provider falls back to
+# OPENAI_API_KEY for OpenAI-compatible endpoints when config.yaml leaves
+# api_key empty (hermes-agent environment-variables reference). Every entry
+# is a model-provider credential — none are orchestrator control-plane
+# secrets.
 MODEL_AUTH_ENV_VARS = frozenset(
     {
         'OPENCODE_API_KEY',
-        'CUSTOM_API_KEY',
         'OPENAI_API_KEY',
-        'EXO_API_KEY',
-        'HERMES_API_KEY',
     }
 )
 

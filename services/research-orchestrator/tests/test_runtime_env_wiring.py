@@ -104,7 +104,9 @@ def test_opencode_child_env_contains_no_secrets(
 def test_hermes_child_env_contains_no_secrets(
     tmp_path: Path, monkeypatch, secret_parent_env
 ) -> None:
-    monkeypatch.setenv('CUSTOM_API_KEY', 'model-key')
+    # Hermes' custom OpenAI-compatible provider falls back to OPENAI_API_KEY
+    # when config.yaml leaves api_key empty (hermes-agent docs).
+    monkeypatch.setenv('OPENAI_API_KEY', 'model-key')
     captured = _captured_popen(monkeypatch)
     workspace = tmp_path / 'runs' / 'run-1' / 'beaker'
     workspace.mkdir(parents=True, exist_ok=True)
@@ -119,6 +121,6 @@ def test_hermes_child_env_contains_no_secrets(
 
     for leaked in SECRET_VARS:
         assert leaked not in captured, f'secret {leaked} reached Hermes Popen'
-    assert captured.get('CUSTOM_API_KEY') == 'model-key'
+    assert captured.get('OPENAI_API_KEY') == 'model-key'
     assert captured.get('HERMES_HOME')
     assert captured.get('API_SERVER_ENABLED') == 'true'

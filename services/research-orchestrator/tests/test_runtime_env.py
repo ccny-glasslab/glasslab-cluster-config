@@ -24,7 +24,8 @@ def test_model_and_benign_forwarded_secrets_absent(monkeypatch) -> None:
     monkeypatch.setenv('TMPDIR', '/tmp')
     monkeypatch.setenv('LANG', 'C.UTF-8')
     monkeypatch.setenv('OPENCODE_API_KEY', 'model-key-1')
-    monkeypatch.setenv('CUSTOM_API_KEY', 'model-key-2')
+    monkeypatch.setenv('OPENAI_API_KEY', 'model-key-2')
+    monkeypatch.setenv('CUSTOM_API_KEY', 'unlisted-model-key')
     monkeypatch.setenv('GLASSLAB_ORCHESTRATOR_DISCORD_BOT_TOKEN', 'discord-token')
     monkeypatch.setenv('GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN', 'operator-token')
     monkeypatch.setenv('GLASSLAB_WORKFLOW_API_TOKEN', 'workflow-token')
@@ -32,7 +33,7 @@ def test_model_and_benign_forwarded_secrets_absent(monkeypatch) -> None:
 
     environment = build_agent_environment(
         runtime_vars={'HOME': '/run/home', 'XDG_CACHE_HOME': '/run/cache'},
-        model_auth_vars={'OPENCODE_API_KEY', 'CUSTOM_API_KEY'},
+        model_auth_vars={'OPENCODE_API_KEY', 'OPENAI_API_KEY'},
     )
 
     assert environment['PATH'] == '/usr/local/bin:/usr/bin'
@@ -41,7 +42,8 @@ def test_model_and_benign_forwarded_secrets_absent(monkeypatch) -> None:
     assert environment['HOME'] == '/run/home'
     assert environment['XDG_CACHE_HOME'] == '/run/cache'
     assert environment['OPENCODE_API_KEY'] == 'model-key-1'
-    assert environment['CUSTOM_API_KEY'] == 'model-key-2'
+    assert environment['OPENAI_API_KEY'] == 'model-key-2'
+    assert 'CUSTOM_API_KEY' not in environment
     for leaked in (
         'GLASSLAB_ORCHESTRATOR_DISCORD_BOT_TOKEN',
         'GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN',
@@ -98,21 +100,20 @@ def test_runtime_vars_override_parent_values(monkeypatch) -> None:
 def test_default_model_auth_vars_are_exactly_the_allowlist(monkeypatch) -> None:
     values = {
         'OPENCODE_API_KEY': 'k1',
-        'CUSTOM_API_KEY': 'k2',
-        'OPENAI_API_KEY': 'k3',
-        'EXO_API_KEY': 'k4',
-        'HERMES_API_KEY': 'k5',
+        'OPENAI_API_KEY': 'k2',
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setenv('SOME_OTHER_KEY', 'k6')
+    monkeypatch.setenv('CUSTOM_API_KEY', 'k6')
+    monkeypatch.setenv('EXO_API_KEY', 'k7')
 
     environment = build_agent_environment(runtime_vars={})
 
     assert set(MODEL_AUTH_ENV_VARS) == set(values)
     for name, value in values.items():
         assert environment.get(name) == value
-    assert 'SOME_OTHER_KEY' not in environment
+    assert 'CUSTOM_API_KEY' not in environment
+    assert 'EXO_API_KEY' not in environment
 
 
 def test_defense_in_depth_rejects_secret_named_requests(monkeypatch) -> None:
