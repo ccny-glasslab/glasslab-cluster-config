@@ -108,7 +108,16 @@ re-embedding rows stored under the old lineage.
 - **Scanned/image-only PDFs are rejected** (415). OCR is deliberately out of
   scope; re-export a born-digital PDF instead.
 - **Size cap**: uploads larger than `knowledge_max_source_bytes` are refused
-  (413). Raise the setting deliberately, not casually.
+  (413). The default (2 MiB) suits papers and notes; large textbooks need a
+  deliberate deployment-level raise:
+
+  ```text
+  GLASSLAB_ORCHESTRATOR_KNOWLEDGE_MAX_SOURCE_BYTES=524288000   # 500 MiB
+  ```
+
+  Set it in the orchestrator deployment env before uploading big books;
+  memory during ingestion scales with the file, so raise it on a host that
+  can spare the RAM.
 - **Secrets never enter the index**: filename patterns, credential-content
   patterns, and long-base64 heuristics reject the whole file fail-closed.
 - **Role scoping decides visibility, not labels alone**: Honeydew reads
