@@ -7,5 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY services/research-ingress/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY services/research-ingress/app /app/app
+RUN useradd --uid 10001 --no-create-home --shell /sbin/nologin glasslab
+USER 10001:10001
 EXPOSE 8096
 CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8096"]

@@ -12,6 +12,8 @@ COPY services/schedule-worker/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY services/schedule-worker/app /app/app
+RUN useradd --uid 10001 --no-create-home --shell /sbin/nologin glasslab
+USER 10001:10001
 
 EXPOSE 8094
 

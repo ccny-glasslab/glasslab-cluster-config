@@ -16,6 +16,9 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: node05
       serviceAccountName: glasslab-workflow-api
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
       imagePullSecrets:
         - name: glasslab-ghcr-pull
       containers:
@@ -64,9 +67,19 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
           volumeMounts:
             - name: artifacts-volume
               mountPath: /mnt/artifacts
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: 250m
@@ -90,3 +103,5 @@ spec:
         - name: artifacts-volume
           persistentVolumeClaim:
             claimName: glasslab-shared-artifacts
+        - name: tmp
+          emptyDir: {}
