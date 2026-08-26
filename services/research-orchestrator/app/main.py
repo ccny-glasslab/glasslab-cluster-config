@@ -200,6 +200,13 @@ def build_engine(
             dataset_catalog_path=settings.benchmark_dataset_catalog_path,
             task_asset_root=settings.task_asset_root,
             maximum_asset_bytes=settings.maximum_task_asset_bytes,
+            asset_download_timeout_seconds=(
+                settings.task_asset_download_timeout_seconds
+            ),
+            asset_download_connect_timeout_seconds=(
+                settings.task_asset_download_connect_timeout_seconds
+            ),
+            asset_download_max_retries=settings.task_asset_download_max_retries,
             ingested_datasets=datasets,
         ),
         policy=ActionPolicy(
