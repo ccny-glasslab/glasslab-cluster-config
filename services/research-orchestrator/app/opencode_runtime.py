@@ -28,6 +28,7 @@ import httpx
 from pydantic import ValidationError
 
 from .config import Settings
+from .runtime_env import build_agent_environment
 from .schemas import AgentName, AgentTurnResult, ProducedFile
 
 
@@ -474,19 +475,20 @@ class OpenCodeProcessRuntime(AgentRuntime):
         # XDG roots are isolated per run and agent under the workspace parent,
         # so no conversation state leaks between runs. The random server
         # password is held only in this in-memory handle and is never written
-        # to disk or the log. NOTE: the full inherited process environment is
-        # passed through, so any orchestrator secrets in env vars are visible
-        # to the agent shell.
-        environment = {
-            **__import__('os').environ,
-            'XDG_CONFIG_HOME': str(config_root),
-            'XDG_DATA_HOME': str(data_root),
-            'XDG_CACHE_HOME': str(cache_root),
-            'XDG_STATE_HOME': str(state_root),
-            'HOME': str(home_root),
-            'OPENCODE_SERVER_USERNAME': 'glasslab-orchestrator',
-            'OPENCODE_SERVER_PASSWORD': password,
-        }
+        # to disk or the log. The child environment is an explicit allowlist
+        # (see app/runtime_env.py): orchestrator control-plane secrets never
+        # reach the agent shell.
+        environment = build_agent_environment(
+            runtime_vars={
+                'XDG_CONFIG_HOME': str(config_root),
+                'XDG_DATA_HOME': str(data_root),
+                'XDG_CACHE_HOME': str(cache_root),
+                'XDG_STATE_HOME': str(state_root),
+                'HOME': str(home_root),
+                'OPENCODE_SERVER_USERNAME': 'glasslab-orchestrator',
+                'OPENCODE_SERVER_PASSWORD': password,
+            },
+        )
         process = subprocess.Popen(
             [
                 self.settings.opencode_executable,
