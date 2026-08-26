@@ -715,3 +715,105 @@ def test_claim_evaluator_contract_requires_primary_metric_and_guardrails() -> No
         'primary metric is missing or non-numeric: rubric_score',
         'required guardrail metric is missing: integrity_pass',
     ]
+
+
+# --- Issue #244: research job pods must not use the default ServiceAccount ---
+
+def test_runner_sa_default_is_rejected_at_startup() -> None:
+    with pytest.raises((ValueError, ValidationError), match='dedicated ServiceAccount'):
+        Settings(runner_service_account_name='default')
+
+
+def test_runner_sa_empty_is_rejected_at_startup() -> None:
+    with pytest.raises((ValueError, ValidationError), match='dedicated ServiceAccount'):
+        Settings(runner_service_account_name='')
+
+
+def test_runner_sa_whitespace_only_is_rejected_at_startup() -> None:
+    with pytest.raises((ValueError, ValidationError), match='dedicated ServiceAccount'):
+        Settings(runner_service_account_name='   ')
+
+
+def test_runner_sa_dedicated_account_is_accepted() -> None:
+    settings = Settings(runner_service_account_name='glasslab-research-workload')
+    assert settings.runner_service_account_name == 'glasslab-research-workload'
+
+
+def test_submitted_job_pod_uses_configured_service_account(monkeypatch) -> None:
+    manifest = RunManifest(
+        run_id='run-sa-check',
+        workflow_id='metric-search-v0',
+        workflow_family='metric-learning',
+        display_name='SA Check',
+        objective='Verify that the configured SA name flows into the rendered pod spec.',
+        submitted_by='test-suite',
+        submitted_at=datetime.now(timezone.utc),
+        inputs={},
+        requested_models=['agent-generated-python'],
+        resource_profile='gpu-small',
+        resource_requests={'cpu': '1'},
+        resource_limits={'cpu': '1'},
+        runner_image='ghcr.io/example/runner:test',
+        runner_service_account_name='glasslab-research-workload',
+        evaluator_type='none',
+        approval_tier='tier-1-standard',
+        expected_artifacts={'required': ['metrics.json'], 'optional': []},
+        experiment_type='gpu-training-job',
+        workload_id='metric-search-v0',
+        entrypoint=['python3', 'run.py'],
+        config_payload={},
+        budget={'max_wallclock_minutes': 5},
+    )
+
+    class Record(SimpleNamespace):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    class BatchApi:
+        submitted = None
+
+        def create_namespaced_job(self, *, namespace, body):
+            self.submitted = (namespace, body)
+
+    batch = BatchApi()
+    client = SimpleNamespace(
+        BatchV1Api=lambda: batch,
+        CoreV1Api=lambda: Record(),
+        **{
+            name: Record
+            for name in (
+                'V1Capabilities',
+                'V1Container',
+                'V1EmptyDirVolumeSource',
+                'V1EnvVar',
+                'V1Job',
+                'V1JobSpec',
+                'V1LocalObjectReference',
+                'V1ObjectMeta',
+                'V1PersistentVolumeClaimVolumeSource',
+                'V1PodSecurityContext',
+                'V1PodSpec',
+                'V1PodTemplateSpec',
+                'V1ResourceRequirements',
+                'V1SeccompProfile',
+                'V1SecurityContext',
+                'V1Volume',
+                'V1VolumeMount',
+            )
+        },
+    )
+    kube_config = SimpleNamespace(load_incluster_config=lambda: None)
+    monkeypatch.setattr(
+        job_submission_module,
+        '_load_kube_modules',
+        lambda: (client, kube_config, RuntimeError, RuntimeError),
+    )
+    submitter = KubernetesJobSubmitter(
+        Settings(runner_service_account_name='glasslab-research-workload')
+    )
+    submitter.submit_run(manifest)
+
+    _, job = batch.submitted
+    pod = job.spec.template.spec
+    assert pod.service_account_name == 'glasslab-research-workload'
+    assert pod.automount_service_account_token is False
