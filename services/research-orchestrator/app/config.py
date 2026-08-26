@@ -98,9 +98,10 @@ class Settings(BaseSettings):
     opencode_executable: str = '/usr/local/bin/opencode'
     opencode_server_host: str = '127.0.0.1'
     opencode_start_port: int = 4210
-    opencode_start_timeout_seconds: float = 15.0
+    opencode_start_timeout_seconds: float = 60.0
     opencode_turn_timeout_seconds: float = 1800.0
     opencode_repeated_tool_limit: int = 6
+    agent_turn_max_retries: int = 2
     opencode_structured_repair_attempts: int = 1
     opencode_structured_output_mode: Literal['json_schema', 'prompt'] = (
         'json_schema'
