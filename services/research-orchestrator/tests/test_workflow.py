@@ -2123,3 +2123,63 @@ def test_objective_runs_build_cluster_execution_payload(
     }
     contracts = execution['dataset_contracts']
     assert contracts[0]['asset']['sha256'] == digest
+
+
+class NoActionThenValidContractRuntime(NewContractRuntime):
+    """First contract draft omits the propose action; the retry includes it."""
+
+    def __init__(self, *, runner_image: str) -> None:
+        super().__init__(runner_image=runner_image)
+        self.omitted_action = False
+
+    def run_turn(self, **kwargs):
+        if (
+            kwargs['agent'].value == 'beaker'
+            and 'Draft an immutable evaluation-contract candidate'
+            in kwargs['prompt']
+            and not self.omitted_action
+        ):
+            self.omitted_action = True
+            return (
+                AgentTurnResult(
+                    kind=TurnKind.CONTRACT_CANDIDATE,
+                    summary='Drafted the candidate but omitted the proposal action.',
+                    done=True,
+                ),
+                'mock-no-action-message',
+            )
+        return super().run_turn(**kwargs)
+
+
+def test_missing_contract_candidate_action_is_retried_with_feedback(
+    orchestrator_bundle,
+) -> None:
+    settings, store, cluster, _, original = orchestrator_bundle
+    engine = ResearchOrchestrator(
+        settings=settings,
+        store=store,
+        runtime=NoActionThenValidContractRuntime(runner_image=RUNNER_IMAGE),
+        workspaces=original.workspaces,
+        contracts=original.contracts,
+        contract_candidates=original.contract_candidates,
+        policy=original.policy,
+        cluster=cluster,
+        discord=DisabledDiscordAdapter(),
+    )
+    run = engine.create_run(
+        RunCreateRequest(objective='Retry a missing contract candidate action.')
+    )
+    protocol = _pending_action(store, run.run_id, 'approve_protocol')
+    engine.approve_action(
+        protocol.action_id,
+        reviewer='test-human',
+        reason='Protocol accepted.',
+    )
+
+    assert store.get_run(run.run_id).state == (
+        RunState.AWAITING_CONTRACT_PROMOTION
+    )
+    assert any(
+        event.event_type == 'contract.candidate_rejected'
+        for event in store.list_events(run.run_id)
+    )
