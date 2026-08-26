@@ -227,3 +227,48 @@ def test_dense_backend_failure_degrades_and_run_survives(tmp_path: Path) -> None
         for event in retrieval_events
     }
     assert any(mode.startswith('lexical(fallback)') for mode in actual_modes)
+
+
+def test_uploaded_source_reachable_via_dense_on_next_advisory(
+    tmp_path: Path,
+) -> None:
+    """The operator upload lifecycle, end to end through one advisory.
+
+    Ingest bytes the way POST /knowledge/sources/upload does, then drive a
+    real run: the incremental ensure must embed the uploaded chunk and the
+    protocol_draft advisory must retrieve it via DENSE on the first try.
+    """
+    engine, store, _approved = _build(tmp_path, stability_text=STABILITY_TEXT)
+    uploaded = engine.knowledge.ingest_bytes(
+        source_type=SourceType.PAPER,
+        filename='uploaded-probe.md',
+        data=(
+            b'Uploaded probe note: consensus clustering with bootstrap '
+            b'resampling and adjusted rand index tracks cluster stability.'
+        ),
+        title='Uploaded probe',
+    )
+
+    run = engine.create_run(
+        RunCreateRequest(objective='cluster stability assessment')
+    )
+    assert run.state == RunState.AWAITING_PROTOCOL_APPROVAL
+
+    built = [
+        event for event in store.list_events(run.run_id)
+        if event.event_type == 'agent.method_advisory_built'
+    ]
+    assert len(built) == 1
+    packet = store.get_context_packet(built[0].payload['packet_id'])
+    cited_sources = {
+        entry.get('source_id') for entry in packet.ranked_sources
+    }
+    assert uploaded.source_id in cited_sources
+
+    retrieval = [
+        event for event in store.list_events(run.run_id)
+        if event.event_type == 'agent.context_retrieved'
+        and event.payload.get('packet_id') == built[0].payload['packet_id']
+    ]
+    assert retrieval
+    assert retrieval[-1].payload.get('retrieval_mode_actual') == 'dense'

@@ -13,6 +13,7 @@ import hashlib
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import numpy as np
@@ -289,7 +290,9 @@ def test_index_ready_after_restart_without_embedding_first(store) -> None:
     assert readiness.indexed_count == len(ids)
     from app.knowledge_dense import ensure_index_built
 
-    assert ensure_index_built(index, store) is None
+    summary = ensure_index_built(index, store)
+    # Incremental: matching lineage means nothing re-embeds.
+    assert summary['n_vectors'] == 0
     assert embed_calls['count'] == 0
 
     hits = index.search(index.embed_query('alpha passage text'), k=1)
@@ -564,3 +567,81 @@ def test_km_token_budget_applies_in_dense_mode(tmp_path) -> None:
         token_budget=30,
     )
     assert len(packet.ranked_sources) == 1
+
+
+def _pinned_provider(revision_pin: str) -> Any:
+    inner = OfflineDeterministicEmbedding(dims=8)
+
+    class Pinned:
+        model_id = MODEL_ID
+        revision = revision_pin
+        dims = 8
+
+        def embed_queries(self, texts):
+            return inner.embed_queries(texts)
+
+        def embed_passages(self, texts):
+            return inner.embed_passages(texts)
+
+    return Pinned()
+
+
+def test_ensure_embeds_new_chunks_incrementally(store) -> None:
+    from app.knowledge_dense import ensure_index_built
+
+    first_ids = _seed_chunks(store, ['alpha passage text'])
+    provider = OfflineDeterministicEmbedding(dims=8)
+    build_dense_index(store, provider, model_id=MODEL_ID)
+
+    second_ids = _seed_chunks(store, ['beta passage text'])
+
+    index = NumpyChunkIndex(store, provider, model_id=MODEL_ID)
+    summary = ensure_index_built(index, store)
+
+    assert summary['n_vectors'] == 1, 'only the new chunk may embed'
+    rows = store.list_knowledge_chunk_vectors(MODEL_ID)
+    assert {meta.chunk_id for meta, _ in rows} == set(first_ids) | set(second_ids)
+    assert index.readiness().indexed_count == len(first_ids) + len(second_ids)
+
+
+def test_ensure_self_heals_rows_after_pin_change(store) -> None:
+    from app.knowledge_dense import ensure_index_built
+
+    ids = _seed_chunks(store, ['alpha passage text'])
+    build_dense_index(store, _pinned_provider('rev-a'), model_id=MODEL_ID)
+
+    healed = NumpyChunkIndex(store, _pinned_provider('rev-b'), model_id=MODEL_ID)
+    assert healed.readiness().available is False
+
+    summary = ensure_index_built(healed, store)
+    rows = store.list_knowledge_chunk_vectors(MODEL_ID)
+    assert {meta.revision for meta, _ in rows} == {'rev-b'}
+    assert summary['n_vectors'] == len(ids)
+    assert healed.readiness().available is True
+
+
+def test_unresolved_lineage_blocks_serving(store) -> None:
+    _seed_chunks(store, ['alpha passage text'])
+    build_dense_index(store, OfflineDeterministicEmbedding(dims=8), model_id=MODEL_ID)
+
+    inner = OfflineDeterministicEmbedding(dims=8)
+
+    class LazyUnresolved:
+        model_id = MODEL_ID
+        revision = ''
+        dims = 8
+
+        def lineage_resolved(self):
+            return False
+
+        def embed_queries(self, texts):
+            return inner.embed_queries(texts)
+
+        def embed_passages(self, texts):
+            return inner.embed_passages(texts)
+
+    index = NumpyChunkIndex(store, LazyUnresolved(), model_id=MODEL_ID)
+    readiness = index.readiness()
+    assert readiness.available is False
+    assert 'unresolved' in readiness.reason.lower()
+    assert index.search(inner.embed_queries(['alpha passage text'])[0], k=3) == []

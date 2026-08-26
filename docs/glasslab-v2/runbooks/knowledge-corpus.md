@@ -51,7 +51,10 @@ Behavior:
 - walks the folder for `*.pdf`, `*.md`, `*.txt` (sorted, recursive)
 - uploads each file; per-file `[ok]`/`[fail]` lines with reasons
 - identical re-uploads deduplicate by content digest (same `source_id`)
-- rebuilds the dense index at the end unless `--skip-rebuild`
+- triggers `POST /knowledge/index/rebuild` at the end unless
+  `--skip-rebuild`. That endpoint re-chunks every source AND re-embeds:
+  chunk replacement cascades away the old vector rows, so the embed step is
+  mandatory, not cosmetic
 
 Exit code is non-zero if anything failed, so it is safe to wrap in loops/CI.
 
@@ -84,9 +87,13 @@ curl -s http://127.0.0.1:18080/health | jq .knowledge_dense
 # indexed_chunks grows after rebuild; available=true requires usable vectors
 ```
 
-Advisories pick up new sources automatically: the advisor lazily builds/
-rebuilds missing vectors before each eligible Honeydew phase, so no manual
-step is required between uploading and the next run.
+Advisories pick up new sources automatically: before each eligible Honeydew
+phase the advisor runs an INCREMENTAL embed that vectorizes exactly the
+chunks missing current-lineage vectors (matching model id, revision pin,
+and dimensions), then reloads the index — so an uploaded document is
+dense-retrievable on the very next advisory with no operator step. The
+same incremental pass also self-heals after a revision-pin change by
+re-embedding rows stored under the old lineage.
 
 ## Correcting mistakes
 

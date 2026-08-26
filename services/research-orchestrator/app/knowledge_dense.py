@@ -139,6 +139,16 @@ class NumpyChunkIndex:
         return self._provider.embed_queries([text])[0]
 
     def readiness(self) -> DenseReadiness:
+        if not _lineage_resolved(self._provider):
+            return DenseReadiness(
+                available=False,
+                reason='embedding revision unresolved (provider not yet loaded)',
+                backend='numpy',
+                model_id=self.model_id,
+                revision=_provider_revision(self._provider),
+                dims=self._provider_dims(),
+                indexed_count=0,
+            )
         notes: list[str] = []
         available = bool(self._rows)
         if self._mismatched:
@@ -173,7 +183,7 @@ class NumpyChunkIndex:
         source_ids: list[str] | None = None,
         k: int = 10,
     ) -> list[tuple[str, float]]:
-        if k <= 0 or not self._rows:
+        if k <= 0 or not self._rows or not _lineage_resolved(self._provider):
             return []
         cached = self._cache
         if cached is None:
@@ -239,6 +249,16 @@ class PgVectorChunkIndex:
         return self._provider.embed_queries([text])[0]
 
     def readiness(self) -> DenseReadiness:
+        if not _lineage_resolved(self._provider):
+            return DenseReadiness(
+                available=False,
+                reason='embedding revision unresolved (provider not yet loaded)',
+                backend='pgvector',
+                model_id=self.model_id,
+                revision=_provider_revision(self._provider),
+                dims=self._provider_dims(),
+                indexed_count=0,
+            )
         rows = self._store.list_knowledge_chunk_vectors(self.model_id)
         expected = self._provider_dims()
         declared_revision = _provider_revision(self._provider)
@@ -274,7 +294,7 @@ class PgVectorChunkIndex:
         source_ids: list[str] | None = None,
         k: int = 10,
     ) -> list[tuple[str, float]]:
-        if k <= 0:
+        if k <= 0 or not _lineage_resolved(self._provider):
             return []
         literal = _halfvec_literal(query_vec)
         declared_revision = _provider_revision(self._provider)
@@ -322,8 +342,16 @@ def build_dense_index(
     this function, because it enumerates ``knowledge_chunks``.
     """
     mid = model_id or provider.model_id
+    declared_revision = _provider_revision(provider)
+    expected_dims = _provider_dims(provider)
+    # Only vectors whose FULL lineage matches the active provider count as
+    # already built: a changed pin or dimension must re-embed, never serve
+    # stale-lineage rows through the skip path.
     existing = {
-        meta.chunk_id for meta, _ in store.list_knowledge_chunk_vectors(mid)
+        meta.chunk_id
+        for meta, _ in store.list_knowledge_chunk_vectors(mid)
+        if meta.dims == expected_dims
+        and (not declared_revision or meta.revision == declared_revision)
     }
     chunks = store.list_all_knowledge_chunks()
     todo = [
@@ -367,16 +395,42 @@ def build_dense_index(
     }
 
 
+def _lineage_resolved(provider: Any) -> bool:
+    resolver = getattr(provider, 'lineage_resolved', None)
+    return resolver() if callable(resolver) else True
+
+
 def ensure_index_built(
     index: NumpyChunkIndex | PgVectorChunkIndex,
     store: Any,
     *,
     force: bool = False,
-) -> dict[str, Any] | None:
-    """Lazily build the index when no usable vectors exist yet (idempotent)."""
-    summary = None
-    if index.readiness().indexed_count == 0 or force:
-        summary = build_dense_index(store, index._provider, force=force)
+) -> dict[str, Any]:
+    """Incrementally embed every chunk missing current-lineage vectors.
+
+    ``build_dense_index`` self-skips chunks that already carry a matching
+    vector, so running it on every advisory turn is cheap and keeps newly
+    ingested or re-chunked sources covered without operator action. Two
+    passes cover lazy providers: embedding may resolve the lineage
+    (revision) mid-pass, and the second pass then re-embeds anything stored
+    under an older lineage once the active one is known.
+    """
+    first = build_dense_index(
+        store,
+        index._provider,
+        model_id=getattr(index, 'model_id', None),
+        force=force,
+    )
+    summary = build_dense_index(
+        store,
+        index._provider,
+        model_id=getattr(index, 'model_id', None),
+    )
+    if not force:
+        # The second pass only performs work when the first pass resolved
+        # the lineage mid-flight (lazy load); report combined effort so
+        # callers never see pre-resolution embeddings vanish.
+        summary['n_vectors'] = first['n_vectors'] + summary['n_vectors']
     if hasattr(index, 'reload'):
         # Refresh in-memory rows so a just-built index is immediately
         # queryable without reconstructing the index object.

@@ -209,6 +209,10 @@ class ArcticEmbedProvider:
         )
         return np.asarray(encoded, dtype=np.float32)
 
+    def lineage_resolved(self) -> bool:
+        """True once the served revision is known (pinned or loaded)."""
+        return bool(self._loaded) or bool(self.revision)
+
     @classmethod
     def unload(cls) -> None:
         """Drop every cached model and reclaim RAM (call before rerankers)."""

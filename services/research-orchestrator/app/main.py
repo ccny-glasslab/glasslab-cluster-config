@@ -714,7 +714,29 @@ def create_app(
         _: None = Depends(require_operator),
     ) -> dict[str, object]:
         reindexed = engine.knowledge.rebuild_index()
-        return {'index_version': 'v1', 'reindexed_sources': reindexed}
+        # Re-chunking replaces chunk rows, which cascades away their vector
+        # rows — so this endpoint must also re-embed, or uploads/rebuilds
+        # would silently degrade retrieval to lexical.
+        dense_summary: dict[str, object] | None = None
+        dense_error: str | None = None
+        dense_index = getattr(engine.knowledge, 'dense_index', None)
+        if dense_index is not None:
+            try:
+                from .knowledge_dense import ensure_index_built
+
+                dense_summary = ensure_index_built(
+                    dense_index, engine.knowledge.store
+                )
+            except Exception as exc:  # noqa: BLE001 - dense stays additive
+                dense_error = f'{type(exc).__name__}: {exc}'
+        response: dict[str, object] = {
+            'index_version': 'v1',
+            'reindexed_sources': reindexed,
+            'dense': dense_summary,
+        }
+        if dense_error is not None:
+            response['dense_error'] = dense_error
+        return response
 
     @app.delete(
         '/knowledge/sources/{source_id}',
