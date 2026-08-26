@@ -64,6 +64,7 @@ from .task_bundles import (
 )
 from .workspaces import WorkspaceManager
 from .knowledge_manager import KnowledgeManager
+from .method_advisor import MethodAdvisor
 
 
 class WorkflowError(RuntimeError):
@@ -140,6 +141,33 @@ class ResearchOrchestrator:
             max_results=settings.knowledge_max_results,
             token_budget=settings.knowledge_token_budget,
         )
+        self.method_advisor: MethodAdvisor | None = None
+        if settings.knowledge_advisory_enabled:
+            try:
+                from .knowledge_dense import (
+                    NumpyChunkIndex,
+                    PgVectorChunkIndex,
+                    create_embedding_provider,
+                )
+
+                provider = create_embedding_provider(
+                    settings.knowledge_embedding_model,
+                    revision=settings.knowledge_embedding_revision,
+                )
+                if settings.knowledge_dense_pg_dsn:
+                    dense_index: Any = PgVectorChunkIndex(
+                        settings.knowledge_dense_pg_dsn, provider
+                    )
+                else:
+                    dense_index = NumpyChunkIndex(store, provider)
+                self.knowledge.dense_index = dense_index
+                self.knowledge.default_retrieval_mode = (
+                    settings.knowledge_dense_mode
+                )
+                self.method_advisor = MethodAdvisor(self.knowledge)
+            except Exception:
+                # Dense retrieval/advisory is additive; startup never depends on it.
+                self.method_advisor = None
         self.policy = policy
         self.cluster = cluster
         self.discord = discord
@@ -905,6 +933,43 @@ class ResearchOrchestrator:
                         ),
                     },
                 )
+            advisor_agent = str(getattr(agent, 'value', agent))
+            advisor_kind = str(getattr(expected_kind, 'value', expected_kind))
+            if (
+                advisor_agent == 'honeydew'
+                and advisor_kind in ('protocol_draft', 'methodology_review')
+                and self.method_advisor is not None
+            ):
+                try:
+                    advisory_block, advisory_payload = (
+                        self.method_advisor.build_and_render(
+                            run_id=run_id,
+                            objective=run.objective,
+                            turn_number=run.turn_number + 1,
+                            turn_kind=expected_kind.value,
+                            problem_md_head=' '.join(prompt.split())[:300],
+                            retrieval_mode=self.settings.knowledge_dense_mode,
+                        )
+                    )
+                    if advisory_block:
+                        prompt = prompt + '\n\n' + advisory_block
+                        payload = advisory_payload or {}
+                        self._event(
+                            run_id,
+                            source='orchestrator',
+                            event_type='agent.method_advisory_attached',
+                            payload={
+                                'turn_id': turn.turn_id,
+                                'packet_id': payload.get('packet_id'),
+                                'advisory_digest': payload.get('advisory_digest'),
+                                'kind': payload.get('kind'),
+                                'n_candidates': len(payload.get('candidates', [])),
+                            },
+                        )
+                except Exception:
+                    # Advisory evidence is additive; a failure must never
+                    # block or strand the research run.
+                    pass
             if recovery_context:
                 prompt = recovery_context + prompt
             # Append the phase-specific discriminator after all retrieved and

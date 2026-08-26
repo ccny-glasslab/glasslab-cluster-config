@@ -35,6 +35,7 @@ from .cluster import FakeClusterExecutor, WorkflowApiClusterExecutor
 from .config import SERVICE_ROOT, Settings, get_settings
 from .contract_candidates import ContractCandidateManager
 from .contracts import ContractIntegrityError, EvaluationContractResolver
+from .corpus_rag.pdf_backend import UnsupportedDocumentError
 from .discord_adapter import DisabledDiscordAdapter, DiscordHttpAdapter
 from .discord_controls import DiscordControlGateway
 from .discord_rest import (
@@ -422,10 +423,27 @@ def create_app(
 
     @app.get('/health')
     def health() -> dict[str, object]:
+        knowledge_dense: dict[str, object] | None = None
+        try:
+            dense_index = getattr(engine.knowledge, 'dense_index', None)
+            if dense_index is not None:
+                readiness = dense_index.readiness()
+                knowledge_dense = {
+                    'available': readiness.available,
+                    'reason': readiness.reason,
+                    'backend': readiness.backend,
+                    'model_id': readiness.model_id,
+                    'revision': readiness.revision,
+                    'dims': readiness.dims,
+                    'indexed_chunks': readiness.indexed_count,
+                }
+        except Exception as exc:  # noqa: BLE001 - diagnostics never fail /health
+            knowledge_dense = {'available': False, 'reason': str(exc)}
         return {
             'status': 'ok',
             'service': settings.app_name,
             'version': settings.app_version,
+            'knowledge_dense': knowledge_dense,
         }
 
     @app.get('/ready')
@@ -624,6 +642,52 @@ def create_app(
         except Exception as exc:
             raise map_error(exc) from exc
 
+    @app.post(
+        '/knowledge/sources/upload',
+        response_model=KnowledgeSource,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def upload_knowledge_source(
+        file: UploadFile = File(...),
+        source_type: str = Form(default='documentation'),
+        title: str | None = Form(default=None),
+        _: None = Depends(require_operator),
+    ) -> KnowledgeSource:
+        # Operator-only content upload: the HTTP twin of path ingestion for
+        # material that lives outside the service filesystem (an operator
+        # laptop full of PDFs). The same size cap and fail-closed secret
+        # scanning apply to the extracted text; PDFs must be born-digital.
+        data = file.file.read(settings.knowledge_max_source_bytes + 1)
+        if len(data) > settings.knowledge_max_source_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    'upload exceeds knowledge_max_source_bytes '
+                    f'({settings.knowledge_max_source_bytes})'
+                ),
+            )
+        try:
+            resolved_type = SourceType(source_type)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f'unknown source_type {source_type!r}',
+            ) from None
+        try:
+            return engine.knowledge.ingest_bytes(
+                source_type=resolved_type,
+                filename=file.filename or 'upload',
+                data=data,
+                title=title,
+            )
+        except UnsupportedDocumentError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail=str(exc),
+            ) from exc
+        except Exception as exc:
+            raise map_error(exc) from exc
+
     @app.get(
         '/knowledge/sources',
         response_model=KnowledgeSourceListResponse,
@@ -650,7 +714,29 @@ def create_app(
         _: None = Depends(require_operator),
     ) -> dict[str, object]:
         reindexed = engine.knowledge.rebuild_index()
-        return {'index_version': 'v1', 'reindexed_sources': reindexed}
+        # Re-chunking replaces chunk rows, which cascades away their vector
+        # rows — so this endpoint must also re-embed, or uploads/rebuilds
+        # would silently degrade retrieval to lexical.
+        dense_summary: dict[str, object] | None = None
+        dense_error: str | None = None
+        dense_index = getattr(engine.knowledge, 'dense_index', None)
+        if dense_index is not None:
+            try:
+                from .knowledge_dense import ensure_index_built
+
+                dense_summary = ensure_index_built(
+                    dense_index, engine.knowledge.store
+                )
+            except Exception as exc:  # noqa: BLE001 - dense stays additive
+                dense_error = f'{type(exc).__name__}: {exc}'
+        response: dict[str, object] = {
+            'index_version': 'v1',
+            'reindexed_sources': reindexed,
+            'dense': dense_summary,
+        }
+        if dense_error is not None:
+            response['dense_error'] = dense_error
+        return response
 
     @app.delete(
         '/knowledge/sources/{source_id}',

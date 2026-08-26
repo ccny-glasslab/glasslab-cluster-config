@@ -11,3 +11,4 @@ Key runbooks:
 - `rollback-v2.md`
 - `restore-v2-secrets.md`
 - `purge-temporary-provisioning-debug.md`
+- `knowledge-corpus.md`
