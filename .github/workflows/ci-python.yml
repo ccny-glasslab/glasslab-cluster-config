@@ -241,6 +241,34 @@ jobs:
           GLASSLAB_TEST_POSTGRES_DSN: postgresql://glasslab:glasslab@127.0.0.1:5432/orchestrator_dense
         run: pytest tests/test_knowledge_dense.py tests/test_corpus_rag_vector_index.py tests/test_corpus_rag_storage.py tests/test_store_contract.py -q
 
+  research-orchestrator-ocr:
+    name: research-orchestrator OCR backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tesseract
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tesseract-ocr
+
+      - name: Install research-orchestrator dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r services/research-orchestrator/requirements.txt pytest httpx
+
+      - name: Run OCR backend tests (real tesseract)
+        working-directory: services/research-orchestrator
+        env:
+          PYTHONPATH: .
+        run: pytest tests/test_corpus_rag_ocr.py -q
+
   adapter-tests:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest

@@ -95,6 +95,30 @@ dense-retrievable on the very next advisory with no operator step. The
 same incremental pass also self-heals after a revision-pin change by
 re-embedding rows stored under the old lineage.
 
+## Scanned books (OCR)
+
+The upload endpoint stays born-digital-only so a 500-page scan can never
+stall an HTTP request. For scans, extract offline first, then push the
+text:
+
+```bash
+# One-time system requirement (operator side, NOT part of the service image):
+#   apt install tesseract-ocr
+
+python services/research-orchestrator/scripts/ingest_pdfs_ocr.py \
+    --dir ~/books/scans --out ~/books/txt --ocr
+
+python services/research-orchestrator/scripts/upload_knowledge_dir.py \
+    --url http://127.0.0.1:18080 --dir ~/books/txt \
+    --source-type documentation
+```
+
+Budget roughly 1–3 s per page on CPU (a 500-page book is tens of minutes).
+`manifest.json` in the output folder records per-file status so re-runs
+resume instead of re-recognizing finished books. Recognition quality bounds
+retrieval quality — a poor scan yields poor embeddings regardless of the
+retrieval stack.
+
 ## Correcting mistakes
 
 - Remove a wrong source:
