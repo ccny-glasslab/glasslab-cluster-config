@@ -25,7 +25,9 @@ from .evidence import (
     serialize_evidence,
 )
 from .matrix import expand_experiment_matrix
-from .opencode_runtime import AgentRuntime
+import httpx
+
+from .opencode_runtime import AgentRuntime, OpenCodeRuntimeError
 from .policy import ActionPolicy
 from .preflight import MatrixPreflightReport, preflight_matrix
 from .research_store import ResearchStore
@@ -67,6 +69,26 @@ from .method_advisor import MethodAdvisor
 
 class WorkflowError(RuntimeError):
     pass
+
+
+NON_RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
+    {'validation', 'kind_mismatch', 'workflow'}
+)
+_RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
+    {'startup', 'turn_timeout', 'repeated_tool_loop', 'provider', 'network'}
+)
+
+
+def _is_retryable_turn_failure(exc: Exception) -> bool:
+    """Transient runtime failures are retryable; deterministic ones are not."""
+    if isinstance(exc, (httpx.HTTPError, TimeoutError)):
+        return True
+    if isinstance(exc, OpenCodeRuntimeError):
+        return (
+            exc.failure_class in _RETRYABLE_TURN_FAILURE_CLASSES
+            or exc.failure_class is None
+        )
+    return False
 
 
 class ResearchOrchestrator:
@@ -749,6 +771,47 @@ class ResearchOrchestrator:
             'AgentTurnResult object with that exact kind.\n'
         )
 
+    def _should_retry_turn(
+        self,
+        exc: Exception,
+        run_id: str,
+        agent: AgentName,
+    ) -> bool:
+        if not _is_retryable_turn_failure(exc):
+            return False
+        failed_turns = sum(
+            1
+            for turn in self.store.list_turns(run_id)
+            if turn.agent == agent and turn.status == 'failed'
+        )
+        return failed_turns <= self.settings.agent_turn_max_retries
+
+    def _retry_agent_turn(
+        self,
+        *,
+        run_id: str,
+        agent: AgentName,
+        prompt: str,
+        expected_kind: TurnKind,
+        input_event: dict[str, Any],
+    ) -> tuple[TurnRecord, AgentTurnResult]:
+        # The failed attempt already consumed a turn number; roll it back so
+        # the bounded retry does not double-count against the turn budget.
+        current = self.store.get_run(run_id)
+        self.store.replace_run(
+            current.model_copy(
+                update={'turn_number': max(0, current.turn_number - 1)}
+            ),
+            expected_version=current.version,
+        )
+        return self._run_agent_turn(
+            run_id=run_id,
+            agent=agent,
+            prompt=prompt,
+            expected_kind=expected_kind,
+            input_event=input_event,
+        )
+
     def _run_agent_turn(
         self,
         *,
@@ -1011,6 +1074,14 @@ class ResearchOrchestrator:
                 expected_kind=expected_kind,
                 error=str(exc),
             )
+            if self._should_retry_turn(exc, run_id, agent):
+                return self._retry_agent_turn(
+                    run_id=run_id,
+                    agent=agent,
+                    prompt=prompt,
+                    expected_kind=expected_kind,
+                    input_event=input_event,
+                )
             raise
         current = self.store.get_run(run_id)
         # Pause/cancel bypass the advancement lock (they must be able to abort a
