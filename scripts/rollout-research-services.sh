@@ -14,11 +14,13 @@ usage() {
   cat <<'USAGE'
 Usage: rollout-research-services.sh [options]
 
-Roll out CI-published workflow-api and research-orchestrator images. Images are
-selected by immutable Git commit tag; this script does not build or push.
+Roll out the authenticated workflow-api bundle and research-orchestrator images.
+Images are selected by immutable Git commit tag; this script does not build or push.
 
 Options:
-  --service <name>  all, workflow-api, or research-orchestrator. Default: all
+  --service <name>  all, workflow-api, research-orchestrator, or rabbitmq.
+                    workflow-api includes all three authenticated callers.
+                    rabbitmq rolls out only the task-fabric broker. Default: all
   --tag <tag>       GHCR image tag. Default: full SHA of the checked-out commit
   --sync            Fast-forward the canonical checkout to origin/main first
   --skip-smoke      Skip post-rollout service health checks
@@ -60,7 +62,6 @@ rollout_workflow_api() {
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/workflow-api/10-rbac.yaml"
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/workflow-api/30-service.yaml"
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/workflow-api/40-workspace-network-policy.yaml"
-
   printf '[rollout-research-services] deploying workflow-api image %s\n' "$image"
   "$KUBECTL" set image \
     -f "$ROOT_DIR/kubeadm/glasslab-v2/workflow-api/20-deployment.yaml" \
@@ -68,6 +69,43 @@ rollout_workflow_api() {
     "$KUBECTL" apply -f -
   "$KUBECTL" -n "$NAMESPACE" rollout status \
     deployment/glasslab-workflow-api --timeout=300s
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/workflow-api/50-ingress-network-policy.yaml"
+}
+
+rollout_command_router() {
+  local image="ghcr.io/ccny-glasslab/glasslab-research-command-router:${IMAGE_TAG}"
+  "$KUBECTL" set image \
+    -f "$ROOT_DIR/kubeadm/glasslab-v2/research-command-router/10-deployment.yaml" \
+    "research-command-router=$image" --local -o yaml |
+    "$KUBECTL" apply -f -
+  "$KUBECTL" -n "$NAMESPACE" rollout status \
+    deployment/glasslab-research-command-router --timeout=300s
+}
+
+rollout_schedule_worker() {
+  local image="ghcr.io/ccny-glasslab/glasslab-schedule-worker:${IMAGE_TAG}"
+  "$KUBECTL" set image \
+    -f "$ROOT_DIR/kubeadm/glasslab-v2/schedule-worker/10-deployment.yaml" \
+    "schedule-worker=$image" --local -o yaml |
+    "$KUBECTL" apply -f -
+  "$KUBECTL" -n "$NAMESPACE" rollout status \
+    deployment/glasslab-schedule-worker --timeout=300s
+}
+
+require_workflow_caller_secrets() {
+  require_object secret glasslab-workflow-api-research-command-router
+  require_object secret glasslab-workflow-api-schedule-worker
+  require_object secret glasslab-workflow-api-research-orchestrator
+}
+
+rollout_authenticated_workflow_bundle() {
+  require_workflow_caller_secrets
+  # New callers remain compatible with the old unauthenticated API. Roll them
+  # first so the server is never switched to fail-closed auth ahead of clients.
+  rollout_command_router
+  rollout_schedule_worker
+  rollout_research_orchestrator
+  rollout_workflow_api
 }
 
 rollout_research_orchestrator() {
@@ -85,6 +123,27 @@ rollout_research_orchestrator() {
     "$KUBECTL" apply -f -
   "$KUBECTL" -n "$NAMESPACE" rollout status \
     deployment/glasslab-research-orchestrator --timeout=300s
+}
+
+rollout_rabbitmq() {
+  # The broker is delivery infrastructure only; PostgreSQL stays authoritative
+  # (ADR 0004). Credentials come from the SOPS-managed secret; the PVC is
+  # provisioned out-of-band like the other static local-PV services.
+  require_object secret glasslab-v2-rabbitmq
+  require_object persistentvolumeclaim glasslab-rabbitmq-data
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/rabbitmq/20-configmap.yaml"
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/rabbitmq/30-topology.yaml"
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/rabbitmq/40-service.yaml"
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/rabbitmq/50-network-policy.yaml"
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/rabbitmq/60-statefulset.yaml"
+  # ConfigMap changes do not roll a StatefulSet, and rabbitmq.conf /
+  # enabled_plugins are subPath mounts that never receive live updates. The
+  # init renderer and postStart verifier only run in a fresh pod, so every
+  # intentional rollout forces a new pod before waiting for status.
+  "$KUBECTL" -n "$NAMESPACE" rollout restart \
+    statefulset/glasslab-rabbitmq
+  "$KUBECTL" -n "$NAMESPACE" rollout status \
+    statefulset/glasslab-rabbitmq --timeout=300s
 }
 
 while [[ $# -gt 0 ]]; do
@@ -122,7 +181,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$SERVICE" in
-  all|workflow-api|research-orchestrator) ;;
+  all|workflow-api|research-orchestrator|rabbitmq) ;;
   *)
     printf '[rollout-research-services] invalid service: %s\n' "$SERVICE" >&2
     exit 1
@@ -160,16 +219,26 @@ require_object secret glasslab-ghcr-pull
 
 case "$SERVICE" in
   all)
-    rollout_workflow_api
-    rollout_research_orchestrator
+    rollout_authenticated_workflow_bundle
     ;;
   workflow-api)
-    rollout_workflow_api
+    rollout_authenticated_workflow_bundle
     ;;
   research-orchestrator)
+    require_object secret glasslab-workflow-api-research-orchestrator
     rollout_research_orchestrator
     ;;
+  rabbitmq)
+    rollout_rabbitmq
+    ;;
 esac
+
+if [[ "$SERVICE" == "rabbitmq" ]]; then
+  "$KUBECTL" -n "$NAMESPACE" get statefulset glasslab-rabbitmq \
+    -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image,READY:.status.readyReplicas
+  printf '[rollout-research-services] done\n'
+  exit 0
+fi
 
 printf '[rollout-research-services] deployed images\n'
 "$KUBECTL" -n "$NAMESPACE" get deployment \

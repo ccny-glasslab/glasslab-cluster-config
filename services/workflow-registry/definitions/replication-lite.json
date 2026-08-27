@@ -34,6 +34,7 @@
     "qwen3-4b-instruct-2507"
   ],
   "runner_image": "ghcr.io/ccny-glasslab/glasslab-replication-runner:0.1.0",
+  "runner_service_account_name": "glasslab-gpu-runner",
   "evaluator_type": "replication-delta",
   "expected_artifacts": {
     "required": [
@@ -63,8 +64,8 @@
     "node_selector": {}
   },
   "approval_tier": "tier-3-human-approval",
-  "execution_status": "declared_only",
-  "submission_backend": "unimplemented",
+  "execution_status": "disabled",
+  "submission_backend": "null",
   "execution_blockers": [
     "runner-spec generation is not implemented in workflow-api job submission"
   ]

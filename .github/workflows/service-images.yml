@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "services/common/**"
+      - "services/task-fabric/**"
       - "services/workflow-api/**"
       - "services/workflow-registry/**"
       - "services/research-orchestrator/**"
@@ -68,7 +69,7 @@ jobs:
       - name: Build and publish
         uses: docker/build-push-action@v5
         with:
-          context: services/research-orchestrator
+          context: .
           file: services/research-orchestrator/Dockerfile
           push: true
           tags: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:${{ github.sha }}

@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 import httpx
 
+from .discord_rest import DiscordRestCircuit, execute_guarded
 from .schemas import EventRecord
 
 
@@ -523,6 +524,7 @@ class DiscordHttpAdapter(DiscordAdapter):
         channel_id: str,
         webhook_url: str | None = None,
         transport: httpx.BaseTransport | None = None,
+        circuit: DiscordRestCircuit | None = None,
     ) -> None:
         self.bot_token = bot_token
         self.channel_id = channel_id
@@ -531,6 +533,12 @@ class DiscordHttpAdapter(DiscordAdapter):
         # request shape without network access.
         self.transport = transport
         self.renderer = DiscordRenderer()
+        # Bounded failure protection: every outbound REST attempt is guarded by
+        # the circuit (see discord_rest.py). Failures are recorded here so the
+        # engine's swallow semantics are unchanged while the failure remains
+        # diagnosable through the circuit snapshot.
+        self.circuit = circuit or DiscordRestCircuit()
+        self._policy = self.circuit.policy
 
     def _client(self) -> httpx.Client:
         return httpx.Client(
@@ -542,22 +550,29 @@ class DiscordHttpAdapter(DiscordAdapter):
 
     def create_thread(self, *, run_id: str, objective: str) -> str | None:
         name = f'research-{run_id[:8]}'
-        with self._client() as client:
-            response = client.post(
-                f'/channels/{self.channel_id}/threads',
-                json={
-                    'name': name,
-                    'type': 11,
-                    'auto_archive_duration': 1440,
-                },
-                headers={
-                    'X-Audit-Log-Reason': quote(
-                        f'Glasslab research run: {objective[:400]}'
-                    ),
-                },
-            )
-            response.raise_for_status()
-            return str(response.json()['id'])
+
+        def attempt() -> httpx.Response:
+            with self._client() as client:
+                return client.post(
+                    f'/channels/{self.channel_id}/threads',
+                    json={
+                        'name': name,
+                        'type': 11,
+                        'auto_archive_duration': 1440,
+                    },
+                    headers={
+                        'X-Audit-Log-Reason': quote(
+                            f'Glasslab research run: {objective[:400]}'
+                        ),
+                    },
+                )
+
+        response = execute_guarded(
+            circuit=self.circuit,
+            policy=self._policy,
+            attempt=attempt,
+        )
+        return str(response.json()['id'])
 
     def _publish_webhook(
         self,
@@ -567,20 +582,31 @@ class DiscordHttpAdapter(DiscordAdapter):
     ) -> None:
         if self.webhook_url is None:
             raise RuntimeError('Discord webhook URL is not configured')
-        with httpx.Client(timeout=15, transport=self.transport) as client:
-            response = client.post(
-                self.webhook_url,
-                params={'wait': 'true', 'thread_id': thread_id},
-                json={
-                    'username': message.identity,
-                    'content': message.content[:2000],
-                    'allowed_mentions': {'parse': []},
-                },
-            )
-        if response.is_error:
-            raise RuntimeError(
-                f'Discord webhook returned HTTP {response.status_code}'
-            )
+
+        def attempt() -> httpx.Response:
+            with httpx.Client(timeout=15, transport=self.transport) as client:
+                return client.post(
+                    self.webhook_url,
+                    params={'wait': 'true', 'thread_id': thread_id},
+                    json={
+                        'username': message.identity,
+                        'content': message.content[:2000],
+                        'allowed_mentions': {'parse': []},
+                    },
+                )
+
+        def raise_webhook_failure(response: httpx.Response) -> None:
+            if response.is_error:
+                raise RuntimeError(
+                    f'Discord webhook returned HTTP {response.status_code}'
+                )
+
+        execute_guarded(
+            circuit=self.circuit,
+            policy=self._policy,
+            attempt=attempt,
+            raise_failure=raise_webhook_failure,
+        )
 
     def publish(
         self,
@@ -612,18 +638,24 @@ class DiscordHttpAdapter(DiscordAdapter):
         payload: dict[str, Any] = {'content': content}
         if message.components is not None:
             payload['components'] = message.components
-        with self._client() as client:
-            if message.is_status and status_message_id:
-                response = client.patch(
-                    f'/channels/{thread_id}/messages/{status_message_id}',
-                    json=payload,
-                )
-            else:
-                response = client.post(
+
+        def attempt() -> httpx.Response:
+            with self._client() as client:
+                if message.is_status and status_message_id:
+                    return client.patch(
+                        f'/channels/{thread_id}/messages/{status_message_id}',
+                        json=payload,
+                    )
+                return client.post(
                     f'/channels/{thread_id}/messages',
                     json=payload,
                 )
-            response.raise_for_status()
-            if message.is_status and not status_message_id:
-                return str(response.json()['id'])
+
+        response = execute_guarded(
+            circuit=self.circuit,
+            policy=self._policy,
+            attempt=attempt,
+        )
+        if message.is_status and not status_message_id:
+            return str(response.json()['id'])
         return status_message_id

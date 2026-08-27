@@ -53,3 +53,4 @@ restore_symlink_tree var/www/html/c
 
 sudo systemctl restart dnsmasq tftpd-hpa nginx
 printf 'Provisioner configs restored from %s and services restarted.\n' "$SNAPROOT"
+printf '%s\n' 'The external SOPS vault is intentionally excluded; restore it separately with scripts/restore-glasslab-secrets.sh.'

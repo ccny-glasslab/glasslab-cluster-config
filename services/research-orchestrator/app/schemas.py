@@ -740,6 +740,11 @@ class ContextPacket(BaseModel):
     ranked_sources: list[dict[str, Any]] = Field(default_factory=list)
     exact_text_supplied: str | None = None
     token_budget: int = Field(gt=0)
+    # Actual retrieval outcome for this packet (defaults keep packets written
+    # before dense retrieval valid to load).
+    retrieval_mode_requested: str | None = None
+    retrieval_mode_actual: str | None = None
+    retrieval_fallback_reason: str = ''
     created_at: datetime = Field(default_factory=utc_now)
 
     def evidence_uri(self) -> str:

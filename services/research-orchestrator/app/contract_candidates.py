@@ -21,6 +21,7 @@ from .contracts import (
     ContractIntegrityError,
     compute_contract_digest,
 )
+from .preflight import MethodologyRequirement
 from .schemas import EvaluationContractDescriptor
 
 
@@ -76,9 +77,13 @@ class ContractCandidateManager:
             if path.is_dir():
                 continue
             relative = path.relative_to(source)
+            # Bytecode caches are interpreter byproducts of the agent's local
+            # checks, not candidate content; the review copy already ignores
+            # them, so sealing skips them instead of failing the candidate.
+            if '__pycache__' in relative.parts or path.suffix == '.pyc':
+                continue
             if (
-                '__pycache__' in relative.parts
-                or relative.name == 'contract.sha256'
+                relative.name == 'contract.sha256'
                 or path.suffix not in ContractCandidateManager.ALLOWED_SUFFIXES
             ):
                 raise ContractCandidateError(
@@ -131,6 +136,17 @@ class ContractCandidateManager:
             raise ContractCandidateError(
                 'manifest requires primary_metric and a valid direction'
             )
+        raw_requirements = descriptor.manifest.get(
+            'methodology_requirements',
+            [],
+        )
+        try:
+            for item in raw_requirements:
+                MethodologyRequirement.model_validate(item)
+        except ValueError as exc:
+            raise ContractCandidateError(
+                f'methodology_requirements are invalid: {exc}'
+            ) from exc
         try:
             for field in (
                 descriptor.execution_wrapper,
@@ -183,7 +199,14 @@ class ContractCandidateManager:
         staging_parent = self.sealed_root / '.staging'
         staging_parent.mkdir(parents=True, exist_ok=True)
         staging = staging_parent / uuid4().hex
-        shutil.copytree(source, staging)
+        # Bytecode caches are interpreter byproducts of the agent's local
+        # checks, never reviewed content; they are excluded so the sealed
+        # digest only covers what a reviewer could read.
+        shutil.copytree(
+            source,
+            staging,
+            ignore=shutil.ignore_patterns('__pycache__', '*.pyc'),
+        )
         # The digest is computed over the staging copy before contract.sha256
         # exists, so the checksum file can never influence its own digest.
         digest = compute_contract_digest(staging)

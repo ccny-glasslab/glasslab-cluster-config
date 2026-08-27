@@ -31,6 +31,7 @@ def write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
                 'requested_models': ['random_forest'],
                 'resource_profile': 'cpu-small',
                 'runner_image': 'ghcr.io/ccny-glasslab/glasslab-tabular-runner:0.1.2',
+                'runner_service_account_name': 'glasslab-gpu-runner',
                 'evaluator_type': 'tabular-metric-max',
                 'approval_tier': 'tier-2-approved-execution',
                 'expected_artifacts': {'required': ['run_manifest.json'], 'optional': []},

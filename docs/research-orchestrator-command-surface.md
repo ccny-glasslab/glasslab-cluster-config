@@ -72,10 +72,12 @@ reference in `problem.md` or the objective.
 - If verification finds missing or invalid evidence, a fresh bounded revision
   budget begins and Beaker receives the failure details.
 - `/research-pause` aborts an active model turn but preserves the worktree and
-  recovery checkpoint. `/research-resume` starts a fresh Hermes session from
+  recovery checkpoint. `/research-resume` starts a fresh OpenCode session from
   that checkpoint.
 - `FAILED`, `CANCELLED`, and `TIMED_OUT` are terminal. They cannot currently be
-  resumed. Retry-from-terminal-checkpoint is a known missing capability.
+  resumed. `POST /runs/{run_id}/retry` creates a fresh child from the parent's
+  verified checkpoint; when an earlier retry child is itself terminal, the
+  next retry supersedes it.
 - The run thread must receive a persisted follow-up for an execution or
   interaction failure; an ephemeral Discord error is not sufficient.
 
@@ -293,8 +295,8 @@ both input and output before the response is built. It is additive: the
 normalized event log remains the authoritative record, and `/turns` never
 supersedes it.
 
-The run's workspaces, protocol, reports, Hermes data, and recovery checkpoints
-are stored beneath
+The run's workspaces, protocol, reports, OpenCode runtime data, and recovery
+checkpoints are stored beneath
 `/mnt/artifacts/research-orchestrator/runs/<run-id>/` in the orchestrator pod.
 Use `kubectl exec` from the provisioner to inspect raw runtime storage beyond
 what `/turns` exposes.
@@ -330,7 +332,7 @@ runs live readiness checks.
 
 Implemented and live:
 
-- separate Honeydew and Beaker Hermes sessions and workspaces
+- separate Honeydew and Beaker OpenCode sessions and workspaces
 - fresh-session recovery after failed or interrupted agent turns, with compact
   persisted checkpoints and unchanged worktrees
 - a bounded Beaker planning turn before implementation, without a fixed
@@ -390,10 +392,10 @@ path is `/task-start`, not another hardcoded task entry.
 - fixed approved repository and runtime profiles
 - no authenticated remote dataset download or private object-store browser
 - no Discord list or status commands
-- no retry or clone operation from a terminal run checkpoint
 - no first-class HTTP endpoint for complete structured turn inspection
 - terminal retries are limited to verified `FAILED`/`TIMED_OUT` protocol
-  checkpoints and always require fresh approvals
+  checkpoints and always require fresh approvals; a terminal retry child is
+  superseded by the next retry rather than reopened
 - no automatic Git push or pull request creation
 - no arbitrary SSH, `kubectl`, secret access, or container publication for
   either agent

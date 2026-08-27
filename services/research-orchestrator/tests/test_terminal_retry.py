@@ -115,6 +115,90 @@ def test_terminal_retry_is_idempotent_and_recovery_is_safe(orchestrator_bundle):
     assert len(store.list_actions(first.run_id)) == action_count
 
 
+def test_retry_tolerates_orchestrator_seeded_workspace_files(orchestrator_bundle, monkeypatch):
+    """Legacy checkpoints predate orchestrator-seeded scaffolding files.
+
+    prepare() materializes AGENTS.md in every agent worktree. A parent that
+    ran before that scaffolding existed produces a manifest without it, while
+    every freshly prepared child contains it. The checkpoint must treat
+    orchestrator-managed scaffolding as reconstructed context, not evidence,
+    so the retry still verifies.
+    """
+    _, store, _, _, engine = orchestrator_bundle
+    parent = _terminal_parent(engine, store)
+    for worktree in (Path(parent.beaker_workspace), Path(parent.honeydew_workspace)):
+        agents = worktree / 'AGENTS.md'
+        if agents.exists():
+            agents.unlink()
+
+    child = engine.retry_terminal_run(parent.run_id, TerminalRetryRequest())
+
+    assert child.state == RunState.AWAITING_PROTOCOL_APPROVAL
+    assert [(a.type, a.approval_status) for a in store.list_actions(child.run_id)] == [
+        ('approve_protocol', ApprovalStatus.PENDING)
+    ]
+
+
+def _force_run_state(store, run_id: str, state: RunState) -> None:
+    current = store.get_run(run_id)
+    store.replace_run(current.model_copy(update={'state': state}), expected_version=current.version)
+
+
+def test_retry_after_cancelled_child_creates_fresh_sibling(orchestrator_bundle):
+    settings, store, _, _, engine = orchestrator_bundle
+    parent = _terminal_parent(engine, store)
+    first = engine.retry_terminal_run(parent.run_id, TerminalRetryRequest())
+    _force_run_state(store, first.run_id, RunState.CANCELLED)
+    first_before = store.get_run(first.run_id).model_dump(mode='json')
+    first_events_before = [e.event_type for e in store.list_events(first.run_id)]
+    parent_retries_before = [
+        e for e in store.list_events(parent.run_id) if e.event_type == 'run.retry_created'
+    ]
+
+    sibling = engine.retry_terminal_run(parent.run_id, TerminalRetryRequest())
+
+    assert sibling.run_id != first.run_id
+    assert sibling.parent_run_id == parent.run_id
+    assert sibling.state == RunState.AWAITING_PROTOCOL_APPROVAL
+    assert sibling.turn_number == 0
+    assert sibling.beaker_session_id is None and sibling.honeydew_session_id is None
+    assert sibling.maximum_turns == settings.maximum_turns
+    assert not store.list_jobs(sibling.run_id)
+    assert [(a.type, a.approval_status) for a in store.list_actions(sibling.run_id)] == [
+        ('approve_protocol', ApprovalStatus.PENDING)
+    ]
+    assert store.get_run(first.run_id).model_dump(mode='json') == first_before
+    first_event_types = [e.event_type for e in store.list_events(first.run_id)]
+    assert len(first_event_types) == len(first_events_before) + 1
+    assert first_event_types[-1] == 'run.retry_superseded'
+    parent_retries_after = [
+        e for e in store.list_events(parent.run_id) if e.event_type == 'run.retry_created'
+    ]
+    assert len(parent_retries_after) == len(parent_retries_before) + 1
+    assert parent_retries_after[-1].payload['child_run_id'] == sibling.run_id
+    assert any(
+        event.event_type == 'run.retry_created' for event in store.list_events(sibling.run_id)
+    )
+
+
+def test_failed_resume_child_can_be_superseded(orchestrator_bundle):
+    _, store, _, _, engine = orchestrator_bundle
+    parent = _terminal_parent(engine, store)
+    first = engine.retry_terminal_run(parent.run_id, TerminalRetryRequest())
+    _force_run_state(store, first.run_id, RunState.FAILED)
+
+    sibling = engine.retry_terminal_run(parent.run_id, TerminalRetryRequest())
+
+    assert sibling.run_id != first.run_id
+    assert sibling.state == RunState.AWAITING_PROTOCOL_APPROVAL
+    assert store.get_terminal_retry_child(parent.run_id).run_id == sibling.run_id
+    superseded = [
+        e for e in store.list_events(first.run_id) if e.event_type == 'run.retry_superseded'
+    ]
+    assert len(superseded) == 1
+    assert superseded[-1].payload['superseded_by'] == sibling.run_id
+
+
 @pytest.mark.parametrize('state', [RunState.CREATED, RunState.CANCELLED, RunState.COMPLETE])
 def test_terminal_retry_rejects_ineligible_source(orchestrator_bundle, state):
     _, store, _, _, engine = orchestrator_bundle

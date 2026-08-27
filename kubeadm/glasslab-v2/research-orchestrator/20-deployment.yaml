@@ -62,6 +62,13 @@ spec:
                 name: glasslab-research-orchestrator
                 optional: true
           env:
+            - name: GLASSLAB_WORKFLOW_API_CALLER_NAME
+              value: research-orchestrator
+            - name: GLASSLAB_WORKFLOW_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-workflow-api-research-orchestrator
+                  key: token
             - name: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
               valueFrom:
                 secretKeyRef:

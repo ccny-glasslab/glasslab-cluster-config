@@ -182,6 +182,11 @@ class ScriptedMockRuntime(AgentRuntime):
             or 'Finalize the existing imported benchmark' in prompt
             or 'Revise the implementation' in prompt
         ):
+            # The cluster executes objective worktrees via `python3 run.py`;
+            # the mock mirrors that mandatory repo-root entrypoint.
+            (workspace / 'run.py').write_text(
+                'print("bounded mock run.py")\n'
+            )
             (workspace / 'experiment.py').write_text(
                 'print("bounded mock experiment")\n'
             )

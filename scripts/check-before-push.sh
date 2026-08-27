@@ -57,6 +57,24 @@ run_configs() {
   python3 scripts/validate-configs.py
 }
 
+run_credential_hygiene() {
+  printf '[check-before-push] scanning credential hygiene\n'
+  python3 scripts/check-credential-hygiene.py .
+}
+
+run_secret_boundary_tests() {
+  printf '[check-before-push] running secret process and recovery boundary tests\n'
+  python3 -m unittest \
+    tests.security.test_secret_process_boundaries \
+    tests.security.test_secret_backup_restore \
+    tests.security.test_lab_security_agent \
+    tests.scripts.test_glasslab_opencode \
+    tests.scripts.test_resolve_runner_image \
+    tests.security.test_workflow_security_manifests \
+    tests.security.test_task_fabric_manifests \
+    -v
+}
+
 run_docs() {
   printf '[check-before-push] checking Markdown links\n'
   python3 scripts/check-doc-links.py
@@ -67,6 +85,7 @@ run_shell() {
   bash -n \
     scripts/check-before-push.sh \
     scripts/glasslab-opencode.sh \
+    scripts/lab-security-agent \
     scripts/research-session-cli.sh \
     scripts/smoke-test-research-orchestrator.sh \
     scripts/submit-learning-task.sh \
@@ -94,11 +113,18 @@ print('All Python files compiled successfully.')
 PY
 }
 
+run_task_fabric_broker_tests() {
+  printf '[check-before-push] running task-fabric broker runtime tests\n'
+  # Skips cleanly when Docker is unavailable; exercises the pinned RabbitMQ
+  # image with the tracked manifests (import, drift, rotation, persistence).
+  pytest -q tests/integration
+}
+
 run_workflow_api_tests() {
   printf '[check-before-push] running core service tests\n'
   (
     cd services/workflow-api
-    PYTHONPATH=../..:. pytest \
+    PYTHONPATH="../..:.${PYTHONPATH:+:$PYTHONPATH}" pytest \
       -p no:cacheprovider \
       tests/test_api.py \
       tests/test_persistence.py \
@@ -108,14 +134,24 @@ run_workflow_api_tests() {
       -q
   )
   (
+    cd services/task-fabric
+    # Shared task-fabric protocol package: stdlib-only, no service imports.
+    PYTHONPATH=".${PYTHONPATH:+:$PYTHONPATH}" pytest \
+      -p no:cacheprovider \
+      tests \
+      -q
+  )
+  (
     cd services/research-workspace-runner
-    PYTHONPATH=. pytest \
+    PYTHONPATH=".${PYTHONPATH:+:$PYTHONPATH}" pytest \
       -p no:cacheprovider \
       tests/test_runner.py \
       -q
   )
   (
     cd services/research-orchestrator
+    # Narrow structural gate for the SQLite/PostgreSQL ResearchStore surface.
+    mypy --config-file mypy-research-store.ini
     contract_test_root="$(mktemp -d)"
     trap 'chmod -R u+w "$contract_test_root" 2>/dev/null || true; rm -rf "$contract_test_root"' EXIT
     GLASSLAB_ORCHESTRATOR_DATABASE_PATH="$contract_test_root/orchestrator.db" \
@@ -129,7 +165,7 @@ run_workflow_api_tests() {
     GLASSLAB_ORCHESTRATOR_TASK_ASSET_ROOT="$contract_test_root/task-assets" \
     GLASSLAB_ORCHESTRATOR_DATASET_UPLOAD_ROOT="$contract_test_root/dataset-uploads" \
     GLASSLAB_ORCHESTRATOR_BENCHMARK_DATASET_CATALOG_PATH="$contract_test_root/datasets/catalog.json" \
-    PYTHONPATH=. pytest \
+    PYTHONPATH=".${PYTHONPATH:+:$PYTHONPATH}" pytest \
       -p no:cacheprovider \
       tests \
       -q
@@ -139,9 +175,12 @@ run_workflow_api_tests() {
 case "$MODE" in
   default)
     run_configs
+    run_credential_hygiene
+    run_secret_boundary_tests
     run_docs
     run_shell
     run_python_syntax
+    run_task_fabric_broker_tests
     run_workflow_api_tests
     ;;
   docs)

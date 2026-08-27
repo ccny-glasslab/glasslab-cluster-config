@@ -47,6 +47,7 @@
     "xgboost_optional"
   ],
   "runner_image": "ghcr.io/ccny-glasslab/glasslab-tabular-runner:0.1.2",
+  "runner_service_account_name": "glasslab-gpu-runner",
   "evaluator_type": "tabular-metric-max",
   "expected_artifacts": {
     "required": [
@@ -77,7 +78,7 @@
     "node_selector": {}
   },
   "approval_tier": "tier-2-approved-execution",
-  "execution_status": "ready",
-  "submission_backend": "kubernetes",
-  "execution_blockers": []
+  "execution_status": "disabled",
+  "submission_backend": "null",
+  "execution_blockers": ["Runner image digest is unavailable; rebuild and pin the image before re-enabling execution."]
 }

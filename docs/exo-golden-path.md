@@ -98,16 +98,26 @@ curl -fsS http://127.0.0.1:52415/v1/chat/completions \
 
 ## OpenCode
 
-Use OpenCode from `.17`, where its provider points to the local exo API:
+Use OpenCode from the contributor workstation. The repo launcher checks the
+two-node RDMA topology and a real model completion before starting OpenCode.
+When the workstation cannot reach the exo API directly, it opens a temporary
+key-only SSH tunnel to `.17` and gives OpenCode that exact forwarded endpoint:
 
 ```bash
-ssh glasslab-17
 cd ~/cluster-config
-opencode -m exo/mlx-community/Qwen3-Coder-Next-4bit
+./scripts/glasslab-opencode.sh
+./scripts/glasslab-opencode.sh "Inspect the current issue list."
 ```
 
+The launcher is self-contained. It does not depend on an untracked
+`~/.local/bin/opencode-with-exo` helper or the user's global OpenCode provider
+configuration. OpenCode is intentionally not installed on the provisioner:
+untrusted agent work belongs in disposable workstation worktrees, away from
+the canonical apply tree and cluster credentials.
+
 The model reconciler may need a short interval after both Macs boot before the
-instance is ready.
+instance is ready. Override `GLASSLAB_EXO_SSH_TARGET` only when the canonical
+`glasslab-exo17` SSH alias is unavailable.
 
 ## Logs And Recovery
 

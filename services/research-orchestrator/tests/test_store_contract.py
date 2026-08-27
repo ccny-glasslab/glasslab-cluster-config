@@ -211,6 +211,164 @@ def test_retry_lineage_event_is_transactionally_visible(store) -> None:
     }
 
 
+def _cancel_run(store, run: RunRecord) -> None:
+    """Force a run into CANCELLED without transition validation (test seam)."""
+    current = store.get_run(run.run_id)
+    store.replace_run(current.model_copy(update={'state': RunState.CANCELLED}), expected_version=current.version)
+
+
+def test_retry_pointer_supersedes_terminal_child(store) -> None:
+    parent = store.create_run(_run(state=RunState.FAILED), one_active_run=False)
+    first = _run(state=RunState.PREPARING)
+    stored, created = store.create_terminal_retry(
+        first,
+        parent_run_id=parent.run_id,
+        retry_key=_id('retry-key'),
+        checkpoint_digest='3' * 64,
+        one_active_run=False,
+    )
+    assert created is True
+    _cancel_run(store, stored)
+    before = store.get_run(stored.run_id).model_dump(mode='json')
+    events_before = store.list_events(stored.run_id)
+    parent_events_before = [e.event_type for e in store.list_events(parent.run_id)]
+
+    replacement = _run(state=RunState.PREPARING)
+    superseding, created_again = store.create_terminal_retry(
+        replacement,
+        parent_run_id=parent.run_id,
+        retry_key=_id('retry-key'),
+        checkpoint_digest='4' * 64,
+        one_active_run=False,
+    )
+
+    assert created_again is True
+    assert superseding.run_id == replacement.run_id
+    assert superseding.run_id != stored.run_id
+    assert store.get_terminal_retry_child(parent.run_id).run_id == replacement.run_id
+    assert store.get_run(stored.run_id).model_dump(mode='json') == before
+    superseded_events = store.list_events(stored.run_id)
+    assert len(superseded_events) == len(events_before) + 1
+    assert superseded_events[-1].event_type == 'run.retry_superseded'
+    assert superseded_events[-1].payload['child_run_id'] == stored.run_id
+    assert superseded_events[-1].payload['superseded_by'] == replacement.run_id
+    parent_event_types = [e.event_type for e in store.list_events(parent.run_id)]
+    assert parent_event_types.count('run.retry_created') == 2
+    latest_parent_event = store.list_events(parent.run_id)[-1]
+    assert latest_parent_event.payload == {
+        'parent_run_id': parent.run_id,
+        'child_run_id': replacement.run_id,
+        'checkpoint_digest': '4' * 64,
+    }
+    replacement_events = [e.event_type for e in store.list_events(replacement.run_id)]
+    assert replacement_events[0] == 'run.created'
+    assert 'run.retry_created' in replacement_events
+    assert parent_events_before.count('run.retry_created') == 1
+
+
+def test_retry_returns_live_child_unchanged(store) -> None:
+    parent = store.create_run(_run(state=RunState.FAILED), one_active_run=False)
+    child = _run(state=RunState.PREPARING)
+    store.create_terminal_retry(
+        child,
+        parent_run_id=parent.run_id,
+        retry_key=_id('retry-key'),
+        checkpoint_digest='3' * 64,
+        one_active_run=False,
+    )
+    events_before = len(store.list_events(child.run_id))
+    runs_before = {run.run_id for run in store.list_runs()}
+
+    again, created = store.create_terminal_retry(
+        child.model_copy(update={'run_id': _id('other-child')}),
+        parent_run_id=parent.run_id,
+        retry_key=_id('retry-key'),
+        checkpoint_digest='9' * 64,
+        one_active_run=False,
+    )
+
+    assert created is False
+    assert again.run_id == child.run_id
+    assert len(store.list_events(child.run_id)) == events_before
+    assert {run.run_id for run in store.list_runs()} == runs_before
+
+
+def test_retry_explicit_key_replay_after_terminal_returns_same_child(store) -> None:
+    parent = store.create_run(_run(state=RunState.FAILED), one_active_run=False)
+    key = _id('explicit-retry-key')
+    child = _run(state=RunState.PREPARING)
+    store.create_terminal_retry(
+        child,
+        parent_run_id=parent.run_id,
+        retry_key=key,
+        checkpoint_digest='3' * 64,
+        one_active_run=False,
+    )
+    _cancel_run(store, store.get_run(child.run_id))
+    events_before = len(store.list_events(child.run_id))
+    runs_before = {run.run_id for run in store.list_runs()}
+
+    replayed, created = store.create_terminal_retry(
+        child.model_copy(update={'run_id': _id('other-child')}),
+        parent_run_id=parent.run_id,
+        retry_key=key,
+        checkpoint_digest='5' * 64,
+        one_active_run=False,
+    )
+
+    assert created is False
+    assert replayed.run_id == child.run_id
+    assert store.get_terminal_retry_child(parent.run_id).run_id == child.run_id
+    assert len(store.list_events(child.run_id)) == events_before
+    assert {run.run_id for run in store.list_runs()} == runs_before
+
+
+def test_retry_supersede_rechecks_parent_terminal_and_slot(store) -> None:
+    slot_parent = store.create_run(_run(state=RunState.FAILED), one_active_run=False)
+    blocked_child = _run(state=RunState.PREPARING)
+    stored, _ = store.create_terminal_retry(
+        blocked_child,
+        parent_run_id=slot_parent.run_id,
+        retry_key=_id('retry-key'),
+        checkpoint_digest='3' * 64,
+        one_active_run=False,
+    )
+    _cancel_run(store, stored)
+    foreign_active = store.create_run(_run(state=RunState.BEAKER_PLANNING), one_active_run=False)
+
+    with pytest.raises(ConcurrencyConflict, match='active run already exists'):
+        store.create_terminal_retry(
+            _run(state=RunState.PREPARING),
+            parent_run_id=slot_parent.run_id,
+            retry_key=_id('retry-key'),
+            checkpoint_digest='6' * 64,
+            one_active_run=True,
+        )
+
+    state_parent = store.create_run(_run(state=RunState.FAILED), one_active_run=False)
+    state_child = _run(state=RunState.PREPARING)
+    stored_state_child, _ = store.create_terminal_retry(
+        state_child,
+        parent_run_id=state_parent.run_id,
+        retry_key=_id('retry-key'),
+        checkpoint_digest='7' * 64,
+        one_active_run=False,
+    )
+    _cancel_run(store, stored_state_child)
+    awakened = store.get_run(state_parent.run_id).model_copy(update={'state': RunState.BEAKER_PLANNING})
+    store.replace_run(awakened, expected_version=awakened.version)
+
+    with pytest.raises(ConcurrencyConflict, match='not terminal'):
+        store.create_terminal_retry(
+            _run(state=RunState.PREPARING),
+            parent_run_id=state_parent.run_id,
+            retry_key=_id('retry-key'),
+            checkpoint_digest='8' * 64,
+            one_active_run=False,
+        )
+    assert store.get_run(foreign_active.run_id).state is RunState.BEAKER_PLANNING
+
+
 def test_knowledge_and_context_records_round_trip(store) -> None:
     run = store.create_run(_run(), one_active_run=False)
     source_digest = uuid4().hex + uuid4().hex
@@ -231,6 +389,38 @@ def test_knowledge_and_context_records_round_trip(store) -> None:
     assert store.list_context_packets(run.run_id)[0].packet_id == packet.packet_id
 
 
+def test_knowledge_search_matches_partial_term_overlap(store) -> None:
+    """Long agent-context queries must still hit chunks sharing any term.
+
+    Retrieval queries combine turn kind, objective, and prompt prefixes into
+    one string. AND-ing every token against short chunks returns nothing, so
+    the lexical search treats whitespace-separated terms as alternatives.
+    """
+    run = store.create_run(_run(), one_active_run=False)
+    source = KnowledgeSource(
+        source_type=SourceType.DOCUMENTATION,
+        canonical_uri='repo://docs/arbitration.md',
+        digest=uuid4().hex + uuid4().hex,
+        run_scope=run.run_id,
+    )
+    store.save_knowledge_source(source)
+    chunk = KnowledgeChunk(
+        source_id=source.source_id,
+        chunk_index=0,
+        text='wine clustering stability analysis runs inside one job',
+        digest='4' * 64,
+        token_count=9,
+    )
+    store.replace_knowledge_chunks(source.source_id, [chunk])
+
+    long_query = (
+        'revision Complete and evaluate the imported UCI Wine Multi-Algorithm '
+        'Clustering benchmark revision candidate.yaml seeds matrix'
+    )
+    hits = store.search_knowledge_chunks(long_query, source_ids=[source.source_id], limit=5)
+    assert [h['chunk_id'] for h in hits] == [chunk.chunk_id]
+
+
 def test_restart_recovery_marks_running_turns_failed(store) -> None:
     run = store.create_run(_run(), one_active_run=False)
     turn = TurnRecord(run_id=run.run_id, agent=AgentName.BEAKER, status='running', created_at=datetime.now(UTC), updated_at=datetime.now(UTC))
@@ -238,3 +428,74 @@ def test_restart_recovery_marks_running_turns_failed(store) -> None:
     assert store.mark_running_turns_interrupted(run.run_id) == 1
     assert store.list_turns(run.run_id)[0].status == 'failed'
     assert store.mark_running_turns_interrupted(run.run_id) == 0
+
+
+@pytest.fixture()
+def postgres_store_any() -> PostgresStore:
+    dsn = os.getenv('GLASSLAB_TEST_POSTGRES_DSN')
+    if not dsn:
+        pytest.skip('GLASSLAB_TEST_POSTGRES_DSN is not configured')
+    return PostgresStore(dsn)
+
+
+def test_pgvector_absence_degrades_without_aborting_store(
+    postgres_store_any: PostgresStore,
+) -> None:
+    """pgvector availability changes the dense surface, never the contract.
+
+    On a server without the vector extension (the standard store-contract
+    container), initialization must still leave every ordinary operation
+    working; the halfvec column exists exactly when the availability probe
+    says it should; and storing canonical vector bytes must succeed with the
+    HNSW projection skipped instead of raising or leaving an aborted
+    transaction behind. The same assertions hold trivially on a
+    pgvector-enabled server (the dense CI lane), where the probe is True and
+    the column exists.
+    """
+    import struct
+
+    from app.corpus_rag import ChunkVectorMeta
+
+    store = postgres_store_any
+    available = store._pgvector_extension_available()
+    with store._connect() as conn:
+        columns = {
+            row['column_name']
+            for row in conn.execute(
+                'SELECT column_name FROM information_schema.columns'
+                " WHERE table_name = 'orchestrator_knowledge_chunk_vectors'"
+            ).fetchall()
+        }
+    assert ('embedding' in columns) == available
+
+    source = KnowledgeSource(
+        source_type=SourceType.DOCUMENTATION,
+        canonical_uri='repo://docs/vector-degrade.md',
+        digest=uuid4().hex + uuid4().hex,
+    )
+    store.save_knowledge_source(source)
+    chunk = KnowledgeChunk(
+        source_id=source.source_id,
+        chunk_index=0,
+        text='vector degradation probe',
+        digest='6' * 64,
+        token_count=3,
+    )
+    store.replace_knowledge_chunks(source.source_id, [chunk])
+
+    meta = ChunkVectorMeta(
+        chunk_id=chunk.chunk_id,
+        model_id=f'probe-{uuid4().hex}',
+        revision='r1',
+        dims=4,
+        index_version='dense-v1',
+    )
+    vector = struct.pack('<4f', 1.0, 0.0, 0.0, 0.0)
+    store.upsert_knowledge_chunk_vectors(meta, vector)
+    listed = store.list_knowledge_chunk_vectors(meta.model_id)
+    assert [m.chunk_id for m, _ in listed] == [chunk.chunk_id]
+    assert bytes(listed[0][1]) == vector
+
+    # No aborted transaction may survive the degraded halfvec projection.
+    run = store.create_run(_run(), one_active_run=False)
+    assert store.get_run(run.run_id).state is RunState.CREATED

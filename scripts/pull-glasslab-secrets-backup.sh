@@ -2,34 +2,35 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REMOTE_HOST="${REMOTE_HOST:-glasslab@192.168.1.44}"
+REMOTE_HOST="${REMOTE_HOST:-glasslab-provisioner}"
 REMOTE_REPO="${REMOTE_REPO:-/home/glasslab/cluster-config}"
 REMOTE_OUTPUT_DIR="${REMOTE_OUTPUT_DIR:-/home/glasslab/glasslab-secret-backups}"
+REMOTE_VAULT_DIR="${GLASSLAB_SECRET_VAULT:-/home/glasslab/.local/share/glasslab-secrets}"
+REMOTE_POLICY="${SOPS_CONFIG:-$REMOTE_REPO/.sops.yaml}"
 LOCAL_OUTPUT_DIR="${LOCAL_OUTPUT_DIR:-$HOME/glasslab-secret-backups}"
 STAMP="${STAMP:-$(date +%Y%m%d-%H%M%S)}"
-PASSFILE=""
-SOURCE_ROOT=""
 
 usage() {
   cat <<'EOF'
-Usage: pull-glasslab-secrets-backup.sh [--remote-host USER@HOST] [--remote-repo DIR] [--remote-output-dir DIR] [--local-output-dir DIR] [--source-root DIR] [--passphrase-file FILE] [--stamp STAMP]
+Usage: pull-glasslab-secrets-backup.sh [--remote-host USER@HOST|ALIAS] [--remote-repo DIR] [--remote-output-dir DIR] [--local-output-dir DIR] [--vault-dir DIR] [--policy FILE] [--stamp STAMP]
 
-Runs the encrypted secret backup helper on `.44` and then pulls the encrypted archive
-and manifest back to this laptop.
+Runs the encrypted-only inventory backup on the provisioner, pulls the tar.gz
+archive and its SHA-256 sidecar into randomized private local staging, verifies
+the download, and publishes both files without overwriting an existing backup.
 
 Defaults:
-  --remote-host        glasslab@192.168.1.44
+  --remote-host        glasslab-provisioner
   --remote-repo        /home/glasslab/cluster-config
   --remote-output-dir  /home/glasslab/glasslab-secret-backups
   --local-output-dir   $HOME/glasslab-secret-backups
+  --vault-dir          /home/glasslab/.local/share/glasslab-secrets
+  --policy             <remote-repo>/.sops.yaml
 
-Notes:
-  - SSH to `.44` must work from the current machine.
-  - The remote helper still prompts for a GPG symmetric passphrase unless
-    --passphrase-file points to an intentional remote passphrase file.
+No passphrase option exists: every payload document is already SOPS-encrypted.
 EOF
 }
 
+policy_was_explicit=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --remote-host)
@@ -48,12 +49,13 @@ while [[ $# -gt 0 ]]; do
       LOCAL_OUTPUT_DIR="$2"
       shift 2
       ;;
-    --source-root)
-      SOURCE_ROOT="$2"
+    --vault-dir)
+      REMOTE_VAULT_DIR="$2"
       shift 2
       ;;
-    --passphrase-file)
-      PASSFILE="$2"
+    --policy)
+      REMOTE_POLICY="$2"
+      policy_was_explicit=1
       shift 2
       ;;
     --stamp)
@@ -72,23 +74,100 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-mkdir -p "$LOCAL_OUTPUT_DIR"
-chmod 700 "$LOCAL_OUTPUT_DIR"
-
-REMOTE_CMD="cd '$REMOTE_REPO' && ./scripts/backup-glasslab-secrets.sh --output-dir '$REMOTE_OUTPUT_DIR' --stamp '$STAMP'"
-if [[ -n "$SOURCE_ROOT" ]]; then
-  REMOTE_CMD+=" --source-root '$SOURCE_ROOT'"
+if [[ "$policy_was_explicit" -eq 0 && -z "${SOPS_CONFIG:-}" ]]; then
+  REMOTE_POLICY="$REMOTE_REPO/.sops.yaml"
 fi
-if [[ -n "$PASSFILE" ]]; then
-  REMOTE_CMD+=" --passphrase-file '$PASSFILE'"
+if [[ ! "$REMOTE_HOST" =~ ^([A-Za-z0-9_.-]+@)?[A-Za-z0-9_.-]+$ ]] ||
+  [[ "$REMOTE_HOST" == -* ]]; then
+  printf 'Remote host must be a safe SSH alias or USER@HOST value.\n' >&2
+  exit 1
+fi
+if [[ ! "$REMOTE_OUTPUT_DIR" =~ ^/[A-Za-z0-9_./-]+$ ]] ||
+  [[ "$REMOTE_OUTPUT_DIR" == *"/../"* ]] || [[ "$REMOTE_OUTPUT_DIR" == *"/.." ]]; then
+  printf 'Remote output directory must be an absolute normalized path.\n' >&2
+  exit 1
+fi
+if [[ ! "$STAMP" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]]; then
+  printf 'Backup stamp contains unsafe characters.\n' >&2
+  exit 1
 fi
 
-ssh -tt "$REMOTE_HOST" "$REMOTE_CMD"
+archive_name="glasslab-secrets-${STAMP}.tar.gz"
+checksum_name="${archive_name}.sha256"
+mkdir -p -- "$LOCAL_OUTPUT_DIR"
+chmod 700 -- "$LOCAL_OUTPUT_DIR"
+if [[ -e "$LOCAL_OUTPUT_DIR/$archive_name" || -e "$LOCAL_OUTPUT_DIR/$checksum_name" ]]; then
+  printf 'A local backup with this stamp already exists.\n' >&2
+  exit 1
+fi
 
-ARCHIVE_BASENAME="glasslab-secrets-${STAMP}.tar"
-scp \
-  "${REMOTE_HOST}:${REMOTE_OUTPUT_DIR}/${ARCHIVE_BASENAME}.gpg" \
-  "${REMOTE_HOST}:${REMOTE_OUTPUT_DIR}/${ARCHIVE_BASENAME%.tar}.manifest.txt" \
-  "$LOCAL_OUTPUT_DIR/"
+shell_quote() {
+  printf '%q' "$1"
+}
 
-printf 'Pulled encrypted backup artifacts into %s\n' "$LOCAL_OUTPUT_DIR"
+remote_command="cd -- $(shell_quote "$REMOTE_REPO") && ./scripts/backup-glasslab-secrets.sh"
+remote_command+=" --vault-dir $(shell_quote "$REMOTE_VAULT_DIR")"
+remote_command+=" --policy $(shell_quote "$REMOTE_POLICY")"
+remote_command+=" --output-dir $(shell_quote "$REMOTE_OUTPUT_DIR")"
+remote_command+=" --stamp $(shell_quote "$STAMP")"
+
+ssh -T -- "$REMOTE_HOST" "$remote_command"
+
+pull_stage="$(mktemp -d -- "$LOCAL_OUTPUT_DIR/.glasslab-secret-pull.XXXXXXXX")"
+archive_path="$LOCAL_OUTPUT_DIR/$archive_name"
+checksum_path="$LOCAL_OUTPUT_DIR/$checksum_name"
+publication_committed=0
+
+rollback_publications() {
+  if [[ "$publication_committed" -eq 0 ]]; then
+    if [[ -e "$archive_path" && -e "$pull_stage/$archive_name" ]] &&
+      [[ "$archive_path" -ef "$pull_stage/$archive_name" ]]; then
+      rm -f -- "$archive_path"
+    fi
+    if [[ -e "$checksum_path" && -e "$pull_stage/$checksum_name" ]] &&
+      [[ "$checksum_path" -ef "$pull_stage/$checksum_name" ]]; then
+      rm -f -- "$checksum_path"
+    fi
+  fi
+}
+
+cleanup() {
+  rollback_publications
+  rm -rf -- "$pull_stage"
+}
+
+handle_signal() {
+  local status="$1"
+  trap - HUP INT TERM USR1 USR2
+  cleanup
+  exit "$status"
+}
+
+trap cleanup EXIT
+trap 'handle_signal 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
+trap 'handle_signal 138' USR1
+trap 'handle_signal 140' USR2
+chmod 700 -- "$pull_stage"
+
+scp -- \
+  "${REMOTE_HOST}:${REMOTE_OUTPUT_DIR}/${archive_name}" \
+  "${REMOTE_HOST}:${REMOTE_OUTPUT_DIR}/${checksum_name}" \
+  "$pull_stage/"
+
+python3 "$ROOT/scripts/secret_backup_restore.py" verify-archive \
+  --archive "$pull_stage/$archive_name" \
+  --checksum "$pull_stage/$checksum_name"
+
+if ! ln -- "$pull_stage/$archive_name" "$archive_path"; then
+  printf 'Could not publish the pulled archive without overwriting a file.\n' >&2
+  exit 1
+fi
+if ! ln -- "$pull_stage/$checksum_name" "$checksum_path"; then
+  printf 'Could not publish the pulled checksum without overwriting a file.\n' >&2
+  exit 1
+fi
+publication_committed=1
+
+printf 'Pulled and verified encrypted-only backup artifacts into %s\n' "$LOCAL_OUTPUT_DIR"

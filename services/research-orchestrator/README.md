@@ -18,6 +18,11 @@ reviewed, pinned Hermes executable and satisfy the isolation gates in
 
 Local checks:
 
+A bounded agent-runtime replay benchmark (frozen #98 repair case, real
+preflight scoring, no cluster contact) lives in
+`scripts/replay-runtime-benchmark.py`; see
+`docs/glasslab-v2/runtime-replay-report.md`.
+
 ```bash
 python -m pip install -r requirements-dev.txt
 PYTHONPATH=. pytest -p no:cacheprovider -q
@@ -26,6 +31,22 @@ PYTHONPATH=. python -m app.smoke
 
 The smoke path uses scripted OpenCode output, a fake cluster executor, the
 repository example evaluation contract, and disabled Discord.
+
+For the one-time SQLite-to-Postgres migration, pass the DSN through the
+existing service environment or an already-open private descriptor, never an
+argument:
+
+```bash
+exec {postgres_dsn_fd}< /secure/path/research-orchestrator-postgres-dsn
+python3 scripts/import-sqlite-store-to-postgres.py \
+  --sqlite-path /secure/path/orchestrator.db \
+  --dsn-fd "$postgres_dsn_fd" \
+  --apply
+exec {postgres_dsn_fd}<&-
+```
+
+`GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN` is the supported environment mode.
+The historical `--postgres-dsn` option is rejected without echoing its value.
 
 The agent model is selected with
 `GLASSLAB_ORCHESTRATOR_AGENT_MODEL_PROVIDER_ID` and
@@ -42,6 +63,14 @@ Generic task archives are compiled by Honeydew into a validated TaskSpec and
 then mapped by deterministic policy to fixed CPU or GPU workspace profiles.
 Use `/task-start` in Discord or `POST /task-bundles/import`; inspect
 `GET /task-bundles/{task_id}/preflight` before creating a run.
+
+Feeding the knowledge corpus (the sources behind Honeydew's method advisory
+and both agents' context retrieval) is operator-only and documented in the
+dedicated runbook: upload a local folder of PDFs/markdown/text with
+`scripts/upload_knowledge_dir.py`, or ingest single files through the
+operator-gated `/knowledge/sources*` endpoints. Full flow, verification, and
+boundary notes:
+[`../../docs/glasslab-v2/runbooks/knowledge-corpus.md`](../../docs/glasslab-v2/runbooks/knowledge-corpus.md).
 
 See [`../../docs/research-orchestrator.md`](../../docs/research-orchestrator.md)
 for the architecture, trust boundaries, deployment state, and limitations.

@@ -32,6 +32,7 @@ from app.schemas import (
     ApprovalStatus,
     ArtifactRecord,
     ExperimentMatrix,
+    IngestedDatasetRecord,
     JobStatus,
     RequestedAction,
     PolicyClassification,
@@ -863,10 +864,11 @@ def test_mocked_complete_workflow_and_agent_isolation(orchestrator_bundle) -> No
     } == {
         'protocol',
         'evaluation_contract_proposal',
+        'source_bundle',
         'metrics',
         'report',
     }
-    assert len(store.list_artifacts(run.run_id)) == 5
+    assert len(store.list_artifacts(run.run_id)) == 6
     turns = store.list_turns(run.run_id)
     assert len(turns) == 7
     assert all(turn.status == 'completed' for turn in turns)
@@ -1629,7 +1631,7 @@ def test_restart_recovery_from_job_running(orchestrator_bundle) -> None:
     assert restarted.recover() == [run.run_id]
     recovered = restarted_store.get_run(run.run_id)
     assert recovered.state == RunState.AWAITING_FINAL_ACCEPTANCE
-    assert len(restarted_store.list_artifacts(run.run_id)) == 5
+    assert len(restarted_store.list_artifacts(run.run_id)) == 6
 
 
 def test_recovery_does_not_replay_stale_approved_matrix(
@@ -1774,6 +1776,30 @@ def test_cancellation_aborts_sessions_and_jobs(orchestrator_bundle) -> None:
         for job in store.list_jobs(run.run_id)
         if job.external_run_id
     )
+
+
+def test_cancellation_failure_does_not_claim_external_job_or_run_cancelled(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    _, store, cluster, runtime, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    job = store.list_jobs(run.run_id)[0]
+
+    def fail_cancel(_external_run_id: str) -> None:
+        raise RuntimeError('workflow-api cancellation unavailable')
+
+    monkeypatch.setattr(cluster, 'cancel', fail_cancel)
+
+    with pytest.raises(WorkflowError, match='could not be confirmed'):
+        engine.cancel_run(run.run_id)
+
+    assert store.get_run(run.run_id).state != RunState.CANCELLED
+    assert store.get_job(job.job_id).status != JobStatus.CANCELLED
+    assert runtime.aborted
+    event = store.list_events(run.run_id)[-1]
+    assert event.event_type == 'run.cancellation_failed'
+    assert event.payload['cancellation_errors']
 
 
 def test_cancellation_discards_paused_run_without_resuming(orchestrator_bundle) -> None:
@@ -1973,3 +1999,187 @@ def test_http_mutations_require_operator_token(orchestrator_bundle) -> None:
             },
         )
         assert response.status_code == 201
+
+
+def test_objective_dataset_references_are_materialized(
+    orchestrator_bundle,
+    tmp_path,
+) -> None:
+    # An objective citing glasslab-dataset:// URIs must find the real bytes
+    # under datasets/ in both agent workspaces, digest-verified: agent
+    # runtimes have no network egress, so a missing local copy drives the
+    # implementer into futile download retries (issue #98 run
+    # 5fbf145886c84255b7af2e06ebded295).
+    _, store, _, _, engine = orchestrator_bundle
+    content = b'fixed_acidity,quality\n7.4,5\n'
+    digest = sha256(content).hexdigest()
+    source = tmp_path / 'tiny.csv'
+    source.write_bytes(content)
+    store.save_dataset(
+        IngestedDatasetRecord(
+            dataset_id=digest,
+            name='tiny-data',
+            filename='tiny.csv',
+            reference_uri=f'glasslab-dataset://{digest}',
+            artifact_uri=(
+                's3://artifacts/research-orchestrator/dataset-uploads/'
+                f'{digest}/tiny.csv'
+            ),
+            path=str(source),
+            sha256=digest,
+            size_bytes=len(content),
+            role='input',
+        )
+    )
+
+    run = engine.create_run(
+        RunCreateRequest(
+            objective=(
+                'Analyze glasslab-dataset://'
+                f'{digest} across three model families.'
+            )
+        )
+    )
+
+    for workspace in (run.beaker_workspace, run.honeydew_workspace):
+        installed = Path(workspace) / 'datasets' / 'tiny.csv'
+        assert installed.is_file()
+        assert installed.read_bytes() == content
+
+
+def test_objective_runs_build_cluster_execution_payload(
+    orchestrator_bundle,
+    tmp_path,
+) -> None:
+    # Objective-driven runs have no imported task bundle; the submitted job
+    # must still carry Beaker's code (source bundle), a deterministic generic
+    # task bundle, and digest-verified dataset bindings, or the cluster would
+    # execute something unrelated to the approved research (issue #98).
+    _, store, _, _, engine = orchestrator_bundle
+    content = b'fixed_acidity,quality\n7.4,5\n'
+    digest = sha256(content).hexdigest()
+    source = tmp_path / 'tiny.csv'
+    source.write_bytes(content)
+    store.save_dataset(
+        IngestedDatasetRecord(
+            dataset_id=digest,
+            name='tiny-data',
+            filename='tiny.csv',
+            reference_uri=f'glasslab-dataset://{digest}',
+            artifact_uri=(
+                's3://artifacts/research-orchestrator/dataset-uploads/'
+                f'{digest}/tiny.csv'
+            ),
+            path=str(source),
+            sha256=digest,
+            size_bytes=len(content),
+            role='input',
+        )
+    )
+    run = engine.create_run(
+        RunCreateRequest(
+            objective=(
+                'Analyze glasslab-dataset://'
+                f'{digest} across three model families.'
+            )
+        )
+    )
+    run = engine.store.get_run(run.run_id)
+    worktree = Path(run.beaker_workspace)
+    (worktree / 'run.py').write_text('print("entrypoint")\n')
+
+    matrix = ExperimentMatrix(
+        base_config='configs/candidate.yaml',
+        variants=[{'name': 'baseline', 'overrides': {}}],
+        seeds=[42],
+        runner_image=RUNNER_IMAGE,
+        resources={'cpu': 2, 'memory_gib': 4, 'gpus': 0,
+                   'wallclock_minutes': 30},
+    )
+    execution = engine._build_objective_execution(run, matrix)
+
+    assert execution['workspace_command'] == ['python3', 'run.py']
+    assert execution['experiment_type'] == 'research-workspace-job'
+    assert execution['workload_id']
+    shared_root = Path(engine.settings.shared_mount_root)
+    task_uri = execution['task_bundle']['uri']
+    source_uri = execution['source_bundle']['uri']
+    assert task_uri.startswith('s3://artifacts/')
+    assert source_uri.startswith('s3://artifacts/')
+    task_path = shared_root / task_uri.removeprefix('s3://artifacts/')
+    with __import__('zipfile').ZipFile(task_path) as archive:
+        assert sorted(archive.namelist()) == [
+            'eval_agent_prompt.md',
+            'problem.md',
+        ]
+    source_path = shared_root / source_uri.removeprefix('s3://artifacts/')
+    with __import__('zipfile').ZipFile(source_path) as archive:
+        assert 'run.py' in archive.namelist()
+    assert execution['dataset_bindings'] == {
+        'tiny-data': (
+            's3://artifacts/research-orchestrator/dataset-uploads/'
+            f'{digest}/tiny.csv'
+        )
+    }
+    contracts = execution['dataset_contracts']
+    assert contracts[0]['asset']['sha256'] == digest
+
+
+class NoActionThenValidContractRuntime(NewContractRuntime):
+    """First contract draft omits the propose action; the retry includes it."""
+
+    def __init__(self, *, runner_image: str) -> None:
+        super().__init__(runner_image=runner_image)
+        self.omitted_action = False
+
+    def run_turn(self, **kwargs):
+        if (
+            kwargs['agent'].value == 'beaker'
+            and 'Draft an immutable evaluation-contract candidate'
+            in kwargs['prompt']
+            and not self.omitted_action
+        ):
+            self.omitted_action = True
+            return (
+                AgentTurnResult(
+                    kind=TurnKind.CONTRACT_CANDIDATE,
+                    summary='Drafted the candidate but omitted the proposal action.',
+                    done=True,
+                ),
+                'mock-no-action-message',
+            )
+        return super().run_turn(**kwargs)
+
+
+def test_missing_contract_candidate_action_is_retried_with_feedback(
+    orchestrator_bundle,
+) -> None:
+    settings, store, cluster, _, original = orchestrator_bundle
+    engine = ResearchOrchestrator(
+        settings=settings,
+        store=store,
+        runtime=NoActionThenValidContractRuntime(runner_image=RUNNER_IMAGE),
+        workspaces=original.workspaces,
+        contracts=original.contracts,
+        contract_candidates=original.contract_candidates,
+        policy=original.policy,
+        cluster=cluster,
+        discord=DisabledDiscordAdapter(),
+    )
+    run = engine.create_run(
+        RunCreateRequest(objective='Retry a missing contract candidate action.')
+    )
+    protocol = _pending_action(store, run.run_id, 'approve_protocol')
+    engine.approve_action(
+        protocol.action_id,
+        reviewer='test-human',
+        reason='Protocol accepted.',
+    )
+
+    assert store.get_run(run.run_id).state == (
+        RunState.AWAITING_CONTRACT_PROMOTION
+    )
+    assert any(
+        event.event_type == 'contract.candidate_rejected'
+        for event in store.list_events(run.run_id)
+    )

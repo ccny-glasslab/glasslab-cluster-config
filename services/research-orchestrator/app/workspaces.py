@@ -76,7 +76,43 @@ class WorkspaceManager:
         ref = repo_ref or self.approved_repo_ref
         self._ensure_worktree(paths.beaker, ref)
         self._ensure_worktree(paths.honeydew, ref)
+        self._seed_tool_roster(paths.beaker)
+        self._seed_tool_roster(paths.honeydew)
         return paths
+
+    # Models occasionally hallucinate tool names ('run', 'list') that do not
+    # exist in the OpenCode runtime; repeated identical invalid calls trip the
+    # doom-loop guard and abort the whole turn. The workspace-level AGENTS.md
+    # is persistent context every session reads, so the authoritative roster
+    # lives here in addition to per-turn prompts.
+    TOOL_ROSTER_NOTE = (
+        '\n## Available tools (authoritative)\n\n'
+        'Exactly these tools exist: bash, edit, glob, grep, read, '
+        'todowrite, write. There is no `run` tool and no `list` tool. '
+        'Execute every command or script with bash; enumerate files with '
+        'glob or `ls` through bash.\n'
+    )
+
+    def seed_agent_context(self, run_id: str) -> None:
+        # Resume paths skip prepare(); existing worktrees still need the
+        # authoritative tool roster so retried sessions see it.
+        self._seed_tool_roster(self.paths(run_id).beaker)
+        self._seed_tool_roster(self.paths(run_id).honeydew)
+
+    def _seed_tool_roster(self, workspace: Path) -> None:
+        agents_md = workspace / 'AGENTS.md'
+        if agents_md.is_file():
+            text = agents_md.read_text(encoding='utf-8')
+            if '## Available tools (authoritative)' not in text:
+                agents_md.write_text(
+                    text.rstrip() + '\n' + self.TOOL_ROSTER_NOTE,
+                    encoding='utf-8',
+                )
+            return
+        agents_md.write_text(
+            '# Workspace agent notes\n' + self.TOOL_ROSTER_NOTE,
+            encoding='utf-8',
+        )
 
     def _ensure_worktree(self, destination: Path, repo_ref: str) -> None:
         # Worktrees give each agent an isolated working tree while sharing the
@@ -226,7 +262,10 @@ class WorkspaceManager:
                 # These are reconstructed by the orchestrator from their
                 # authoritative sources; copying them as a delta would either
                 # duplicate immutable task inputs or retain mode 0444.
-                if rel == Path('program.md') or rel.parts[0] == 'benchmark-task':
+                # Orchestrator-managed scaffolding is reconstructed for
+                # every workspace and is not checkpoint evidence; legacy
+                # manifests predate it.
+                if rel in {Path('program.md'), Path('AGENTS.md')} or rel.parts[0] == 'benchmark-task':
                     continue
                 source = source_root / rel
                 if source.is_symlink() or not source.is_file():
@@ -329,7 +368,10 @@ class WorkspaceManager:
                 rel = Path(relative)
                 if code not in {' M', 'M ', '??'} or rel.is_absolute() or '..' in rel.parts:
                     raise WorkspaceError('retry child worktree delta is ambiguous')
-                if rel == Path('program.md') or rel.parts[0] == 'benchmark-task':
+                # Orchestrator-managed scaffolding is reconstructed for
+                # every workspace and is not checkpoint evidence; legacy
+                # manifests predate it.
+                if rel in {Path('program.md'), Path('AGENTS.md')} or rel.parts[0] == 'benchmark-task':
                     continue
                 observed_files.add((name, rel.as_posix()))
         if observed_files != manifest_files:
@@ -505,6 +547,38 @@ class WorkspaceManager:
             # Task inputs land under a fixed, read-only location in both
             # workspaces: agents may read the task but cannot rewrite it.
             destination.chmod(0o555)
+
+    def install_run_datasets(
+        self,
+        *,
+        run_id: str,
+        datasets: list[tuple[str, str]],
+    ) -> list[str]:
+        # Objective-referenced ingested datasets land read-only under
+        # datasets/ in both workspaces so agent local checks never need the
+        # network. Idempotent: an existing file is left untouched.
+        installed: list[str] = []
+        for workspace in (
+            self.paths(run_id).beaker,
+            self.paths(run_id).honeydew,
+        ):
+            destination = workspace / 'datasets'
+            destination.mkdir(parents=True, exist_ok=True)
+            for source_name, filename in datasets:
+                source = Path(source_name).resolve()
+                if source.is_symlink() or not source.is_file():
+                    raise WorkspaceError(
+                        f'run dataset is unavailable: {filename}'
+                    )
+                target = destination / Path(filename).name
+                if not target.exists():
+                    shutil.copy2(source, target)
+                    target.chmod(0o444)
+                installed.append(
+                    (target.relative_to(workspace)).as_posix()
+                )
+            destination.chmod(0o555)
+        return installed
 
     def package_source_bundle(
         self,

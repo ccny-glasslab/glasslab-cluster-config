@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
+import re
 import subprocess
+import zipfile
 from threading import RLock
 from typing import Any
 from uuid import uuid4, uuid5, NAMESPACE_URL
@@ -16,10 +19,18 @@ from .contract_candidates import ContractCandidateManager
 from .contracts import EvaluationContractResolver
 from .discord_adapter import DiscordAdapter
 from .datasets import DatasetIngestionManager
+from .evidence import (
+    EvidencePhase,
+    build_evidence_snapshot,
+    serialize_evidence,
+)
 from .matrix import expand_experiment_matrix
-from .opencode_runtime import AgentRuntime
+import httpx
+
+from .opencode_runtime import AgentRuntime, OpenCodeRuntimeError
 from .policy import ActionPolicy
 from .preflight import MatrixPreflightReport, preflight_matrix
+from .research_store import ResearchStore
 from .schemas import (
     ActionRecord,
     AgentName,
@@ -45,7 +56,7 @@ from .schemas import (
     TurnRecord,
     utc_now,
 )
-from .storage import ConcurrencyConflict, SqliteStore
+from .storage import ConcurrencyConflict
 from .task_bundles import (
     TaskBundleManager,
     TaskBundleRecord,
@@ -53,10 +64,31 @@ from .task_bundles import (
 )
 from .workspaces import WorkspaceManager
 from .knowledge_manager import KnowledgeManager
+from .method_advisor import MethodAdvisor
 
 
 class WorkflowError(RuntimeError):
     pass
+
+
+NON_RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
+    {'validation', 'kind_mismatch', 'workflow'}
+)
+_RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
+    {'startup', 'turn_timeout', 'repeated_tool_loop', 'provider', 'network'}
+)
+
+
+def _is_retryable_turn_failure(exc: Exception) -> bool:
+    """Transient runtime failures are retryable; deterministic ones are not."""
+    if isinstance(exc, (httpx.HTTPError, TimeoutError)):
+        return True
+    if isinstance(exc, OpenCodeRuntimeError):
+        return (
+            exc.failure_class in _RETRYABLE_TURN_FAILURE_CLASSES
+            or exc.failure_class is None
+        )
+    return False
 
 
 class ResearchOrchestrator:
@@ -64,7 +96,7 @@ class ResearchOrchestrator:
         self,
         *,
         settings: Settings,
-        store: SqliteStore,
+        store: ResearchStore,
         runtime: AgentRuntime,
         workspaces: WorkspaceManager,
         contracts: EvaluationContractResolver,
@@ -109,6 +141,33 @@ class ResearchOrchestrator:
             max_results=settings.knowledge_max_results,
             token_budget=settings.knowledge_token_budget,
         )
+        self.method_advisor: MethodAdvisor | None = None
+        if settings.knowledge_advisory_enabled:
+            try:
+                from .knowledge_dense import (
+                    NumpyChunkIndex,
+                    PgVectorChunkIndex,
+                    create_embedding_provider,
+                )
+
+                provider = create_embedding_provider(
+                    settings.knowledge_embedding_model,
+                    revision=settings.knowledge_embedding_revision,
+                )
+                if settings.knowledge_dense_pg_dsn:
+                    dense_index: Any = PgVectorChunkIndex(
+                        settings.knowledge_dense_pg_dsn, provider
+                    )
+                else:
+                    dense_index = NumpyChunkIndex(store, provider)
+                self.knowledge.dense_index = dense_index
+                self.knowledge.default_retrieval_mode = (
+                    settings.knowledge_dense_mode
+                )
+                self.method_advisor = MethodAdvisor(self.knowledge)
+            except Exception:
+                # Dense retrieval/advisory is additive; startup never depends on it.
+                self.method_advisor = None
         self.policy = policy
         self.cluster = cluster
         self.discord = discord
@@ -313,6 +372,7 @@ class ResearchOrchestrator:
             # recover() sees a run in PREPARING and resumes drafting, which is
             # the only signal that workspace setup finished.
             self._transition(run_id, RunState.PREPARING)
+            self._materialize_objective_datasets(run_id)
             self._transition(run_id, RunState.HONEYDEW_DRAFTING_PROTOCOL)
             try:
                 self._draft_protocol(run_id)
@@ -320,6 +380,48 @@ class ResearchOrchestrator:
                 self._fail_run(run_id, exc)
                 raise
             return self.store.get_run(run_id)
+
+    def _materialize_objective_datasets(self, run_id: str) -> None:
+        # Copy every ingested dataset cited by the objective into the agent
+        # workspaces. Agent runtimes have no network egress, so without the
+        # local copy the implementer can only fail (issue #98).
+        run = self.store.get_run(run_id)
+        dataset_ids = sorted(
+            set(
+                re.findall(
+                    r'glasslab-dataset://([0-9a-f]{64})',
+                    run.objective,
+                )
+            )
+        )
+        if not dataset_ids:
+            return
+        datasets: list[tuple[str, str]] = []
+        for dataset_id in dataset_ids:
+            record = self.store.get_dataset(dataset_id)
+            source = Path(record.path)
+            digest = sha256()
+            with source.open('rb') as handle:
+                for chunk in iter(
+                    lambda: handle.read(1024 * 1024), b''
+                ):
+                    digest.update(chunk)
+            if digest.hexdigest() != record.sha256:
+                raise WorkflowError(
+                    'objective dataset failed checksum verification: '
+                    f'{record.name}'
+                )
+            datasets.append((record.path, record.filename))
+        installed = self.workspaces.install_run_datasets(
+            run_id=run_id,
+            datasets=datasets,
+        )
+        self._event(
+            run_id,
+            source='orchestrator',
+            event_type='run.datasets_materialized',
+            payload={'files': sorted(set(installed))},
+        )
 
     def import_task_bundle(
         self,
@@ -669,6 +771,47 @@ class ResearchOrchestrator:
             'AgentTurnResult object with that exact kind.\n'
         )
 
+    def _should_retry_turn(
+        self,
+        exc: Exception,
+        run_id: str,
+        agent: AgentName,
+    ) -> bool:
+        if not _is_retryable_turn_failure(exc):
+            return False
+        failed_turns = sum(
+            1
+            for turn in self.store.list_turns(run_id)
+            if turn.agent == agent and turn.status == 'failed'
+        )
+        return failed_turns <= self.settings.agent_turn_max_retries
+
+    def _retry_agent_turn(
+        self,
+        *,
+        run_id: str,
+        agent: AgentName,
+        prompt: str,
+        expected_kind: TurnKind,
+        input_event: dict[str, Any],
+    ) -> tuple[TurnRecord, AgentTurnResult]:
+        # The failed attempt already consumed a turn number; roll it back so
+        # the bounded retry does not double-count against the turn budget.
+        current = self.store.get_run(run_id)
+        self.store.replace_run(
+            current.model_copy(
+                update={'turn_number': max(0, current.turn_number - 1)}
+            ),
+            expected_version=current.version,
+        )
+        return self._run_agent_turn(
+            run_id=run_id,
+            agent=agent,
+            prompt=prompt,
+            expected_kind=expected_kind,
+            input_event=input_event,
+        )
+
     def _run_agent_turn(
         self,
         *,
@@ -790,6 +933,43 @@ class ResearchOrchestrator:
                         ),
                     },
                 )
+            advisor_agent = str(getattr(agent, 'value', agent))
+            advisor_kind = str(getattr(expected_kind, 'value', expected_kind))
+            if (
+                advisor_agent == 'honeydew'
+                and advisor_kind in ('protocol_draft', 'methodology_review')
+                and self.method_advisor is not None
+            ):
+                try:
+                    advisory_block, advisory_payload = (
+                        self.method_advisor.build_and_render(
+                            run_id=run_id,
+                            objective=run.objective,
+                            turn_number=run.turn_number + 1,
+                            turn_kind=expected_kind.value,
+                            problem_md_head=' '.join(prompt.split())[:300],
+                            retrieval_mode=self.settings.knowledge_dense_mode,
+                        )
+                    )
+                    if advisory_block:
+                        prompt = prompt + '\n\n' + advisory_block
+                        payload = advisory_payload or {}
+                        self._event(
+                            run_id,
+                            source='orchestrator',
+                            event_type='agent.method_advisory_attached',
+                            payload={
+                                'turn_id': turn.turn_id,
+                                'packet_id': payload.get('packet_id'),
+                                'advisory_digest': payload.get('advisory_digest'),
+                                'kind': payload.get('kind'),
+                                'n_candidates': len(payload.get('candidates', [])),
+                            },
+                        )
+                except Exception:
+                    # Advisory evidence is additive; a failure must never
+                    # block or strand the research run.
+                    pass
             if recovery_context:
                 prompt = recovery_context + prompt
             # Append the phase-specific discriminator after all retrieved and
@@ -894,6 +1074,14 @@ class ResearchOrchestrator:
                 expected_kind=expected_kind,
                 error=str(exc),
             )
+            if self._should_retry_turn(exc, run_id, agent):
+                return self._retry_agent_turn(
+                    run_id=run_id,
+                    agent=agent,
+                    prompt=prompt,
+                    expected_kind=expected_kind,
+                    input_event=input_event,
+                )
             raise
         current = self.store.get_run(run_id)
         # Pause/cancel bypass the advancement lock (they must be able to abort a
@@ -1120,7 +1308,7 @@ class ResearchOrchestrator:
             if parent.state not in {RunState.FAILED, RunState.TIMED_OUT}:
                 raise WorkflowError('only FAILED or TIMED_OUT runs can be retried')
             existing_child = self.store.get_terminal_retry_child(parent_run_id)
-            if existing_child is not None:
+            if existing_child is not None and existing_child.state not in TERMINAL_STATES:
                 return existing_child
             source_protocol = Path(parent.protocol_path or '')
             if not source_protocol.is_file() or source_protocol.is_symlink():
@@ -1195,9 +1383,13 @@ class ResearchOrchestrator:
                 task_binding=task_binding,
                 base_commit=parent_base_commit,
             )
-            retry_key = request.idempotency_key or sha256(
-                f'terminal-retry-v1:{parent_run_id}:{checkpoint_digest}'.encode()
-            ).hexdigest()
+            if request.idempotency_key:
+                retry_key = request.idempotency_key
+            else:
+                attempt = f'{parent_run_id}:{checkpoint_digest}'
+                if existing_child is not None:
+                    attempt = f'{attempt}:{existing_child.run_id}'
+                retry_key = sha256(f'terminal-retry-v1:{attempt}'.encode()).hexdigest()
             now = utc_now()
             child = RunRecord(
                 run_id=child_id, parent_run_id=parent_run_id,
@@ -2106,10 +2298,28 @@ class ResearchOrchestrator:
             'program.md. Create a self-contained directory under '
             '`contract-candidate/<contract-id>/<version>/` containing '
             'contract.json, the execution wrapper, evaluator, input and output '
-            'JSON schemas, and concise test vectors or tests. The descriptor '
-            'must contain only the EvaluationContractDescriptor fields, set '
-            'container_image_digest to null, and put both primary_metric and '
-            'primary_metric_direction in manifest. When the binding task '
+            'JSON schemas, and concise test vectors or tests. contract.json '
+            'must be one JSON object with exactly these top-level keys and '
+            'no others: contract_id (string; it must be EXACTLY the approved '
+            'proposal evaluator_type value below, not a descriptive name), '
+            'manifest (an inline JSON object with FLAT keys only: '
+            'manifest.primary_metric must be the plain metric-name STRING '
+            '(for example "roc_auc"), never a nested object; '
+            'manifest.primary_metric_direction must be the plain STRING '
+            '"maximize" or "minimize"; it may also hold '
+            'methodology_requirements, budget, '
+            'and guardrails; never a filename reference), execution_wrapper '
+            '(relative path string to the wrapper .py file inside the '
+            'candidate directory), evaluation_entry_point (relative path '
+            'string to the evaluator .py file), expected_input_schema '
+            '(relative path string to the input JSON schema file), '
+            'expected_output_schema (relative path string to the output '
+            'JSON schema file), required_artifacts (non-empty list of '
+            'strings), resource_constraints (object with numeric cpu, '
+            'memory_gib, gpus, wallclock_minutes), container_image_digest '
+            '(set to null). The descriptor must not contain kind, '
+            'candidate_path, rationale, or any other keys. When the binding '
+            'task '
             'requires explicit methodological choices or comparisons, encode '
             'them as manifest.methodology_requirements entries with '
             'requirement_id, config_path, mode (`decision` or `comparison`), '
@@ -2120,9 +2330,14 @@ class ResearchOrchestrator:
             'Python file inside the candidate directory, not a command or '
             'module reference. Do not write '
             'contract.sha256; the orchestrator owns sealing. Run lightweight '
-            'local checks. Return exactly one `propose_evaluation_contract` '
-            'action with contract_id, semantic version, candidate_path, and '
-            'rationale. Do not request publication, Kubernetes, registry, or '
+            'local checks with PYTHONDONTWRITEBYTECODE=1 and remove any '
+            '__pycache__ directory before returning. Return exactly one '
+            '`propose_evaluation_contract` '
+            'action whose arguments contain exactly the keys `contract_id`, '
+            '`version` (semantic-version string such as 1.0.0; the key is '
+            '`version`, never `semantic_version`), `candidate_path` (relative '
+            'to the Beaker workspace), and `rationale`. Do not request '
+            'publication, Kubernetes, registry, or '
             'shared-storage access.\n\nApproved scientific proposal:\n'
             + json.dumps(proposal, indent=2, sort_keys=True)
         )
@@ -2153,10 +2368,34 @@ class ResearchOrchestrator:
                 for action in actions
                 if action.type == 'propose_evaluation_contract'
             ]
-            raise WorkflowError(
+            feedback_message = (
                 'Beaker must propose exactly one valid contract candidate'
-                + (f': {"; ".join(denied)}' if denied else '')
+                + (
+                    f': {"; ".join(denied)}'
+                    if denied
+                    else '; the previous response contained no '
+                    'propose_evaluation_contract action'
+                )
             )
+            # Same deterministic-retry pattern as the seal-rejection path: the
+            # agent re-drafts with the concrete failure as feedback. The chain
+            # is bounded by the per-run turn budget (TIMED_OUT when exhausted),
+            # so a stuck agent cannot loop forever.
+            self._event(
+                run_id,
+                source='orchestrator',
+                event_type='contract.candidate_rejected',
+                payload={
+                    'action_id': None,
+                    'reason': feedback_message,
+                    'retrying': True,
+                },
+            )
+            self._beaker_draft_contract(
+                run_id,
+                feedback=feedback_message,
+            )
+            return
         action = candidates[0]
         request = ContractCandidateRequest.model_validate(action.arguments)
         workspace = Path(self.store.get_run(run_id).beaker_workspace).resolve()
@@ -2177,28 +2416,79 @@ class ResearchOrchestrator:
             primary = proposal.get('primary_metric')
             resources = proposal.get('resource_constraints')
             required_artifacts = proposal.get('required_artifacts')
-            if (
-                request.contract_id != proposal.get('evaluator_type')
-                or not isinstance(primary, dict)
-                or descriptor.manifest.get('primary_metric')
-                != primary.get('name')
-                or descriptor.manifest.get('primary_metric_direction')
-                != primary.get('direction')
-                or not isinstance(required_artifacts, list)
-                or not set(required_artifacts).issubset(
-                    descriptor.required_artifacts
+            mismatches: list[str] = []
+            if request.contract_id != proposal.get('evaluator_type'):
+                mismatches.append(
+                    'contract_id must be exactly the approved proposal '
+                    f'evaluator_type {proposal.get("evaluator_type")!r} but '
+                    f'the action proposed {request.contract_id!r}'
                 )
-                or not isinstance(resources, dict)
-                or float(resources.get('cpu', float('inf')))
-                > descriptor.resource_constraints.cpu
-                or float(resources.get('memory_gib', float('inf')))
-                > descriptor.resource_constraints.memory_gib
-                or int(resources.get('gpus', self.policy.maximum_gpus + 1))
-                > descriptor.resource_constraints.gpus
+            if not isinstance(primary, dict):
+                mismatches.append(
+                    'approved proposal has no primary_metric object'
+                )
+            else:
+                if descriptor.manifest.get('primary_metric') != primary.get(
+                    'name'
+                ):
+                    mismatches.append(
+                        'manifest.primary_metric must equal the approved '
+                        f'primary metric name {primary.get("name")!r} but is '
+                        f'{descriptor.manifest.get("primary_metric")!r}'
+                    )
+                if descriptor.manifest.get('primary_metric_direction') != (
+                    primary.get('direction')
+                ):
+                    mismatches.append(
+                        'manifest.primary_metric_direction must equal the '
+                        'approved direction '
+                        f'{primary.get("direction")!r} but is '
+                        f'{descriptor.manifest.get("primary_metric_direction")!r}'
+                    )
+            if not isinstance(required_artifacts, list):
+                mismatches.append(
+                    'approved proposal has no required_artifacts list'
+                )
+            elif not set(required_artifacts).issubset(
+                descriptor.required_artifacts
             ):
+                missing = sorted(
+                    set(required_artifacts) - set(descriptor.required_artifacts)
+                )
+                mismatches.append(
+                    'descriptor.required_artifacts must include every '
+                    f'approved artifact; missing: {missing}'
+                )
+            if not isinstance(resources, dict):
+                mismatches.append(
+                    'approved proposal has no resource_constraints object'
+                )
+            else:
+                if float(resources.get('cpu', float('inf'))) > (
+                    descriptor.resource_constraints.cpu
+                ):
+                    mismatches.append(
+                        'resource_constraints.cpu is below the approved '
+                        f'minimum {resources.get("cpu")}'
+                    )
+                if float(resources.get('memory_gib', float('inf'))) > (
+                    descriptor.resource_constraints.memory_gib
+                ):
+                    mismatches.append(
+                        'resource_constraints.memory_gib is below the '
+                        f'approved minimum {resources.get("memory_gib")}'
+                    )
+                if int(resources.get('gpus', self.policy.maximum_gpus + 1)) > (
+                    descriptor.resource_constraints.gpus
+                ):
+                    mismatches.append(
+                        'resource_constraints.gpus is below the approved '
+                        f'minimum {resources.get("gpus")}'
+                    )
+            if mismatches:
                 raise WorkflowError(
                     'candidate descriptor does not implement the approved '
-                    'scientific contract proposal'
+                    'scientific contract proposal: ' + '; '.join(mismatches)
                 )
         except (OSError, ValueError, WorkflowError) as exc:
             feedback_message = (
@@ -2423,6 +2713,123 @@ class ResearchOrchestrator:
         self._transition(action.run_id, RunState.BEAKER_PLANNING)
         self._beaker_plan(action.run_id)
 
+    def _build_objective_execution(
+        self,
+        run: RunRecord,
+        matrix: ExperimentMatrix,
+    ) -> dict[str, object]:
+        # Objective-driven runs have no imported task bundle. The deployed
+        # workflow-api workspace contract requires both a task and a source
+        # bundle, so synthesize a deterministic generic task bundle from the
+        # objective text itself instead of weakening that contract (issue
+        # #98). Beaker's worktree is the source bundle; datasets cited by
+        # the objective are bound by their immutable registry records.
+        problem = (
+            '# Objective\n\n' + run.objective.strip() + '\n\n'
+            '# Run binding\n\n'
+            f'- run_id: {run.run_id}\n'
+            '- evaluation_contract: '
+            f'{run.evaluation_contract_id}@'
+            f'{run.evaluation_contract_version}\n'
+        )
+        evaluator_prompt = (
+            'Evaluate the artifacts emitted under GLASSLAB_OUTPUT_DIR for '
+            'this run against its immutable evaluation contract.\n'
+            'contract: '
+            f'{run.evaluation_contract_id}@{run.evaluation_contract_version}\n'
+            'Required artifacts are declared by the contract manifest; the '
+            'workload must not create or score evaluation.json, '
+            'integrity_pass, or rubric_score.\n'
+        )
+        bundle_root = (
+            Path(self.settings.task_bundle_root) / 'objective'
+        )
+        bundle_root.mkdir(parents=True, exist_ok=True)
+        staging_digest = sha256(
+            (problem + evaluator_prompt + run.run_id).encode('utf-8')
+        ).hexdigest()
+        bundle_path = bundle_root / staging_digest / 'task.zip'
+        if not bundle_path.is_file():
+            bundle_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = bundle_path.with_suffix('.tmp')
+            with zipfile.ZipFile(
+                temporary,
+                mode='w',
+                compression=zipfile.ZIP_DEFLATED,
+            ) as archive:
+                for name, content in (
+                    ('problem.md', problem),
+                    ('eval_agent_prompt.md', evaluator_prompt),
+                ):
+                    info = zipfile.ZipInfo(name)
+                    info.date_time = (1980, 1, 1, 0, 0, 0)
+                    archive.writestr(
+                        info,
+                        content,
+                        compress_type=zipfile.ZIP_DEFLATED,
+                    )
+            os.replace(temporary, bundle_path)
+        shared_root = Path(self.settings.shared_mount_root).resolve()
+        bundle_relative = bundle_path.resolve().relative_to(shared_root)
+
+        source_path, source_digest = self.workspaces.package_source_bundle(
+            run_id=run.run_id,
+            source_subdirectory='.',
+        )
+        source_relative = source_path.resolve().relative_to(shared_root)
+        self._save_local_artifact(
+            run_id=run.run_id,
+            artifact_type='source_bundle',
+            uri='artifact://' + source_relative.as_posix(),
+            digest=source_digest,
+            metadata={'path': str(source_path)},
+        )
+
+        dataset_ids = sorted(
+            set(
+                re.findall(
+                    r'glasslab-dataset://([0-9a-f]{64})',
+                    run.objective,
+                )
+            )
+        )
+        records = [self.store.get_dataset(d) for d in dataset_ids]
+        return {
+            'workload_id': self.settings.cluster_execution_workload_id,
+            'experiment_type': 'research-workspace-job',
+            'task_bundle': {
+                'uri': 's3://artifacts/' + bundle_relative.as_posix(),
+                'sha256': self._file_sha256(bundle_path),
+            },
+            'source_bundle': {
+                'uri': 's3://artifacts/' + source_relative.as_posix(),
+                'sha256': source_digest,
+            },
+            'workspace_command': ['python3', 'run.py'],
+            'dataset_contracts': [
+                {
+                    'name': record.name,
+                    'role': record.role,
+                    'contains_labels': record.contains_labels,
+                    'asset': {
+                        'uri': record.artifact_uri,
+                        'sha256': record.sha256,
+                    },
+                }
+                for record in records
+            ],
+            'dataset_bindings': {
+                record.name: record.artifact_uri for record in records
+            },
+        }
+
+    def _file_sha256(self, path: Path) -> str:
+        digest = sha256()
+        with path.open('rb') as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+
     def _beaker_plan(self, run_id: str) -> None:
         run = self.store.get_run(run_id)
         task_context = ''
@@ -2605,7 +3012,19 @@ class ResearchOrchestrator:
         prompt = (
             'Read the approved read-only program.md and implementation-plan.md. '
             'Execute the task-specific plan in your isolated worktree, adapting '
-            'it when repository evidence requires. Finish the bounded experiment '
+            'it when repository evidence requires. Your only tools are bash, '
+            'edit, glob, grep, read, todowrite, and write; there is no run or '
+            'list tool, so execute every command and script through bash. '
+            'Every ingested dataset '
+            'cited by the objective is already copied read-only under '
+            '`datasets/` in this worktree; load it from there and never make '
+            'network calls. The approved cluster job executes this worktree '
+            'with `python3 run.py`, so a repo-root `run.py` entrypoint is '
+            'mandatory: read `GLASSLAB_GENERIC_CONFIG_JSON` for the variant '
+            'name, seed, base_config path, and overrides; read '
+            '`GLASSLAB_DATASET_BINDINGS_JSON` (dataset name to mounted path) '
+            'for data access; write every output artifact, including '
+            '`metrics.json`, under `GLASSLAB_OUTPUT_DIR`. Finish the bounded experiment '
             'runner, run the listed lightweight checks, and '
             'propose one submit_experiment_matrix action. The action arguments '
             'must match the ExperimentMatrix schema and must not contain an '
@@ -2877,9 +3296,11 @@ class ResearchOrchestrator:
             action=action,
         )
         if not preflight.passed:
+            joined = '; '.join(preflight.errors)
             rejection_reason = (
                 'Deterministic matrix preflight failed: '
-                + '; '.join(preflight.errors)
+                + joined
+                + self._methodology_resolution_appendix(joined)
             )
             self.store.update_action(
                 action.action_id,
@@ -2978,9 +3399,23 @@ class ResearchOrchestrator:
                     'reason': rejection_reason,
                 },
             )
+            # Honeydew's summary alone can drop the deterministic error
+            # mechanics (e.g. how methodology requirements resolve against
+            # base_config); the raw preflight text must survive into the
+            # revision prompt or every revision burns out identically.
+            feedback = self._methodology_feedback(result)
+            preflight_error = self._matrix_preflight_error(
+                run_id=run_id,
+                action=action,
+            )
+            if preflight_error:
+                feedback = (
+                    feedback + '\n\nDeterministic preflight error: '
+                    + preflight_error
+                )
             self._request_methodology_revision(
                 run_id,
-                feedback=self._methodology_feedback(result),
+                feedback=feedback,
             )
             return
         approved_action = self.store.mark_action_honeydew_approved(
@@ -3154,7 +3589,41 @@ class ResearchOrchestrator:
             run_id=run_id,
             action=action,
         )
-        return '; '.join(report.errors) if report.errors else None
+        if not report.errors:
+            return None
+        joined = '; '.join(report.errors)
+        return joined + self._methodology_resolution_appendix(joined)
+
+    @staticmethod
+    def _methodology_resolution_appendix(errors: str) -> str:
+        if 'methodology setting' not in errors:
+            return ''
+        # The resolution mechanics (dotted paths into the base_config
+        # document, list-of-distinct-values for comparisons) are not
+        # guessable from the bare error; without this appendix every
+        # revision burns out on the same gap (issue #98 run
+        # 5fbf145886c84255b7af2e06ebded295).
+        return (
+            '. Methodology requirements resolve against the YAML file '
+            'at matrix.base_config inside your worktree: the resolver '
+            'splits each requirement config_path ONLY on "." characters; '
+            'every other character, including "/", is a literal part of a '
+            'YAML key name. So config_path "src/train.py" means: split on '
+            'the dot -> first key is literally "src/train", then nested '
+            'key "py". A comparison requirement needs that final node to '
+            'be a list of at least minimum_distinct_values distinct '
+            'strings; decision requirements need at least one value. '
+            'Exact YAML for config_path "src/train.py" with three model '
+            'families:\n'
+            '"src/train":\n'
+            '  "py":\n'
+            '    - logistic_regression\n'
+            '    - random_forest\n'
+            '    - gradient_boosting\n'
+            '(quote the "src/train" key; it contains a slash, not a dot). '
+            'Edit the base_config file so every listed requirement '
+            'resolves, then re-propose the same matrix.'
+        )
 
     @staticmethod
     def _methodology_feedback(result: AgentTurnResult) -> str:
@@ -3396,6 +3865,8 @@ class ResearchOrchestrator:
                 digest=source_digest,
                 metadata={'path': str(source_path)},
             )
+        else:
+            execution = self._build_objective_execution(run, matrix)
         specs = expand_experiment_matrix(
             run_id=run.run_id,
             action_id=action.action_id,
@@ -3732,85 +4203,20 @@ class ResearchOrchestrator:
             },
         )
 
-    def _evidence_snapshot(self, run_id: str) -> dict[str, Any]:
-        artifacts = self.store.list_artifacts(run_id)
-        return {
-            'jobs': [
-                job.model_dump(mode='json')
-                for job in self.store.list_jobs(run_id)
-            ],
-            'artifacts': [
-                artifact.model_dump(mode='json')
-                for artifact in artifacts
-            ],
-            'artifact_contents': [
-                excerpt
-                for artifact in artifacts
-                if (excerpt := self._artifact_evidence_excerpt(artifact))
-                is not None
-            ],
-        }
-
-    def _artifact_evidence_excerpt(
+    def _evidence_snapshot(
         self,
-        artifact: ArtifactRecord,
-    ) -> dict[str, Any] | None:
-        relative = Path(artifact.uri)
-        if relative.name not in {
-            'runner.log',
-            'status.json',
-            'evaluation.json',
-            'metrics.json',
-            'metrics.csv',
-            'fairness.csv',
-            'report.md',
-        }:
-            return None
-        shared_root = Path(self.settings.shared_mount_root).resolve()
-        path = (shared_root / relative).resolve()
-        if not path.is_relative_to(shared_root) or not path.is_file():
-            return None
-        digest = sha256()
-        with path.open('rb') as handle:
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
-        if digest.hexdigest() != artifact.sha256:
-            return {
-                'uri': f'artifact://{artifact.uri}',
-                'type': artifact.type,
-                'sha256': artifact.sha256,
-                'content_unavailable': 'artifact digest mismatch',
-            }
-        maximum = self.settings.evidence_excerpt_max_bytes
-        size = path.stat().st_size
-        with path.open('rb') as handle:
-            if relative.name == 'runner.log' and size > maximum:
-                handle.seek(-maximum, 2)
-            content = handle.read(maximum)
-        text = content.decode('utf-8', errors='replace')
-        parsed: Any = text
-        if relative.suffix == '.json' and size <= maximum:
-            try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError:
-                parsed = text
-        return {
-            'uri': f'artifact://{artifact.uri}',
-            'type': artifact.type,
-            'sha256': artifact.sha256,
-            'digest_verified': True,
-            'size_bytes': size,
-            'truncated': size > maximum,
-            'excerpt_position': (
-                'tail'
-                if relative.name == 'runner.log' and size > maximum
-                else 'head'
-            ),
-            'content': parsed,
-        }
+        run_id: str,
+        phase: EvidencePhase = EvidencePhase.ANALYSIS,
+    ) -> dict[str, Any]:
+        """Bounded evidence summary for an agent turn, scoped by phase."""
+        return build_evidence_snapshot(
+            self.settings, self.store, run_id, phase=phase
+        )
 
     def _analyze_results(self, run_id: str) -> None:
-        evidence = self._evidence_snapshot(run_id)
+        evidence = self._evidence_snapshot(
+            run_id, phase=EvidencePhase.ANALYSIS
+        )
         _, result = self._run_agent_turn(
             run_id=run_id,
             agent=AgentName.BEAKER,
@@ -3819,7 +4225,7 @@ class ResearchOrchestrator:
                 'failed job is an observation to explain, not proof that the '
                 'research run failed. Cite evidence URIs for every material '
                 'claim.\n\n'
-                + json.dumps(evidence, indent=2, sort_keys=True)
+                + serialize_evidence(evidence)
             ),
             expected_kind=TurnKind.EXPERIMENT_ANALYSIS,
             input_event=evidence,
@@ -3834,7 +4240,9 @@ class ResearchOrchestrator:
         self._verify_results(run_id)
 
     def _verify_results(self, run_id: str) -> None:
-        evidence = self._evidence_snapshot(run_id)
+        evidence = self._evidence_snapshot(
+            run_id, phase=EvidencePhase.VERIFICATION
+        )
         _, result = self._run_agent_turn(
             run_id=run_id,
             agent=AgentName.HONEYDEW,
@@ -3843,7 +4251,7 @@ class ResearchOrchestrator:
                 'authoritative records and the approved program.md. Set '
                 'done=true only if the evidence supports a final report. Cite '
                 'artifact, job, event, Git, or contract URIs.\n\n'
-                + json.dumps(evidence, indent=2, sort_keys=True)
+                + serialize_evidence(evidence)
             ),
             expected_kind=TurnKind.VERIFICATION,
             input_event=evidence,
@@ -3867,13 +4275,19 @@ class ResearchOrchestrator:
         self._write_report(run_id)
 
     def _write_report(self, run_id: str, feedback: str | None = None) -> None:
-        evidence = self._evidence_snapshot(run_id)
+        evidence = self._evidence_snapshot(run_id, phase=EvidencePhase.REPORT)
         prompt = (
             'Write report.md for the human. Separate observations from '
             'inferences, cite authoritative evidence URIs, include failed runs '
-            'and limitations, and do not overstate single-run results. Return '
-            'the file with purpose "report".\n\n'
-            + json.dumps(evidence, indent=2, sort_keys=True)
+            'and limitations, and do not overstate single-run results. Create '
+            'report.md yourself as a new file at the top level of your own '
+            'workspace using the workspace file tool before returning the '
+            'structured result. The produced_files entry with purpose '
+            '"report" must name that newly created file, which must exist as '
+            'a real file in your own workspace when the turn ends; do not '
+            'reference job artifacts or files from other locations as your '
+            'produced file.\n\n'
+            + serialize_evidence(evidence)
         )
         if feedback:
             prompt += f'\n\nHuman rejection feedback:\n{feedback}'
@@ -3987,6 +4401,8 @@ class ResearchOrchestrator:
                     'active_since': utc_now(),
                 },
             )
+            self.workspaces.seed_agent_context(run_id)
+            self._materialize_objective_datasets(run_id)
             self._event(
                 run_id,
                 source='orchestrator',
@@ -4124,6 +4540,7 @@ class ResearchOrchestrator:
                     self.cluster.cancel(job.external_run_id)
                 except Exception as exc:
                     cancellation_errors.append(f'{job.job_id}: {exc}')
+                    continue
             self.store.update_job(
                 job.model_copy(
                     update={
@@ -4134,6 +4551,20 @@ class ResearchOrchestrator:
                         },
                     }
                 )
+            )
+        if cancellation_errors:
+            self._event(
+                run_id,
+                source='orchestrator',
+                event_type='run.cancellation_failed',
+                payload={
+                    'cancellation_errors': cancellation_errors,
+                    'requested_by': requested_by,
+                    'reason': reason,
+                },
+            )
+            raise WorkflowError(
+                'cancellation could not be confirmed for every external job'
             )
         cancelled = self._transition(
             run_id,

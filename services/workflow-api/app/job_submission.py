@@ -81,6 +81,10 @@ class JobSubmitter(ABC):
     def get_live_logs(self, record: RunRecord) -> list[LogEntry]:
         return []
 
+    def cancel_run(self, record: RunRecord) -> None:
+        """Cancel the submitted workload, or raise when cancellation is uncertain."""
+        raise NotImplementedError('job submitter does not support cancellation')
+
 
 class NullJobSubmitter(JobSubmitter):
     def __init__(self, namespace: str) -> None:
@@ -94,6 +98,9 @@ class NullJobSubmitter(JobSubmitter):
             status='accepted',
             detail='Job submission interface is present but not wired to Kubernetes yet.',
         )
+
+    def cancel_run(self, record: RunRecord) -> None:
+        return None
 
 
 def _load_kube_modules() -> tuple[Any, Any, type[Exception], type[Exception]]:
@@ -333,7 +340,7 @@ def _build_runner_spec(manifest: RunManifest, settings: Settings) -> dict:
 
 
 def _is_generic_experiment_manifest(manifest: RunManifest) -> bool:
-    return bool(manifest.experiment_type or manifest.workload_id or manifest.entrypoint)
+    return bool(manifest.experiment_type or manifest.workload_id)
 
 
 def _active_deadline_seconds(manifest: RunManifest) -> int | None:
@@ -346,6 +353,11 @@ def _active_deadline_seconds(manifest: RunManifest) -> int | None:
         or raw_minutes < 1
     ):
         raise ValueError('budget.max_wallclock_minutes must be a positive integer')
+    if (
+        manifest.maximum_wallclock_minutes is not None
+        and raw_minutes > manifest.maximum_wallclock_minutes
+    ):
+        raise ValueError('budget.max_wallclock_minutes exceeds the registry ceiling')
     return raw_minutes * 60
 
 
@@ -492,6 +504,9 @@ def validate_workflow_submission_support(workflow: Any, settings: Settings) -> l
             resource_limits=workflow.resource_profile.limits,
             node_selector=workflow.resource_profile.node_selector,
             runner_image=workflow.runner_image,
+            runner_service_account_name=workflow.runner_service_account_name,
+            maximum_wallclock_minutes=workflow.max_wallclock_minutes,
+            entrypoint=list(workflow.default_entrypoint),
             evaluator_type=workflow.evaluator_type,
             approval_tier=workflow.approval_tier,
             expected_artifacts=workflow.expected_artifacts.model_dump(mode='json'),
@@ -666,7 +681,7 @@ class KubernetesJobSubmitter(JobSubmitter):
 
         pod_spec = self.client.V1PodSpec(
             restart_policy='Never',
-            service_account_name=self.settings.runner_service_account_name,
+            service_account_name=manifest.runner_service_account_name,
             automount_service_account_token=False,
             image_pull_secrets=[self.client.V1LocalObjectReference(name=self.settings.image_pull_secret_name)],
             containers=[container],
@@ -817,6 +832,24 @@ class KubernetesJobSubmitter(JobSubmitter):
         if status.active:
             return RunStatus(run_id=record.run_id, status='running', updated_at=now, detail='Kubernetes Job is active.')
         return RunStatus(run_id=record.run_id, status='queued', updated_at=now, detail='Kubernetes Job is queued.')
+
+    def cancel_run(self, record: RunRecord) -> None:
+        try:
+            self.batch_api.delete_namespaced_job(
+                name=record.job_submission.job_name,
+                namespace=record.job_submission.namespace,
+                propagation_policy='Foreground',
+            )
+        except self.api_exception as exc:
+            if getattr(exc, 'status', None) == 404:
+                return
+            raise LiveStatusUnavailableError(
+                'Kubernetes API error during job cancellation'
+            ) from exc
+        except _KUBE_TRANSPORT_EXCEPTIONS as exc:
+            raise LiveStatusUnavailableError(
+                'Kubernetes transport failure during job cancellation'
+            ) from exc
 
     def get_live_logs(self, record: RunRecord) -> list[LogEntry]:
         try:

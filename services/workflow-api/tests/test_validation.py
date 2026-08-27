@@ -34,11 +34,89 @@ from app.job_submission import (
     resolve_evaluation_contract,
 )
 import app.job_submission as job_submission_module
-from app.schemas import InvestigationPlanCreateRequest, RunCreateRequest
+from app.schemas import InvestigationPlanCreateRequest, InvestigationWorkspaceSpec, RunCreateRequest
 from app.validation import validate_run_request
 from services.common.schemas import RunManifest
+from services.common.schemas import WorkflowRegistryEntry
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.mark.parametrize(
+    'command',
+    [
+        'python3 run.py',
+        [],
+        ['sh', '-lc', 'python3 run.py'],
+        ['bash', 'run.py'],
+        ['python3', ''],
+        ['python3', 'run.py\x00'],
+    ],
+)
+def test_workspace_command_rejects_shell_form_or_unsafe_structure(command) -> None:
+    with pytest.raises(ValidationError):
+        InvestigationWorkspaceSpec.model_validate(
+            {
+                'task_bundle': {'uri': 's3://datasets/task.zip', 'sha256': 'a' * 64},
+                'source_bundle': {'uri': 's3://artifacts/source.zip', 'sha256': 'b' * 64},
+                'command': command,
+            }
+        )
+
+
+def test_workspace_command_accepts_bounded_python_argv() -> None:
+    workspace = InvestigationWorkspaceSpec.model_validate(
+        {
+            'task_bundle': {'uri': 's3://datasets/task.zip', 'sha256': 'a' * 64},
+            'source_bundle': {'uri': 's3://artifacts/source.zip', 'sha256': 'b' * 64},
+            'command': ['python3', 'run.py', '--seed', '17'],
+        }
+    )
+    assert workspace.command == ['python3', 'run.py', '--seed', '17']
+
+
+def test_active_registry_execution_policy_is_complete_and_immutable() -> None:
+    registry = WorkflowRegistry(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions')
+
+    active = [
+        entry
+        for entry in registry.list_workflows()
+        if entry.execution_status == 'ready' and entry.submission_backend == 'kubernetes'
+    ]
+    assert active
+    for entry in active:
+        assert '@sha256:' in entry.runner_image
+        assert len(entry.runner_image.rsplit('@sha256:', 1)[1]) == 64
+        assert entry.default_entrypoint
+        assert entry.runner_service_account_name
+        assert entry.resource_profile.requests
+        assert entry.resource_profile.limits
+        assert entry.max_wallclock_minutes > 0
+
+
+@pytest.mark.parametrize(
+    ('update', 'match'),
+    [
+        ({'runner_image': 'ghcr.io/example/runner:latest'}, 'digest-pinned'),
+        ({'allow_custom_image': True}, 'Extra inputs are not permitted'),
+        ({'allow_custom_entrypoint': True}, 'Extra inputs are not permitted'),
+        ({'default_entrypoint': []}, 'fixed default_entrypoint'),
+        ({'runner_service_account_name': ' '}, 'runner_service_account_name'),
+        ({'max_wallclock_minutes': None}, 'wall-clock ceiling'),
+    ],
+)
+def test_active_registry_rejects_incomplete_or_custom_execution_policy(
+    update: dict[str, object],
+    match: str,
+) -> None:
+    registry = WorkflowRegistry(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions')
+    source = registry.get_workflow('research-workspace-cpu-v1')
+    assert source is not None
+    payload = source.model_dump(mode='json')
+    payload.update(update)
+
+    with pytest.raises(ValidationError, match=match):
+        WorkflowRegistryEntry.model_validate(payload)
 
 
 def build_workspace_execution(
@@ -153,6 +231,8 @@ def test_generic_run_wallclock_budget_becomes_kubernetes_deadline() -> None:
         requested_models=['agent-generated-python'],
         resource_profile='cpu-research-medium',
         runner_image='ghcr.io/example/research-workspace:0.1.0',
+        runner_service_account_name='registry-runner',
+        maximum_wallclock_minutes=20,
         evaluator_type='rubric-gated-v1',
         approval_tier='tier-2-approved-execution',
         expected_artifacts={'required': ['status.json'], 'optional': []},
@@ -163,6 +243,10 @@ def test_generic_run_wallclock_budget_becomes_kubernetes_deadline() -> None:
     )
 
     assert _active_deadline_seconds(manifest) == 17 * 60
+
+    excessive = manifest.model_copy(update={'budget': {'max_wallclock_minutes': 21}})
+    with pytest.raises(ValueError, match='registry ceiling'):
+        _active_deadline_seconds(excessive)
 
 
 def test_evaluation_contract_must_match_trusted_catalog() -> None:
@@ -179,6 +263,7 @@ def test_evaluation_contract_must_match_trusted_catalog() -> None:
         requested_models=['agent-generated-python'],
         resource_profile='gpu-small',
         runner_image='ghcr.io/example/runner:test',
+        runner_service_account_name='registry-runner',
         evaluator_type='contract',
         approval_tier='tier-2-approved-execution',
         expected_artifacts={'required': ['metrics.json'], 'optional': []},
@@ -270,6 +355,7 @@ def test_evaluation_contract_resolves_verified_shared_bundle(
         requested_models=['agent-generated-python'],
         resource_profile='gpu-small',
         runner_image='ghcr.io/example/runner:test',
+        runner_service_account_name='registry-runner',
         evaluator_type='contract',
         approval_tier='tier-2-approved-execution',
         expected_artifacts={'required': ['metrics.json'], 'optional': []},
@@ -309,6 +395,7 @@ def test_evaluation_contract_rejects_agent_supplied_execution_fields() -> None:
         requested_models=['agent-generated-python'],
         resource_profile='gpu-small',
         runner_image='ghcr.io/example/runner:test',
+        runner_service_account_name='registry-runner',
         evaluator_type='contract',
         approval_tier='tier-2-approved-execution',
         expected_artifacts={'required': ['metrics.json'], 'optional': []},
@@ -358,6 +445,7 @@ def test_kubernetes_job_mounts_trusted_contract_read_only(monkeypatch) -> None:
         resource_requests={'cpu': '1'},
         resource_limits={'cpu': '1'},
         runner_image='ghcr.io/example/runner:test',
+        runner_service_account_name='registry-runner',
         evaluator_type='contract',
         approval_tier='tier-2-approved-execution',
         expected_artifacts={'required': ['metrics.json'], 'optional': []},
@@ -425,6 +513,10 @@ def test_kubernetes_job_mounts_trusted_contract_read_only(monkeypatch) -> None:
     _, job = batch.submitted
     pod = job.spec.template.spec
     assert pod.automount_service_account_token is False
+    assert pod.service_account_name == 'registry-runner'
+    assert pod.containers[0].image == manifest.runner_image
+    assert pod.containers[0].resources.requests == manifest.resource_requests
+    assert pod.containers[0].resources.limits == manifest.resource_limits
     assert pod.init_containers[0].image == trusted['container_image_digest']
     assert pod.containers[0].command == [
         'python3',
@@ -500,6 +592,7 @@ def test_research_workspace_mounts_only_declared_asset_subpaths() -> None:
         requested_models=['agent-generated-python'],
         resource_profile='cpu-research-medium',
         runner_image='ghcr.io/example/research-workspace:0.1.0',
+        runner_service_account_name='registry-runner',
         evaluator_type='rubric-gated-v1',
         approval_tier='tier-2-approved-execution',
         expected_artifacts={'required': ['status.json'], 'optional': []},
