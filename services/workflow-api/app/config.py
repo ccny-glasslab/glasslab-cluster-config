@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     store_json_path: str = '/mnt/artifacts/workflow-api/state/run-store.json'
     store_postgres_dsn: str | None = None
     runner_namespace: str = 'glasslab-v2'
+    runner_service_account_name: str = 'glasslab-research-workload'
     default_submitted_by: str = 'glasslab-operator'
     job_submission_mode: Literal['null', 'kubernetes'] = 'null'
     runner_image_pull_policy: str = 'IfNotPresent'
@@ -131,6 +132,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode='after')
     def validate_store_backend(self) -> 'Settings':
+        if self.runner_service_account_name.strip() in ('', 'default'):
+            raise ValueError(
+                'GLASSLAB_WORKFLOW_API_RUNNER_SERVICE_ACCOUNT_NAME must be a '
+                'dedicated ServiceAccount — using "default" mounts the namespace '
+                'default SA token into every research job pod'
+            )
         if self.store_backend == 'memory' and not self.allow_inmemory_store:
             raise ValueError(
                 'workflow-api store backend is set to memory but allow_inmemory_store=false; '
