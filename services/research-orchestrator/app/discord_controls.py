@@ -185,9 +185,12 @@ def execute_discord_task_creation(
     preflight = engine.task_preflight(task)
     if not preflight.ready:
         # Fail closed: a task that does not compile, have its assets, or pass
-        # checksum verification must never be turned into a run.
+        # checksum verification must never be turned into a run. The raised
+        # message carries the actionable feedback (what the spec is missing)
+        # so the operator can fix and resubmit instead of hitting a dead end.
         raise ValueError(
-            'task compiled but is not ready: '
+            preflight.feedback
+            or 'task compiled but is not ready: '
             + '; '.join(preflight.blocking_issues)
         )
     return engine.create_run(
