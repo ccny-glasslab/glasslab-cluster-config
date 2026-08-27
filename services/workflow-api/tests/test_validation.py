@@ -715,3 +715,84 @@ def test_claim_evaluator_contract_requires_primary_metric_and_guardrails() -> No
         'primary metric is missing or non-numeric: rubric_score',
         'required guardrail metric is missing: integrity_pass',
     ]
+
+
+# --- Issue #241: design-path runs must carry activeDeadlineSeconds ---
+
+def test_design_path_job_has_active_deadline_seconds(monkeypatch) -> None:
+    # Verifies that a manifest whose budget is populated (as create_run_record
+    # now does) produces a Kubernetes Job with activeDeadlineSeconds set.
+    manifest = RunManifest(
+        run_id='run-deadline-check',
+        workflow_id='generic-tabular-benchmark',
+        workflow_family='tabular',
+        display_name='Deadline Check',
+        objective='Verify the registry wall-clock ceiling becomes activeDeadlineSeconds.',
+        submitted_by='test-suite',
+        submitted_at=datetime.now(timezone.utc),
+        inputs={},
+        requested_models=['logistic_regression'],
+        resource_profile='cpu-small',
+        resource_requests={'cpu': '1'},
+        resource_limits={'cpu': '1'},
+        runner_image='ghcr.io/example/runner:test',
+        runner_service_account_name='glasslab-gpu-runner',
+        maximum_wallclock_minutes=45,
+        budget={'max_wallclock_minutes': 45},
+        evaluator_type='none',
+        approval_tier='tier-2-approved-execution',
+        expected_artifacts={'required': ['metrics.json'], 'optional': []},
+        experiment_type='gpu-training-job',
+        workload_id='generic-tabular-benchmark',
+        entrypoint=['python3', 'run.py'],
+        config_payload={},
+    )
+
+    class Record(SimpleNamespace):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    class BatchApi:
+        submitted = None
+
+        def create_namespaced_job(self, *, namespace, body):
+            self.submitted = (namespace, body)
+
+    batch = BatchApi()
+    client = SimpleNamespace(
+        BatchV1Api=lambda: batch,
+        CoreV1Api=lambda: Record(),
+        **{
+            name: Record
+            for name in (
+                'V1Capabilities',
+                'V1Container',
+                'V1EmptyDirVolumeSource',
+                'V1EnvVar',
+                'V1Job',
+                'V1JobSpec',
+                'V1LocalObjectReference',
+                'V1ObjectMeta',
+                'V1PersistentVolumeClaimVolumeSource',
+                'V1PodSecurityContext',
+                'V1PodSpec',
+                'V1PodTemplateSpec',
+                'V1ResourceRequirements',
+                'V1SeccompProfile',
+                'V1SecurityContext',
+                'V1Volume',
+                'V1VolumeMount',
+            )
+        },
+    )
+    kube_config = SimpleNamespace(load_incluster_config=lambda: None)
+    monkeypatch.setattr(
+        job_submission_module,
+        '_load_kube_modules',
+        lambda: (client, kube_config, RuntimeError, RuntimeError),
+    )
+    submitter = KubernetesJobSubmitter(Settings())
+    submitter.submit_run(manifest)
+
+    _, job = batch.submitted
+    assert job.spec.active_deadline_seconds == 45 * 60

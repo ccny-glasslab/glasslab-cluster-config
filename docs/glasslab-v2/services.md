@@ -8,7 +8,7 @@ Glasslab v2 treats workflow execution as a contract-driven pipeline.
 - `evaluator` reads multiple completed run bundles and produces deterministic `comparison.json` and `summary.md` outputs.
 - `reporter` converts manifests, metrics, and optional evaluator output into a stable Markdown memo for operators.
 - Kubernetes Jobs remain the bounded execution layer.
-- `whatsapp-gateway`, `research-ingress`, and `research-command-router` are the deterministic command surface in front of these components.
+- `research-command-router` remains the deterministic command surface in front of these components. Its upstream `whatsapp-gateway` and `research-ingress` adapters have been retired; see `docs/glasslab-v2/historical/README.md`.
 
 ## Canonical artifact contract
 

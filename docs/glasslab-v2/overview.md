@@ -103,12 +103,7 @@ Owns:
 
 ### `research-ingress`
 
-Inbound control normalization.
-
-Owns:
-
-- command vs non-command turn split
-- deterministic forwarding to the router
+Retired (issue #159). See `docs/glasslab-v2/historical/README.md`.
 
 ### `research-command-router`
 

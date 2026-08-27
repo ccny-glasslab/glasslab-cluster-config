@@ -60,6 +60,11 @@ jobs:
             requirements: services/workflow-api/requirements.txt
             pythonpath: ../..:.
             tests: tests/test_api.py tests/test_persistence.py tests/test_run_artifacts.py tests/test_schedule_execution.py tests/test_validation.py
+          - name: research-command-router
+            workdir: services/research-command-router
+            requirements: services/research-command-router/requirements.txt
+            pythonpath: .
+            tests: tests/test_api.py
           - name: research-workspace-runner
             workdir: services/research-workspace-runner
             requirements: services/research-workspace-runner/requirements.txt
@@ -276,11 +281,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: research-ingress
-            workdir: services/research-ingress
-            requirements: services/research-ingress/requirements.txt
-            pythonpath: .
-            tests: tests/test_api.py
           - name: research-command-router
             workdir: services/research-command-router
             requirements: services/research-command-router/requirements.txt
