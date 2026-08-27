@@ -717,17 +717,40 @@ def test_claim_evaluator_contract_requires_primary_metric_and_guardrails() -> No
     ]
 
 
-# --- Issue #241: design-path runs must carry activeDeadlineSeconds ---
+# --- Issue #244: research job pods must not use the default ServiceAccount ---
 
-def test_design_path_job_has_active_deadline_seconds(monkeypatch) -> None:
-    # Verifies that a manifest whose budget is populated (as create_run_record
-    # now does) produces a Kubernetes Job with activeDeadlineSeconds set.
+def test_runner_sa_default_is_rejected_at_startup() -> None:
+    with pytest.raises((ValueError, ValidationError), match='dedicated ServiceAccount'):
+        Settings(runner_service_account_name='default')
+
+
+def test_runner_sa_empty_is_rejected_at_startup() -> None:
+    with pytest.raises((ValueError, ValidationError), match='dedicated ServiceAccount'):
+        Settings(runner_service_account_name='')
+
+
+def test_runner_sa_whitespace_only_is_rejected_at_startup() -> None:
+    with pytest.raises((ValueError, ValidationError), match='dedicated ServiceAccount'):
+        Settings(runner_service_account_name='   ')
+
+
+def test_runner_sa_dedicated_account_is_accepted() -> None:
+    settings = Settings(runner_service_account_name='glasslab-research-workload')
+    assert settings.runner_service_account_name == 'glasslab-research-workload'
+
+
+# --- Issue #241: design-path runs must carry activeDeadlineSeconds ---
+# The submission-path test below merges both PRs' assertions: the configured
+# dedicated ServiceAccount flows into the pod spec while the registry budget
+# ceiling becomes activeDeadlineSeconds on the Kubernetes Job.
+
+def test_submitted_job_pod_uses_sa_and_deadline(monkeypatch) -> None:
     manifest = RunManifest(
-        run_id='run-deadline-check',
+        run_id='run-sa-deadline-check',
         workflow_id='generic-tabular-benchmark',
         workflow_family='tabular',
-        display_name='Deadline Check',
-        objective='Verify the registry wall-clock ceiling becomes activeDeadlineSeconds.',
+        display_name='SA Deadline Check',
+        objective='Verify SA and activeDeadlineSeconds flow into the rendered pod spec.',
         submitted_by='test-suite',
         submitted_at=datetime.now(timezone.utc),
         inputs={},
@@ -736,7 +759,7 @@ def test_design_path_job_has_active_deadline_seconds(monkeypatch) -> None:
         resource_requests={'cpu': '1'},
         resource_limits={'cpu': '1'},
         runner_image='ghcr.io/example/runner:test',
-        runner_service_account_name='glasslab-gpu-runner',
+        runner_service_account_name='glasslab-research-workload',
         maximum_wallclock_minutes=45,
         budget={'max_wallclock_minutes': 45},
         evaluator_type='none',
@@ -791,8 +814,13 @@ def test_design_path_job_has_active_deadline_seconds(monkeypatch) -> None:
         '_load_kube_modules',
         lambda: (client, kube_config, RuntimeError, RuntimeError),
     )
-    submitter = KubernetesJobSubmitter(Settings())
+    submitter = KubernetesJobSubmitter(
+        Settings(runner_service_account_name='glasslab-research-workload')
+    )
     submitter.submit_run(manifest)
 
     _, job = batch.submitted
+    pod = job.spec.template.spec
+    assert pod.service_account_name == 'glasslab-research-workload'
+    assert pod.automount_service_account_token is False
     assert job.spec.active_deadline_seconds == 45 * 60
