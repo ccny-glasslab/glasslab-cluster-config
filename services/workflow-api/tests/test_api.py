@@ -2895,6 +2895,33 @@ def test_create_run_from_latest_ready_design_draft() -> None:
     assert payload['manifest']['inputs']['dataset_name'] == 'titanic'
 
 
+def test_design_path_run_manifest_carries_registry_wallclock_budget() -> None:
+    # Regression test for #241: create_run_record was not populating budget,
+    # so every design-path submission shipped without activeDeadlineSeconds.
+    # LegacyCompatibilityWorkflowRegistry patches max_wallclock_minutes to 240
+    # for all workflows, so the resulting manifest must carry that ceiling.
+    client = build_legacy_compatibility_client()
+
+    intake = client.post(
+        '/intakes',
+        json={
+            'raw_request': 'Benchmark the approved models on Titanic and create a validation run.',
+            'notes': ['Use the standard Titanic train/test splits.'],
+        },
+    )
+    assert intake.status_code == 201
+
+    design = client.post('/design-drafts/from-latest-intake')
+    assert design.status_code == 201
+
+    run = client.post('/runs/from-latest-design-draft')
+    assert run.status_code == 201
+    payload = run.json()
+
+    budget = payload['manifest']['budget']
+    assert budget.get('max_wallclock_minutes') == 240
+
+
 def test_apply_latest_session_design_skill_is_not_shadowed_by_session_route() -> None:
     client = build_client()
 

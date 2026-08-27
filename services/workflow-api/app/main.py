@@ -1094,6 +1094,7 @@ def create_run_record(
         runner_image=workflow.runner_image,
         runner_service_account_name=workflow.runner_service_account_name,
         maximum_wallclock_minutes=workflow.max_wallclock_minutes,
+        budget={'max_wallclock_minutes': workflow.max_wallclock_minutes},
         entrypoint=list(workflow.default_entrypoint),
         evaluator_type=workflow.evaluator_type,
         approval_tier=workflow.approval_tier,

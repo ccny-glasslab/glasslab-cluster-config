@@ -6,6 +6,19 @@
   vars_files:
     - ../group_vars/all.yml
     - ../group_vars/gpu_nodes.yml
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.systemd:
+        name: containerd
+        state: restarted
+        enabled: true
+
+    - name: Restart kubelet
+      ansible.builtin.systemd:
+        name: kubelet
+        state: restarted
+        enabled: true
+
   tasks:
     - name: Confirm NVIDIA PCI devices are visible before enablement
       ansible.builtin.command:
@@ -30,18 +43,8 @@
       ansible.builtin.apt:
         name: "{{ gpu_driver_package_override | default(gpu_driver_package) }}"
         state: present
+      register: gpu_driver_install
       when: gpu_driver_install_enabled | bool
-
-    - name: Back up existing NVIDIA container toolkit repo file when present
-      ansible.builtin.shell: |
-        set -e
-        if [ -f "{{ gpu_nvidia_container_repo_list }}" ]; then
-          cp -a "{{ gpu_nvidia_container_repo_list }}" "{{ gpu_nvidia_container_repo_list }}.bak-$(date +%Y%m%d-%H%M%S)"
-        fi
-      args:
-        executable: /bin/bash
-      changed_when: false
-      when: gpu_nvidia_container_toolkit_enabled | bool
 
     - name: Install NVIDIA container toolkit keyring
       ansible.builtin.shell: |
@@ -55,6 +58,7 @@
       ansible.builtin.copy:
         dest: "{{ gpu_nvidia_container_repo_list }}"
         mode: '0644'
+        backup: true
         content: |
           deb [signed-by={{ gpu_nvidia_container_keyring }}] {{ gpu_nvidia_container_repo_base }} /
       when: gpu_nvidia_container_toolkit_enabled | bool
@@ -66,40 +70,35 @@
         update_cache: true
       when: gpu_nvidia_container_toolkit_enabled | bool
 
-    - name: Back up containerd config before NVIDIA runtime changes
-      ansible.builtin.shell: |
-        set -e
-        cp -a /etc/containerd/config.toml "/etc/containerd/config.toml.bak-$(date +%Y%m%d-%H%M%S)"
-      args:
-        executable: /bin/bash
-      changed_when: true
+    - name: Check if NVIDIA runtime is already configured in containerd
+      ansible.builtin.command:
+        cmd: grep -q 'nvidia' /etc/containerd/config.toml
+      register: gpu_containerd_nvidia_check
+      changed_when: false
+      failed_when: false
       when: gpu_nvidia_container_toolkit_enabled | bool
 
     - name: Configure NVIDIA runtime for containerd
       ansible.builtin.command:
         cmd: nvidia-ctk runtime configure --runtime=containerd --config=/etc/containerd/config.toml
-      when: gpu_nvidia_container_toolkit_enabled | bool
+      register: gpu_containerd_configure
+      changed_when: true
+      when:
+        - gpu_nvidia_container_toolkit_enabled | bool
+        - gpu_containerd_nvidia_check.rc is defined
+        - gpu_containerd_nvidia_check.rc != 0
+      notify:
+        - Restart containerd
+        - Restart kubelet
 
-    - name: Restart containerd after NVIDIA runtime configuration
-      ansible.builtin.systemd:
-        name: containerd
-        state: restarted
-        enabled: true
-      when: gpu_nvidia_container_toolkit_enabled | bool
-
-    - name: Restart kubelet after NVIDIA runtime configuration
-      ansible.builtin.systemd:
-        name: kubelet
-        state: restarted
-        enabled: true
-      when: gpu_nvidia_container_toolkit_enabled | bool
-
-    - name: Reboot after NVIDIA driver/toolkit changes
+    - name: Reboot after NVIDIA driver or runtime configuration changes
       ansible.builtin.reboot:
         reboot_timeout: "{{ gpu_reboot_timeout }}"
         post_reboot_delay: 20
         test_command: nvidia-smi -L
-      when: gpu_driver_install_enabled | bool or gpu_nvidia_container_toolkit_enabled | bool
+      when: >-
+        (gpu_driver_install is defined and gpu_driver_install.changed) or
+        (gpu_containerd_configure is defined and gpu_containerd_configure.changed)
 
     - name: Verify NVIDIA driver is functional after reboot
       ansible.builtin.command: nvidia-smi -L
