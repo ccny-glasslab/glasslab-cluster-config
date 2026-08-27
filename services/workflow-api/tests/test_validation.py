@@ -739,30 +739,36 @@ def test_runner_sa_dedicated_account_is_accepted() -> None:
     assert settings.runner_service_account_name == 'glasslab-research-workload'
 
 
-def test_submitted_job_pod_uses_configured_service_account(monkeypatch) -> None:
+# --- Issue #241: design-path runs must carry activeDeadlineSeconds ---
+# The submission-path test below merges both PRs' assertions: the configured
+# dedicated ServiceAccount flows into the pod spec while the registry budget
+# ceiling becomes activeDeadlineSeconds on the Kubernetes Job.
+
+def test_submitted_job_pod_uses_sa_and_deadline(monkeypatch) -> None:
     manifest = RunManifest(
-        run_id='run-sa-check',
-        workflow_id='metric-search-v0',
-        workflow_family='metric-learning',
-        display_name='SA Check',
-        objective='Verify that the configured SA name flows into the rendered pod spec.',
+        run_id='run-sa-deadline-check',
+        workflow_id='generic-tabular-benchmark',
+        workflow_family='tabular',
+        display_name='SA Deadline Check',
+        objective='Verify SA and activeDeadlineSeconds flow into the rendered pod spec.',
         submitted_by='test-suite',
         submitted_at=datetime.now(timezone.utc),
         inputs={},
-        requested_models=['agent-generated-python'],
-        resource_profile='gpu-small',
+        requested_models=['logistic_regression'],
+        resource_profile='cpu-small',
         resource_requests={'cpu': '1'},
         resource_limits={'cpu': '1'},
         runner_image='ghcr.io/example/runner:test',
         runner_service_account_name='glasslab-research-workload',
+        maximum_wallclock_minutes=45,
+        budget={'max_wallclock_minutes': 45},
         evaluator_type='none',
-        approval_tier='tier-1-standard',
+        approval_tier='tier-2-approved-execution',
         expected_artifacts={'required': ['metrics.json'], 'optional': []},
         experiment_type='gpu-training-job',
-        workload_id='metric-search-v0',
+        workload_id='generic-tabular-benchmark',
         entrypoint=['python3', 'run.py'],
         config_payload={},
-        budget={'max_wallclock_minutes': 5},
     )
 
     class Record(SimpleNamespace):
@@ -817,3 +823,4 @@ def test_submitted_job_pod_uses_configured_service_account(monkeypatch) -> None:
     pod = job.spec.template.spec
     assert pod.service_account_name == 'glasslab-research-workload'
     assert pod.automount_service_account_token is False
+    assert job.spec.active_deadline_seconds == 45 * 60
