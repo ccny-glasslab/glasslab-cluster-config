@@ -39,8 +39,6 @@ Useful service buckets:
   - `services/evaluator`
   - `services/reporter`
 - legacy or compatibility services:
-  - `services/whatsapp-gateway`
-  - `services/research-ingress`
   - `services/research-command-router`
   - `services/intake-agent`
   - `services/interpretation-agent`
@@ -49,6 +47,10 @@ Useful service buckets:
 
 The legacy services are retained for migration and historical reference. They
 are not the current research front door.
+
+`whatsapp-gateway` and `research-ingress` have been retired; see
+`docs/glasslab-v2/historical/README.md`. `research-command-router` is held
+pending confirmation on the #173 workflow-api auth work.
 
 ## Canonical Product Direction
 

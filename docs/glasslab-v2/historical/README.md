@@ -16,6 +16,7 @@ For current architecture read `AGENTS.md` and `docs/glasslab-v2/current/README.m
 ## WhatsApp (deprecated transport)
 
 - [whatsapp-dedicated-account-migration.md](whatsapp-dedicated-account-migration.md) — WhatsApp dedicated account migration plan
+- [research-ingress.md](research-ingress.md) — research-ingress service contract, deterministic ingress layer in front of research-command-router
 
 ## Old Command Surface (`!new`, `!plan`, `!run` era)
 
