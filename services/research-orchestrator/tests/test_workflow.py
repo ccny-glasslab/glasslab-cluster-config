@@ -20,6 +20,7 @@ import pytest
 
 from app.contracts import EvaluationContractResolver
 from app.contract_candidates import ContractCandidateManager
+from app.config import SERVICE_ROOT
 from app.discord_adapter import DisabledDiscordAdapter
 from app.engine import ResearchOrchestrator, WorkflowError
 from app.main import create_app
@@ -36,6 +37,7 @@ from app.schemas import (
     JobStatus,
     RequestedAction,
     PolicyClassification,
+    ProposedMetric,
     RunCreateRequest,
     RunState,
     TurnKind,
@@ -2181,5 +2183,74 @@ def test_missing_contract_candidate_action_is_retried_with_feedback(
     )
     assert any(
         event.event_type == 'contract.candidate_rejected'
+        for event in store.list_events(run.run_id)
+    )
+
+
+class InstalledContractRuntime(ScriptedMockRuntime):
+    """Honeydew proposes the already-installed generic contract, so the run
+    must bind directly instead of drafting a duplicate candidate."""
+
+    def __init__(self, *, runner_image: str) -> None:
+        super().__init__(runner_image=runner_image)
+        self.beaker_contract_drafts = 0
+
+    def run_turn(self, **kwargs):
+        prompt = kwargs['prompt']
+        agent = kwargs['agent'].value
+        if agent == 'honeydew' and 'Draft a concrete program.md' in prompt:
+            result, message_id = super().run_turn(**kwargs)
+            assert result.evaluation_contract_proposal is not None
+            proposal = result.evaluation_contract_proposal
+            proposal.evaluator_type = 'generic-task-integrity-v1'
+            proposal.primary_metric = ProposedMetric(
+                name='rubric_score',
+                direction='maximize',
+                minimum_effect=0.01,
+            )
+            proposal.required_artifacts = [
+                'metrics.json',
+                'evaluation.json',
+                'report.md',
+            ]
+            return result, message_id
+        if agent == 'beaker' and 'Draft an immutable evaluation-contract' in prompt:
+            self.beaker_contract_drafts += 1
+        return super().run_turn(**kwargs)
+
+
+def test_installed_contract_proposal_binds_directly(orchestrator_bundle) -> None:
+    settings, store, cluster, _, original = orchestrator_bundle
+    runtime = InstalledContractRuntime(runner_image=RUNNER_IMAGE)
+    engine = ResearchOrchestrator(
+        settings=settings,
+        store=store,
+        runtime=runtime,
+        workspaces=original.workspaces,
+        contracts=original.contracts,
+        contract_candidates=original.contract_candidates,
+        policy=original.policy,
+        cluster=cluster,
+        discord=DisabledDiscordAdapter(),
+    )
+    engine.contract_candidates.install_repository_contract(
+        SERVICE_ROOT / 'evaluation-contracts' / 'generic-task-integrity-v1' / '1.0.0'
+    )
+    run = engine.create_run(
+        RunCreateRequest(objective='Bind directly to the installed contract.')
+    )
+    protocol = _pending_action(store, run.run_id, 'approve_protocol')
+    engine.approve_action(
+        protocol.action_id,
+        reviewer='test-human',
+        reason='Protocol accepted.',
+    )
+
+    final = store.get_run(run.run_id)
+    assert final.state not in {RunState.PAUSED, RunState.FAILED}
+    assert runtime.beaker_contract_drafts == 0
+    assert final.evaluation_contract_id == 'generic-task-integrity-v1'
+    assert any(
+        event.event_type == 'contract.bound_existing'
         for event in store.list_events(run.run_id)
     )
