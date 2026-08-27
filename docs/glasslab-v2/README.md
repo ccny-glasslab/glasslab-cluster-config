@@ -52,7 +52,6 @@ These remain current and useful after the cleanup pass:
 - `stateful-object-inventory-2026-04.md`
 - `workflow-registry.md`
 - `services.md`
-- `research-ingress.md`
 - `research-command-router.md`
 - `custom-chat-shell-plan.md`
 - `bounded-experiment-runner-priority.md`
