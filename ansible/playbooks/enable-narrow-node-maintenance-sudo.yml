@@ -12,24 +12,7 @@
         mode: '0755'
         owner: root
         group: root
-        content: |
-          #!/usr/bin/env bash
-          set -euo pipefail
-
-          usage() {
-            echo "Usage: glasslab-import-k8s-image <tar-path>" >&2
-          }
-
-          if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-            usage
-            exit 0
-          fi
-
-          [[ $# -eq 1 ]] || { usage; exit 1; }
-          archive="$1"
-          [[ -f "$archive" ]] || { echo "archive not found: $archive" >&2; exit 1; }
-
-          exec ctr -n k8s.io images import "$archive"
+        src: glasslab-import-k8s-image
 
     - name: Install wrapper for checking whether a containerd image exists
       ansible.builtin.copy:
@@ -61,61 +44,7 @@
         mode: '0755'
         owner: root
         group: root
-        content: |
-          #!/usr/bin/env bash
-          set -euo pipefail
-
-          usage() {
-            echo "Usage: glasslab-install-titanic-dataset <remote-stage-dir> <remote-dataset-dir>" >&2
-          }
-
-          if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-            usage
-            exit 0
-          fi
-
-          [[ $# -eq 2 ]] || { usage; exit 1; }
-          remote_stage="$1"
-          remote_dataset_dir="$2"
-
-          case "$remote_stage" in
-            /tmp/glasslab-titanic-sync-*) ;;
-            *)
-              echo "refusing unexpected staging path: $remote_stage" >&2
-              exit 1
-              ;;
-          esac
-
-          case "$remote_dataset_dir" in
-            /var/lib/glasslab-agent/datasets/titanic) ;;
-            *)
-              echo "refusing unexpected dataset path: $remote_dataset_dir" >&2
-              exit 1
-              ;;
-          esac
-
-          sync_ts="$(date +%Y%m%d-%H%M%S)"
-          backup_root="$(dirname "$remote_dataset_dir")"
-          backup_dir="$backup_root/_sync_backup_$sync_ts"
-
-          install -d -m 0755 "$remote_dataset_dir" "$backup_dir"
-
-          for file in train.csv test.csv gender_submission.csv sample_submission.csv; do
-            if [[ -f "$remote_dataset_dir/$file" ]]; then
-              cp -a "$remote_dataset_dir/$file" "$backup_dir/$file"
-            fi
-            if [[ -f "$remote_stage/$file" ]]; then
-              install -o root -g root -m 0644 "$remote_stage/$file" "$remote_dataset_dir/$file"
-            fi
-          done
-
-          printf 'official_source=kaggle\ncompetition=titanic\nsynced_at_utc=%s\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$remote_dataset_dir/.dataset-source"
-          chmod 0644 "$remote_dataset_dir/.dataset-source"
-          rm -rf "$remote_stage"
-
-          printf 'REMOTE_BACKUP_DIR=%s\n' "$backup_dir"
-          wc -l "$remote_dataset_dir/train.csv" "$remote_dataset_dir/test.csv"
+        src: glasslab-install-titanic-dataset
 
     - name: Install narrow sudoers policy for reviewed maintenance wrappers
       ansible.builtin.copy:
@@ -141,6 +70,48 @@
       ansible.builtin.command: sudo -n /usr/local/sbin/glasslab-install-titanic-dataset --help
       register: dataset_wrapper_check
       changed_when: false
+
+    - name: Prepare wrapper traversal probes
+      ansible.builtin.file:
+        path: /tmp/glasslab-titanic-sync-verify-real
+        state: directory
+      changed_when: false
+
+    - name: Create symlink escape probe
+      ansible.builtin.file:
+        src: /var
+        dest: /tmp/glasslab-titanic-sync-verify-escape
+        state: link
+      changed_when: false
+
+    - name: Verify dotdot traversal staging path is refused
+      ansible.builtin.command: sudo -n /usr/local/sbin/glasslab-install-titanic-dataset '/tmp/glasslab-titanic-sync-verify-real/../../var' /var/lib/glasslab-agent/datasets/titanic
+      register: dotdot_traversal
+      changed_when: false
+      ignore_errors: true
+
+    - name: Verify symlink escape staging path is refused
+      ansible.builtin.command: sudo -n /usr/local/sbin/glasslab-install-titanic-dataset '/tmp/glasslab-titanic-sync-verify-escape' /var/lib/glasslab-agent/datasets/titanic
+      register: symlink_traversal
+      changed_when: false
+      ignore_errors: true
+
+    - name: Remove wrapper traversal probes
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/glasslab-titanic-sync-verify-real
+        - /tmp/glasslab-titanic-sync-verify-escape
+      changed_when: false
+
+    - name: Assert traversal staging paths are refused
+      ansible.builtin.assert:
+        that:
+          - dotdot_traversal.rc != 0
+          - symlink_traversal.rc != 0
+          - "'refusing' in (dotdot_traversal.stderr | default(''))"
+          - "'refusing' in (symlink_traversal.stderr | default(''))"
 
     - name: Summarize narrow maintenance sudo state
       ansible.builtin.debug:

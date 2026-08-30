@@ -72,6 +72,7 @@ run_secret_boundary_tests() {
     tests.scripts.test_resolve_runner_image \
     tests.security.test_workflow_security_manifests \
     tests.security.test_task_fabric_manifests \
+    tests.security.test_node_maintenance_wrappers \
     -v
 }
 
