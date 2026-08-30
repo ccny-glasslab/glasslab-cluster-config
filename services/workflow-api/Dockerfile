@@ -22,5 +22,7 @@ ENV \
 COPY services/common /app/services/common
 COPY services/workflow-registry /app/services/workflow-registry
 COPY services/workflow-api/app /app/app
+RUN useradd --uid 10001 --no-create-home --shell /sbin/nologin glasslab
+USER 10001:10001
 EXPOSE 8080
 CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]

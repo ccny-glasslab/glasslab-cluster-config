@@ -12,11 +12,6 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KUBE_ROOT = REPOSITORY_ROOT / "kubeadm" / "glasslab-v2"
 
 CALLERS = {
-    "research-command-router": {
-        "deployment": KUBE_ROOT / "research-command-router" / "10-deployment.yaml",
-        "container": "research-command-router",
-        "secret": "glasslab-workflow-api-research-command-router",
-    },
     "schedule-worker": {
         "deployment": KUBE_ROOT / "schedule-worker" / "10-deployment.yaml",
         "container": "schedule-worker",
@@ -81,7 +76,6 @@ class WorkflowSecurityManifestTests(unittest.TestCase):
         )
         environment = env_by_name(container)
         token_env_names = {
-            "research-command-router": "GLASSLAB_WORKFLOW_API_RESEARCH_COMMAND_ROUTER_TOKEN",
             "schedule-worker": "GLASSLAB_WORKFLOW_API_SCHEDULE_WORKER_TOKEN",
             "research-orchestrator": "GLASSLAB_WORKFLOW_API_RESEARCH_ORCHESTRATOR_TOKEN",
         }
