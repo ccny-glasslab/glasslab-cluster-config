@@ -46,8 +46,9 @@ seen classes and report unseen-class generalization" is.
   verifies the file and digest. No download happens at compile time.
 
 - **Remote assets:** declare a canonical public HTTPS URL only when it is
-  fast and small. The compiler downloads it with size/address checks, a
-  bounded timeout (default 300s) and limited retries. **Do not rely on remote
+  fast and small. The compiler downloads it with public-HTTPS and
+  global-address checks on every hop, a 60-second timeout, a size cap, and
+  a sha256 verification. **Do not rely on remote
   downloads for large datasets** — the cifar100 canonical host serves at
   ~100 KB/s from the cluster, so a 160 MB archive takes ~24 minutes and
   exceeds any practical compile timeout. Large data must be uploaded first.
