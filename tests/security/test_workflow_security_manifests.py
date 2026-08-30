@@ -119,11 +119,11 @@ class WorkflowSecurityManifestTests(unittest.TestCase):
         bundle = rollout[rollout.index("rollout_authenticated_workflow_bundle()") :]
         for caller in CALLERS:
             self.assertIn(f"require_object secret {CALLERS[caller]['secret']}", rollout)
-        command_position = bundle.index("rollout_command_router")
+        # The retired command-router is not part of the authenticated bundle.
+        self.assertNotIn("rollout_command_router", bundle)
         schedule_position = bundle.index("rollout_schedule_worker")
         orchestrator_position = bundle.index("rollout_research_orchestrator")
         server_position = bundle.index("rollout_workflow_api")
-        self.assertLess(command_position, server_position)
         self.assertLess(schedule_position, server_position)
         self.assertLess(orchestrator_position, server_position)
 
