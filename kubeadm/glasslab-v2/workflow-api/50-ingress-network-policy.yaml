@@ -16,12 +16,6 @@ spec:
               kubernetes.io/metadata.name: glasslab-v2
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: glasslab-research-command-router
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: glasslab-v2
-          podSelector:
-            matchLabels:
               app.kubernetes.io/name: glasslab-schedule-worker
         - namespaceSelector:
             matchLabels:
