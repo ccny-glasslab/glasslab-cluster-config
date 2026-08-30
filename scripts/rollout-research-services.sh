@@ -93,7 +93,6 @@ rollout_schedule_worker() {
 }
 
 require_workflow_caller_secrets() {
-  require_object secret glasslab-workflow-api-research-command-router
   require_object secret glasslab-workflow-api-schedule-worker
   require_object secret glasslab-workflow-api-research-orchestrator
 }
