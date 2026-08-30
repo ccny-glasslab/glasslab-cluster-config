@@ -64,6 +64,7 @@ from .task_bundles import (
 )
 from .workspaces import WorkspaceManager
 from .knowledge_manager import KnowledgeManager
+from .method_advisor import MethodAdvisor
 
 
 class WorkflowError(RuntimeError):
@@ -140,6 +141,33 @@ class ResearchOrchestrator:
             max_results=settings.knowledge_max_results,
             token_budget=settings.knowledge_token_budget,
         )
+        self.method_advisor: MethodAdvisor | None = None
+        if settings.knowledge_advisory_enabled:
+            try:
+                from .knowledge_dense import (
+                    NumpyChunkIndex,
+                    PgVectorChunkIndex,
+                    create_embedding_provider,
+                )
+
+                provider = create_embedding_provider(
+                    settings.knowledge_embedding_model,
+                    revision=settings.knowledge_embedding_revision,
+                )
+                if settings.knowledge_dense_pg_dsn:
+                    dense_index: Any = PgVectorChunkIndex(
+                        settings.knowledge_dense_pg_dsn, provider
+                    )
+                else:
+                    dense_index = NumpyChunkIndex(store, provider)
+                self.knowledge.dense_index = dense_index
+                self.knowledge.default_retrieval_mode = (
+                    settings.knowledge_dense_mode
+                )
+                self.method_advisor = MethodAdvisor(self.knowledge)
+            except Exception:
+                # Dense retrieval/advisory is additive; startup never depends on it.
+                self.method_advisor = None
         self.policy = policy
         self.cluster = cluster
         self.discord = discord
@@ -905,6 +933,43 @@ class ResearchOrchestrator:
                         ),
                     },
                 )
+            advisor_agent = str(getattr(agent, 'value', agent))
+            advisor_kind = str(getattr(expected_kind, 'value', expected_kind))
+            if (
+                advisor_agent == 'honeydew'
+                and advisor_kind in ('protocol_draft', 'methodology_review')
+                and self.method_advisor is not None
+            ):
+                try:
+                    advisory_block, advisory_payload = (
+                        self.method_advisor.build_and_render(
+                            run_id=run_id,
+                            objective=run.objective,
+                            turn_number=run.turn_number + 1,
+                            turn_kind=expected_kind.value,
+                            problem_md_head=' '.join(prompt.split())[:300],
+                            retrieval_mode=self.settings.knowledge_dense_mode,
+                        )
+                    )
+                    if advisory_block:
+                        prompt = prompt + '\n\n' + advisory_block
+                        payload = advisory_payload or {}
+                        self._event(
+                            run_id,
+                            source='orchestrator',
+                            event_type='agent.method_advisory_attached',
+                            payload={
+                                'turn_id': turn.turn_id,
+                                'packet_id': payload.get('packet_id'),
+                                'advisory_digest': payload.get('advisory_digest'),
+                                'kind': payload.get('kind'),
+                                'n_candidates': len(payload.get('candidates', [])),
+                            },
+                        )
+                except Exception:
+                    # Advisory evidence is additive; a failure must never
+                    # block or strand the research run.
+                    pass
             if recovery_context:
                 prompt = recovery_context + prompt
             # Append the phase-specific discriminator after all retrieved and
@@ -2228,6 +2293,68 @@ class ResearchOrchestrator:
         proposal = self._latest_contract_proposal(run_id)
         if proposal is None:
             raise WorkflowError('run has no evaluation contract proposal')
+        run = self.store.get_run(run_id)
+        # When the approved proposal references an already-installed contract,
+        # bind to it directly: a duplicate candidate cannot be promoted (the
+        # promoted id/version is immutable) and the installed contract is
+        # already trusted. The compatibility check gates this so a proposal
+        # that the installed contract cannot implement still falls through to
+        # the task-specific candidate flow.
+        installed = None
+        try:
+            installed = self.contracts.resolve(
+                proposal.get('evaluator_type'),
+                run.evaluation_contract_version,
+            )
+        except ValueError:
+            installed = None
+        if installed is not None:
+            original = run
+            self.store.replace_run(
+                run.model_copy(
+                    update={
+                        'evaluation_contract_id': (
+                            installed.descriptor.contract_id
+                        ),
+                        'evaluation_contract_version': (
+                            installed.descriptor.version
+                        ),
+                        'evaluation_contract_digest': installed.digest,
+                    }
+                ),
+                expected_version=run.version,
+            )
+            if self._contract_binding_compatible(run_id):
+                self._event(
+                    run_id,
+                    source='orchestrator',
+                    event_type='contract.bound_existing',
+                    payload={
+                        'contract_id': installed.descriptor.contract_id,
+                        'version': installed.descriptor.version,
+                        'digest': installed.digest,
+                    },
+                )
+                self._transition(run_id, RunState.BEAKER_PLANNING)
+                self._beaker_plan(run_id)
+                return
+            current = self.store.get_run(run_id)
+            self.store.replace_run(
+                current.model_copy(
+                    update={
+                        'evaluation_contract_id': (
+                            original.evaluation_contract_id
+                        ),
+                        'evaluation_contract_version': (
+                            original.evaluation_contract_version
+                        ),
+                        'evaluation_contract_digest': (
+                            original.evaluation_contract_digest
+                        ),
+                    }
+                ),
+                expected_version=current.version,
+            )
         prompt = (
             'Draft an immutable evaluation-contract candidate for the approved '
             'program.md. Create a self-contained directory under '
@@ -2303,10 +2430,34 @@ class ResearchOrchestrator:
                 for action in actions
                 if action.type == 'propose_evaluation_contract'
             ]
-            raise WorkflowError(
+            feedback_message = (
                 'Beaker must propose exactly one valid contract candidate'
-                + (f': {"; ".join(denied)}' if denied else '')
+                + (
+                    f': {"; ".join(denied)}'
+                    if denied
+                    else '; the previous response contained no '
+                    'propose_evaluation_contract action'
+                )
             )
+            # Same deterministic-retry pattern as the seal-rejection path: the
+            # agent re-drafts with the concrete failure as feedback. The chain
+            # is bounded by the per-run turn budget (TIMED_OUT when exhausted),
+            # so a stuck agent cannot loop forever.
+            self._event(
+                run_id,
+                source='orchestrator',
+                event_type='contract.candidate_rejected',
+                payload={
+                    'action_id': None,
+                    'reason': feedback_message,
+                    'retrying': True,
+                },
+            )
+            self._beaker_draft_contract(
+                run_id,
+                feedback=feedback_message,
+            )
+            return
         action = candidates[0]
         request = ContractCandidateRequest.model_validate(action.arguments)
         workspace = Path(self.store.get_run(run_id).beaker_workspace).resolve()

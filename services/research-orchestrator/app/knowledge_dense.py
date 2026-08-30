@@ -1,0 +1,438 @@
+"""Production dense retrieval over the canonical knowledge chunk namespace.
+
+Vectors attach to existing ``knowledge_chunks`` rows — this module creates no
+secondary chunk namespace. Surfaces:
+
+- :class:`NumpyChunkIndex`: brute-force cosine over stored vector bytes;
+  works on every store backend.
+- :class:`PgVectorChunkIndex`: HNSW-backed search over the guarded halfvec
+  column; requires a PostgreSQL DSN where the pgvector extension is available.
+- :func:`build_dense_index`: idempotent batch embedding of every existing
+  chunk for one embedding-model lineage.
+
+Dimension/model mismatches degrade readiness and are reported rather than
+silently mixed: rows whose ``dims`` disagree with the active provider are
+ignored and surfaced through ``readiness()``.
+"""
+
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+
+from .corpus_rag.contracts import ChunkVectorMeta
+from .corpus_rag.embeddings import decode_vector, encode_vector
+
+DENSE_INDEX_VERSION = 'dense-v1'
+
+_HALFVEC_COLUMN_DIMS = 768
+
+
+def _halfvec_literal(values: Any) -> str:
+    """Format a vector as a halfvec literal, zero-padded to the column dims.
+
+    The physical column is ``halfvec(768)`` and enforces exactly 768
+    dimensions. Zero-padding shorter vectors is cosine-invariant, so small
+    test/embedding lineages share the same column safely; the canonical
+    ``dims``/bytes columns keep the true width.
+    """
+    arr = np.asarray(values, dtype=np.float32).ravel()
+    if arr.shape[0] > _HALFVEC_COLUMN_DIMS:
+        raise DenseModelError(
+            f'vector has {arr.shape[0]} dims, exceeds halfvec column'
+            f' ({_HALFVEC_COLUMN_DIMS})'
+        )
+    padded = np.zeros(_HALFVEC_COLUMN_DIMS, dtype=np.float32)
+    padded[:arr.shape[0]] = arr
+    return '[' + ','.join(f'{x:.7g}' for x in padded) + ']'
+
+
+class DenseModelError(Exception):
+    """An operation would mix incompatible embedding lineages."""
+
+
+def create_embedding_provider(model_name: str, revision: str = '') -> Any:
+    """Resolve an embedding provider from a configured model name."""
+    if model_name == 'offline-deterministic':
+        from .corpus_rag.embeddings import OfflineDeterministicEmbedding
+
+        return OfflineDeterministicEmbedding(dims=768)
+    from .corpus_rag.embeddings import ArcticEmbedProvider
+
+    return ArcticEmbedProvider(model_name=model_name, revision=revision)
+
+
+@dataclass(frozen=True)
+class DenseReadiness:
+    available: bool
+    reason: str
+    backend: str
+    model_id: str
+    revision: str
+    dims: int
+    indexed_count: int
+
+
+def _unit_row(vec: Any, *, dims: int | None = None) -> np.ndarray:
+    arr = np.ascontiguousarray(vec, dtype=np.float32)
+    if arr.ndim != 1:
+        raise DenseModelError(f'vector must be 1-D, got shape {arr.shape}')
+    if dims is not None and arr.shape[0] != dims:
+        raise DenseModelError(
+            f'vector has {arr.shape[0]} dims, expected {dims}'
+        )
+    norm = float(np.linalg.norm(arr))
+    return arr / norm if norm > 0 else arr.copy()
+
+
+def _provider_revision(provider: Any) -> str:
+    return getattr(provider, 'revision', '') or ''
+
+
+def _provider_dims(provider: Any) -> int:
+    return int(getattr(provider, 'dims'))
+
+
+class NumpyChunkIndex:
+    """Brute-force cosine over stored vector bytes (fine to ~100k chunks)."""
+
+    def __init__(
+        self,
+        store: Any,
+        provider: Any,
+        model_id: str | None = None,
+    ) -> None:
+        self._store = store
+        self._provider = provider
+        self.model_id = model_id or provider.model_id
+        self._rows: dict[str, np.ndarray] = {}
+        self._mismatched = 0
+        self._cache: tuple[list[str], np.ndarray] | None = None
+        self.reload()
+
+    def reload(self) -> None:
+        self._rows = {}
+        self._mismatched = 0
+        self._revision_mismatched = 0
+        self._cache = None
+        expected = self._provider_dims()
+        declared_revision = _provider_revision(self._provider)
+        for meta, blob in self._store.list_knowledge_chunk_vectors(self.model_id):
+            vec = decode_vector(blob)
+            if meta.dims != expected or vec.shape[0] != expected:
+                self._mismatched += 1
+                continue
+            # A declared revision must match the stored lineage exactly;
+            # an empty declaration cannot be verified and is not filtered.
+            if declared_revision and meta.revision != declared_revision:
+                self._revision_mismatched += 1
+                continue
+            self._rows[meta.chunk_id] = _unit_row(vec)
+
+    def _provider_dims(self) -> int:
+        return _provider_dims(self._provider)
+
+    def embed_query(self, text: str) -> np.ndarray:
+        return self._provider.embed_queries([text])[0]
+
+    def readiness(self) -> DenseReadiness:
+        if not _lineage_resolved(self._provider):
+            return DenseReadiness(
+                available=False,
+                reason='embedding revision unresolved (provider not yet loaded)',
+                backend='numpy',
+                model_id=self.model_id,
+                revision=_provider_revision(self._provider),
+                dims=self._provider_dims(),
+                indexed_count=0,
+            )
+        notes: list[str] = []
+        available = bool(self._rows)
+        if self._mismatched:
+            notes.append(
+                f'{self._mismatched} row(s) ignored for dimension mismatch'
+            )
+        if self._revision_mismatched:
+            notes.append(
+                f'{self._revision_mismatched} row(s) ignored for '
+                'embedding-revision mismatch'
+            )
+        reason = ''
+        if not available:
+            reason = f'no usable vectors for model {self.model_id!r}'
+            reason += ''.join(f'; {note}' for note in notes)
+        else:
+            reason = '; '.join(notes)
+        return DenseReadiness(
+            available=available,
+            reason=reason,
+            backend='numpy',
+            model_id=self.model_id,
+            revision=_provider_revision(self._provider),
+            dims=self._provider_dims(),
+            indexed_count=len(self._rows),
+        )
+
+    def search(
+        self,
+        query_vec: np.ndarray,
+        *,
+        source_ids: list[str] | None = None,
+        k: int = 10,
+    ) -> list[tuple[str, float]]:
+        if k <= 0 or not self._rows or not _lineage_resolved(self._provider):
+            return []
+        cached = self._cache
+        if cached is None:
+            ids = list(self._rows)
+            cached = (ids, np.stack([self._rows[cid] for cid in ids]))
+            self._cache = cached
+        ids, matrix = cached
+
+        q_unit = _unit_row(query_vec, dims=self._provider_dims())
+        scores = matrix @ q_unit
+        ranked = sorted(
+            zip(ids, scores.tolist()), key=lambda item: (-item[1], item[0])
+        )
+
+        # Source scoping needs chunk->source resolution, which lives in the
+        # store rather than vector metadata; hydrate lazily in batches until
+        # k in-scope hits are confirmed (never returning out-of-scope rows).
+        out: list[tuple[str, float]] = []
+        allowed_sources = set(source_ids) if source_ids is not None else None
+        pending = [cid for cid, _ in ranked]
+        step = max(k * 3, 24)
+        ranked_by_id = dict(ranked)
+        for start in range(0, len(pending), step):
+            batch = pending[start:start + step]
+            rows = {
+                row['chunk_id']: row
+                for row in self._store.get_knowledge_chunks(batch)
+            }
+            for cid in batch:
+                row = rows.get(cid)
+                if row is None:
+                    continue
+                if allowed_sources is not None and row['source_id'] not in allowed_sources:
+                    continue
+                out.append((cid, ranked_by_id[cid]))
+                if len(out) >= k:
+                    return out
+        return out
+
+    def hydrate(self, chunk_ids: list[str]) -> list[dict[str, Any]]:
+        return self._store.get_knowledge_chunks(chunk_ids)
+
+
+class PgVectorChunkIndex:
+    """HNSW-backed dense search over the guarded halfvec column."""
+
+    def __init__(
+        self,
+        store_or_dsn: Any,
+        provider: Any,
+        model_id: str | None = None,
+    ) -> None:
+        if hasattr(store_or_dsn, 'list_knowledge_chunk_vectors'):
+            self._store = store_or_dsn
+        else:
+            from .postgres_store import PostgresStore
+
+            self._store = PostgresStore(str(store_or_dsn))
+        self._provider = provider
+        self.model_id = model_id or provider.model_id
+
+    def embed_query(self, text: str) -> np.ndarray:
+        return self._provider.embed_queries([text])[0]
+
+    def readiness(self) -> DenseReadiness:
+        if not _lineage_resolved(self._provider):
+            return DenseReadiness(
+                available=False,
+                reason='embedding revision unresolved (provider not yet loaded)',
+                backend='pgvector',
+                model_id=self.model_id,
+                revision=_provider_revision(self._provider),
+                dims=self._provider_dims(),
+                indexed_count=0,
+            )
+        rows = self._store.list_knowledge_chunk_vectors(self.model_id)
+        expected = self._provider_dims()
+        declared_revision = _provider_revision(self._provider)
+        usable = [
+            (meta, blob) for meta, blob in rows
+            if meta.dims == expected
+            and decode_vector(blob).shape[0] == expected
+            and (not declared_revision or meta.revision == declared_revision)
+        ]
+        mismatched = len(rows) - len(usable)
+        reason = ''
+        available = bool(usable)
+        if not available:
+            reason = f'no usable pgvector rows for model {self.model_id!r}'
+        elif mismatched:
+            reason = (
+                f'{mismatched} row(s) ignored for dimension/revision mismatch'
+            )
+        return DenseReadiness(
+            available=available,
+            reason=reason,
+            backend='pgvector',
+            model_id=self.model_id,
+            revision=_provider_revision(self._provider),
+            dims=expected,
+            indexed_count=len(usable),
+        )
+
+    def search(
+        self,
+        query_vec: np.ndarray,
+        *,
+        source_ids: list[str] | None = None,
+        k: int = 10,
+    ) -> list[tuple[str, float]]:
+        if k <= 0 or not _lineage_resolved(self._provider):
+            return []
+        literal = _halfvec_literal(query_vec)
+        declared_revision = _provider_revision(self._provider)
+        sql = (
+            'SELECT v.chunk_id, 1 - (v.embedding <=> %s::halfvec) AS score'
+            ' FROM orchestrator_knowledge_chunk_vectors v'
+            ' WHERE v.model_id = %s AND v.embedding IS NOT NULL'
+        )
+        params: list[Any] = [literal, self.model_id]
+        if declared_revision:
+            sql += ' AND v.revision = %s'
+            params.append(declared_revision)
+        if source_ids:
+            ids = list(source_ids)
+            sql += ' AND v.chunk_id IN (SELECT chunk_id FROM orchestrator_knowledge_chunks WHERE source_id = ANY(%s))'
+            params.append(ids)
+        sql += ' ORDER BY v.embedding <=> %s::halfvec LIMIT %s'
+        params.extend([literal, k])
+        with self._store._connect() as conn:
+            with conn.transaction():
+                conn.execute('SET LOCAL hnsw.ef_search = 100')
+                rows = conn.execute(sql, params).fetchall()
+        return [(row['chunk_id'], float(row['score'])) for row in rows]
+
+    def hydrate(self, chunk_ids: list[str]) -> list[dict[str, Any]]:
+        return self._store.get_knowledge_chunks(chunk_ids)
+
+    def _provider_dims(self) -> int:
+        return _provider_dims(self._provider)
+
+
+def build_dense_index(
+    store: Any,
+    provider: Any,
+    *,
+    model_id: str | None = None,
+    batch_size: int = 32,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Embed every existing knowledge chunk for one model lineage.
+
+    Idempotent: chunks that already carry a vector for ``model_id`` are
+    skipped unless ``force`` re-embeds them. Only chunks that already passed
+    KnowledgeManager ingestion (secret/path checks included) can ever reach
+    this function, because it enumerates ``knowledge_chunks``.
+    """
+    mid = model_id or provider.model_id
+    declared_revision = _provider_revision(provider)
+    expected_dims = _provider_dims(provider)
+    # Only vectors whose FULL lineage matches the active provider count as
+    # already built: a changed pin or dimension must re-embed, never serve
+    # stale-lineage rows through the skip path.
+    existing = {
+        meta.chunk_id
+        for meta, _ in store.list_knowledge_chunk_vectors(mid)
+        if meta.dims == expected_dims
+        and (not declared_revision or meta.revision == declared_revision)
+    }
+    chunks = store.list_all_knowledge_chunks()
+    todo = [
+        chunk for chunk in chunks
+        if force or chunk['chunk_id'] not in existing
+    ]
+
+    indexed = 0
+    skipped = 0
+    for start in range(0, len(todo), batch_size):
+        batch = todo[start:start + batch_size]
+        vectors = provider.embed_passages([row['text'] for row in batch])
+        for row, vec in zip(batch, vectors):
+            meta = ChunkVectorMeta(
+                chunk_id=row['chunk_id'],
+                model_id=mid,
+                revision=_provider_revision(provider),
+                dims=_provider_dims(provider),
+                index_version=DENSE_INDEX_VERSION,
+            )
+            try:
+                store.upsert_knowledge_chunk_vectors(meta, encode_vector(vec))
+            except Exception as exc:  # noqa: BLE001 - per-row isolation below
+                if type(exc).__name__ != 'IntegrityError':
+                    raise
+                skipped += 1
+                print(
+                    f'[build_dense_index] skipping unresolvable chunk {meta.chunk_id}',
+                    file=sys.stderr,
+                )
+                continue
+            indexed += 1
+
+    return {
+        'model_id': mid,
+        'revision': _provider_revision(provider),
+        'dims': _provider_dims(provider),
+        'n_vectors': indexed,
+        'skipped': skipped,
+        'index_version': DENSE_INDEX_VERSION,
+    }
+
+
+def _lineage_resolved(provider: Any) -> bool:
+    resolver = getattr(provider, 'lineage_resolved', None)
+    return resolver() if callable(resolver) else True
+
+
+def ensure_index_built(
+    index: NumpyChunkIndex | PgVectorChunkIndex,
+    store: Any,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Incrementally embed every chunk missing current-lineage vectors.
+
+    ``build_dense_index`` self-skips chunks that already carry a matching
+    vector, so running it on every advisory turn is cheap and keeps newly
+    ingested or re-chunked sources covered without operator action. Two
+    passes cover lazy providers: embedding may resolve the lineage
+    (revision) mid-pass, and the second pass then re-embeds anything stored
+    under an older lineage once the active one is known.
+    """
+    first = build_dense_index(
+        store,
+        index._provider,
+        model_id=getattr(index, 'model_id', None),
+        force=force,
+    )
+    summary = build_dense_index(
+        store,
+        index._provider,
+        model_id=getattr(index, 'model_id', None),
+    )
+    if not force:
+        # The second pass only performs work when the first pass resolved
+        # the lineage mid-flight (lazy load); report combined effort so
+        # callers never see pre-resolution embeddings vanish.
+        summary['n_vectors'] = first['n_vectors'] + summary['n_vectors']
+    if hasattr(index, 'reload'):
+        # Refresh in-memory rows so a just-built index is immediately
+        # queryable without reconstructing the index object.
+        index.reload()
+    return summary

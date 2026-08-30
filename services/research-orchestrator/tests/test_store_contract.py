@@ -428,3 +428,74 @@ def test_restart_recovery_marks_running_turns_failed(store) -> None:
     assert store.mark_running_turns_interrupted(run.run_id) == 1
     assert store.list_turns(run.run_id)[0].status == 'failed'
     assert store.mark_running_turns_interrupted(run.run_id) == 0
+
+
+@pytest.fixture()
+def postgres_store_any() -> PostgresStore:
+    dsn = os.getenv('GLASSLAB_TEST_POSTGRES_DSN')
+    if not dsn:
+        pytest.skip('GLASSLAB_TEST_POSTGRES_DSN is not configured')
+    return PostgresStore(dsn)
+
+
+def test_pgvector_absence_degrades_without_aborting_store(
+    postgres_store_any: PostgresStore,
+) -> None:
+    """pgvector availability changes the dense surface, never the contract.
+
+    On a server without the vector extension (the standard store-contract
+    container), initialization must still leave every ordinary operation
+    working; the halfvec column exists exactly when the availability probe
+    says it should; and storing canonical vector bytes must succeed with the
+    HNSW projection skipped instead of raising or leaving an aborted
+    transaction behind. The same assertions hold trivially on a
+    pgvector-enabled server (the dense CI lane), where the probe is True and
+    the column exists.
+    """
+    import struct
+
+    from app.corpus_rag import ChunkVectorMeta
+
+    store = postgres_store_any
+    available = store._pgvector_extension_available()
+    with store._connect() as conn:
+        columns = {
+            row['column_name']
+            for row in conn.execute(
+                'SELECT column_name FROM information_schema.columns'
+                " WHERE table_name = 'orchestrator_knowledge_chunk_vectors'"
+            ).fetchall()
+        }
+    assert ('embedding' in columns) == available
+
+    source = KnowledgeSource(
+        source_type=SourceType.DOCUMENTATION,
+        canonical_uri='repo://docs/vector-degrade.md',
+        digest=uuid4().hex + uuid4().hex,
+    )
+    store.save_knowledge_source(source)
+    chunk = KnowledgeChunk(
+        source_id=source.source_id,
+        chunk_index=0,
+        text='vector degradation probe',
+        digest='6' * 64,
+        token_count=3,
+    )
+    store.replace_knowledge_chunks(source.source_id, [chunk])
+
+    meta = ChunkVectorMeta(
+        chunk_id=chunk.chunk_id,
+        model_id=f'probe-{uuid4().hex}',
+        revision='r1',
+        dims=4,
+        index_version='dense-v1',
+    )
+    vector = struct.pack('<4f', 1.0, 0.0, 0.0, 0.0)
+    store.upsert_knowledge_chunk_vectors(meta, vector)
+    listed = store.list_knowledge_chunk_vectors(meta.model_id)
+    assert [m.chunk_id for m, _ in listed] == [chunk.chunk_id]
+    assert bytes(listed[0][1]) == vector
+
+    # No aborted transaction may survive the degraded halfvec projection.
+    run = store.create_run(_run(), one_active_run=False)
+    assert store.get_run(run.run_id).state is RunState.CREATED

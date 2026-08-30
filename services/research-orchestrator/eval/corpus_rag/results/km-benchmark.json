@@ -1,0 +1,34 @@
+{
+  "modes": {
+    "lexical": {
+      "recall@10": 0.875,
+      "mrr@10": 0.75,
+      "ndcg@10": 0.8273,
+      "precision@10": 0.1875,
+      "distinct_sources@10": 6.625,
+      "latency_ms_per_question": 79.4
+    },
+    "dense": {
+      "recall@10": 0.875,
+      "mrr@10": 0.75,
+      "ndcg@10": 0.8273,
+      "precision@10": 0.1875,
+      "distinct_sources@10": 6.625,
+      "latency_ms_per_question": 79.4
+    },
+    "hybrid": {
+      "recall@10": 0.875,
+      "mrr@10": 0.75,
+      "ndcg@10": 0.8273,
+      "precision@10": 0.1875,
+      "distinct_sources@10": 6.625,
+      "latency_ms_per_question": 79.4
+    }
+  },
+  "environment": {
+    "k": 10,
+    "n_questions": 8,
+    "surface": "KnowledgeManager.retrieve",
+    "store": "/home/gr66ss/rag-data/km-corpus.db"
+  }
+}

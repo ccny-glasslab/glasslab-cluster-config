@@ -119,12 +119,23 @@
     recurse: true
   loop: "{{ glasslab_exo_shared_paths }}"
 
-- name: Preserve group inheritance on shared workspace directories
-  ansible.builtin.shell: >-
-    find {{ item | quote }} -type d ! -perm -2000 -exec chmod g+s {} +
-  register: glasslab_exo_setgid
-  changed_when: glasslab_exo_setgid.stdout | length > 0
+- name: Find shared workspace directories missing setgid
+  ansible.builtin.command: >-
+    find {{ item | quote }} -type d ! -perm -2000
+  register: glasslab_exo_setgid_needed
+  changed_when: false
   loop: "{{ glasslab_exo_shared_paths }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Set setgid on shared workspace directories that need it
+  ansible.builtin.command: >-
+    find {{ item.item | quote }} -type d ! -perm -2000 -exec chmod g+s {} +
+  changed_when: true
+  when: item.stdout_lines | length > 0
+  loop: "{{ glasslab_exo_setgid_needed.results }}"
+  loop_control:
+    label: "{{ item.item }}"
 
 - name: Verify active macOS accounts have SSH authorization
   ansible.builtin.command: "test -s /Users/{{ item.username }}/.ssh/authorized_keys"

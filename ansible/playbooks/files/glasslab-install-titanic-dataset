@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: glasslab-install-titanic-dataset <remote-stage-dir> <remote-dataset-dir>" >&2
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+[[ $# -eq 2 ]] || { usage; exit 1; }
+remote_stage="$1"
+remote_dataset_dir="$2"
+
+# Issue #262: canonicalize BOTH arguments before any destructive or read
+# operation. realpath resolves symlinks and ".." components, so a
+# traversal-shaped argument (prefix-match-only checks are bypassable with
+# ".." or a symlink) can never silently point outside the allowed tree. An
+# unresolvable staging path (e.g. after an interrupted sync) is refused
+# rather than guessed at.
+staging_prefix=/tmp/glasslab-titanic-sync-
+resolved_stage="$(realpath -e "$remote_stage")" || {
+  echo "refusing unresolvable staging path: $remote_stage" >&2
+  exit 1
+}
+case "$resolved_stage" in
+  "$staging_prefix"*)
+    if [[ "$resolved_stage" == "$staging_prefix" || "$resolved_stage" == "$staging_prefix/" ]]; then
+      echo "refusing staging path at the sync root itself: $resolved_stage" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "refusing unexpected staging path: $remote_stage (resolves to $resolved_stage)" >&2
+    exit 1
+    ;;
+esac
+
+expected_dataset_dir=/var/lib/glasslab-agent/datasets/titanic
+resolved_dataset_dir="$(realpath -m "${remote_dataset_dir%/}")"
+if [[ "$resolved_dataset_dir" != "$expected_dataset_dir" ]]; then
+  echo "refusing unexpected dataset path: $remote_dataset_dir (resolves to $resolved_dataset_dir)" >&2
+  exit 1
+fi
+
+remote_stage="$resolved_stage"
+remote_dataset_dir="$resolved_dataset_dir"
+
+sync_ts="$(date +%Y%m%d-%H%M%S)"
+backup_root="$(dirname "$remote_dataset_dir")"
+backup_dir="$backup_root/_sync_backup_$sync_ts"
+
+install -d -m 0755 "$remote_dataset_dir" "$backup_dir"
+
+for file in train.csv test.csv gender_submission.csv sample_submission.csv; do
+  if [[ -f "$remote_dataset_dir/$file" ]]; then
+    cp -a "$remote_dataset_dir/$file" "$backup_dir/$file"
+  fi
+  if [[ -f "$remote_stage/$file" ]]; then
+    install -o root -g root -m 0644 "$remote_stage/$file" "$remote_dataset_dir/$file"
+  fi
+done
+
+printf 'official_source=kaggle\ncompetition=titanic\nsynced_at_utc=%s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$remote_dataset_dir/.dataset-source"
+chmod 0644 "$remote_dataset_dir/.dataset-source"
+rm -rf "$remote_stage"
+
+printf 'REMOTE_BACKUP_DIR=%s\n' "$backup_dir"
+wc -l "$remote_dataset_dir/train.csv" "$remote_dataset_dir/test.csv"

@@ -165,3 +165,130 @@ def test_context_packet_api_lists_and_inspects(tmp_path: Path) -> None:
         assert detail.json()['run_id'] == run_id
         assert detail.json()['packet_id'] == packet_id
         assert 'index_version' in detail.json()
+
+
+def _make_born_digital_pdf() -> bytes:
+    import pymupdf
+
+    doc = pymupdf.Document()
+    body_lines = [
+        'Section one: consensus clustering stabilizes bootstrap replicates',
+        'across many initializations of the k-means procedure.',
+        'Adjusted rand index tracks agreement between replicate partitions.',
+        'Second section: fixed-k baselines anchor the stability comparison',
+        'and silhouette diagnostics summarize separation quality.',
+    ]
+    for index, line in enumerate(body_lines):
+        page = doc.new_page()
+        page.insert_text((72, 200 + 20 * index), line)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+def test_upload_endpoint_accepts_text_and_pdf(tmp_path: Path) -> None:
+    approved, settings, engine = _bundle(tmp_path)
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        text_response = client.post(
+            '/knowledge/sources/upload',
+            files={
+                'file': (
+                    'notes.txt',
+                    b'Uploaded note: prefer consensus clustering for stability.',
+                )
+            },
+            data={'source_type': 'documentation'},
+        )
+        assert text_response.status_code == 201, text_response.text
+        source = text_response.json()
+        assert source['canonical_uri'] == 'upload://notes.txt'
+        assert source['access_policy'] == 'run-approved'
+
+        pdf_response = client.post(
+            '/knowledge/sources/upload',
+            files={
+                'file': ('methods.pdf', _make_born_digital_pdf()),
+            },
+            data={'source_type': 'paper', 'title': 'Methods PDF'},
+        )
+        assert pdf_response.status_code == 201, pdf_response.text
+        assert pdf_response.json()['title'] == 'Methods PDF'
+
+        hits = engine.knowledge.store.search_knowledge_chunks(
+            'consensus clustering', limit=3
+        )
+        assert hits, 'extracted PDF text must be retrievable'
+
+        # Re-uploading identical content deduplicates to the same source.
+        repeat = client.post(
+            '/knowledge/sources/upload',
+            files={
+                'file': (
+                    'notes.txt',
+                    b'Uploaded note: prefer consensus clustering for stability.',
+                )
+            },
+            data={'source_type': 'documentation'},
+        )
+        assert repeat.status_code == 201
+        assert repeat.json()['source_id'] == source['source_id']
+
+
+def test_upload_endpoint_rejects_oversize_secret_and_binary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    approved, settings, engine = _bundle(tmp_path)
+    settings.knowledge_max_source_bytes = 512
+    engine.knowledge.max_source_bytes = 512
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        oversize = client.post(
+            '/knowledge/sources/upload',
+            files={'file': ('big.txt', b'x' * 513)},
+            data={'source_type': 'documentation'},
+        )
+        assert oversize.status_code == 413
+
+        secret = client.post(
+            '/knowledge/sources/upload',
+            files={
+                'file': (
+                    'config-notes.txt',
+                    b'deployment notes\npassword=hunter2-example\n',
+                )
+            },
+            data={'source_type': 'documentation'},
+        )
+        assert secret.status_code == 409
+        assert 'secret' in secret.text
+
+        binary = client.post(
+            '/knowledge/sources/upload',
+            files={'file': ('blob.bin', b'\x00\x01\x02\xff\xfe\xfd')},
+            data={'source_type': 'documentation'},
+        )
+        assert binary.status_code == 409
+        assert 'not a PDF and not UTF-8' in binary.text
+
+
+def test_upload_endpoint_requires_operator_token(tmp_path: Path) -> None:
+    approved, settings, engine = _bundle(tmp_path)
+    settings.require_operator_auth = True
+    settings.operator_api_token = 'expected-token'
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        denied = client.post(
+            '/knowledge/sources/upload',
+            files={'file': ('notes.txt', b'hello')},
+            data={'source_type': 'documentation'},
+        )
+        assert denied.status_code in (401, 403)
+
+        allowed = client.post(
+            '/knowledge/sources/upload',
+            files={'file': ('notes.txt', b'hello from operator')},
+            data={'source_type': 'documentation'},
+            headers={'X-Glasslab-Operator-Token': 'expected-token'},
+        )
+        assert allowed.status_code == 201

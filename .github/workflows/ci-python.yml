@@ -60,6 +60,11 @@ jobs:
             requirements: services/workflow-api/requirements.txt
             pythonpath: ../..:.
             tests: tests/test_api.py tests/test_persistence.py tests/test_run_artifacts.py tests/test_schedule_execution.py tests/test_validation.py
+          - name: research-command-router
+            workdir: services/research-command-router
+            requirements: services/research-command-router/requirements.txt
+            pythonpath: .
+            tests: tests/test_api.py
           - name: research-workspace-runner
             workdir: services/research-workspace-runner
             requirements: services/research-workspace-runner/requirements.txt
@@ -182,6 +187,93 @@ jobs:
         working-directory: services/research-orchestrator
         run: mypy --config-file mypy-research-store.ini
 
+  research-orchestrator-clean-install:
+    name: research-orchestrator clean install (image parity)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install and start from the documented production requirements only
+        run: services/research-orchestrator/scripts/check-clean-install.sh
+
+  research-orchestrator-dense-pgvector:
+    name: research-orchestrator dense retrieval (pgvector present)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: glasslab
+          POSTGRES_PASSWORD: glasslab
+          POSTGRES_DB: orchestrator_dense
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U glasslab -d orchestrator_dense"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install research-orchestrator dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r services/research-orchestrator/requirements.txt pytest httpx
+
+      # The DSN-gated dense suites skip without CORPUS_RAG_PG_DSN; this lane
+      # is the required environment where pgvector actually exists, so those
+      # tests must run (and pass) here. The store contract additionally runs
+      # against this pgvector-enabled server to prove ordinary operations are
+      # unaffected when the extension IS available.
+      - name: Run dense/pgvector suites and store contract against pgvector
+        working-directory: services/research-orchestrator
+        env:
+          PYTHONPATH: .
+          CORPUS_RAG_PG_DSN: postgresql://glasslab:glasslab@127.0.0.1:5432/orchestrator_dense
+          GLASSLAB_TEST_POSTGRES_DSN: postgresql://glasslab:glasslab@127.0.0.1:5432/orchestrator_dense
+        run: pytest tests/test_knowledge_dense.py tests/test_corpus_rag_vector_index.py tests/test_corpus_rag_storage.py tests/test_store_contract.py -q
+
+  research-orchestrator-ocr:
+    name: research-orchestrator OCR backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tesseract
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tesseract-ocr
+
+      - name: Install research-orchestrator dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r services/research-orchestrator/requirements.txt pytest httpx
+
+      - name: Run OCR backend tests (real tesseract)
+        working-directory: services/research-orchestrator
+        env:
+          PYTHONPATH: .
+        run: pytest tests/test_corpus_rag_ocr.py -q
+
   adapter-tests:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
@@ -189,11 +281,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: research-ingress
-            workdir: services/research-ingress
-            requirements: services/research-ingress/requirements.txt
-            pythonpath: .
-            tests: tests/test_api.py
           - name: research-command-router
             workdir: services/research-command-router
             requirements: services/research-command-router/requirements.txt

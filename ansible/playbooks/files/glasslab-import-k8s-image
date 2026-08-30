@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: glasslab-import-k8s-image <tar-path>" >&2
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+[[ $# -eq 1 ]] || { usage; exit 1; }
+archive="$1"
+
+# Issue #262: canonicalize before the root read — only archives under /tmp
+# are acceptable. realpath resolves symlinks and ".." components, so a path
+# like /tmp/../..-escaped or a symlink into /etc cannot smuggle an arbitrary
+# root-readable file into the containerd import. The legit callers stage
+# their archives under /tmp (workflow-api and control-shell builds).
+resolved_archive="$(realpath -e "$archive")" || {
+  echo "refusing unresolvable archive path: $archive" >&2
+  exit 1
+}
+case "$resolved_archive" in
+  /tmp/*) ;;
+  *)
+    echo "refusing archive outside /tmp: $archive (resolves to $resolved_archive)" >&2
+    exit 1
+    ;;
+esac
+[[ -f "$resolved_archive" ]] || { echo "archive not found: $archive" >&2; exit 1; }
+
+exec ctr -n k8s.io images import "$resolved_archive"

@@ -6,3 +6,10 @@ PyYAML==6.0.2
 python-multipart==0.0.20
 psycopg[binary]==3.2.9
 uvicorn[standard]==0.34.0
+# Import-time dependencies of the dense-retrieval surface (corpus-RAG method
+# advisory). The production image ships them unconditionally, so the unit-test
+# lane that validates the production import surface installs exactly this
+# file. torch/sentence-transformers stay in requirements-dense.txt because
+# they are imported lazily (model weights are a runtime concern).
+numpy==2.2.6
+PyMuPDF==1.28.2

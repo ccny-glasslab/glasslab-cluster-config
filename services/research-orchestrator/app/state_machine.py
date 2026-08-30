@@ -51,6 +51,10 @@ TRANSITIONS: dict[RunState, set[RunState]] = {
     },
     RunState.BEAKER_DRAFTING_CONTRACT: {
         RunState.HONEYDEW_REVIEWING_CONTRACT,
+        # Direct bind: when the approved proposal references an already
+        # installed contract, the run skips the candidate/review/promotion
+        # states and proceeds straight to planning.
+        RunState.BEAKER_PLANNING,
         RunState.PAUSED,
         RunState.CANCELLED,
         RunState.FAILED,
