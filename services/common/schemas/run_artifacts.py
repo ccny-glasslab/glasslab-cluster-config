@@ -36,6 +36,7 @@ class RunManifest(BaseModel):
     node_selector: dict[str, str] = Field(default_factory=dict)
     runner_image: str
     runner_service_account_name: str = Field(
+        default='default',
         min_length=1,
         max_length=253,
         pattern=r'^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$',
