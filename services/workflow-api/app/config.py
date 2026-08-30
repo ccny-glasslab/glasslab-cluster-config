@@ -21,24 +21,6 @@ from .paths import discover_repo_root
 DEFAULT_REGISTRY_DIR = discover_repo_root() / 'services' / 'workflow-registry' / 'definitions'
 
 DEFAULT_CALLER_OPERATIONS = {
-    'research-command-router': frozenset({
-        'GET /research-sessions/latest/context', 'GET /research-sessions/{session_id}/context',
-        'GET /research-sessions/{session_id}/autoresearch-summary',
-        'GET /research-sessions/latest/preflight/current-plan',
-        'GET /research-sessions/{session_id}/preflight/current-plan',
-        'GET /research-sessions/latest/autoresearch-model-comparison',
-        'GET /research-sessions/{session_id}/autoresearch-model-comparison',
-        'POST /research-sessions', 'POST /research-sessions/latest/intake',
-        'POST /research-sessions/{session_id}/intake',
-        'POST /research-sessions/latest/transitions/prepare-current-plan',
-        'POST /research-sessions/{session_id}/transitions/prepare-current-plan',
-        'POST /research-sessions/latest/transitions/run-happy-path',
-        'POST /research-sessions/{session_id}/transitions/run-happy-path',
-        'POST /research-sessions/latest/transitions/advance-autoresearch',
-        'POST /research-sessions/{session_id}/transitions/advance-autoresearch',
-        'POST /research-sessions/latest/decisions/current',
-        'POST /research-sessions/{session_id}/decisions/current',
-    }),
     'schedule-worker': frozenset({
         'POST /digest-schedules/run-due', 'POST /approved-rerun-schedules/run-due',
     }),
@@ -126,7 +108,6 @@ class Settings(BaseSettings):
     external_literature_timeout_seconds: float = 20.0
     external_literature_mailto: str | None = None
     caller_policies: tuple[CallerPolicy, ...] = Field(default_factory=tuple)
-    research_command_router_token: SecretStr | None = None
     schedule_worker_token: SecretStr | None = None
     research_orchestrator_token: SecretStr | None = None
 
@@ -148,7 +129,6 @@ class Settings(BaseSettings):
         if self.store_backend == 'postgres' and not (self.store_postgres_dsn or '').strip():
             raise ValueError('postgres store backend requires a non-empty store_postgres_dsn')
         dedicated_tokens = {
-            'research-command-router': self.research_command_router_token,
             'schedule-worker': self.schedule_worker_token,
             'research-orchestrator': self.research_orchestrator_token,
         }

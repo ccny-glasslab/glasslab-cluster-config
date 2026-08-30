@@ -191,26 +191,21 @@ def test_settings_reject_duplicate_caller_tokens() -> None:
 def test_dedicated_tokens_build_default_policies_without_json_interpolation(monkeypatch) -> None:
     monkeypatch.delenv('GLASSLAB_WORKFLOW_API_CALLER_POLICIES', raising=False)
     settings = Settings(
-        research_command_router_token='router-"\\\n-token',
         schedule_worker_token='schedule-token',
         research_orchestrator_token='orchestrator-token',
     )
 
     assert {policy.name for policy in settings.caller_policies} == {
-        'research-command-router', 'schedule-worker', 'research-orchestrator',
+        'schedule-worker', 'research-orchestrator',
     }
-    router = next(policy for policy in settings.caller_policies if policy.name == 'research-command-router')
-    assert router.token.get_secret_value() == 'router-"\\\n-token'
-    assert 'GET /research-sessions/latest/context' in router.allowed_operations
 
 
 def test_dedicated_tokens_must_be_configured_as_a_complete_distinct_set(monkeypatch) -> None:
     monkeypatch.delenv('GLASSLAB_WORKFLOW_API_CALLER_POLICIES', raising=False)
     with pytest.raises(ValueError, match='all dedicated workflow caller tokens'):
-        Settings(research_command_router_token='router-token')
+        Settings(schedule_worker_token='schedule-token')
     with pytest.raises(ValueError, match='caller policy tokens must be unique'):
         Settings(
-            research_command_router_token='shared-token',
             schedule_worker_token='shared-token',
-            research_orchestrator_token='orchestrator-token',
+            research_orchestrator_token='shared-token',
         )
