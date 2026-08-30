@@ -2293,6 +2293,68 @@ class ResearchOrchestrator:
         proposal = self._latest_contract_proposal(run_id)
         if proposal is None:
             raise WorkflowError('run has no evaluation contract proposal')
+        run = self.store.get_run(run_id)
+        # When the approved proposal references an already-installed contract,
+        # bind to it directly: a duplicate candidate cannot be promoted (the
+        # promoted id/version is immutable) and the installed contract is
+        # already trusted. The compatibility check gates this so a proposal
+        # that the installed contract cannot implement still falls through to
+        # the task-specific candidate flow.
+        installed = None
+        try:
+            installed = self.contracts.resolve(
+                proposal.get('evaluator_type'),
+                run.evaluation_contract_version,
+            )
+        except ValueError:
+            installed = None
+        if installed is not None:
+            original = run
+            self.store.replace_run(
+                run.model_copy(
+                    update={
+                        'evaluation_contract_id': (
+                            installed.descriptor.contract_id
+                        ),
+                        'evaluation_contract_version': (
+                            installed.descriptor.version
+                        ),
+                        'evaluation_contract_digest': installed.digest,
+                    }
+                ),
+                expected_version=run.version,
+            )
+            if self._contract_binding_compatible(run_id):
+                self._event(
+                    run_id,
+                    source='orchestrator',
+                    event_type='contract.bound_existing',
+                    payload={
+                        'contract_id': installed.descriptor.contract_id,
+                        'version': installed.descriptor.version,
+                        'digest': installed.digest,
+                    },
+                )
+                self._transition(run_id, RunState.BEAKER_PLANNING)
+                self._beaker_plan(run_id)
+                return
+            current = self.store.get_run(run_id)
+            self.store.replace_run(
+                current.model_copy(
+                    update={
+                        'evaluation_contract_id': (
+                            original.evaluation_contract_id
+                        ),
+                        'evaluation_contract_version': (
+                            original.evaluation_contract_version
+                        ),
+                        'evaluation_contract_digest': (
+                            original.evaluation_contract_digest
+                        ),
+                    }
+                ),
+                expected_version=current.version,
+            )
         prompt = (
             'Draft an immutable evaluation-contract candidate for the approved '
             'program.md. Create a self-contained directory under '
