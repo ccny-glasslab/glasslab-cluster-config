@@ -101,7 +101,6 @@ rollout_authenticated_workflow_bundle() {
   require_workflow_caller_secrets
   # New callers remain compatible with the old unauthenticated API. Roll them
   # first so the server is never switched to fail-closed auth ahead of clients.
-  rollout_schedule_worker
   rollout_research_orchestrator
   rollout_workflow_api
 }

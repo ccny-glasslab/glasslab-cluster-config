@@ -119,12 +119,13 @@ class WorkflowSecurityManifestTests(unittest.TestCase):
         bundle = rollout[rollout.index("rollout_authenticated_workflow_bundle()") :]
         for caller in CALLERS:
             self.assertIn(f"require_object secret {CALLERS[caller]['secret']}", rollout)
-        # The retired command-router is not part of the authenticated bundle.
+        # Retired (command-router) and legacy (schedule-worker) services are
+        # not part of the authenticated bundle; their images are not published
+        # by the ccny service-image pipeline.
         self.assertNotIn("rollout_command_router", bundle)
-        schedule_position = bundle.index("rollout_schedule_worker")
+        self.assertNotIn("rollout_schedule_worker", bundle)
         orchestrator_position = bundle.index("rollout_research_orchestrator")
         server_position = bundle.index("rollout_workflow_api")
-        self.assertLess(schedule_position, server_position)
         self.assertLess(orchestrator_position, server_position)
 
     def test_public_smoke_does_not_call_protected_workflow_routes(self):
