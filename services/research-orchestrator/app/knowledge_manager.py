@@ -233,18 +233,20 @@ class KnowledgeManager:
         metadata: dict[str, Any] | None = None,
         access_policy: str = 'run-approved',
         emit_event_for_run: str | None = None,
+        forbidden_values: Sequence[str] = (),
     ) -> KnowledgeSource:
         """Ingest uploaded bytes (born-digital PDF or UTF-8 text).
 
         The HTTP twin of :meth:`ingest_source` for material that lives
         outside the service filesystem (an operator laptop, an upload form):
-        same size cap and fail-closed secret scanning applied to the
-        extracted text, but no allowlisted path — the canonical URI is
-        synthesized as ``upload://<filename>`` and the digest covers the raw
-        uploaded bytes so re-uploading the identical file deduplicates.
-        PDFs go through the born-digital PyMuPDF backend; scanned documents
-        are rejected (OCR out of scope). Uploads default to unscoped +
-        run-approved so they join the shared corpus both agents read.
+        same size cap, but the content check is VALUE-based rather than the
+        broad heuristic used for agent-facing ingestion. Operator-curated
+        corpus material legitimately contains credential-shaped prose
+        ('api_key=', 'token =', 'password') — ML textbooks are full of it —
+        so only the LIVE control-plane secret values (operator token, Discord
+        bot token/webhook, workflow token, postgres DSN) are rejected as
+        substrings. The filename path-pattern check still applies; PDFs must
+        be born-digital; uploads default to unscoped + run-approved.
         """
         if len(data) > self.max_source_bytes:
             raise KnowledgeError(
@@ -260,8 +262,11 @@ class KnowledgeManager:
             raise KnowledgeError(
                 f'upload {safe_name!r} contains no extractable text'
             )
-        if self._text_contains_secrets(text):
-            raise KnowledgeError('refusing to index suspected secret material')
+        for forbidden in forbidden_values:
+            if forbidden and forbidden in text:
+                raise KnowledgeError(
+                    'refusing to index known secret material'
+                )
         source = KnowledgeSource(
             source_type=source_type,
             canonical_uri=f'upload://{safe_name}',

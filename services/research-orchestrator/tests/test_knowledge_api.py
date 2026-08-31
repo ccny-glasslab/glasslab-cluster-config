@@ -240,6 +240,7 @@ def test_upload_endpoint_rejects_oversize_secret_and_binary(
 ) -> None:
     approved, settings, engine = _bundle(tmp_path)
     settings.knowledge_max_source_bytes = 512
+    settings.operator_api_token = 'live-operator-token-value-abc123'
     engine.knowledge.max_source_bytes = 512
     app = create_app(settings, engine=engine, start_watcher=False)
     with TestClient(app) as client:
@@ -250,18 +251,33 @@ def test_upload_endpoint_rejects_oversize_secret_and_binary(
         )
         assert oversize.status_code == 413
 
+        # Operator uploads check LIVE secret VALUES, not the broad heuristic:
+        # a real configured value is refused...
         secret = client.post(
             '/knowledge/sources/upload',
             files={
                 'file': (
                     'config-notes.txt',
-                    b'deployment notes\npassword=hunter2-example\n',
+                    b'deployment notes\noperator token: live-operator-token-value-abc123\n',
                 )
             },
             data={'source_type': 'documentation'},
         )
         assert secret.status_code == 409
         assert 'secret' in secret.text
+
+        # ...while credential-shaped prose that is NOT a live value is fine.
+        prose = client.post(
+            '/knowledge/sources/upload',
+            files={
+                'file': (
+                    'textbook-notes.txt',
+                    b'password managers, api_key=, token = nn.Parameter examples',
+                )
+            },
+            data={'source_type': 'documentation'},
+        )
+        assert prose.status_code == 201, prose.text
 
         binary = client.post(
             '/knowledge/sources/upload',
