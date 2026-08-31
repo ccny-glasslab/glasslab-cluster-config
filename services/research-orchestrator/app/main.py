@@ -30,6 +30,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
+from pydantic import SecretStr
 
 from .cluster import FakeClusterExecutor, WorkflowApiClusterExecutor
 from .config import SERVICE_ROOT, Settings, get_settings
@@ -642,6 +643,34 @@ def create_app(
         except Exception as exc:
             raise map_error(exc) from exc
 
+    def _control_plane_secret_values(settings: Settings) -> tuple[str, ...]:
+        """Live control-plane secret VALUES the corpus must never contain.
+
+        Operator uploads skip the broad content heuristic (credential-shaped
+        prose is legitimate in operator-curated material); instead the actual
+        configured secret values are rejected as substrings, so a real
+        credential can still never enter the corpus while textbooks and
+        papers are unaffected.
+        """
+        import os
+
+        raw: list[Any] = [
+            settings.operator_api_token,
+            settings.discord_bot_token,
+            settings.discord_webhook_url,
+            settings.workflow_api_token,
+            os.environ.get('GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN', ''),
+        ]
+        values: list[str] = []
+        for item in raw:
+            if item is None:
+                continue
+            if isinstance(item, SecretStr):
+                item = item.get_secret_value()
+            if item:
+                values.append(str(item))
+        return tuple(values)
+
     @app.post(
         '/knowledge/sources/upload',
         response_model=KnowledgeSource,
@@ -655,8 +684,9 @@ def create_app(
     ) -> KnowledgeSource:
         # Operator-only content upload: the HTTP twin of path ingestion for
         # material that lives outside the service filesystem (an operator
-        # laptop full of PDFs). The same size cap and fail-closed secret
-        # scanning apply to the extracted text; PDFs must be born-digital.
+        # laptop full of PDFs). Size-capped; content is checked against the
+        # LIVE control-plane secret values (not the broad heuristic, which
+        # would reject legitimate credential-shaped prose in books).
         data = file.file.read(settings.knowledge_max_source_bytes + 1)
         if len(data) > settings.knowledge_max_source_bytes:
             raise HTTPException(
@@ -679,6 +709,7 @@ def create_app(
                 filename=file.filename or 'upload',
                 data=data,
                 title=title,
+                forbidden_values=_control_plane_secret_values(settings),
             )
         except UnsupportedDocumentError as exc:
             raise HTTPException(
