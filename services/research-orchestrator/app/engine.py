@@ -37,6 +37,7 @@ from .schemas import (
     AgentTurnResult,
     ApprovalStatus,
     ArtifactRecord,
+    Citation,
     ContractCandidateRequest,
     ContextPacket,
     EvaluationContractDescriptor,
@@ -46,6 +47,7 @@ from .schemas import (
     JobRecord,
     JobStatus,
     PolicyClassification,
+    ResearchAnswer,
     RequestedAction,
     RunCreateRequest,
     RunRecord,
@@ -56,7 +58,7 @@ from .schemas import (
     TurnRecord,
     utc_now,
 )
-from .storage import ConcurrencyConflict
+from .storage import ConcurrencyConflict, RecordNotFound
 from .task_bundles import (
     TaskBundleManager,
     TaskBundleRecord,
@@ -770,6 +772,126 @@ class ResearchOrchestrator:
             '- Complete the requested phase, then return one complete '
             'AgentTurnResult object with that exact kind.\n'
         )
+
+    def answer_research_question(
+        self,
+        *,
+        question: str,
+        conversation_id: str,
+    ) -> ResearchAnswer:
+        """Answer a research question over the knowledge corpus.
+
+        Runs a bounded research_answer turn outside the run pipeline: the
+        question is the retrieval query, the retrieved packet is attached as
+        citable context, and the model must return a schema-valid
+        ResearchAnswer whose citations resolve to knowledge:// URIs. The
+        conversation is recorded as an inert run (it never transitions and
+        never holds the single-active-run slot) so its events, packet, and
+        turn stay durable and FK-consistent. An output with the wrong kind
+        or no answer variant is rejected.
+        """
+        paths = self.workspaces.paths(conversation_id)
+        workspace = paths.honeydew
+        workspace.mkdir(parents=True, exist_ok=True)
+        try:
+            self.store.get_run(conversation_id)
+        except RecordNotFound:
+            now = utc_now()
+            record = RunRecord(
+                run_id=conversation_id,
+                objective=question,
+                state=RunState.CREATED,
+                evaluation_contract_id=self.settings.default_evaluation_contract_id,
+                evaluation_contract_version=(
+                    self.settings.default_evaluation_contract_version
+                ),
+                evaluation_contract_digest='',
+                beaker_workspace=str(paths.beaker),
+                honeydew_workspace=str(workspace),
+                shared_artifacts_path=str(paths.shared_artifacts),
+                reports_path=str(paths.reports),
+                maximum_turns=self.settings.maximum_turns,
+                maximum_runtime_seconds=self.settings.maximum_runtime_seconds,
+                maximum_parallel_jobs=1,
+                created_at=now,
+                updated_at=now,
+            )
+            self.store.create_run(record, one_active_run=False)
+        session = self.runtime.ensure_session(
+            run_id=conversation_id,
+            agent=AgentName.HONEYDEW,
+            workspace=workspace,
+            existing_session_id=None,
+        )
+        packet = self.knowledge.retrieve(
+            run_id=conversation_id,
+            agent='honeydew',
+            turn_number=1,
+            turn_kind='research_answer',
+            query=question,
+            index_version='v1',
+            max_results=self.settings.knowledge_max_results,
+            token_budget=self.settings.knowledge_token_budget,
+            run_scope=conversation_id,
+            allowed_source_types=None,
+        )
+        prompt = (
+            'You are Honeydew, answering a direct research question from an '
+            'operator. Answer the question strictly from the retrieved '
+            'reference material. Every substantive claim must carry a '
+            'knowledge:// citation in the citations[] field (knowledge_uri + '
+            'source + a short verbatim excerpt). If the retrieved material '
+            'does not answer the question, set unanswerable: true and leave '
+            'citations empty rather than guessing.\n\n'
+            f'QUESTION: {question}\n'
+        )
+        if packet and packet.exact_text_supplied:
+            prompt = packet.exact_text_supplied + '\n\n' + prompt
+            self._event(
+                conversation_id,
+                source='orchestrator',
+                event_type='agent.context_attached',
+                payload={
+                    'packet_id': packet.packet_id,
+                    'agent': 'honeydew',
+                    'turn_kind': 'research_answer',
+                    'ranked_count': len(packet.ranked_sources),
+                    'token_count': len(packet.exact_text_supplied.split()),
+                },
+            )
+        prompt += self._required_turn_kind_instruction(TurnKind.RESEARCH_ANSWER)
+        result, message_id = self.runtime.run_turn(
+            run_id=conversation_id,
+            agent=AgentName.HONEYDEW,
+            workspace=workspace,
+            session_id=session.session_id,
+            prompt=prompt,
+        )
+        if result.kind != TurnKind.RESEARCH_ANSWER or result.research_answer is None:
+            self._event(
+                conversation_id,
+                source='orchestrator',
+                event_type='agent.output_rejected',
+                payload={
+                    'returned_kind': result.kind.value,
+                    'expected_kind': TurnKind.RESEARCH_ANSWER.value,
+                },
+            )
+            raise ValueError(
+                f'research_answer turn returned kind {result.kind.value} '
+                'without a research_answer payload'
+            )
+        self.store.save_turn(
+            TurnRecord(
+                run_id=conversation_id,
+                agent=AgentName.HONEYDEW,
+                opencode_session_id=session.session_id,
+                opencode_message_id=message_id,
+                structured_output=result,
+                status='completed',
+            )
+        )
+        return result.research_answer
 
     def _should_retry_turn(
         self,
