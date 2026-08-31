@@ -859,7 +859,26 @@ class ResearchOrchestrator:
                     'token_count': len(packet.exact_text_supplied.split()),
                 },
             )
+            prompt = (
+                prompt
+                + '\n\nThe citable knowledge URI for every source in this '
+                'turn is knowledge://context/'
+                + packet.packet_id
+                + ' — cite that URI in every citation, never the source '
+                'upload:// or artifact:// URI.\n'
+            )
         prompt += self._required_turn_kind_instruction(TurnKind.RESEARCH_ANSWER)
+        prompt += (
+            '\nThe answer content must be NESTED under the research_answer '
+            'field of the AgentTurnResult envelope, exactly like this:\n'
+            '{"kind": "research_answer", "summary": "short summary", '
+            '"research_answer": {"answer": "the full answer text", '
+            '"citations": [{"knowledge_uri": "knowledge://context/<packet-id>",'
+            ' "source": "source title", "excerpt": "verbatim excerpt"}], '
+            '"unanswerable": false, "suggested_followups": []}}\n'
+            'Do not place answer, citations, unanswerable, or '
+            'suggested_followups anywhere else.\n'
+        )
         result, message_id = self.runtime.run_turn(
             run_id=conversation_id,
             agent=AgentName.HONEYDEW,

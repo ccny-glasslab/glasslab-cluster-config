@@ -295,8 +295,9 @@ class AgentTurnResult(BaseModel):
 
 
 class Citation(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-
+    # Deliberately tolerant of extra fields: the research_answer turn runs
+    # through a coding model that appends descriptive keys to citation
+    # objects. The three required fields are what the API consumes.
     knowledge_uri: str = Field(min_length=1)
     source: str = Field(min_length=1)
     excerpt: str = Field(min_length=1)
@@ -308,8 +309,6 @@ class ResearchAnswer(BaseModel):
     ``citations`` must be non-empty whenever the corpus answers the question;
     an ungrounded response is a schema violation, not a valid answer.
     """
-
-    model_config = ConfigDict(extra='forbid')
 
     answer: str = Field(min_length=1)
     citations: list[Citation] = Field(default_factory=list)
