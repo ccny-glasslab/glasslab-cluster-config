@@ -39,7 +39,12 @@ What is **missing**:
 - Conversation state (multi-turn memory is per-run, not per-conversation).
 - A chat surface (none exists; Discord is a control surface, not a product
   surface).
-- Corpus depth (one registered knowledge source so far — see Phase 0).
+- **Corpus curation, not corpus creation.** The live production store already
+  holds **75 knowledge-source rows / 66 unique titles / 3151 chunks** (checked
+  live 2026-08-30): ML-methods literature (metric learning, uncertainty
+  quantification, conformal prediction, autoML, model cards, agent
+  benchmarks) plus Glasslab-internal sources. Nine titles are duplicated
+  (18 rows) and need dedup — see Phase 0.
 
 ## Design principles
 
@@ -69,13 +74,20 @@ projections).
 
 ### Phase 0 — Corpus readiness (prerequisite, can run in parallel)
 
-The experience lives or dies on corpus depth. Ingestion machinery exists
-(OCR intake, dataset upload, corpus-RAG registration). Register a real
-corpus: the Glasslab docs, the approved research sources, and any
-collected literature.
+The corpus already exists and is substantial (75 source rows / 66 unique
+titles / 3151 chunks live). Phase 0 is therefore **curation, not creation**:
+1. **Dedup** — nine titles are ingested twice (050, 083, 102, 152, 192,
+   193, 242, 244, 254). Remove the duplicate rows so retrieval cannot
+   return the same content twice.
+2. **Quality/coverage** — audit chunk health (the `_rechunk_source` path)
+   and fill gaps for the lab's actual question domains (the current corpus
+   is ML-methods-heavy; check Glasslab-ops and research-frontier coverage).
+3. **Retrieval spot-check** — representative questions must return relevant
+   packets with clean citations.
 
-**Acceptance:** ≥ N useful knowledge sources registered; retrieval over
-them returns relevant packets for representative questions.
+**Acceptance:** zero duplicate titles; retrieval over the corpus returns
+relevant packets for representative questions; packets are citable as
+`knowledge://context:<id>`.
 
 ### Phase 1 — Grounded answer turn + `/chat` endpoint (the feasibility proof)
 
@@ -164,6 +176,7 @@ conversation).
 
 ## First slice (what future-us should start with)
 
-Phase 0 (register a real corpus) **and** Phase 1 (turn kind + `/chat` on a
+Phase 0 (dedup + curate the existing 75-source corpus) **and** Phase 1
+(turn kind + `/chat` on a
 `feat/research-chat` branch from `testing`, in a dedicated worktree given
 the parallel main/testing churn). Verify with curl before any UI work.
