@@ -1,0 +1,63 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: corpus-gpu-embed
+  namespace: glasslab-v2
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 7200
+  template:
+    spec:
+      serviceAccountName: glasslab-gpu-runner
+      automountServiceAccountToken: false
+      # Required: without the nvidia runtime the container cannot reach the
+      # driver even though the device plugin allocated a GPU.
+      runtimeClassName: nvidia
+      restartPolicy: Never
+      nodeSelector:
+        glasslab.io/gpu-vendor: nvidia
+      imagePullSecrets:
+        - name: glasslab-ghcr-pull
+      containers:
+        - name: embed
+          # Pin the immutable commit-derived tag of the workspace-runner GPU
+          # image; bump to the latest published `sha-<sha>-benchmark-gpu`
+          # (research-workspace-runner-image.yml) when it changes.
+          image: ghcr.io/ccny-glasslab/glasslab-research-workspace-runner:sha-bfe70da6dffcabd833411a0d19ca857a112c370d-benchmark-gpu
+          command:
+            - /bin/sh
+            - -c
+            - >
+              pip install -q sentence-transformers "psycopg[binary]" &&
+              python /mnt/scripts/corpus_gpu_embed.py
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              memory: 12Gi
+              cpu: "4"
+            requests:
+              memory: 6Gi
+              cpu: "2"
+          env:
+            - name: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-research-orchestrator
+                  key: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+            # Reuse the weights already cached by the orchestrator so the
+            # GPU job never re-downloads the model.
+            - name: HF_HOME
+              value: /mnt/artifacts/research-orchestrator/hf-cache
+          volumeMounts:
+            - name: scripts
+              mountPath: /mnt/scripts
+            - name: artifacts
+              mountPath: /mnt/artifacts
+      volumes:
+        - name: scripts
+          configMap:
+            name: corpus-embed-script
+            defaultMode: 0444
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: glasslab-shared-artifacts

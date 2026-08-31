@@ -20,6 +20,9 @@ data:
   # Operator knowledge ingestion may only read from the mounted approved
   # repository; the code defaults target a non-containerized layout.
   GLASSLAB_ORCHESTRATOR_KNOWLEDGE_ALLOWLIST_ROOTS: /mnt/artifacts/research-orchestrator/approved-repo/docs,/mnt/artifacts/research-orchestrator/approved-repo/services/research-orchestrator/evaluation-contracts
+  # Whole books are uploaded as single sources; the 2 MiB default rejects
+  # textbook-size text extracts, so the corpus upload cap is raised.
+  GLASSLAB_ORCHESTRATOR_KNOWLEDGE_MAX_SOURCE_BYTES: "16777216"
   GLASSLAB_ORCHESTRATOR_EVALUATION_CONTRACT_ROOT: /app/evaluation-contracts
   GLASSLAB_ORCHESTRATOR_PROMOTED_CONTRACT_ROOT: /mnt/artifacts/research-orchestrator/trusted-contracts/bundles
   GLASSLAB_ORCHESTRATOR_SEALED_CONTRACT_CANDIDATE_ROOT: /mnt/artifacts/research-orchestrator/contract-candidates

@@ -95,6 +95,33 @@ dense-retrievable on the very next advisory with no operator step. The
 same incremental pass also self-heals after a revision-pin change by
 re-embedding rows stored under the old lineage.
 
+## GPU embedding
+
+Embedding runs on the orchestrator pod CPU are slow at corpus scale (hours
+for ~10k chunks). For bulk batches, embed on a cluster GPU with a bounded
+Job — the verified path:
+
+```bash
+# 1. Stage the embed script into a ConfigMap:
+kubectl -n glasslab-v2 create configmap corpus-embed-script \
+  --from-file=corpus_gpu_embed.py=services/research-orchestrator/scripts/corpus_gpu_embed.py
+
+# 2. Run the Job (kubeadm/glasslab-v2/jobs/corpus-gpu-embed.yaml):
+kubectl apply -f kubeadm/glasslab-v2/jobs/corpus-gpu-embed.yaml
+kubectl -n glasslab-v2 logs job/corpus-gpu-embed -f
+
+# 3. Verify parity:
+#    vectors == chunks for the lineage in Postgres, then confirm the
+#    orchestrator serves them on the next advisory (/health.knowledge_dense).
+```
+
+Notes: the Job pins the immutable `sha-<sha>-benchmark-gpu` workspace-runner
+image tag (bump it when that image changes); it reuses the HF weights cache
+already populated by the orchestrator; vectors are written with the same
+model/revision/dims lineage so the orchestrator's numpy index reloads and
+serves them without any service change. The orchestrator in-process CPU path
+remains the small-batch fallback.
+
 ## Scanned books (OCR)
 
 The upload endpoint stays born-digital-only so a 500-page scan can never
