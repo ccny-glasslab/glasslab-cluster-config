@@ -13,6 +13,7 @@ import asyncio
 from dataclasses import dataclass
 import io
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import discord
 from discord import app_commands
@@ -21,6 +22,7 @@ from .artifact_delivery import ArtifactBundle, build_run_artifact_bundle
 from .schemas import (
     ApprovalStatus,
     IngestedDatasetRecord,
+    ResearchAnswer,
     RunCreateRequest,
     RunRecord,
 )
@@ -236,6 +238,57 @@ def execute_discord_turn_history(
     return format_turn_history(run, summaries, total_turns=len(turns))
 
 
+def execute_discord_research_question(
+    engine: ResearchOrchestrator,
+    *,
+    question: str,
+    conversation_id: str,
+) -> ResearchAnswer:
+    return engine.answer_research_question(
+        question=question,
+        conversation_id=conversation_id,
+    )
+
+
+MAX_DISCORD_RESEARCH_ANSWER_CHARS = 2000
+
+
+def format_research_answer(answer: ResearchAnswer) -> str:
+    """Render a research answer within Discord's message length bound.
+
+    The answer text is capped first, then citation lines (source + verbatim
+    excerpt) fill the remaining budget so the trust loop — checking a claim
+    against its source — survives even a long answer.
+    """
+    if answer.unanswerable:
+        return (
+            'The knowledge corpus does not contain material to answer this '
+            'question. Rephrase it against the corpus domain (ML methods, '
+            'uncertainty quantification, metric learning, and similar).'
+        )
+    lines: list[str] = []
+    answer_text = ' '.join(answer.answer.strip().split())
+    if len(answer_text) > 1100:
+        answer_text = answer_text[:1097].rstrip() + '...'
+    lines.append(answer_text)
+    budget = MAX_DISCORD_RESEARCH_ANSWER_CHARS - len(answer_text) - 2
+    citations = answer.citations
+    if citations:
+        header = f'**Sources ({len(citations)})**'
+        budget -= len(header) + 2
+        lines.extend(['', header])
+        for index, citation in enumerate(citations, start=1):
+            excerpt = ' '.join(citation.excerpt.split())
+            if len(excerpt) > 100:
+                excerpt = excerpt[:97].rstrip() + '...'
+            line = f'[{index}] {citation.source} — "{excerpt}"'
+            if len(line) > budget:
+                break
+            lines.append(line)
+            budget -= len(line) + 1
+    return '\n'.join(lines)
+
+
 # Compatibility name for callers that predate generic task compilation.
 execute_discord_benchmark_creation = execute_discord_task_creation
 
@@ -434,6 +487,26 @@ class DiscordControlGateway:
                 interaction,
                 run_id=run_id,
                 limit=int(limit),
+            )
+
+        @self.tree.command(
+            name='research-question',
+            description=(
+                'Ask a research question; Honeydew answers from the '
+                'knowledge corpus with citations.'
+            ),
+            guild=self.guild,
+        )
+        @app_commands.describe(
+            question='Research question for the knowledge corpus.',
+        )
+        async def research_question(
+            interaction: discord.Interaction,
+            question: app_commands.Range[str, 5, 2000],
+        ) -> None:
+            await self._on_research_question(
+                interaction,
+                question=str(question),
             )
 
     def _register_run_control_command(self, operation: str) -> None:
@@ -894,6 +967,47 @@ class DiscordControlGateway:
         except Exception as exc:
             await interaction.followup.send(
                 f'Turn inspection failed: {exc}',
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+    async def _on_research_question(
+        self,
+        interaction: discord.Interaction,
+        *,
+        question: str,
+    ) -> None:
+        actor = self._actor(interaction)
+        if not self.policy.is_authorized(actor):
+            await self._respond(
+                interaction,
+                'You are not authorized to ask Glasslab research questions.',
+            )
+            return
+        if str(interaction.channel_id) != self.channel_id:
+            await self._respond(
+                interaction,
+                'Ask research questions from the configured Glasslab channel.',
+            )
+            return
+        # A research_answer turn is a bounded agent turn (about a minute);
+        # the followup window is generous enough to hold it.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            answer = await asyncio.to_thread(
+                execute_discord_research_question,
+                self.engine,
+                question=question,
+                conversation_id=f'discord-{uuid4().hex[:16]}',
+            )
+            await interaction.followup.send(
+                format_research_answer(answer),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as exc:
+            await interaction.followup.send(
+                f'Research question failed: {type(exc).__name__}: {exc}',
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
