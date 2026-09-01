@@ -25,6 +25,7 @@ from .corpus_rag import (
     RagDocumentRecord,
     RagSectionRecord,
 )
+from .knowledge_search import or_query
 from .schemas import (
     ActionRecord, AgentName, ApprovalStatus, ArtifactRecord, ContextPacket,
     EventRecord, IngestedDatasetRecord, JobRecord, JobStatus, KnowledgeChunk,
@@ -458,9 +459,11 @@ class PostgresStore:
         # positional placeholder automatically.
         # websearch_to_tsquery ANDs every token; long agent-context queries
         # would never match short chunks. OR the tokens instead and let
-        # ts_rank_cd prefer chunks that contain more of them.
-        or_query = ' OR '.join(token for token in query.split() if len(token) > 1) or query
-        params: list[Any] = [or_query, or_query]
+        # ts_rank_cd prefer chunks that contain more of them. Stopwords and
+        # prompt-boilerplate tokens are filtered first so common words do not
+        # dominate the ranking (see knowledge_search.search_terms).
+        or_query_text = or_query(query, max_terms=48)
+        params: list[Any] = [or_query_text, or_query_text]
         clause = "to_tsvector('simple', text) @@ websearch_to_tsquery('simple', %s)"
         if source_ids: clause += ' AND source_id = ANY(%s)'; params.append(source_ids)
         params.append(limit)

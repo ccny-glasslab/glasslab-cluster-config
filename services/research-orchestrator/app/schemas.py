@@ -72,6 +72,7 @@ class TurnKind(StrEnum):
     EXPERIMENT_ANALYSIS = 'experiment_analysis'
     VERIFICATION = 'verification'
     FINAL_REPORT = 'final_report'
+    RESEARCH_ANSWER = 'research_answer'
 
 
 class Claim(BaseModel):
@@ -290,6 +291,36 @@ class AgentTurnResult(BaseModel):
     message_to_other_agent: str = ''
     recommended_next_state: RunState | None = None
     done: bool = False
+    research_answer: ResearchAnswer | None = None
+
+
+class Citation(BaseModel):
+    # Deliberately tolerant of extra fields: the research_answer turn runs
+    # through a coding model that appends descriptive keys to citation
+    # objects. The three required fields are what the API consumes.
+    knowledge_uri: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    excerpt: str = Field(min_length=1)
+
+
+class ResearchAnswer(BaseModel):
+    """Grounded answer to a research question over the knowledge corpus.
+
+    ``citations`` must be non-empty whenever the corpus answers the question;
+    an ungrounded response is a schema violation, not a valid answer.
+    """
+
+    answer: str = Field(min_length=1)
+    citations: list[Citation] = Field(default_factory=list)
+    unanswerable: bool = False
+    suggested_followups: list[str] = Field(default_factory=list)
+
+
+class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    question: str = Field(min_length=1, max_length=2000)
+    conversation_id: str | None = None
 
 
 class ResourceRequest(BaseModel):
