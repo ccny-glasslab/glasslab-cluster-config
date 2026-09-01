@@ -308,3 +308,39 @@ def test_upload_endpoint_requires_operator_token(tmp_path: Path) -> None:
             headers={'X-Glasslab-Operator-Token': 'expected-token'},
         )
         assert allowed.status_code == 201
+
+
+def test_chat_returns_cited_research_answer(tmp_path: Path) -> None:
+    _, settings, engine = _bundle(tmp_path)
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        response = client.post(
+            '/chat',
+            json={'question': 'how does conformal prediction guarantee coverage'},
+        )
+        assert response.status_code == 201
+        body = response.json()
+        assert body['answer']
+        assert body['citations'], 'a corpus-answerable question must cite sources'
+        assert body['citations'][0]['knowledge_uri'].startswith('knowledge://')
+        assert body['citations'][0]['excerpt']
+
+
+def test_chat_requires_operator_token(tmp_path: Path) -> None:
+    _, settings, engine = _bundle(tmp_path)
+    settings.require_operator_auth = True
+    settings.operator_api_token = 'expected-token'
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        denied = client.post(
+            '/chat',
+            json={'question': 'what is metric learning'},
+        )
+        assert denied.status_code in (401, 403)
+
+        allowed = client.post(
+            '/chat',
+            json={'question': 'what is metric learning'},
+            headers={'X-Glasslab-Operator-Token': 'expected-token'},
+        )
+        assert allowed.status_code == 201

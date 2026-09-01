@@ -26,6 +26,7 @@ from .corpus_rag import (
     RagDocumentRecord,
     RagSectionRecord,
 )
+from .knowledge_search import or_query
 from .schemas import (
     ActionRecord,
     AgentName,
@@ -1430,7 +1431,9 @@ class SqliteStore:
         # Agent-context queries concatenate turn kind, objective, and prompt
         # prefixes into long strings; matching only a fixed prefix of terms
         # missed the distinctive words entirely, so every term competes.
-        terms = [term for term in query.split() if len(term) > 1][:24]
+        # Stopwords and prompt-boilerplate tokens are filtered first so
+        # common words do not dominate the bm25 ranking.
+        terms = [term for term in or_query(query, max_terms=24).split()]
         fts_query = ' OR '.join(f'"{term}"' for term in terms) or None
         with self._connect() as connection:
             if fts_query and source_ids:

@@ -421,6 +421,46 @@ def test_knowledge_search_matches_partial_term_overlap(store) -> None:
     assert [h['chunk_id'] for h in hits] == [chunk.chunk_id]
 
 
+def test_knowledge_search_ranks_distinctive_terms_over_stopwords(store) -> None:
+    """Common words must not outrank the query's real terms.
+
+    OR-ing every token matches chunks that merely contain 'the'/'and'/'from';
+    stopword filtering must keep those from crowding out the chunks that
+    actually share the query's distinctive terms.
+    """
+    run = store.create_run(_run(), one_active_run=False)
+    source = KnowledgeSource(
+        source_type=SourceType.DOCUMENTATION,
+        canonical_uri='repo://docs/conformal.md',
+        digest=uuid4().hex + uuid4().hex,
+        run_scope=run.run_id,
+    )
+    store.save_knowledge_source(source)
+    stopword_chunk = KnowledgeChunk(
+        source_id=source.source_id,
+        chunk_index=0,
+        text='the and from with about into these those',
+        digest='5' * 64,
+        token_count=9,
+    )
+    real_chunk = KnowledgeChunk(
+        source_id=source.source_id,
+        chunk_index=1,
+        text='conformal prediction calibration coverage guarantee',
+        digest='6' * 64,
+        token_count=6,
+    )
+    store.replace_knowledge_chunks(source.source_id, [stopword_chunk, real_chunk])
+
+    long_query = (
+        'revision Complete and evaluate the imported conformal prediction '
+        'calibration benchmark from the task bundle and report the coverage'
+    )
+    hits = store.search_knowledge_chunks(long_query, source_ids=[source.source_id], limit=5)
+    assert hits, 'expected at least one hit'
+    assert hits[0]['chunk_id'] == real_chunk.chunk_id
+
+
 def test_restart_recovery_marks_running_turns_failed(store) -> None:
     run = store.create_run(_run(), one_active_run=False)
     turn = TurnRecord(run_id=run.run_id, agent=AgentName.BEAKER, status='running', created_at=datetime.now(UTC), updated_at=datetime.now(UTC))

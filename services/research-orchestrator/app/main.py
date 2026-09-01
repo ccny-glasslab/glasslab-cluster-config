@@ -56,6 +56,7 @@ from .schemas import (
     ActionRecord,
     ApprovalRequest,
     ArtifactListResponse,
+    ChatRequest,
     ContextPacket,
     ContextPacketListResponse,
     EventListResponse,
@@ -64,6 +65,7 @@ from .schemas import (
     KnowledgeSourceListResponse,
     KnowledgeSourceRequest,
     RejectionRequest,
+    ResearchAnswer,
     RunCreateRequest,
     RunListResponse,
     RunRecord,
@@ -768,6 +770,28 @@ def create_app(
         if dense_error is not None:
             response['dense_error'] = dense_error
         return response
+
+    @app.post(
+        '/chat',
+        response_model=ResearchAnswer,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def answer_research_question(
+        request: ChatRequest,
+        _: None = Depends(require_operator),
+    ) -> ResearchAnswer:
+        # A research_answer turn is a synchronous agent turn (minutes); the
+        # event loop must stay responsive for the Discord Gateway task and
+        # /ready probes.
+        conversation_id = request.conversation_id or f'chat-{secrets.token_hex(8)}'
+        try:
+            return await asyncio.to_thread(
+                engine.answer_research_question,
+                question=request.question,
+                conversation_id=conversation_id,
+            )
+        except Exception as exc:
+            raise map_error(exc) from exc
 
     @app.delete(
         '/knowledge/sources/{source_id}',
