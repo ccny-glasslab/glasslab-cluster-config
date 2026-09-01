@@ -521,9 +521,8 @@ class DiscordControlGateway:
         @self.tree.command(
             name='task-start',
             description=(
-                'Start a Glasslab investigation: attach a task ZIP '
-                '(problem.md + rubric) OR give an objective — Honeydew '
-                'drafts the protocol either way.'
+                'Start an investigation: attach a task ZIP (problem.md + '
+                'rubric) or give an objective.'
             ),
             guild=self.guild,
         )
@@ -664,8 +663,7 @@ class DiscordControlGateway:
         @self.tree.command(
             name='research-question',
             description=(
-                'Ask the knowledge corpus — a ~1-minute cited answer, no run. '
-                'Use task-start to launch an investigation.'
+                'Ask the knowledge corpus — a ~1-minute cited answer, no run.'
             ),
             guild=self.guild,
         )
