@@ -13,9 +13,8 @@ and approval role or explicit administrator allowlist.
 
 | Command | Where | Effect |
 | --- | --- | --- |
-| `/research-start objective:<text>` | Main Glasslab channel | Starts a question-driven run. Honeydew drafts the protocol and evaluation contract proposal. |
-| `/task-start archive:<zip> [objective:<text>]` | Main Glasslab channel | Compiles an arbitrary task archive, performs preflight, and starts the run only when required inputs are ready. |
-| `/benchmark-start archive:<zip> [objective:<text>]` | Main Glasslab channel | Compatibility alias for `/task-start`; do not build new integrations around this name. |
+| `/task-start [archive:<zip>] [objective:<text>]` | Main Glasslab channel | Starts an investigation: with an archive, compiles + preflights + starts the task; without one, starts an objective-driven run. Honeydew drafts the protocol and evaluation contract proposal either way. |
+| `/research-question question:<text>` | Main Glasslab channel | Asks the knowledge corpus — a ~1-minute cited answer, no run. Use `/task-start` to launch an investigation from the direction. |
 | `/dataset-upload dataset:<file> name:<name> [role:<role>] [contains_labels:<bool>]` | Main Glasslab channel | Stores a file immutably and returns a checksum-addressed `glasslab-dataset://` reference. |
 | `/research-artifacts [run_id:<id>] [include_source:<bool>]` | Run thread, or main channel with `run_id` | Downloads a digest-verified ZIP of the latest run-level artifacts and successful-job outputs. |
 | `/research-turns [run_id:<id>] [limit:<int>]` | Run thread, or main channel with `run_id` | Shows the run's most recent redacted agent turns (default 5, max 20) with agent identity, status, and timestamps. |
@@ -63,7 +62,8 @@ The bot creates one public thread for the run. Continue from that thread:
 Approve and Reject are message buttons, not slash commands. An approval only
 authorizes the described action; it is not evidence that execution succeeded.
 
-For a question without an archive, use `/research-start`. Honeydew still begins
+For a question without an archive, use `/task-start` with only an objective.
+Honeydew still begins
 with the protocol and evaluation contract. For local data, run
 `/dataset-upload` first and put the returned `glasslab-dataset://<sha256>`
 reference in `problem.md` or the objective.

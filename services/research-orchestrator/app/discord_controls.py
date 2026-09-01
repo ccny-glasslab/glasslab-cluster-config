@@ -519,60 +519,24 @@ class DiscordControlGateway:
 
     def _register_commands(self) -> None:
         @self.tree.command(
-            name='research-start',
-            description='Start a Glasslab research run from an objective.',
-            guild=self.guild,
-        )
-        @app_commands.describe(
-            objective=(
-                'Research objective for Honeydew to turn into a protocol '
-                'and evaluation contract proposal.'
-            )
-        )
-        async def research_start(
-            interaction: discord.Interaction,
-            objective: app_commands.Range[str, 10, 2000],
-        ) -> None:
-            await self._on_research_start(
-                interaction,
-                objective=str(objective),
-            )
-
-        @self.tree.command(
-            name='benchmark-start',
-            description='Import and start a supported Glasslab ML benchmark.',
-            guild=self.guild,
-        )
-        @app_commands.describe(
-            archive='One supported ML_Benchmark_*.zip task bundle.',
-            objective='Optional narrower objective for this benchmark run.',
-        )
-        async def benchmark_start(
-            interaction: discord.Interaction,
-            archive: discord.Attachment,
-            objective: app_commands.Range[str, 10, 1000] | None = None,
-        ) -> None:
-            await self._on_benchmark_start(
-                interaction,
-                archive=archive,
-                objective=str(objective) if objective else None,
-            )
-
-        @self.tree.command(
             name='task-start',
-            description='Compile, preflight, and start a Glasslab research task.',
+            description=(
+                'Start a Glasslab investigation: attach a task ZIP '
+                '(problem.md + rubric) OR give an objective — Honeydew '
+                'drafts the protocol either way.'
+            ),
             guild=self.guild,
         )
         @app_commands.describe(
-            archive='ZIP containing one problem.md and an optional evaluator rubric.',
-            objective='Optional narrower objective for this research run.',
+            archive='Optional ZIP containing problem.md and an evaluator rubric.',
+            objective='Research objective (required when no archive is attached).',
         )
         async def task_start(
             interaction: discord.Interaction,
-            archive: discord.Attachment,
-            objective: app_commands.Range[str, 10, 1000] | None = None,
+            archive: discord.Attachment | None = None,
+            objective: app_commands.Range[str, 10, 2000] | None = None,
         ) -> None:
-            await self._on_benchmark_start(
+            await self._on_task_start(
                 interaction,
                 archive=archive,
                 objective=str(objective) if objective else None,
@@ -700,8 +664,8 @@ class DiscordControlGateway:
         @self.tree.command(
             name='research-question',
             description=(
-                'Ask a research question; Honeydew answers from the '
-                'knowledge corpus with citations.'
+                'Ask the knowledge corpus — a ~1-minute cited answer, no run. '
+                'Use task-start to launch an investigation.'
             ),
             guild=self.guild,
         )
@@ -788,99 +752,57 @@ class DiscordControlGateway:
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    async def _on_research_start(
+    async def _on_task_start(
         self,
         interaction: discord.Interaction,
         *,
-        objective: str,
-    ) -> None:
-        actor = self._actor(interaction)
-        if not self.policy.is_authorized(actor):
-            await self._respond(
-                interaction,
-                'You are not authorized to start Glasslab research runs.',
-            )
-            return
-        if str(interaction.channel_id) != self.channel_id:
-            await self._respond(
-                interaction,
-                'Start research runs from the configured Glasslab channel.',
-            )
-            return
-        await self._respond(
-            interaction,
-            (
-                'Research request accepted. Honeydew is drafting the protocol '
-                'and evaluation contract proposal; a run thread will appear '
-                'in this channel.'
-            ),
-        )
-        task = asyncio.create_task(
-            self._create_run(
-                interaction=interaction,
-                objective=objective,
-            )
-        )
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-
-    async def _create_run(
-        self,
-        *,
-        interaction: discord.Interaction,
-        objective: str,
-    ) -> None:
-        try:
-            # Engine work is synchronous and disk/DB bound; run it in a worker
-            # thread so the gateway event loop stays responsive.
-            run = await asyncio.to_thread(
-                execute_discord_run_creation,
-                self.engine,
-                objective=objective,
-            )
-            destination = (
-                f'<#{run.discord_thread_id}>'
-                if run.discord_thread_id
-                else f'run `{run.run_id}`'
-            )
-            await interaction.followup.send(
-                (
-                    f'Research run created in {destination}. '
-                    'Review the proposed protocol and evaluation contract there.'
-                ),
-                ephemeral=True,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except Exception as exc:
-            try:
-                await interaction.followup.send(
-                    f'Research run creation failed: {exc}',
-                    ephemeral=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            except discord.HTTPException:
-                return
-
-    async def _on_benchmark_start(
-        self,
-        interaction: discord.Interaction,
-        *,
-        archive: discord.Attachment,
+        archive: discord.Attachment | None,
         objective: str | None,
     ) -> None:
         actor = self._actor(interaction)
         if not self.policy.is_authorized(actor):
             await self._respond(
                 interaction,
-                'You are not authorized to start Glasslab benchmark runs.',
+                'You are not authorized to start Glasslab investigations.',
             )
             return
         if str(interaction.channel_id) != self.channel_id:
             await self._respond(
                 interaction,
-                'Start benchmark runs from the configured Glasslab channel.',
+                'Start investigations from the configured Glasslab channel.',
             )
             return
+        if archive is None and not objective:
+            await self._respond(
+                interaction,
+                (
+                    'Attach a task ZIP (problem.md + rubric) or provide an '
+                    'objective to start an investigation.'
+                ),
+            )
+            return
+        if archive is None:
+            # Objective-only path: accept immediately and create the run in
+            # the background; the run thread appears in the channel shortly.
+            await self._respond(
+                interaction,
+                (
+                    'Research request accepted. Honeydew is drafting the '
+                    'protocol and evaluation contract proposal; a run thread '
+                    'will appear in this channel.'
+                ),
+            )
+            task = asyncio.create_task(
+                self._create_objective_run(
+                    interaction=interaction,
+                    objective=objective or '',
+                )
+            )
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+            return
+        # Archived path: compile + preflight + start (a 40-90s import), so
+        # defer first and reply once the run is created.
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             if archive.size > self.engine.task_bundles.MAX_ARCHIVE_BYTES:
@@ -910,10 +832,45 @@ class DiscordControlGateway:
             )
         except Exception as exc:
             await interaction.followup.send(
-                f'Benchmark import or run creation failed: {exc}',
+                f'Task import or run creation failed: {exc}',
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+
+    async def _create_objective_run(
+        self,
+        *,
+        interaction: discord.Interaction,
+        objective: str,
+    ) -> None:
+        try:
+            run = await asyncio.to_thread(
+                execute_discord_run_creation,
+                self.engine,
+                objective=objective,
+            )
+            destination = (
+                f'<#{run.discord_thread_id}>'
+                if run.discord_thread_id
+                else f'run `{run.run_id}`'
+            )
+            await interaction.followup.send(
+                (
+                    f'Research run created in {destination}. '
+                    'Review the proposed protocol and evaluation contract there.'
+                ),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as exc:
+            try:
+                await interaction.followup.send(
+                    f'Research run creation failed: {exc}',
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                return
 
     def _resolve_controlled_run(
         self,
