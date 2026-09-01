@@ -27,14 +27,22 @@ install -o root -g wheel -m 0755 \
 install -o root -g wheel -m 0755 \
   "${SCRIPT_DIR}/glasslab-exo-reconcile.sh" \
   /usr/local/libexec/glasslab-exo-reconcile
+install -o root -g wheel -m 0755 \
+  "${SCRIPT_DIR}/glasslab-exo-rdma-guard.sh" \
+  /usr/local/libexec/glasslab-exo-rdma-guard
 install -o root -g wheel -m 0644 \
   "${SCRIPT_DIR}/com.glasslab.exo-${ROLE}.plist" \
   /Library/LaunchDaemons/com.glasslab.exo.plist
+install -o root -g wheel -m 0644 \
+  "${SCRIPT_DIR}/com.glasslab.exo-rdma-guard.plist" \
+  /Library/LaunchDaemons/com.glasslab.exo-rdma-guard.plist
 
 plutil -lint /Library/LaunchDaemons/com.glasslab.exo.plist
+plutil -lint /Library/LaunchDaemons/com.glasslab.exo-rdma-guard.plist
 
 launchctl bootout system/com.glasslab.exo 2>/dev/null || true
 launchctl bootout system/com.glasslab.exo-reconcile 2>/dev/null || true
+launchctl bootout system/com.glasslab.exo-rdma-guard 2>/dev/null || true
 sleep 2
 pkill -u glasslab -f '/Users/glasslab/exo/.venv/bin/python3' 2>/dev/null || true
 pkill -u glasslab -f 'caffeinate.*exo' 2>/dev/null || true
@@ -51,6 +59,10 @@ fi
 launchctl bootstrap system /Library/LaunchDaemons/com.glasslab.exo.plist
 launchctl enable system/com.glasslab.exo
 launchctl kickstart -k system/com.glasslab.exo
+
+launchctl bootstrap system /Library/LaunchDaemons/com.glasslab.exo-rdma-guard.plist
+launchctl enable system/com.glasslab.exo-rdma-guard
+launchctl kickstart -k system/com.glasslab.exo-rdma-guard
 
 if [[ "$ROLE" == "17" ]]; then
   launchctl bootstrap system /Library/LaunchDaemons/com.glasslab.exo-reconcile.plist
