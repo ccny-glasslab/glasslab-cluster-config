@@ -52,8 +52,6 @@ These remain current and useful after the cleanup pass:
 - `stateful-object-inventory-2026-04.md`
 - `workflow-registry.md`
 - `services.md`
-- `research-command-router.md`
-- `custom-chat-shell-plan.md`
 - `bounded-experiment-runner-priority.md`
 - `runner-first-technique-knowledge-plan.md`
 - `technique-catalog.md`
@@ -66,11 +64,16 @@ These remain current and useful after the cleanup pass:
 These are analysis/reference documents, not current product contracts:
 
 - `artifact-contract-audit-2026-04.md`
-- `doc-contradictions-2026-04.md`
-- `generic-experiment-gap-audit-2026-04.md`
-- `workload-registry-evolution-notes-2026-04.md`
 - `reference/glasslab-workload-contract-v0.md`
-- `opencode-storage-cleanup-handoff-2026-04.md`
+
+Older dated audit docs (`doc-contradictions-2026-04.md`,
+`generic-experiment-gap-audit-2026-04.md`,
+`workload-registry-evolution-notes-2026-04.md`,
+`opencode-storage-cleanup-handoff-2026-04.md`,
+`implemented-vs-discussed-2026-03-30.md`,
+`workflow-api-test-triage-2026-04-28.md`,
+`storage-capacity-inventory-2026-03-23.md`) have been moved to
+[`historical/`](historical/README.md).
 
 ## Current Operator / Infrastructure References
 
@@ -121,11 +124,8 @@ source of truth:
 - legacy `vllm` retirement notes
 - early research-assistant framing docs
 
-Use:
-
-- `historical/README.md`
-
-to find them intentionally instead of treating them as current defaults.
+Use [`historical/README.md`](historical/README.md) to find them intentionally
+instead of treating them as current defaults.
 
 ## Directory Structure
 
