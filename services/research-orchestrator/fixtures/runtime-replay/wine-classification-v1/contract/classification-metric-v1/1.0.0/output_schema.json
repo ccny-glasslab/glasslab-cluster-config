@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "properties": {
+    "roc_auc": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Area Under ROC Curve"
+    },
+    "f1": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "F1 Score"
+    },
+    "accuracy": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Accuracy Score"
+    },
+    "ece": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Expected Calibration Error"
+    },
+    "pr_auc": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Area Under Precision-Recall Curve"
+    },
+    "threshold_optimized": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Optimized classification threshold"
+    },
+    "n_samples": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of test samples"
+    }
+  },
+  "required": ["roc_auc", "f1", "accuracy", "ece", "pr_auc", "threshold_optimized", "n_samples"]
+}

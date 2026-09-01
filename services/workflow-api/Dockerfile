@@ -7,6 +7,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 COPY services/workflow-api/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
+# Shared task-fabric protocol package, installed from the checked-out source.
+COPY services/task-fabric /app/services/task-fabric
+RUN pip install --no-cache-dir /app/services/task-fabric
 
 ARG GLASSLAB_GIT_SHA=unknown
 ARG GLASSLAB_BUILD_SOURCE=unspecified
@@ -19,5 +22,7 @@ ENV \
 COPY services/common /app/services/common
 COPY services/workflow-registry /app/services/workflow-registry
 COPY services/workflow-api/app /app/app
+RUN useradd --uid 10001 --no-create-home --shell /sbin/nologin glasslab
+USER 10001:10001
 EXPOSE 8080
 CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]

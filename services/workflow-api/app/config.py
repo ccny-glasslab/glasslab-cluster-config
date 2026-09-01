@@ -12,12 +12,23 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .auth import CallerPolicy
 from .paths import discover_repo_root
 
 DEFAULT_REGISTRY_DIR = discover_repo_root() / 'services' / 'workflow-registry' / 'definitions'
+
+DEFAULT_CALLER_OPERATIONS = {
+    'schedule-worker': frozenset({
+        'POST /digest-schedules/run-due', 'POST /approved-rerun-schedules/run-due',
+    }),
+    'research-orchestrator': frozenset({
+        'POST /experiments/runs', 'GET /runs/{run_id}',
+        'GET /runs/{run_id}/artifacts', 'POST /runs/{run_id}/cancel',
+    }),
+}
 
 
 class Settings(BaseSettings):
@@ -39,9 +50,9 @@ class Settings(BaseSettings):
     store_json_path: str = '/mnt/artifacts/workflow-api/state/run-store.json'
     store_postgres_dsn: str | None = None
     runner_namespace: str = 'glasslab-v2'
+    runner_service_account_name: str = 'glasslab-research-workload'
     default_submitted_by: str = 'glasslab-operator'
     job_submission_mode: Literal['null', 'kubernetes'] = 'null'
-    runner_service_account_name: str = 'default'
     runner_image_pull_policy: str = 'IfNotPresent'
     runner_backoff_limit: int = 0
     runner_job_ttl_seconds: int = 86400
@@ -81,6 +92,10 @@ class Settings(BaseSettings):
     source_document_storage_mode: Literal['filesystem', 'minio'] = 'filesystem'
     source_document_storage_dir: str = '/mnt/artifacts/source-documents'
     source_document_bucket: str = 'research-sources'
+    source_document_fetch_timeout_seconds: float = Field(default=30.0, gt=0)
+    source_document_max_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
+    source_document_max_redirects: int = Field(default=4, ge=0, le=10)
+    source_document_allowed_hosts: tuple[str, ...] = Field(default_factory=tuple)
     minio_endpoint: str = 'glasslab-minio.glasslab-v2.svc.cluster.local:9000'
     minio_access_key: str | None = None
     minio_secret_key: str | None = None
@@ -92,9 +107,18 @@ class Settings(BaseSettings):
     external_literature_dblp_url: str = 'https://dblp.org/search/publ/api'
     external_literature_timeout_seconds: float = 20.0
     external_literature_mailto: str | None = None
+    caller_policies: tuple[CallerPolicy, ...] = Field(default_factory=tuple)
+    schedule_worker_token: SecretStr | None = None
+    research_orchestrator_token: SecretStr | None = None
 
     @model_validator(mode='after')
     def validate_store_backend(self) -> 'Settings':
+        if self.runner_service_account_name.strip() in ('', 'default'):
+            raise ValueError(
+                'GLASSLAB_WORKFLOW_API_RUNNER_SERVICE_ACCOUNT_NAME must be a '
+                'dedicated ServiceAccount — using "default" mounts the namespace '
+                'default SA token into every research job pod'
+            )
         if self.store_backend == 'memory' and not self.allow_inmemory_store:
             raise ValueError(
                 'workflow-api store backend is set to memory but allow_inmemory_store=false; '
@@ -104,6 +128,26 @@ class Settings(BaseSettings):
             raise ValueError('json store backend requires a non-empty store_json_path')
         if self.store_backend == 'postgres' and not (self.store_postgres_dsn or '').strip():
             raise ValueError('postgres store backend requires a non-empty store_postgres_dsn')
+        dedicated_tokens = {
+            'schedule-worker': self.schedule_worker_token,
+            'research-orchestrator': self.research_orchestrator_token,
+        }
+        configured_tokens = {name: token for name, token in dedicated_tokens.items() if token is not None}
+        if configured_tokens and len(configured_tokens) != len(dedicated_tokens):
+            raise ValueError('all dedicated workflow caller tokens must be configured together')
+        if configured_tokens and self.caller_policies:
+            raise ValueError('configure dedicated workflow caller tokens or caller_policies, not both')
+        if configured_tokens:
+            self.caller_policies = tuple(
+                CallerPolicy(name=name, token=token, allowed_operations=DEFAULT_CALLER_OPERATIONS[name])
+                for name, token in configured_tokens.items()
+            )
+        caller_names = [policy.name for policy in self.caller_policies]
+        if len(caller_names) != len(set(caller_names)):
+            raise ValueError('caller policy names must be unique')
+        caller_tokens = [policy.token.get_secret_value() for policy in self.caller_policies]
+        if len(caller_tokens) != len(set(caller_tokens)):
+            raise ValueError('caller policy tokens must be unique')
         return self
 
 

@@ -1,5 +1,12 @@
 # Research Command Router
 
+> **Deprecated — legacy service, not the current research front door.**
+> This service describes the `!new`/`!plan`/`!run` command surface that has been
+> superseded by the Honeydew/Beaker Discord slash-command interface. It is
+> retained for historical context only. See
+> [`docs/research-orchestrator-command-surface.md`](../../docs/research-orchestrator-command-surface.md)
+> for the current operator command reference.
+
 This service is the deterministic front door for the supported Glasslab command
 surface.
 

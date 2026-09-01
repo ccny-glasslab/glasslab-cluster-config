@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mode", "finding_id", "base_commit", "diff_sha256", "files_changed", "commands_run", "residual_risk", "unresolved_questions"],
+  "properties": {
+    "mode": {"const": "repair"},
+    "finding_id": {"type": "string"},
+    "base_commit": {"type": "string"},
+    "diff_sha256": {"type": "string"},
+    "files_changed": {"type": "array", "items": {"type": "string"}},
+    "commands_run": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command", "exit_status"],
+        "properties": {
+          "command": {"type": "string"},
+          "exit_status": {"type": "integer"}
+        }
+      }
+    },
+    "residual_risk": {"type": "string"},
+    "unresolved_questions": {"type": "array", "items": {"type": "string"}}
+  }
+}

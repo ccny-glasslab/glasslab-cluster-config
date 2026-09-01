@@ -1,0 +1,128 @@
+# Wine Quality Classification Benchmark - Config
+
+name: wine_quality_classification
+description: Wine Quality Classification Benchmark - Compare ensemble vs baseline models
+
+runtime_profile: cpu-ml-standard-v1
+schema_version: glasslab-task-spec-v1
+
+assets:
+  - name: wine_quality
+    role: dataset
+    source_url: https://archive.ics.uci.edu/static/public/186/wine+quality.zip
+    contains_labels: true
+
+required_artifacts:
+  - metrics.json
+  - reports/figures/roc_curves.png
+  - reports/figures/calibration_plots.png
+  - reports/tables/metrics_table.csv
+  - reports/tables/feature_importance.csv
+
+required_metric_keys:
+  - cv_results.baseline.auc_mean
+  - cv_results.random_forest.auc_mean
+  - cv_results.gradient_boosting.auc_mean
+  - test_metrics.baseline.auc
+  - test_metrics.random_forest.auc
+  - test_metrics.gradient_boosting.auc
+  - test_metrics.baseline.ece
+  - test_metrics.random_forest.ece
+  - test_metrics.gradient_boosting.ece
+  - test_metrics.baseline.f1
+  - test_metrics.random_forest.f1
+  - test_metrics.gradient_boosting.f1
+
+missing_inputs: []
+
+budget_mode: wallclock
+max_wallclock_minutes: 30
+
+resource_constraints:
+  cpu: 1.0
+  memory_gib: 2.0
+  gpus: 0
+  wallclock_minutes: 30
+
+primary_metric:
+  name: cv_results.random_forest.auc_mean
+  direction: maximize
+  minimum_effect: 0.02
+
+guardrails:
+  - name: baseline_auc
+    direction: maximize
+    minimum: 0.85
+    required: true
+  - name: test_metrics.baseline.ece
+    direction: minimize
+    maximum: 0.10
+    required: true
+  - name: ensemble_improvement
+    direction: maximize
+    minimum: 0.02
+    required: true
+
+methodology:
+  - src/train.py: Compare L2-regularized logistic regression baseline with non-linear ensembles (Random Forest, Gradient Boosting)
+  - src/train.py: Optimize classification threshold per fold to maximize F1 score
+  - src/train.py: Use stratified k-fold cross-validation (k=5) with fixed random seed
+  - src/train.py: Apply class weighting to address class imbalance in high-quality wine classification
+
+src:
+  train:
+    py:
+      - logistic_regression
+      - random_forest
+      - gradient_boosting
+
+experiment_dimensions:
+  model:
+    - baseline
+    - random_forest
+    - gradient_boosting
+  threshold_optimization:
+    strategy: maximize_f1
+    per_fold: true
+  cross_validation:
+    type: stratified_k_fold
+    k: 5
+    random_seed: 17
+  class_imbalance:
+    handling: class_weighting
+    weighting: balanced
+
+hyperparameter_search:
+  model_family:
+    - baseline
+    - random_forest
+    - gradient_boosting
+  baseline_C:
+    - 0.1
+    - 1.0
+    - 10.0
+  random_forest_n_estimators:
+    - 50
+    - 100
+  gradient_boosting_learning_rate:
+    - 0.01
+    - 0.1
+
+feature_columns:
+  - fixed_acidity
+  - volatile_acidity
+  - citric_acid
+  - residual_sugar
+  - chlorides
+  - free_sulfur_dioxide
+  - total_sulfur_dioxide
+  - density
+  - pH
+  - sulphates
+  - alcohol
+
+class_threshold: 7
+
+random_seed: 17
+cross_validation_folds: 5
+test_split_size: 0.2

@@ -2,7 +2,7 @@
 
 Covers which fields the submission payload carries for research-workspace
 workloads (fixed registry image, task/source bundles) versus GPU-training
-workloads (validated custom image), and that workflow-api rejection detail is
+workloads (also registry-owned), and that workflow-api rejection detail is
 preserved verbatim as ClusterExecutorError.
 """
 
@@ -53,11 +53,13 @@ def _spec(*, workspace: bool) -> ExpandedJobSpec:
     )
 
 
-def _executor(handler) -> WorkflowApiClusterExecutor:
+def _executor(handler, *, caller_name='research-orchestrator', token='orchestrator-secret') -> WorkflowApiClusterExecutor:
     executor = WorkflowApiClusterExecutor(
         base_url='http://workflow-api.test',
         workload_id='gpu-experiment',
         experiment_type='gpu-training-job',
+        caller_name=caller_name,
+        token=token,
     )
     # Swap the real HTTP client for an in-memory MockTransport so the tests
     # exercise the exact payload and error mapping without a live workflow-api.
@@ -67,6 +69,55 @@ def _executor(handler) -> WorkflowApiClusterExecutor:
         transport=transport,
     )
     return executor
+
+
+def test_mutations_send_caller_identity() -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(request.headers)
+        return httpx.Response(201, json={'run_id': 'external-1', 'status': {'status': 'accepted'}})
+
+    _executor(handler).submit(_spec(workspace=True))
+
+    assert captured['x-glasslab-caller'] == 'research-orchestrator'
+    assert captured['x-glasslab-workflow-token'] == 'orchestrator-secret'
+
+
+def test_mutation_fails_closed_without_token() -> None:
+    executor = _executor(lambda _: pytest.fail('request must not be sent'), token='   ')
+
+    with pytest.raises(ClusterExecutorError, match='credentials are not configured'):
+        executor.submit(_spec(workspace=True))
+
+
+def test_reads_send_caller_identity() -> None:
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(dict(request.headers))
+        if request.url.path.endswith('/artifacts'):
+            return httpx.Response(404, json={'detail': 'artifacts not found'})
+        return httpx.Response(200, json={'status': {'status': 'running'}})
+
+    _executor(handler).inspect('external-1')
+
+    assert len(captured) == 2
+    assert all(headers['x-glasslab-caller'] == 'research-orchestrator' for headers in captured)
+    assert all(headers['x-glasslab-workflow-token'] == 'orchestrator-secret' for headers in captured)
+
+
+def test_cancellation_sends_caller_identity() -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(request.headers)
+        return httpx.Response(200, json={})
+
+    _executor(handler).cancel('external-1')
+
+    assert captured['x-glasslab-caller'] == 'research-orchestrator'
+    assert captured['x-glasslab-workflow-token'] == 'orchestrator-secret'
 
 
 def test_workspace_submission_defers_fixed_image_to_workflow_registry() -> None:
@@ -85,7 +136,7 @@ def test_workspace_submission_defers_fixed_image_to_workflow_registry() -> None:
     assert 'image_ref' not in captured
 
 
-def test_non_workspace_submission_keeps_validated_custom_image() -> None:
+def test_non_workspace_submission_also_defers_image_to_workflow_registry() -> None:
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -96,18 +147,18 @@ def test_non_workspace_submission_keeps_validated_custom_image() -> None:
         )
 
     _executor(handler).submit(_spec(workspace=False))
-    assert captured['image_ref'] == 'example.invalid/stale-runner:v1'
+    assert 'image_ref' not in captured
 
 
 def test_submission_error_preserves_workflow_api_detail() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
             409,
-            json={'detail': 'workload does not allow a custom image_ref'},
+            json={'detail': 'workflow execution policy rejected the submission'},
         )
 
     with pytest.raises(
         ClusterExecutorError,
-        match='workload does not allow a custom image_ref',
+        match='workflow execution policy rejected the submission',
     ):
         _executor(handler).submit(_spec(workspace=False))

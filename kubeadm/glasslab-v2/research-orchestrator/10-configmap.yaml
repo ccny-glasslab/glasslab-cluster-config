@@ -17,6 +17,12 @@ data:
   GLASSLAB_ORCHESTRATOR_EVIDENCE_EXCERPT_MAX_BYTES: "32768"
   GLASSLAB_ORCHESTRATOR_APPROVED_REPO_PATH: /mnt/artifacts/research-orchestrator/approved-repo
   GLASSLAB_ORCHESTRATOR_APPROVED_REPO_REF: main
+  # Operator knowledge ingestion may only read from the mounted approved
+  # repository; the code defaults target a non-containerized layout.
+  GLASSLAB_ORCHESTRATOR_KNOWLEDGE_ALLOWLIST_ROOTS: /mnt/artifacts/research-orchestrator/approved-repo/docs,/mnt/artifacts/research-orchestrator/approved-repo/services/research-orchestrator/evaluation-contracts
+  # Whole books are uploaded as single sources; the 2 MiB default rejects
+  # textbook-size text extracts, so the corpus upload cap is raised.
+  GLASSLAB_ORCHESTRATOR_KNOWLEDGE_MAX_SOURCE_BYTES: "16777216"
   GLASSLAB_ORCHESTRATOR_EVALUATION_CONTRACT_ROOT: /app/evaluation-contracts
   GLASSLAB_ORCHESTRATOR_PROMOTED_CONTRACT_ROOT: /mnt/artifacts/research-orchestrator/trusted-contracts/bundles
   GLASSLAB_ORCHESTRATOR_SEALED_CONTRACT_CANDIDATE_ROOT: /mnt/artifacts/research-orchestrator/contract-candidates
@@ -32,9 +38,11 @@ data:
   GLASSLAB_ORCHESTRATOR_BENCHMARK_DATASET_CATALOG_PATH: /mnt/artifacts/research-orchestrator/datasets/catalog.json
   GLASSLAB_ORCHESTRATOR_DEFAULT_EVALUATION_CONTRACT_ID: example-research-v1
   GLASSLAB_ORCHESTRATOR_DEFAULT_EVALUATION_CONTRACT_VERSION: 1.0.0
-  # Hermes owns the inner agent tool-use loop; Glasslab still owns state,
-  # approvals, evaluation contracts, jobs, artifacts, and Discord projection.
-  GLASSLAB_ORCHESTRATOR_AGENT_RUNTIME_BACKEND: hermes
+  # OpenCode is the selected agent runtime for the issue-98 validation path;
+  # Glasslab still owns state, approvals, evaluation contracts, jobs,
+  # artifacts, and Discord projection. Hermes remains an explicit opt-in
+  # rollback backend (see test_agent_runtime.py).
+  GLASSLAB_ORCHESTRATOR_AGENT_RUNTIME_BACKEND: opencode
   GLASSLAB_ORCHESTRATOR_OPENCODE_EXECUTABLE: /usr/local/bin/opencode
   GLASSLAB_ORCHESTRATOR_OPENCODE_START_PORT: "4210"
   GLASSLAB_ORCHESTRATOR_OPENCODE_TURN_TIMEOUT_SECONDS: "1800"
@@ -45,18 +53,21 @@ data:
   # instead of a copy per run (see issue #99); session/auth/log state stays
   # per-run regardless of this setting.
   GLASSLAB_ORCHESTRATOR_OPENCODE_SHARED_CACHE_ROOT: /mnt/artifacts/research-orchestrator/opencode-cache
-  # OpenCode remains installed only as a rollback runtime.
+  # OpenCode is the selected runtime; the model is served by the local exo
+  # endpoint (Hermes, when opted in, connects to the same endpoint).
   GLASSLAB_ORCHESTRATOR_AGENT_MODEL_PROVIDER_ID: exo
+  # Qwen3-Coder-Next-4bit is the only model with an active exo instance
+  # (reconciler-approved placement); alternates 404 with "No instance found".
   GLASSLAB_ORCHESTRATOR_AGENT_MODEL_NAME: mlx-community/Qwen3-Coder-Next-4bit
   # Hermes connects directly to this OpenAI-compatible Exo endpoint.
   GLASSLAB_ORCHESTRATOR_QWEN_BASE_URL: http://192.168.1.17:52415/v1
   GLASSLAB_ORCHESTRATOR_QWEN_MODEL_NAME: mlx-community/Qwen3-Coder-Next-4bit
   GLASSLAB_ORCHESTRATOR_CLUSTER_EXECUTION_MODE: workflow-api
   GLASSLAB_ORCHESTRATOR_CLUSTER_EXECUTION_API_URL: http://glasslab-workflow-api.glasslab-v2.svc.cluster.local:8080
-  GLASSLAB_ORCHESTRATOR_CLUSTER_EXECUTION_WORKLOAD_ID: metric-search-v0
-  GLASSLAB_ORCHESTRATOR_CLUSTER_EXECUTION_EXPERIMENT_TYPE: gpu-training-job
+  GLASSLAB_ORCHESTRATOR_CLUSTER_EXECUTION_WORKLOAD_ID: workspace-cpu-ml-v1
+  GLASSLAB_ORCHESTRATOR_CLUSTER_EXECUTION_EXPERIMENT_TYPE: research-workspace-job
   GLASSLAB_ORCHESTRATOR_KUBERNETES_NAMESPACE: glasslab-v2
-  GLASSLAB_ORCHESTRATOR_PERMITTED_JOB_IMAGES: ghcr.io/ccny-glasslab/glasslab-gpu-experiment-runner:0.1.7-local,ghcr.io/ccny-glasslab/glasslab-research-workspace-runner:benchmark-cpu-v1,ghcr.io/ccny-glasslab/glasslab-research-workspace-runner:benchmark-cpu-v2,ghcr.io/ccny-glasslab/glasslab-research-workspace-runner:benchmark-gpu-v1
+  GLASSLAB_ORCHESTRATOR_PERMITTED_JOB_IMAGES: ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:dae5bc4967f5ac54edb6c6d63d8d3db9e4652cc46e035118b0c456eb70121061,ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:9e7c18d186108847a485ab955194ced2dceee3ed8c8a624a2b0f3ee0e7628b60
   GLASSLAB_ORCHESTRATOR_MAXIMUM_TURNS: "20"
   GLASSLAB_ORCHESTRATOR_MAXIMUM_METHODOLOGY_REVISIONS: "2"
   GLASSLAB_ORCHESTRATOR_MAXIMUM_RUNTIME_SECONDS: "86400"

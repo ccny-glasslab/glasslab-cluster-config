@@ -16,6 +16,8 @@ import json
 import secrets
 from typing import AsyncIterator
 
+import httpx
+
 from fastapi import (
     Depends,
     FastAPI,
@@ -28,23 +30,33 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
+from pydantic import SecretStr
 
 from .cluster import FakeClusterExecutor, WorkflowApiClusterExecutor
 from .config import SERVICE_ROOT, Settings, get_settings
 from .contract_candidates import ContractCandidateManager
 from .contracts import ContractIntegrityError, EvaluationContractResolver
+from .corpus_rag.pdf_backend import UnsupportedDocumentError
 from .discord_adapter import DisabledDiscordAdapter, DiscordHttpAdapter
 from .discord_controls import DiscordControlGateway
+from .discord_rest import (
+    DiscordCircuitOpen,
+    DiscordRestCircuit,
+    DiscordRestPolicy,
+    execute_guarded,
+)
 from .datasets import DatasetIngestionError, DatasetIngestionManager
 from .engine import ResearchOrchestrator, WorkflowError
 from .hermes_runtime import HermesProcessRuntime
 from .knowledge_manager import KnowledgeError
 from .opencode_runtime import AgentRuntime, OpenCodeProcessRuntime
 from .policy import ActionPolicy
+from .research_store import ResearchStore
 from .schemas import (
     ActionRecord,
     ApprovalRequest,
     ArtifactListResponse,
+    ChatRequest,
     ContextPacket,
     ContextPacketListResponse,
     EventListResponse,
@@ -53,9 +65,11 @@ from .schemas import (
     KnowledgeSourceListResponse,
     KnowledgeSourceRequest,
     RejectionRequest,
+    ResearchAnswer,
     RunCreateRequest,
     RunListResponse,
     RunRecord,
+    TerminalRetryRequest,
     SourceType,
     TurnListResponse,
 )
@@ -88,7 +102,7 @@ def build_engine(
     # Composition root: wires every subsystem against the same store so all
     # mutations share one transaction boundary and one event log. The cluster
     # executor is swapped for a fake when running without a live API.
-    store = (
+    store: ResearchStore = (
         PostgresStore(settings.store_postgres_dsn)
         if settings.store_backend == 'postgres'
         else SqliteStore(settings.database_path)
@@ -103,6 +117,12 @@ def build_engine(
                 base_url=settings.cluster_execution_api_url,
                 workload_id=settings.cluster_execution_workload_id,
                 experiment_type=settings.cluster_execution_experiment_type,
+                caller_name=settings.workflow_api_caller_name,
+                token=(
+                    settings.workflow_api_token.get_secret_value()
+                    if settings.workflow_api_token
+                    else ''
+                ),
             )
         )
     if discord is None:
@@ -111,13 +131,25 @@ def build_engine(
             and settings.discord_bot_token
             and settings.discord_channel_id
         ):
+            discord_rest_circuit = DiscordRestCircuit(
+                policy=DiscordRestPolicy(
+                    circuit_open_failures=(
+                        settings.discord_rest_circuit_max_failures
+                    ),
+                    cooldown_seconds=(
+                        settings.discord_rest_circuit_cooldown_seconds
+                    ),
+                )
+            )
             discord = DiscordHttpAdapter(
                 bot_token=settings.discord_bot_token,
                 channel_id=settings.discord_channel_id,
                 webhook_url=settings.discord_webhook_url,
+                circuit=discord_rest_circuit,
             )
         else:
             discord = DisabledDiscordAdapter()
+            discord_rest_circuit = None
     contract_candidates = ContractCandidateManager(
         sealed_root=settings.sealed_contract_candidate_root,
         promoted_root=settings.promoted_contract_root,
@@ -178,6 +210,70 @@ def build_engine(
     )
 
 
+def probe_discord_rest(
+    *,
+    circuit: DiscordRestCircuit,
+    token: str,
+    transport: httpx.BaseTransport | None = None,
+) -> None:
+    """Bounded, best-effort REST health probe.
+
+    Runs ``GET /applications/@me`` with the bot token through the same
+    guarded executor the projection adapter uses, so an open circuit fails
+    fast with zero network attempts and every outcome is recorded in the
+    circuit. Exceptions are intentionally swallowed: this is a diagnostic
+    probe, not workflow state.
+    """
+
+    def attempt() -> httpx.Response:
+        with httpx.Client(
+            base_url='https://discord.com/api/v10',
+            headers={'Authorization': f'Bot {token}'},
+            timeout=10,
+            transport=transport,
+        ) as client:
+            return client.get('/applications/@me')
+
+    try:
+        execute_guarded(circuit=circuit, policy=circuit.policy, attempt=attempt)
+    except (DiscordCircuitOpen, httpx.HTTPError):
+        pass
+
+
+async def _discord_rest_probe_loop(
+    circuit: DiscordRestCircuit,
+    token: str,
+    interval_seconds: float,
+) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        await asyncio.to_thread(
+            probe_discord_rest,
+            circuit=circuit,
+            token=token,
+        )
+
+
+def _discord_rest_status(circuit: DiscordRestCircuit | None) -> str:
+    if circuit is None:
+        return 'disabled'
+    snapshot = circuit.snapshot()
+    if snapshot['state'] != 'closed':
+        return 'blocked'
+    if snapshot['total_successes'] > 0:
+        return 'ready'
+    return 'unknown'
+
+
+def _discord_rest_reason(circuit: DiscordRestCircuit | None) -> str | None:
+    if circuit is None:
+        return None
+    snapshot = circuit.snapshot()
+    if snapshot['state'] == 'closed':
+        return None
+    return snapshot['last_outcome_category'] or 'circuit_open'
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -186,6 +282,12 @@ def create_app(
 ) -> FastAPI:
     settings = settings or get_settings()
     engine = engine or build_engine(settings)
+    discord_adapter = getattr(engine, 'discord', None)
+    discord_rest_circuit = (
+        discord_adapter.circuit
+        if isinstance(discord_adapter, DiscordHttpAdapter)
+        else None
+    )
     watcher = JobWatcher(
         engine,
         poll_interval_seconds=settings.job_poll_interval_seconds,
@@ -237,6 +339,19 @@ def create_app(
             if discord_controls is not None
             else None
         )
+        discord_rest_probe_task = (
+            asyncio.create_task(
+                _discord_rest_probe_loop(
+                    discord_rest_circuit,
+                    settings.discord_bot_token,
+                    settings.discord_rest_probe_interval_seconds,
+                ),
+                name='research-orchestrator-discord-rest-probe',
+            )
+            if discord_rest_circuit is not None
+            and settings.discord_rest_probe_interval_seconds > 0
+            else None
+        )
         try:
             yield
         finally:
@@ -249,6 +364,8 @@ def create_app(
                 tasks.append(watcher_task)
             if discord_task is not None:
                 tasks.append(discord_task)
+            if discord_rest_probe_task is not None:
+                tasks.append(discord_rest_probe_task)
             await asyncio.gather(*tasks, return_exceptions=True)
 
     app = FastAPI(
@@ -258,6 +375,7 @@ def create_app(
     )
     app.state.engine = engine
     app.state.discord_controls = discord_controls
+    app.state.discord_rest = discord_rest_circuit
 
     def require_operator(
         supplied_token: str | None = Header(
@@ -308,10 +426,27 @@ def create_app(
 
     @app.get('/health')
     def health() -> dict[str, object]:
+        knowledge_dense: dict[str, object] | None = None
+        try:
+            dense_index = getattr(engine.knowledge, 'dense_index', None)
+            if dense_index is not None:
+                readiness = dense_index.readiness()
+                knowledge_dense = {
+                    'available': readiness.available,
+                    'reason': readiness.reason,
+                    'backend': readiness.backend,
+                    'model_id': readiness.model_id,
+                    'revision': readiness.revision,
+                    'dims': readiness.dims,
+                    'indexed_chunks': readiness.indexed_count,
+                }
+        except Exception as exc:  # noqa: BLE001 - diagnostics never fail /health
+            knowledge_dense = {'available': False, 'reason': str(exc)}
         return {
             'status': 'ok',
             'service': settings.app_name,
             'version': settings.app_version,
+            'knowledge_dense': knowledge_dense,
         }
 
     @app.get('/ready')
@@ -342,6 +477,25 @@ def create_app(
                 if discord_controls is None
                 else 'connecting'
             ),
+            'discord_gateway': (
+                'ready'
+                if discord_controls is not None
+                and discord_controls.client.is_ready()
+                else 'disabled'
+                if discord_controls is None
+                else 'connecting'
+            ),
+            'discord_rest': _discord_rest_status(
+                app.state.discord_rest
+            ),
+            'discord_rest_reason': _discord_rest_reason(
+                app.state.discord_rest
+            ),
+            'discord_rest_detail': (
+                app.state.discord_rest.snapshot()
+                if app.state.discord_rest is not None
+                else None
+            ),
             'evaluation_contract': {
                 'contract_id': contract.descriptor.contract_id,
                 'version': contract.descriptor.version,
@@ -359,6 +513,17 @@ def create_app(
         except Exception as exc:
             raise map_error(exc) from exc
 
+    @app.post('/runs/{run_id}/retry', response_model=RunRecord, status_code=status.HTTP_201_CREATED)
+    def retry_terminal_run(
+        run_id: str,
+        request: TerminalRetryRequest,
+        _: None = Depends(require_operator),
+    ) -> RunRecord:
+        try:
+            return engine.retry_terminal_run(run_id, request)
+        except Exception as exc:
+            raise map_error(exc) from exc
+
     @app.post(
         '/task-bundles/import',
         response_model=TaskBundleRecord,
@@ -372,7 +537,11 @@ def create_app(
             content = await archive.read(
                 TaskBundleManager.MAX_ARCHIVE_BYTES + 1
             )
-            return engine.import_task_bundle(
+            # Offload the synchronous compile (a 40-90s OpenCode agent turn on
+            # first import) so the event loop — and therefore the Discord
+            # Gateway task and /ready probe — stays responsive.
+            return await asyncio.to_thread(
+                engine.import_task_bundle,
                 filename=archive.filename or '',
                 content=content,
             )
@@ -476,6 +645,82 @@ def create_app(
         except Exception as exc:
             raise map_error(exc) from exc
 
+    def _control_plane_secret_values(settings: Settings) -> tuple[str, ...]:
+        """Live control-plane secret VALUES the corpus must never contain.
+
+        Operator uploads skip the broad content heuristic (credential-shaped
+        prose is legitimate in operator-curated material); instead the actual
+        configured secret values are rejected as substrings, so a real
+        credential can still never enter the corpus while textbooks and
+        papers are unaffected.
+        """
+        import os
+
+        raw: list[Any] = [
+            settings.operator_api_token,
+            settings.discord_bot_token,
+            settings.discord_webhook_url,
+            settings.workflow_api_token,
+            os.environ.get('GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN', ''),
+        ]
+        values: list[str] = []
+        for item in raw:
+            if item is None:
+                continue
+            if isinstance(item, SecretStr):
+                item = item.get_secret_value()
+            if item:
+                values.append(str(item))
+        return tuple(values)
+
+    @app.post(
+        '/knowledge/sources/upload',
+        response_model=KnowledgeSource,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def upload_knowledge_source(
+        file: UploadFile = File(...),
+        source_type: str = Form(default='documentation'),
+        title: str | None = Form(default=None),
+        _: None = Depends(require_operator),
+    ) -> KnowledgeSource:
+        # Operator-only content upload: the HTTP twin of path ingestion for
+        # material that lives outside the service filesystem (an operator
+        # laptop full of PDFs). Size-capped; content is checked against the
+        # LIVE control-plane secret values (not the broad heuristic, which
+        # would reject legitimate credential-shaped prose in books).
+        data = file.file.read(settings.knowledge_max_source_bytes + 1)
+        if len(data) > settings.knowledge_max_source_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    'upload exceeds knowledge_max_source_bytes '
+                    f'({settings.knowledge_max_source_bytes})'
+                ),
+            )
+        try:
+            resolved_type = SourceType(source_type)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f'unknown source_type {source_type!r}',
+            ) from None
+        try:
+            return engine.knowledge.ingest_bytes(
+                source_type=resolved_type,
+                filename=file.filename or 'upload',
+                data=data,
+                title=title,
+                forbidden_values=_control_plane_secret_values(settings),
+            )
+        except UnsupportedDocumentError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail=str(exc),
+            ) from exc
+        except Exception as exc:
+            raise map_error(exc) from exc
+
     @app.get(
         '/knowledge/sources',
         response_model=KnowledgeSourceListResponse,
@@ -502,7 +747,51 @@ def create_app(
         _: None = Depends(require_operator),
     ) -> dict[str, object]:
         reindexed = engine.knowledge.rebuild_index()
-        return {'index_version': 'v1', 'reindexed_sources': reindexed}
+        # Re-chunking replaces chunk rows, which cascades away their vector
+        # rows — so this endpoint must also re-embed, or uploads/rebuilds
+        # would silently degrade retrieval to lexical.
+        dense_summary: dict[str, object] | None = None
+        dense_error: str | None = None
+        dense_index = getattr(engine.knowledge, 'dense_index', None)
+        if dense_index is not None:
+            try:
+                from .knowledge_dense import ensure_index_built
+
+                dense_summary = ensure_index_built(
+                    dense_index, engine.knowledge.store
+                )
+            except Exception as exc:  # noqa: BLE001 - dense stays additive
+                dense_error = f'{type(exc).__name__}: {exc}'
+        response: dict[str, object] = {
+            'index_version': 'v1',
+            'reindexed_sources': reindexed,
+            'dense': dense_summary,
+        }
+        if dense_error is not None:
+            response['dense_error'] = dense_error
+        return response
+
+    @app.post(
+        '/chat',
+        response_model=ResearchAnswer,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def answer_research_question(
+        request: ChatRequest,
+        _: None = Depends(require_operator),
+    ) -> ResearchAnswer:
+        # A research_answer turn is a synchronous agent turn (minutes); the
+        # event loop must stay responsive for the Discord Gateway task and
+        # /ready probes.
+        conversation_id = request.conversation_id or f'chat-{secrets.token_hex(8)}'
+        try:
+            return await asyncio.to_thread(
+                engine.answer_research_question,
+                question=request.question,
+                conversation_id=conversation_id,
+            )
+        except Exception as exc:
+            raise map_error(exc) from exc
 
     @app.delete(
         '/knowledge/sources/{source_id}',

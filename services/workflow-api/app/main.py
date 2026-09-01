@@ -23,12 +23,14 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib import request as urllib_request
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
 from services.common.schemas import ArtifactIndexEntry, ArtifactsIndex, RunManifest, RunStatus, WorkflowRegistryEntry
 
 from .config import Settings, get_settings
+from .auth import authenticate_request
 from .autoresearch_routes import register_autoresearch_routes
 from .digest_scheduling import schedule_is_due
 from .execution_routes import register_execution_routes
@@ -1090,6 +1092,10 @@ def create_run_record(
         resource_limits=workflow.resource_profile.limits,
         node_selector=workflow.resource_profile.node_selector,
         runner_image=workflow.runner_image,
+        runner_service_account_name=workflow.runner_service_account_name,
+        maximum_wallclock_minutes=workflow.max_wallclock_minutes,
+        budget={'max_wallclock_minutes': workflow.max_wallclock_minutes},
+        entrypoint=list(workflow.default_entrypoint),
         evaluator_type=workflow.evaluator_type,
         approval_tier=workflow.approval_tier,
         expected_artifacts=workflow.expected_artifacts.model_dump(mode='json'),
@@ -1192,6 +1198,15 @@ def create_app(
     app.state.registry = registry
     app.state.store = store
     app.state.submitter = submitter
+
+    @app.middleware('http')
+    async def authorize_requests(request: Request, call_next):
+        if not (request.method == 'GET' and request.url.path == '/healthz'):
+            try:
+                authenticate_request(request, settings)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
+        return await call_next(request)
 
     @app.get('/healthz')
     def healthz() -> dict:

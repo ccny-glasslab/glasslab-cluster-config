@@ -17,10 +17,12 @@ from .opencode_runtime import AgentRuntime, RuntimeSession
 from .schemas import (
     AgentName,
     AgentTurnResult,
+    Citation,
     Claim,
     EvaluationContractProposal,
     ProducedFile,
     RequestedAction,
+    ResearchAnswer,
     RunState,
     TaskSpecProposal,
     TurnKind,
@@ -71,6 +73,30 @@ class ScriptedMockRuntime(AgentRuntime):
         self.turn_counts[agent] += 1
         self.prompts.append((agent, prompt))
         message_id = f'mock-message-{uuid4().hex[:12]}'
+        if agent == AgentName.HONEYDEW and 'research question' in prompt:
+            return (
+                AgentTurnResult(
+                    kind=TurnKind.RESEARCH_ANSWER,
+                    summary='Answered the research question from the corpus.',
+                    research_answer=ResearchAnswer(
+                        answer='Conformal prediction provides coverage '
+                        'guarantees by construction on calibration data.',
+                        citations=[
+                            Citation(
+                                knowledge_uri=(
+                                    'knowledge://context/'
+                                    '00000000000000000000000000000000'
+                                ),
+                                source='conformal-prediction-nixtla',
+                                excerpt='Setting up Conformal Intervals '
+                                'Parameter Requirements',
+                            )
+                        ],
+                    ),
+                    done=True,
+                ),
+                message_id,
+            )
         if agent == AgentName.BEAKER and 'Write implementation-plan.md' in prompt:
             (workspace / 'implementation-plan.md').write_text(
                 '# Implementation Plan\n\n'
@@ -182,6 +208,11 @@ class ScriptedMockRuntime(AgentRuntime):
             or 'Finalize the existing imported benchmark' in prompt
             or 'Revise the implementation' in prompt
         ):
+            # The cluster executes objective worktrees via `python3 run.py`;
+            # the mock mirrors that mandatory repo-root entrypoint.
+            (workspace / 'run.py').write_text(
+                'print("bounded mock run.py")\n'
+            )
             (workspace / 'experiment.py').write_text(
                 'print("bounded mock experiment")\n'
             )

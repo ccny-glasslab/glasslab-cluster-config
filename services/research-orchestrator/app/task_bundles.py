@@ -27,6 +27,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from .schemas import TaskAssetProposal, TaskSpecProposal
+from .spec_feedback import format_spec_feedback
 
 
 class TaskBundleError(ValueError):
@@ -83,6 +84,7 @@ class TaskPreflight(BaseModel):
     missing_inputs: list[str]
     blocking_issues: list[str]
     ready: bool
+    feedback: str = ''
 
 
 @dataclass(frozen=True)
@@ -97,7 +99,8 @@ RUNTIME_PROFILES = {
         workload_id='workspace-cpu-ml-v1',
         runner_image=(
             'ghcr.io/ccny-glasslab/'
-            'glasslab-research-workspace-runner:benchmark-cpu-v2'
+            'glasslab-research-workspace-runner@sha256:'
+            'dae5bc4967f5ac54edb6c6d63d8d3db9e4652cc46e035118b0c456eb70121061'
         ),
         resources={
             'cpu': 4,
@@ -110,7 +113,8 @@ RUNTIME_PROFILES = {
         workload_id='workspace-gpu-ml-v1',
         runner_image=(
             'ghcr.io/ccny-glasslab/'
-            'glasslab-research-workspace-runner:benchmark-gpu-v1'
+            'glasslab-research-workspace-runner@sha256:'
+            '9e7c18d186108847a485ab955194ced2dceee3ed8c8a624a2b0f3ee0e7628b60'
         ),
         resources={
             'cpu': 8,
@@ -127,7 +131,8 @@ RUNTIME_PROFILES = {
 FIXED_WORKLOAD_RUNNER_IMAGES = {
     'benchmark-workspace-cpu-v1': (
         'ghcr.io/ccny-glasslab/'
-        'glasslab-research-workspace-runner:benchmark-cpu-v2'
+        'glasslab-research-workspace-runner@sha256:'
+        'dae5bc4967f5ac54edb6c6d63d8d3db9e4652cc46e035118b0c456eb70121061'
     ),
     'workspace-cpu-ml-v1': RUNTIME_PROFILES['cpu-ml-standard-v1'].runner_image,
     'workspace-gpu-ml-v1': RUNTIME_PROFILES['gpu-ml-standard-v1'].runner_image,
@@ -589,6 +594,7 @@ class TaskBundleManager:
                         f'{asset.name}'
                     )
         issues.extend(asset_issues)
+        ready = not issues and evaluator_ready
         return TaskPreflight(
             task_id=record.task_id,
             digest=record.digest,
@@ -598,7 +604,8 @@ class TaskBundleManager:
             evaluator_ready=evaluator_ready,
             missing_inputs=record.missing_inputs,
             blocking_issues=issues,
-            ready=not issues and evaluator_ready,
+            ready=ready,
+            feedback=format_spec_feedback(issues) if not ready else '',
         )
 
     @staticmethod

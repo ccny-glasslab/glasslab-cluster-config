@@ -135,3 +135,113 @@ def test_candidate_cannot_supply_checksum_or_symlink(tmp_path: Path) -> None:
             contract_id='candidate-v1',
             version='1.0.0',
         )
+
+
+def test_python_bytecode_caches_are_skipped_during_sealing(
+    tmp_path: Path,
+) -> None:
+    # Beaker runs its local checks inside the candidate directory, and
+    # CPython leaves __pycache__/*.pyc behind. Those are reproducible
+    # interpreter byproducts rather than reviewed content, and the
+    # review-copy path already ignores them; sealing must skip them too.
+    # Issue #98 run 6ba79481df7142a89ee67050b0fb37e4 exhausted its turn
+    # budget on exactly this rejection.
+    source = tmp_path / 'source'
+    _write_candidate(source)
+    pycache = source / 'src' / '__pycache__'
+    pycache.mkdir(parents=True)
+    (pycache / 'evaluator.cpython-311.pyc').write_bytes(b'\x00\x01cache')
+    manager = ContractCandidateManager(
+        sealed_root=str(tmp_path / 'sealed'),
+        promoted_root=str(tmp_path / 'shared' / 'bundles'),
+        catalog_path=str(tmp_path / 'shared' / 'catalog.json'),
+        shared_mount_root=str(tmp_path),
+    )
+
+    sealed = manager.seal(
+        source=source,
+        contract_id='candidate-v1',
+        version='1.0.0',
+    )
+
+    assert not list(sealed.sealed_path.rglob('*.pyc'))
+    assert not list(sealed.sealed_path.rglob('__pycache__'))
+    assert (sealed.sealed_path / 'evaluator.py').is_file()
+
+
+def test_unknown_non_text_content_is_still_rejected(tmp_path: Path) -> None:
+    source = tmp_path / 'source'
+    _write_candidate(source)
+    (source / 'helper.sh').write_text('#!/bin/sh\n')
+    manager = ContractCandidateManager(
+        sealed_root=str(tmp_path / 'sealed'),
+        promoted_root=str(tmp_path / 'shared' / 'bundles'),
+        catalog_path=str(tmp_path / 'shared' / 'catalog.json'),
+        shared_mount_root=str(tmp_path),
+    )
+
+    with pytest.raises(ContractCandidateError, match='unsupported'):
+        manager.seal(
+            source=source,
+            contract_id='candidate-v1',
+            version='1.0.0',
+        )
+
+
+def test_candidate_methodology_requirements_missing_config_path_is_rejected(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / 'source'
+    _write_candidate(source)
+    descriptor_path = source / 'contract.json'
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor['manifest']['methodology_requirements'] = [
+        {
+            'requirement_id': 'calibration-metric-threshold',
+            'mode': 'decision',
+            'description': 'accuracy is the primary metric',
+        }
+    ]
+    descriptor_path.write_text(json.dumps(descriptor))
+    manager = ContractCandidateManager(
+        sealed_root=str(tmp_path / 'sealed'),
+        promoted_root=str(tmp_path / 'shared' / 'bundles'),
+        catalog_path=str(tmp_path / 'shared' / 'catalog.json'),
+        shared_mount_root=str(tmp_path),
+    )
+    with pytest.raises(ContractCandidateError, match='methodology_requirements'):
+        manager.seal(
+            source=source,
+            contract_id='candidate-v1',
+            version='1.0.0',
+        )
+
+
+def test_candidate_valid_methodology_requirements_seal_cleanly(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / 'source'
+    _write_candidate(source)
+    descriptor_path = source / 'contract.json'
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor['manifest']['methodology_requirements'] = [
+        {
+            'requirement_id': 'calibration-metric-threshold',
+            'config_path': 'configs/candidate.yaml',
+            'mode': 'decision',
+            'description': 'accuracy is the primary metric',
+        }
+    ]
+    descriptor_path.write_text(json.dumps(descriptor))
+    manager = ContractCandidateManager(
+        sealed_root=str(tmp_path / 'sealed'),
+        promoted_root=str(tmp_path / 'shared' / 'bundles'),
+        catalog_path=str(tmp_path / 'shared' / 'catalog.json'),
+        shared_mount_root=str(tmp_path),
+    )
+    sealed = manager.seal(
+        source=source,
+        contract_id='candidate-v1',
+        version='1.0.0',
+    )
+    assert sealed.digest

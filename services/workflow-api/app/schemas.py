@@ -275,23 +275,14 @@ class GenericExperimentRunRequest(BaseModel):
     workload_id: str = Field(min_length=3)
     parent_run_id: str | None = None
     campaign_id: str | None = None
-    image_ref: str | None = None
-    entrypoint: list[str] = Field(default_factory=list)
     config_payload: dict[str, Any] = Field(default_factory=dict)
     dataset_bindings: dict[str, str] = Field(default_factory=dict)
-    resources: dict[str, Any] = Field(default_factory=dict)
     budget: dict[str, Any] = Field(default_factory=dict)
     artifact_contract: ExpectedArtifactsSpec | None = None
     metric_contract: dict[str, Any] = Field(default_factory=dict)
     submitted_by: str | None = None
     run_priority: Literal['user', 'autonomous'] = 'user'
     session_id: str | None = None
-
-    @field_validator('entrypoint')
-    @classmethod
-    def validate_entrypoint(cls, value: list[str]) -> list[str]:
-        cleaned = [' '.join(str(item).split()).strip() for item in value]
-        return [item for item in cleaned if item]
 
     @field_validator('dataset_bindings')
     @classmethod
@@ -1117,6 +1108,12 @@ class InvestigationWorkspaceSpec(BaseModel):
         cleaned = [str(item).strip() for item in value]
         if not cleaned or any(not item for item in cleaned):
             raise ValueError('workspace command entries must not be blank')
+        if len(cleaned) > 64 or any(len(item) > 1024 for item in cleaned):
+            raise ValueError('workspace command exceeds the bounded argv contract')
+        if cleaned[0] not in {'python3'}:
+            raise ValueError('workspace command executable is not approved')
+        if any(any(ord(character) < 32 for character in item) for item in cleaned):
+            raise ValueError('workspace command entries must not contain control characters')
         return cleaned
 
 

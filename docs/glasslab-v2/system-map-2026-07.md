@@ -106,10 +106,7 @@ These may remain live, but they should not define the product.
 
 | Component | Path | Decision |
 | --- | --- | --- |
-| WhatsApp gateway | `services/whatsapp-gateway/` | Keep as optional remote adapter only. |
-| WhatsApp web bridge | `services/whatsapp-web-bridge/` | Keep only while WhatsApp remains a secondary adapter. |
-| research-ingress | `services/research-ingress/` | Compatibility adapter in front of workflow-api. |
-| research-command-router | `services/research-command-router/` | Compatibility router; do not add new workflow logic here. |
+| research-command-router | `services/research-command-router/` | Compatibility router; do not add new workflow logic here. Held pending confirmation on the #173 workflow-api auth work. |
 | intake / interpretation / design / assessment agents | `services/*-agent/` | Bounded agents, not the core execution engine. |
 | schedule-worker | `services/schedule-worker/` | Useful for scheduled execution; keep behind workflow-api records. |
 
@@ -131,6 +128,7 @@ These are useful for context but should not be treated as current defaults.
 
 | Area | Where to look |
 | --- | --- |
+| whatsapp-gateway, whatsapp-web-bridge, research-ingress (retired, issue #159) | `docs/glasslab-v2/historical/README.md` |
 | March live-state snapshots | `docs/glasslab-v2/live-state-*.md` |
 | old OpenClaw/Ollama/vLLM direction | `docs/glasslab-v2/historical/README.md` |
 | early research-assistant framing | `docs/glasslab-v2/historical/README.md` |
@@ -200,8 +198,10 @@ docs/glasslab-v2/ci-policy-2026-07.md
 
 ### Phase 3: Prune services and manifests
 
-- Decide whether WhatsApp remains an actively supported adapter.
-- If not, scale it down, move its tests to archive/manual, then remove manifests.
+- Done: WhatsApp (gateway, web bridge) and research-ingress are retired
+  (issue #159); source, manifests, and CI entries removed.
+  research-command-router is held pending confirmation on the #173
+  workflow-api auth work.
 - Keep bounded agents only if they consume/produce workflow-api records.
 - Archive v1 Titanic manifests after the generic experiment path covers the same
   demonstration value.

@@ -72,6 +72,7 @@ class TurnKind(StrEnum):
     EXPERIMENT_ANALYSIS = 'experiment_analysis'
     VERIFICATION = 'verification'
     FINAL_REPORT = 'final_report'
+    RESEARCH_ANSWER = 'research_answer'
 
 
 class Claim(BaseModel):
@@ -290,6 +291,36 @@ class AgentTurnResult(BaseModel):
     message_to_other_agent: str = ''
     recommended_next_state: RunState | None = None
     done: bool = False
+    research_answer: ResearchAnswer | None = None
+
+
+class Citation(BaseModel):
+    # Deliberately tolerant of extra fields: the research_answer turn runs
+    # through a coding model that appends descriptive keys to citation
+    # objects. The three required fields are what the API consumes.
+    knowledge_uri: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    excerpt: str = Field(min_length=1)
+
+
+class ResearchAnswer(BaseModel):
+    """Grounded answer to a research question over the knowledge corpus.
+
+    ``citations`` must be non-empty whenever the corpus answers the question;
+    an ungrounded response is a schema violation, not a valid answer.
+    """
+
+    answer: str = Field(min_length=1)
+    citations: list[Citation] = Field(default_factory=list)
+    unanswerable: bool = False
+    suggested_followups: list[str] = Field(default_factory=list)
+
+
+class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    question: str = Field(min_length=1, max_length=2000)
+    conversation_id: str | None = None
 
 
 class ResourceRequest(BaseModel):
@@ -429,6 +460,15 @@ class RunRecord(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     run_id: str
+    # A retry is a distinct run.  This immutable link is the API-visible
+    # lineage edge; terminal parents are never reopened or rewritten.
+    parent_run_id: str | None = None
+    retry_checkpoint_digest: str | None = None
+    # The exact Git commit used to create both isolated worktrees.  Retry
+    # children are pinned here instead of resolving a moving branch name.
+    workspace_base_commit: str | None = Field(
+        default=None, pattern=r'^[a-f0-9]{40}$'
+    )
     objective: str
     state: RunState
     protocol_path: str | None = None
@@ -731,6 +771,11 @@ class ContextPacket(BaseModel):
     ranked_sources: list[dict[str, Any]] = Field(default_factory=list)
     exact_text_supplied: str | None = None
     token_budget: int = Field(gt=0)
+    # Actual retrieval outcome for this packet (defaults keep packets written
+    # before dense retrieval valid to load).
+    retrieval_mode_requested: str | None = None
+    retrieval_mode_actual: str | None = None
+    retrieval_fallback_reason: str = ''
     created_at: datetime = Field(default_factory=utc_now)
 
     def evidence_uri(self) -> str:
@@ -782,6 +827,14 @@ class RunCreateRequest(BaseModel):
         if bool(self.evaluation_contract_id) != bool(self.evaluation_contract_version):
             raise ValueError('evaluation contract ID and version must be supplied together')
         return self
+
+
+class TerminalRetryRequest(BaseModel):
+    """Optional caller key for an auditable, idempotent terminal retry."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=256)
 
 
 class ApprovalRequest(BaseModel):

@@ -15,6 +15,10 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: node05
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
       imagePullSecrets:
         - name: glasslab-ghcr-pull
       containers:
@@ -22,6 +26,13 @@ spec:
           image: ghcr.io/ccny-glasslab/glasslab-research-command-router:0.1.11-local
           imagePullPolicy: IfNotPresent
           env:
+            - name: GLASSLAB_WORKFLOW_API_CALLER_NAME
+              value: research-command-router
+            - name: GLASSLAB_WORKFLOW_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-workflow-api-research-command-router
+                  key: token
             - name: GLASSLAB_RESEARCH_COMMAND_ROUTER_WORKFLOW_API_URL
               value: http://glasslab-workflow-api.glasslab-v2.svc.cluster.local:8080
             - name: GLASSLAB_RESEARCH_COMMAND_ROUTER_TIMEOUT_SECONDS
@@ -29,6 +40,17 @@ spec:
           ports:
             - containerPort: 8095
               name: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: 50m
@@ -48,3 +70,6 @@ spec:
               port: http
             initialDelaySeconds: 15
             periodSeconds: 20
+      volumes:
+        - name: tmp
+          emptyDir: {}

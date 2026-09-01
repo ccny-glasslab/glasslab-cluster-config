@@ -26,6 +26,9 @@ TRANSITIONS: dict[RunState, set[RunState]] = {
     RunState.CREATED: {RunState.PREPARING, RunState.CANCELLED, RunState.FAILED},
     RunState.PREPARING: {
         RunState.HONEYDEW_DRAFTING_PROTOCOL,
+        # A terminal retry with a verified immutable protocol intentionally
+        # waits for a fresh human protocol approval rather than redrafting it.
+        RunState.AWAITING_PROTOCOL_APPROVAL,
         RunState.PAUSED,
         RunState.CANCELLED,
         RunState.FAILED,
@@ -48,6 +51,10 @@ TRANSITIONS: dict[RunState, set[RunState]] = {
     },
     RunState.BEAKER_DRAFTING_CONTRACT: {
         RunState.HONEYDEW_REVIEWING_CONTRACT,
+        # Direct bind: when the approved proposal references an already
+        # installed contract, the run skips the candidate/review/promotion
+        # states and proceeds straight to planning.
+        RunState.BEAKER_PLANNING,
         RunState.PAUSED,
         RunState.CANCELLED,
         RunState.FAILED,

@@ -10,9 +10,8 @@ on:
         type: choice
         options:
           - workflow-api
-          - whatsapp-gateway
-          - research-ingress
           - research-command-router
+          - schedule-worker
           - research-orchestrator
           - research-workspace-runner
           - runner
@@ -54,23 +53,18 @@ jobs:
               echo "dockerfile=services/workflow-api/Dockerfile" >> "$GITHUB_OUTPUT"
               echo "image=ghcr.io/${REPO_OWNER}/glasslab-workflow-api" >> "$GITHUB_OUTPUT"
               ;;
-            whatsapp-gateway)
-              echo "context=services/whatsapp-gateway" >> "$GITHUB_OUTPUT"
-              echo "dockerfile=services/whatsapp-gateway/Dockerfile" >> "$GITHUB_OUTPUT"
-              echo "image=ghcr.io/${REPO_OWNER}/glasslab-whatsapp-gateway" >> "$GITHUB_OUTPUT"
-              ;;
-            research-ingress)
-              echo "context=services/research-ingress" >> "$GITHUB_OUTPUT"
-              echo "dockerfile=services/research-ingress/Dockerfile" >> "$GITHUB_OUTPUT"
-              echo "image=ghcr.io/${REPO_OWNER}/glasslab-research-ingress" >> "$GITHUB_OUTPUT"
-              ;;
             research-command-router)
               echo "context=services/research-command-router" >> "$GITHUB_OUTPUT"
               echo "dockerfile=services/research-command-router/Dockerfile" >> "$GITHUB_OUTPUT"
               echo "image=ghcr.io/${REPO_OWNER}/glasslab-research-command-router" >> "$GITHUB_OUTPUT"
               ;;
+            schedule-worker)
+              echo "context=services/schedule-worker" >> "$GITHUB_OUTPUT"
+              echo "dockerfile=services/schedule-worker/Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "image=ghcr.io/${REPO_OWNER}/glasslab-schedule-worker" >> "$GITHUB_OUTPUT"
+              ;;
             research-orchestrator)
-              echo "context=services/research-orchestrator" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
               echo "dockerfile=services/research-orchestrator/Dockerfile" >> "$GITHUB_OUTPUT"
               echo "image=ghcr.io/${REPO_OWNER}/glasslab-research-orchestrator" >> "$GITHUB_OUTPUT"
               ;;

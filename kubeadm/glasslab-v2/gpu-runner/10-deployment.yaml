@@ -14,7 +14,12 @@ spec:
         app.kubernetes.io/name: glasslab-gpu-runner
     spec:
       enableServiceLinks: false
+      serviceAccountName: glasslab-gpu-runner
+      automountServiceAccountToken: false
       runtimeClassName: nvidia
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
       nodeSelector:
         glasslab.io/gpu-candidate: "true"
         kubernetes.io/hostname: node02
@@ -35,7 +40,7 @@ spec:
                 secretKeyRef:
                   name: glasslab-v2-runner
                   key: GLASSLAB_RUNNER_STORE_POSTGRES_DSN
-                  optional: true
+                  optional: false
             - name: GLASSLAB_RUNNER_MINIO_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
@@ -52,9 +57,19 @@ spec:
               value: glasslab-minio.glasslab-v2.svc.cluster.local:9000
             - name: GLASSLAB_RUNNER_PORT
               value: "52415"
+            - name: HF_HOME
+              value: /mnt/model-cache
           ports:
             - containerPort: 52415
               name: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
           resources:
             requests:
               cpu: "2"
@@ -87,7 +102,7 @@ spec:
             - name: artifacts-volume
               mountPath: /mnt/artifacts
             - name: model-cache
-              mountPath: /root/.cache/huggingface
+              mountPath: /mnt/model-cache
             - name: tmp-volume
               mountPath: /tmp
       volumes:

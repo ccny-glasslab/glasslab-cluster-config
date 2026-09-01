@@ -62,11 +62,23 @@ spec:
                 name: glasslab-research-orchestrator
                 optional: true
           env:
+            - name: GLASSLAB_WORKFLOW_API_CALLER_NAME
+              value: research-orchestrator
+            - name: GLASSLAB_WORKFLOW_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-workflow-api-research-orchestrator
+                  key: token
             - name: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
               valueFrom:
                 secretKeyRef:
                   name: glasslab-research-orchestrator
                   key: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+            # The dense-retrieval embedding model downloads its weights to
+            # HF_HOME at first use; the pod home is read-only, so point the
+            # cache at the persistent shared volume next to opencode-cache.
+            - name: HF_HOME
+              value: /mnt/artifacts/research-orchestrator/hf-cache
           ports:
             - containerPort: 8080
               name: http

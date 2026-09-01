@@ -77,6 +77,7 @@
     "deterministic-template"
   ],
   "runner_image": "ghcr.io/ccny-glasslab/glasslab-gpu-experiment-runner:0.1.7-local",
+  "runner_service_account_name": "glasslab-gpu-runner",
   "evaluator_type": "gpu-training-metrics",
   "expected_artifacts": {
     "required": [
@@ -112,9 +113,9 @@
     }
   },
   "approval_tier": "tier-2-approved-execution",
-  "execution_status": "ready",
-  "submission_backend": "kubernetes",
-  "execution_blockers": [],
+  "execution_status": "disabled",
+  "submission_backend": "null",
+  "execution_blockers": ["Runner image digest is unavailable; rebuild and pin the image before re-enabling execution."],
   "runtime_requirements": {
     "gpu": true,
     "training_stack": ["pytorch", "torchvision", "timm"],

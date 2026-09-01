@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,7 +28,7 @@ class Settings(BaseSettings):
 
     planner_model_name: str = 'Qwen/Qwen3-4B-Instruct-2507'
     qwen_api_base: str = 'http://vllm.glasslab-agents.svc.cluster.local:8000/v1'
-    qwen_api_key: str = 'change-me'
+    qwen_api_key: str
     qwen_timeout_seconds: int = 30
     planner_temperature: float = 0.0
     planner_max_tokens: int = 256
@@ -59,6 +60,18 @@ class Settings(BaseSettings):
 
     poll_interval_seconds: int = 10
     auto_monitor_submitted_jobs: bool = True
+
+    @field_validator('qwen_api_key')
+    @classmethod
+    def reject_placeholder_qwen_api_key(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if (
+            not normalized
+            or normalized.startswith('change-me')
+            or normalized in {'redacted', '<redacted>', 'replace-me'}
+        ):
+            raise ValueError('qwen_api_key must contain a non-placeholder value')
+        return value
 
     @property
     def titanic_dataset_path(self) -> str:

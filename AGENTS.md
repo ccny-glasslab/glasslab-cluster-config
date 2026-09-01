@@ -52,7 +52,7 @@ The current human-facing research path is:
 ```text
 Discord
   -> research-orchestrator
-  -> isolated Honeydew and Beaker OpenCode runtimes
+  -> isolated Hermes-backed Honeydew and Beaker runtimes
   -> structured, policy-checked action requests
   -> workflow-api
   -> bounded Kubernetes Jobs
@@ -74,9 +74,15 @@ The responsibilities are deliberately separate:
 - **Discord** is an interface and transcript projection, not authoritative
   memory or state.
 
-Both agents currently use separate OpenCode processes and sessions against the
-exo OpenAI-compatible endpoint configured for the shared Qwen model. Their
-workspaces and OpenCode data are isolated per run and agent.
+Both agents run through separate Hermes gateway processes against the exo
+OpenAI-compatible endpoint configured for the shared Qwen model. Their
+workspaces and runtime data are isolated per run and agent. OpenCode remains
+installed only as a rollback runtime; it is selected only by setting
+`GLASSLAB_ORCHESTRATOR_AGENT_RUNTIME_BACKEND` back to `opencode`.
+
+Run state is stored in PostgreSQL in production, selected by
+`GLASSLAB_ORCHESTRATOR_STORE_BACKEND=postgres`. SQLite remains the local, test,
+and import-migration backend (`sqlite`).
 
 Primary code and deployment areas:
 
@@ -240,8 +246,10 @@ records applied immediately before every deletion.
 
 ## Development And Delivery
 
-Work on one branch per coherent change and open a pull request into protected
-`main`. Direct administrator pushes are for incident recovery only.
+Work on one branch per coherent change and open a feature pull request into
+`testing`. Promote `testing` to protected `main` only when the integration
+state is ready for production. Direct administrator pushes are for incident
+recovery only.
 
 Before pushing:
 

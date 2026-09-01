@@ -16,6 +16,7 @@ For current architecture read `AGENTS.md` and `docs/glasslab-v2/current/README.m
 ## WhatsApp (deprecated transport)
 
 - [whatsapp-dedicated-account-migration.md](whatsapp-dedicated-account-migration.md) — WhatsApp dedicated account migration plan
+- [research-ingress.md](research-ingress.md) — research-ingress service contract, deterministic ingress layer in front of research-command-router
 
 ## Old Command Surface (`!new`, `!plan`, `!run` era)
 
@@ -28,3 +29,17 @@ For current architecture read `AGENTS.md` and `docs/glasslab-v2/current/README.m
 ## Titanic (legacy v1 stack)
 
 - [titanic-agent-stack.md](titanic-agent-stack.md) — legacy v1 FastAPI agent stack, preserved as reference
+
+## Dated Audit And Reference Docs (2026-03 to 2026-04)
+
+These were moved here from the top level of `docs/glasslab-v2/` as part of the
+historical reorganization. They predate the current Honeydew/Beaker architecture
+and are not current product contracts or runbooks.
+
+- [implemented-vs-discussed-2026-03-30.md](implemented-vs-discussed-2026-03-30.md) — feature implementation vs. discussion gap audit (March 2026)
+- [storage-capacity-inventory-2026-03-23.md](storage-capacity-inventory-2026-03-23.md) — storage capacity inventory snapshot (March 2026)
+- [doc-contradictions-2026-04.md](doc-contradictions-2026-04.md) — documented contradictions audit (April 2026)
+- [generic-experiment-gap-audit-2026-04.md](generic-experiment-gap-audit-2026-04.md) — generic experiment gap audit (April 2026)
+- [workload-registry-evolution-notes-2026-04.md](workload-registry-evolution-notes-2026-04.md) — workload registry evolution notes (April 2026)
+- [opencode-storage-cleanup-handoff-2026-04.md](opencode-storage-cleanup-handoff-2026-04.md) — OpenCode storage cleanup handoff notes (April 2026)
+- [workflow-api-test-triage-2026-04-28.md](workflow-api-test-triage-2026-04-28.md) — workflow-api test triage snapshot (April 2026)

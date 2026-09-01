@@ -28,11 +28,22 @@ import httpx
 from pydantic import ValidationError
 
 from .config import Settings
+from .runtime_env import build_agent_environment
 from .schemas import AgentName, AgentTurnResult, ProducedFile
 
 
 class OpenCodeRuntimeError(RuntimeError):
-    pass
+    """A surfaced OpenCode runtime failure.
+
+    ``failure_class`` classifies the failure for the engine's bounded retry
+    decision: transient classes (startup, turn_timeout, repeated_tool_loop,
+    provider, network) are retryable; deterministic classes (validation,
+    kind_mismatch) are not.
+    """
+
+    def __init__(self, message: str, *, failure_class: str | None = None) -> None:
+        super().__init__(message)
+        self.failure_class = failure_class
 
 
 @dataclass
@@ -328,7 +339,10 @@ class OpenCodeProcessRuntime(AgentRuntime):
                 except OSError:
                     continue
             return port
-        raise OpenCodeRuntimeError('no OpenCode runtime port is available')
+        raise OpenCodeRuntimeError(
+            'no OpenCode runtime port is available',
+            failure_class='startup',
+        )
 
     def _permissions(self, agent: AgentName) -> dict[str, Any]:
         # Deny-list for the agent's bash tool. Cluster mutation, network
@@ -461,19 +475,20 @@ class OpenCodeProcessRuntime(AgentRuntime):
         # XDG roots are isolated per run and agent under the workspace parent,
         # so no conversation state leaks between runs. The random server
         # password is held only in this in-memory handle and is never written
-        # to disk or the log. NOTE: the full inherited process environment is
-        # passed through, so any orchestrator secrets in env vars are visible
-        # to the agent shell.
-        environment = {
-            **__import__('os').environ,
-            'XDG_CONFIG_HOME': str(config_root),
-            'XDG_DATA_HOME': str(data_root),
-            'XDG_CACHE_HOME': str(cache_root),
-            'XDG_STATE_HOME': str(state_root),
-            'HOME': str(home_root),
-            'OPENCODE_SERVER_USERNAME': 'glasslab-orchestrator',
-            'OPENCODE_SERVER_PASSWORD': password,
-        }
+        # to disk or the log. The child environment is an explicit allowlist
+        # (see app/runtime_env.py): orchestrator control-plane secrets never
+        # reach the agent shell.
+        environment = build_agent_environment(
+            runtime_vars={
+                'XDG_CONFIG_HOME': str(config_root),
+                'XDG_DATA_HOME': str(data_root),
+                'XDG_CACHE_HOME': str(cache_root),
+                'XDG_STATE_HOME': str(state_root),
+                'HOME': str(home_root),
+                'OPENCODE_SERVER_USERNAME': 'glasslab-orchestrator',
+                'OPENCODE_SERVER_PASSWORD': password,
+            },
+        )
         process = subprocess.Popen(
             [
                 self.settings.opencode_executable,
@@ -507,7 +522,8 @@ class OpenCodeProcessRuntime(AgentRuntime):
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise OpenCodeRuntimeError(
-                    f'OpenCode process exited during startup; see {log_path}'
+                    f'OpenCode process exited during startup; see {log_path}',
+                    failure_class='startup',
                 )
             try:
                 response = httpx.get(
@@ -521,7 +537,10 @@ class OpenCodeProcessRuntime(AgentRuntime):
                 pass
             time.sleep(0.1)
         self._stop_handle(handle)
-        raise OpenCodeRuntimeError('OpenCode server did not become healthy')
+        raise OpenCodeRuntimeError(
+            'OpenCode server did not become healthy',
+            failure_class='startup',
+        )
 
     def _client(self, handle: _ProcessHandle) -> httpx.Client:
         return httpx.Client(
@@ -581,7 +600,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
             workspace=workspace,
         )
         stop_watchdog = threading.Event()
-        abort_reasons: list[str] = []
+        abort_reasons: list[tuple[str, str]] = []
         # The watchdog polls the transcript and enforces both the hard
         # wall-clock deadline and the identical-terminal-tool-call guard. It
         # records why the turn was aborted so run_turn surfaces a meaningful
@@ -608,11 +627,17 @@ class OpenCodeProcessRuntime(AgentRuntime):
                 prompt=prompt,
             )
             if abort_reasons:
-                raise OpenCodeRuntimeError(abort_reasons[0])
+                reason, failure_class = abort_reasons[0]
+                raise OpenCodeRuntimeError(
+                    reason, failure_class=failure_class
+                )
             return result
         except Exception as exc:
             if abort_reasons:
-                raise OpenCodeRuntimeError(abort_reasons[0]) from exc
+                reason, failure_class = abort_reasons[0]
+                raise OpenCodeRuntimeError(
+                    reason, failure_class=failure_class
+                ) from exc
             raise
         finally:
             stop_watchdog.set()
@@ -676,7 +701,8 @@ class OpenCodeProcessRuntime(AgentRuntime):
                     provider_error = provider_error_message(body)
                     if provider_error:
                         raise OpenCodeRuntimeError(
-                            f'OpenCode provider error: {provider_error}'
+                            f'OpenCode provider error: {provider_error}',
+                            failure_class='provider',
                         )
                     info = body.get('info', {})
                     message_id = info.get('id')
@@ -699,7 +725,8 @@ class OpenCodeProcessRuntime(AgentRuntime):
                                 >= self.settings.opencode_structured_repair_attempts
                             ):
                                 raise OpenCodeRuntimeError(
-                                    'OpenCode turn did not return structured output'
+                                    'OpenCode turn did not return structured output',
+                                    failure_class='validation',
                                 ) from exc
                             current_prompt = (
                                 'Return only the structured result for your '
@@ -745,9 +772,13 @@ class OpenCodeProcessRuntime(AgentRuntime):
                 raise OpenCodeRuntimeError(
                     'OpenCode structured output remained invalid after '
                     f'{self.settings.opencode_structured_repair_attempts} '
-                    f'repair attempt(s): {_validation_summary(exc)}'
+                    f'repair attempt(s): {_validation_summary(exc)}',
+                    failure_class='validation',
                 ) from exc
-        raise OpenCodeRuntimeError('OpenCode turn ended without a result')
+        raise OpenCodeRuntimeError(
+            'OpenCode turn ended without a result',
+            failure_class='validation',
+        )
 
     @staticmethod
     def _terminal_tool_signatures(messages: list[dict[str, Any]]) -> list[str]:
@@ -783,11 +814,12 @@ class OpenCodeProcessRuntime(AgentRuntime):
         session_id: str,
         workspace: Path,
         stop: threading.Event,
-        abort_reasons: list[str],
+        abort_reasons: list[tuple[str, str]],
     ) -> None:
         deadline = time.monotonic() + self.settings.opencode_turn_timeout_seconds
         while not stop.wait(2):
             reason: str | None = None
+            failure_class: str | None = None
             if time.monotonic() >= deadline:
                 reason = (
                     'OpenCode turn exceeded the hard wall-clock limit of '
@@ -821,11 +853,12 @@ class OpenCodeProcessRuntime(AgentRuntime):
                                 'OpenCode turn aborted after '
                                 f'{limit} identical terminal tool calls'
                             )
+                            failure_class = 'repeated_tool_loop'
                 except (httpx.HTTPError, ValueError):
                     continue
             if reason is None:
                 continue
-            abort_reasons.append(reason)
+            abort_reasons.append((reason, failure_class or 'turn_timeout'))
             try:
                 with httpx.Client(
                     base_url=handle.base_url,

@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-RunState = Literal['accepted', 'queued', 'running', 'succeeded', 'failed', 'rejected']
+RunState = Literal['accepted', 'queued', 'running', 'succeeded', 'failed', 'rejected', 'cancelled']
 MetricDirection = Literal['maximize', 'minimize']
 RunPriority = Literal['user', 'autonomous']
 
@@ -35,6 +35,13 @@ class RunManifest(BaseModel):
     resource_limits: dict[str, str] = Field(default_factory=dict)
     node_selector: dict[str, str] = Field(default_factory=dict)
     runner_image: str
+    runner_service_account_name: str = Field(
+        default='default',
+        min_length=1,
+        max_length=253,
+        pattern=r'^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$',
+    )
+    maximum_wallclock_minutes: int | None = Field(default=None, ge=1)
     evaluator_type: str
     approval_tier: str
     expected_artifacts: dict[str, list[str]]

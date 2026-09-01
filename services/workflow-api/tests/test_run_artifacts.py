@@ -51,6 +51,7 @@ def build_run_record(run_id: str, status: RunStatus) -> RunRecord:
         resource_limits={},
         node_selector={},
         runner_image='busybox:latest',
+        runner_service_account_name='registry-runner',
         evaluator_type='none',
         approval_tier='tier-1-read-only',
         expected_artifacts={'required': ['status.json'], 'optional': ['logs/runner.log']},
@@ -356,3 +357,92 @@ def test_get_live_status_lets_programming_errors_propagate() -> None:
     submitter.batch_api = _ExplodingBatchApi()
     with pytest.raises(RuntimeError):
         submitter.get_live_status(_queued_record('run-live-program-error'))
+
+
+def test_cancel_run_deletes_kubernetes_job_with_foreground_propagation() -> None:
+    class _ApiException(Exception):
+        status = None
+
+    class _BatchApi:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def delete_namespaced_job(self, **kwargs):
+            self.calls.append(kwargs)
+
+    submitter = KubernetesJobSubmitter.__new__(KubernetesJobSubmitter)
+    submitter.api_exception = _ApiException
+    submitter.batch_api = _BatchApi()
+    record = _queued_record('run-cancel')
+
+    submitter.cancel_run(record)
+
+    assert submitter.batch_api.calls == [
+        {
+            'name': record.job_submission.job_name,
+            'namespace': record.job_submission.namespace,
+            'propagation_policy': 'Foreground',
+        }
+    ]
+
+
+def test_cancel_run_treats_missing_kubernetes_job_as_already_cancelled() -> None:
+    class _ApiException(Exception):
+        def __init__(self, status):
+            self.status = status
+
+    class _BatchApi:
+        def delete_namespaced_job(self, **kwargs):
+            raise _ApiException(404)
+
+    submitter = KubernetesJobSubmitter.__new__(KubernetesJobSubmitter)
+    submitter.api_exception = _ApiException
+    submitter.batch_api = _BatchApi()
+
+    submitter.cancel_run(_queued_record('run-already-gone'))
+
+
+def test_cancel_run_maps_kubernetes_api_failure_to_unavailable() -> None:
+    class _ApiException(Exception):
+        def __init__(self, status):
+            self.status = status
+
+    class _BatchApi:
+        def delete_namespaced_job(self, **kwargs):
+            raise _ApiException(503)
+
+    submitter = KubernetesJobSubmitter.__new__(KubernetesJobSubmitter)
+    submitter.api_exception = _ApiException
+    submitter.batch_api = _BatchApi()
+
+    with pytest.raises(LiveStatusUnavailableError):
+        submitter.cancel_run(_queued_record('run-cancel-api-error'))
+
+
+def test_run_manifest_without_runner_service_account_name_parses_with_default() -> None:
+    # #279 made runner_service_account_name required, but the pre-#279 image
+    # persisted run manifests without it; the new image must still load them.
+    from services.common.schemas import RunManifest
+
+    from datetime import datetime, timezone
+
+    manifest = RunManifest.model_validate(
+        {
+            "run_id": "run-1",
+            "workflow_id": "research-workspace-cpu-v1",
+            "workflow_family": "research-workspace",
+            "display_name": "Test",
+            "objective": "A bounded test objective.",
+            "submitted_by": "test",
+            "submitted_at": datetime.now(timezone.utc),
+            "requested_models": ["test-model"],
+            "resource_profile": "cpu-small",
+            "runner_image": "ghcr.io/example/runner:test",
+            "maximum_wallclock_minutes": 60,
+            "evaluator_type": "generic-task-integrity-v1",
+            "approval_tier": "tier-2-approved-execution",
+            "expected_artifacts": {"required": ["metrics.json"]},
+            "experiment_type": "research-workspace-job",
+        }
+    )
+    assert manifest.runner_service_account_name == "default"

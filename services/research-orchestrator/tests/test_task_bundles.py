@@ -16,6 +16,7 @@ import zipfile
 import pytest
 
 from app.schemas import TaskAssetProposal, TaskSpecProposal
+from app.config import Settings
 from app.datasets import DatasetIngestionManager
 from app.storage import SqliteStore
 from app.task_bundles import (
@@ -81,6 +82,28 @@ def test_import_task_bundle_is_immutable_and_idempotent(tmp_path: Path) -> None:
     assert first.compilation_source == 'honeydew-task-spec'
     assert first.workload_id == 'workspace-cpu-ml-v1'
     assert first.datasets == []
+
+
+def test_default_settings_accept_compiled_workspace_runtime(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    proposal = TaskSpecProposal(
+        schema_version='glasslab-task-spec-v1',
+        display_name='Default Runtime Task',
+        runtime_profile='cpu-ml-standard-v1',
+        rationale='Verify defaults and compiled policy cannot drift.',
+    )
+    record = manager.compile(
+        manager.stage_archive(filename='task.zip', content=_archive()),
+        proposal,
+    )
+
+    preflight = manager.preflight(
+        record,
+        permitted_images=set(Settings().permitted_job_images),
+        evaluator_ready=True,
+    )
+
+    assert preflight.ready
 
 
 def test_loading_persisted_task_rebinds_fixed_workload_runner(
@@ -286,3 +309,33 @@ def test_source_bundle_packaging_is_deterministic(
     )
     assert second_path.read_bytes() == first_bytes
     assert second_digest == first_digest
+
+
+def test_preflight_includes_actionable_feedback_when_not_ready(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    proposal = TaskSpecProposal(
+        schema_version='glasslab-task-spec-v1',
+        display_name='Incomplete Task',
+        runtime_profile='cpu-ml-standard-v1',
+        assets=[],
+        required_artifacts=['metrics.json'],
+        required_metric_keys=['accuracy'],
+        missing_inputs=[
+            'exact evaluation rubric with metric thresholds and stopping conditions'
+        ],
+        rationale='Missing the rubric on purpose.',
+    )
+    record = manager.compile(
+        manager.stage_archive(filename='anything.zip', content=_archive()),
+        proposal,
+    )
+    preflight = manager.preflight(
+        record,
+        permitted_images={
+            RUNTIME_PROFILES['cpu-ml-standard-v1'].runner_image
+        },
+        evaluator_ready=True,
+    )
+    assert not preflight.ready
+    assert '## Evaluation rubric' in preflight.feedback
+    assert 'No run was started' in preflight.feedback

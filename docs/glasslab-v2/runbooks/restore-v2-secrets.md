@@ -1,85 +1,125 @@
-# Restore Glasslab v2 Secrets
+# Restore Glasslab v2 encrypted secrets
 
-1. Log into the provisioner and move to the canonical repo.
+This procedure restores the external encrypted SOPS vault. It does not decrypt
+documents, apply Kubernetes Secrets, or restart workloads. Those later actions
+require the separately enrolled SOPS operator boundary.
+
+Do not perform this procedure until the archive and its adjacent `.sha256` file
+are available on the provisioner and an operator has explicitly approved the
+target vault replacement.
+
+## 1. Confirm the operating boundary
+
+Use a personal provisioner account and the canonical checkout:
 
 ```bash
-ssh glasslab@192.168.1.44
+ssh glasslab-provisioner
 cd /home/glasslab/cluster-config
 ```
 
-2. Restore the encrypted backup contents into the local secret paths.
-
-If using the repo helper output:
+Confirm the intended archive names without displaying their contents:
 
 ```bash
-mkdir -p /tmp/glasslab-secret-restore
-gpg --decrypt /path/to/glasslab-secrets-<timestamp>.tar.gpg > /tmp/glasslab-secret-restore/glasslab-secrets.tar
-tar -xf /tmp/glasslab-secret-restore/glasslab-secrets.tar -C /tmp/glasslab-secret-restore
-cp /tmp/glasslab-secret-restore/kubeadm/glasslab-v2/secrets/*.local.yaml kubeadm/glasslab-v2/secrets/ 2>/dev/null || true
-cp /tmp/glasslab-secret-restore/kubeadm/agent-stack/12-agent-secrets.yaml kubeadm/agent-stack/12-agent-secrets.yaml 2>/dev/null || true
+backup_dir=/home/glasslab/glasslab-secret-backups
+find "$backup_dir" -maxdepth 1 -type f \
+  \( -name 'glasslab-secrets-*.tar.gz' -o -name 'glasslab-secrets-*.tar.gz.sha256' \) \
+  -printf '%f\n' | sort
 ```
 
-Required files:
+Select the exact archive path. Keep the checksum beside it using the default
+`<archive>.sha256` name.
 
-- `kubeadm/glasslab-v2/secrets/10-postgres.local.yaml`
-- `kubeadm/glasslab-v2/secrets/20-minio.local.yaml`
-- `kubeadm/glasslab-v2/secrets/30-whatsapp-gateway.local.yaml` if local allowlist values are managed outside Kubernetes
+## 2. Restore into the external vault
 
-Related v1 file if the copied vLLM API key must also be restored:
-
-- `kubeadm/agent-stack/12-agent-secrets.yaml`
-
-3. Lock down file permissions.
+The helper validates in a randomized private sibling directory before it
+honors confirmation. Replace the example timestamp with the reviewed backup:
 
 ```bash
-chmod 600 kubeadm/glasslab-v2/secrets/*.local.yaml
-chmod 600 kubeadm/agent-stack/12-agent-secrets.yaml 2>/dev/null || true
+archive=/home/glasslab/glasslab-secret-backups/glasslab-secrets-YYYYMMDD-HHMMSS.tar.gz
+vault=/home/glasslab/.local/share/glasslab-secrets
+./scripts/restore-glasslab-secrets.sh \
+  --archive "$archive" \
+  --vault-dir "$vault" \
+  --yes
 ```
 
-4. Review the manifests before applying them.
+`--yes` is mandatory. A checksum mismatch, unsafe tar path, traversal or read
+error, link, unexpected member, inventory mismatch, mixed plaintext Secret
+payload, duplicate YAML mapping, malformed OpenPGP SOPS metadata, malformed
+policy fingerprint, or tar failure stops before replacement. Normal operation
+uses the fixed root-owned `/usr/bin/tar`; an ambient `TAR_BIN` value is ignored.
+The helper never calls `sops -d` and never prints a secret document.
+
+If the vault already exists, the output reports the dated randomized rollback
+directory. Preserve it until the recovery drill and service validation are
+complete. In the exceptional case where both rollback preservation and the
+automatic exchange-back fail, stop immediately: the error reports a private
+staging path that still contains the previous vault. Do not remove that path
+until an operator has completed a reviewed manual recovery.
+
+If SIGINT or SIGTERM arrives before commit, the command exits nonzero and the
+active vault remains unchanged. If a signal was already pending when the
+atomic exchange and rollback commit completed, the command reports that
+deferred signal but exits zero; its restored-vault and rollback paths are then
+the authoritative committed state.
+
+## 3. Check restored metadata without values
+
+Check directory ownership/modes and inventory filenames only:
 
 ```bash
-sed -n '1,200p' kubeadm/glasslab-v2/secrets/10-postgres.local.yaml
-sed -n '1,200p' kubeadm/glasslab-v2/secrets/20-minio.local.yaml
-sed -n '1,200p' kubeadm/glasslab-v2/secrets/30-whatsapp-gateway.local.yaml 2>/dev/null || true
+stat -c '%a %U:%G %n' "$vault" "$vault/inventory.yaml"
+find "$vault" -type f -name '*.sops.yaml' -printf '%P\n' | sort
 ```
 
-5. Apply the restored secrets.
+Expected modes are `700` for the vault/directories and `600` for files. Compare
+the filename list with the inventory through the approved SOPS operator tooling
+once that tooling is enrolled. Do not use `sed`, `cat`, shell tracing, or a
+generic YAML dump on live secret documents.
 
-```bash
-kubectl apply -f kubeadm/glasslab-v2/secrets/
-```
+## 4. Complete the SOPS recovery gate
 
-6. If the v1 secret file was restored or rotated too, apply it separately.
+This repository change does not supply a plaintext-decryption fallback. Before
+any cluster apply or credential rotation:
 
-```bash
-kubectl apply -f kubeadm/agent-stack/12-agent-secrets.yaml
-```
+1. verify two individual online recipients can pass the approved non-printing
+   canary check;
+2. verify the offline recovery recipient in an isolated GPG home, then return
+   its private material offline;
+3. verify every live inventory entry carries every active recipient; and
+4. restore the canary to an isolated vault and record only pass/fail metadata.
 
-7. Restart the workloads that read those secrets from environment variables.
+The planned `glasslab-secret doctor`/`apply` interface owns later decryption and
+cluster application. If it is not installed and reviewed, stop here rather
+than inventing a plaintext temporary-file procedure.
 
-```bash
-kubectl -n glasslab-v2 rollout restart statefulset/glasslab-postgres
-kubectl -n glasslab-v2 rollout restart deployment/glasslab-minio
-kubectl -n glasslab-v2 rollout restart deployment/glasslab-whatsapp-gateway 2>/dev/null || true
-kubectl -n glasslab-agents rollout restart deployment/vllm 2>/dev/null || true
-kubectl -n glasslab-agents rollout restart deployment/glasslab-agent-api 2>/dev/null || true
-```
+## 5. Apply and validate only after enrollment
 
-8. Wait for the affected workloads to settle.
+Once the approved SOPS operator CLI exists, use its named inventory operations
+to apply the required records. Then restart only the workloads whose Secret
+values changed and run their existing service smoke tests. Do not treat a
+successful archive restore as proof that Kubernetes objects or workloads were
+updated.
 
-```bash
-kubectl -n glasslab-v2 rollout status statefulset/glasslab-postgres --timeout=300s
-kubectl -n glasslab-v2 rollout status deployment/glasslab-minio --timeout=300s
-kubectl -n glasslab-v2 rollout status deployment/glasslab-whatsapp-gateway --timeout=300s 2>/dev/null || true
-kubectl -n glasslab-agents rollout status deployment/vllm --timeout=1200s 2>/dev/null || true
-```
+Record non-secret recovery evidence:
 
-9. Re-run the core validation path.
+- archive timestamp and SHA-256 verification result;
+- restored inventory record count (not values);
+- rollback directory name;
+- operator, date, host, fingerprint suffix, and canary pass/fail; and
+- affected workload validation results.
 
-```bash
-./scripts/smoke-test-v2.sh
-kubectl -n glasslab-v2 get secret glasslab-v2-postgres glasslab-v2-minio glasslab-whatsapp-gateway 2>/dev/null || true
-```
+## 6. Rollback decision
 
-10. If the original secret values are not available, generate new values, update the local manifests, apply them, and treat the restore as a rotation event.
+Keep the prior vault rollback directory unchanged until the drill completes.
+If SOPS recipient or canary validation fails, do not apply the restored records
+and do not rotate credentials. Escalate for a reviewed rollback or create a new
+archive from the preserved directory; avoid ad-hoc directory moves during an
+active recovery.
+
+## Deferred status
+
+The live vault migration and recovery drill are intentionally deferred until
+SOPS enrollment is complete. Repository tests use isolated disposable vaults
+and do not contact the provisioner, read live secrets, decrypt data, or mutate
+the cluster.

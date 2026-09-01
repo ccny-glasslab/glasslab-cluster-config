@@ -106,10 +106,6 @@ printf '[smoke-test-v2] workflow-api health response\n'
 "$CURL" -fsS "http://127.0.0.1:${HEALTH_PORT}/healthz"
 printf '\n'
 
-printf '[smoke-test-v2] workflow-api family catalog\n'
-"$CURL" -fsS "http://127.0.0.1:${HEALTH_PORT}/workflow-families"
-printf '\n'
-
 if [[ "$INCLUDE_BOUNDED_AGENTS" == true ]]; then
   printf '[smoke-test-v2] bounded-agent rollout checks were included.\n'
 else

@@ -33,7 +33,8 @@ This document summarizes the contrastive learning deployment for Glasslab cluste
 - `10-deployment.yaml` - Deployment with GPU support
 - `20-pvc.yaml` - Model cache PVC (50Gi)
 - `30-configmap.yaml` - Configuration parameters
-- `40-secret.yaml` - Database credentials
+- `40-secret.example.yaml` - Non-deployable database credential schema
+- `40-secret.local.yaml` - Ignored operator-created live Secret (never commit)
 - `50-service.yaml` - ClusterIP service
 - `60-serviceaccount.yaml` - ServiceAccount
 
@@ -59,9 +60,17 @@ This document summarizes the contrastive learning deployment for Glasslab cluste
 
 **`scripts/upload-cifar100.sh`**:
 ```bash
-# Upload CIFAR-100 dataset to MinIO
-./scripts/upload-cifar100.sh
+# After SOPS operator enrollment, provide MinIO values only to the child
+# environment; never put either credential on the command line.
+./scripts/glasslab-secret exec-env minio-cifar100 -- \
+  ./scripts/upload-cifar100.sh
 ```
+
+The planned `glasslab-secret exec-env` interface is not present on this branch;
+until it is enrolled, run the uploader only from an already approved private
+environment containing `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`. The helper
+rejects credential arguments and scopes the values to each `mc` child through
+`MC_HOST_glasslab`.
 
 **`scripts/run-contrastive-experiment.sh`**:
 ```bash
@@ -148,13 +157,21 @@ docker build -f Dockerfile.gpu -t glasslab/runner:gpu-v1 .
 
 ```bash
 cd ~/cluster-config
-kubectl apply -f kubeadm/glasslab-v2/gpu-runner/00-all.yaml
+export GLASSLAB_GPU_RUNNER_SECRET_FILE="$PWD/kubeadm/glasslab-v2/gpu-runner/40-secret.local.yaml"
+./scripts/deploy-gpu-runner.sh --apply
 ```
+
+Create the ignored local file from `40-secret.example.yaml` through the
+approved secret workflow. Never apply `00-all.yaml` directly: the deployment
+helper validates the local or existing live PostgreSQL DSN without printing it
+and fails before applying workload resources when the Secret contract is not
+satisfied.
 
 ### 3. Upload CIFAR-100 Dataset
 
 ```bash
-./scripts/upload-cifar100.sh
+./scripts/glasslab-secret exec-env minio-cifar100 -- \
+  ./scripts/upload-cifar100.sh
 ```
 
 ### 4. Run Experiment
@@ -169,7 +186,7 @@ kubectl apply -f kubeadm/glasslab-v2/gpu-runner/00-all.yaml
 
 - [x] GPU runner image built (`glasslab/runner:gpu-v1`)
 - [x] Kubernetes manifests created
-- [x] ConfigMap and Secret defined
+- [x] ConfigMap and non-deployable Secret schema defined
 - [x] PVC for model cache created
 - [x] ServiceAccount created
 - [x] Deployment manifest with GPU support
@@ -184,7 +201,8 @@ kubectl apply -f kubeadm/glasslab-v2/gpu-runner/00-all.yaml
 ## Next Steps
 
 1. Push GPU runner image to registry or load on cluster node
-2. Apply Kubernetes manifests
+2. Create the ignored local Secret through the approved workflow and deploy
+   with `scripts/deploy-gpu-runner.sh`
 3. Verify runner pod is running
 4. Upload CIFAR-100 dataset to MinIO
 5. Submit contrastive learning experiment
