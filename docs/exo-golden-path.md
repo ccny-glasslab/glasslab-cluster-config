@@ -119,6 +119,43 @@ The model reconciler may need a short interval after both Macs boot before the
 instance is ready. Override `GLASSLAB_EXO_SSH_TARGET` only when the canonical
 `glasslab-exo17` SSH alias is unavailable.
 
+## Known Recurring Failure: RDMA Device Drift
+
+Symptom: every chat completion returns `No instance found for
+mlx-community/Qwen3-Coder-Next-4bit` and the reconcile log repeats
+`waiting for the two-node rdma_en5 topology`, even though the Thunderbolt
+link is up (pings fine, `/state` shows 2 nodes and 2 rdma links).
+
+Root cause: macOS failed to register the Thunderbolt RDMA verbs device on a
+Mac until reboot. Verify with:
+
+```bash
+ibv_devices        # expected: a rdma_en5 line on BOTH Macs
+```
+
+The failure is asymmetric and deterministic: the affected Mac lists
+`rdma_en2/en3/en4` (empty ports) but no `rdma_en5` for the connected
+Thunderbolt 4 port, so JACCL's queue-pair init fails (`errno 96`) and no
+two-node placement can ever be created.
+
+Repair (once): reboot the affected Mac. launchd auto-restores exo, and
+`rdma_en5` re-registers (verified on `.17`, 2026-09-01).
+
+Permanent behavior (deployed 2026-09-01):
+
+- `com.glasslab.exo-reconcile` no longer spins in silence: when the pair is
+  unavailable it logs a `REPAIR REQUIRED` line (with the `ibv_devices`
+  diagnostic) and after `GLASSLAB_EXO_PAIR_GRACE_CHECKS` (default 3) checks
+  it submits a **single-node** placement of the approved model, so the
+  orchestrator always has its model even while the pair is degraded. The
+  two-node path is re-tried every cycle and the fallback is replaced
+  automatically when the pair returns.
+- `com.glasslab.exo-rdma-guard` (both Macs, every 5 min) makes drift loud
+  immediately: it checks `ibv_devices` for `rdma_en5` and appends a
+  `REPAIR REQUIRED` line to
+  `/Users/glasslab/Library/Logs/glasslab-exo-rdma-guard.log` when the device
+  is missing.
+
 ## Logs And Recovery
 
 Logs are retained outside `/tmp`:
