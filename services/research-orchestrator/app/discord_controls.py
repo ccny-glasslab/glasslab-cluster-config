@@ -12,8 +12,11 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import io
+import logging
 from typing import TYPE_CHECKING
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 import discord
 from discord import app_commands
@@ -992,7 +995,19 @@ class DiscordControlGateway:
             return
         # A research_answer turn is a bounded agent turn (about a minute);
         # the followup window is generous enough to hold it.
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception as exc:  # noqa: BLE001 - ack can race an earlier
+            # interaction (duplicate invocation) or expire; nothing can be
+            # delivered then, but it must be logged, not silent.
+            logger.error(
+                'research_question: could not acknowledge interaction: '
+                '%s: %s',
+                type(exc).__name__,
+                exc,
+            )
+            return
+        logger.info('research_question starting: %.120s', question)
         try:
             answer = await asyncio.to_thread(
                 execute_discord_research_question,
@@ -1005,12 +1020,25 @@ class DiscordControlGateway:
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-        except Exception as exc:
-            await interaction.followup.send(
-                f'Research question failed: {type(exc).__name__}: {exc}',
-                ephemeral=True,
-                allowed_mentions=discord.AllowedMentions.none(),
+        except Exception as exc:  # noqa: BLE001 - report, never crash the gateway
+            logger.error(
+                'research_question failed: %s: %s',
+                type(exc).__name__,
+                exc,
             )
+            try:
+                await interaction.followup.send(
+                    f'Research question failed: {type(exc).__name__}: {exc}',
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception as followup_exc:  # noqa: BLE001 - best effort
+                logger.error(
+                    'research_question: could not deliver failure notice: '
+                    '%s: %s',
+                    type(followup_exc).__name__,
+                    followup_exc,
+                )
 
     async def _on_research_cancel(
         self,

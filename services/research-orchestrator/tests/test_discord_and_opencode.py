@@ -1314,3 +1314,88 @@ def test_format_research_answer_truncates_long_answers_and_excerpts() -> None:
     rendered = format_research_answer(answer)
     assert len(rendered) <= 2000
     assert '...' in rendered
+
+
+class _FakeFollowup:
+    def __init__(self, sink):
+        self._sink = sink
+
+    async def send(self, content, **kwargs):
+        self._sink.append(content)
+
+
+class _FakeResponse:
+    def __init__(self, defer_error=None):
+        self._defer_error = defer_error
+
+    async def defer(self, *args, **kwargs):
+        if self._defer_error is not None:
+            raise self._defer_error
+
+    async def send_message(self, *args, **kwargs):
+        pass
+
+
+class _FakeInteraction:
+    def __init__(self, *, channel_id='main-channel', user_id='doll-user'):
+        self.channel_id = channel_id
+        self.guild_id = '123456789'
+        self.user = SimpleNamespace(id=user_id, name='doll', display_name='doll')
+        self.followup_messages = []
+        self.response = _FakeResponse()
+        self.followup = _FakeFollowup(self.followup_messages)
+
+
+def _build_test_gateway():
+    store = Mock()
+    store.list_runs.return_value = []
+    engine = Mock()
+    engine.store = store
+    return DiscordControlGateway(
+        engine=engine,
+        bot_token='bot-token',
+        guild_id='123456789',
+        channel_id='main-channel',
+        admin_role_id='role-1',
+        admin_user_ids=['doll-user'],
+        maximum_dataset_upload_bytes=1024,
+    )
+
+
+def test_research_question_survives_ack_failure() -> None:
+    import asyncio
+
+    gateway = _build_test_gateway()
+    interaction = _FakeInteraction()
+    interaction.response = _FakeResponse(defer_error=RuntimeError('ack raced'))
+    # The handler must complete without raising when the ack can no longer be
+    # claimed (duplicate invocation / expired interaction) — otherwise Discord
+    # reports "The application did not respond".
+    asyncio.run(
+        gateway._on_research_question(interaction, question='some question')
+    )
+    assert interaction.followup_messages == []
+
+
+def test_research_question_contains_followup_failure() -> None:
+    import asyncio
+
+    gateway = _build_test_gateway()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError('engine exploded')
+
+    gateway.engine.answer_research_question = boom
+    interaction = _FakeInteraction()
+
+    class _BrokenFollowup:
+        async def send(self, *args, **kwargs):
+            raise RuntimeError('followup window expired')
+
+    interaction.followup = _BrokenFollowup()
+    # Engine failure + a followup that also fails must still not escape the
+    # handler; the error is logged, never a silent "did not respond".
+    asyncio.run(
+        gateway._on_research_question(interaction, question='some question')
+    )
+    assert interaction.followup_messages == []
