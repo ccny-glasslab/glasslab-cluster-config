@@ -22,12 +22,17 @@ and approval role or explicit administrator allowlist.
 | `/research-pause [run_id:<id>] [reason:<text>]` | Run thread, or main channel with `run_id` | Aborts an active model turn, preserves state, and records where to resume. |
 | `/research-resume [run_id:<id>] [reason:<text>]` | Run thread, or main channel with `run_id` | Restores a paused run to its prior state and restarts workflow recovery. |
 | `/research-cancel [run_id:<id>] [reason:<text>]` | Run thread, or main channel with `run_id` | Cancels the run, aborts active Hermes turns, requests cancellation of active jobs, and records the Discord actor and reason. |
+| `/research-status [run_id:<id>]` | Run thread, or main channel with `run_id` | Shows a durable-derived snapshot of the run: state, phase, pending approval, job counts by status, and next required action. |
+| `/research-list` | Main Glasslab channel | Lists active runs first, then the most recently updated terminal runs, up to 10 total. |
 
-Inside a run thread, pause, resume, and cancel resolve the run from the thread
-and do not require an ID.
+Inside a run thread, pause, resume, cancel, and status resolve the run from the
+thread and do not require an ID. `/research-status` without a `run_id` in the
+main channel is rejected; `/research-list` takes no arguments.
 
-Discord does not currently expose list or status slash commands. Status is
-shown by the run thread's editable status message.
+`/research-status` and `/research-list` are read-only projections: they derive
+their output only from durable run, action, and job records and never mutate
+state, append events, create actions, or trigger recovery. Pending human
+approval takes precedence when deriving the "next action" field.
 
 ## Intended End-To-End Run
 

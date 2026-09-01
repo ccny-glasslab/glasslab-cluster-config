@@ -8,6 +8,7 @@ repair, workspace-file materialization, and per-agent runtime isolation.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -19,9 +20,12 @@ import pytest
 from app.discord_adapter import DiscordHttpAdapter, DiscordRenderer
 from app.config import Settings
 from app.discord_controls import (
+    DISCORD_MESSAGE_LIMIT,
     DiscordControlActor,
     DiscordControlGateway,
     DiscordControlPolicy,
+    bound_discord_message,
+    build_run_status_view,
     execute_discord_action,
     execute_discord_dataset_ingestion,
     execute_discord_research_question,
@@ -30,6 +34,12 @@ from app.discord_controls import (
     execute_discord_run_creation,
     execute_discord_turn_history,
     format_research_answer,
+    job_status_counts,
+    next_action_for,
+    pending_human_approval,
+    render_run_list,
+    render_run_status,
+    select_runs_for_list,
 )
 from app.opencode_runtime import (
     OpenCodeProcessRuntime,
@@ -51,6 +61,11 @@ from app.schemas import (
     TurnKind,
     TurnRecord,
     utc_now,
+    ApprovalStatus,
+    JobStatus,
+    PolicyClassification,
+    RunState,
+    TERMINAL_STATES,
 )
 
 
@@ -391,6 +406,8 @@ def test_discord_gateway_registers_component_handler() -> None:
         'research-turns',
         'research-question',
         'dataset-upload',
+        'research-status',
+        'research-list',
     ):
         assert gateway.tree.get_command(
             command_name,
@@ -1237,6 +1254,340 @@ def test_opencode_repairs_missing_structured_output(
         repair_payload['parts'][0]['text']
     )
 
+
+# ------------------------------------------------------------------ #
+# /research-status and /research-list pure rendering and resolution
+# ------------------------------------------------------------------ #
+
+
+def _run(
+    *,
+    run_id: str,
+    state: RunState,
+    updated_at: datetime | None = None,
+    thread_id: str | None = None,
+):
+    return SimpleNamespace(
+        run_id=run_id,
+        state=state,
+        updated_at=updated_at or datetime(2026, 1, 1, tzinfo=timezone.utc),
+        discord_thread_id=thread_id,
+    )
+
+
+def _action(
+    *,
+    type_: str,
+    classification: PolicyClassification,
+    status: ApprovalStatus = ApprovalStatus.PENDING,
+    honeydew_approved: bool = False,
+):
+    return SimpleNamespace(
+        type=type_,
+        policy_classification=classification,
+        approval_status=status,
+        honeydew_approved=honeydew_approved,
+    )
+
+
+def _job(status: JobStatus):
+    return SimpleNamespace(status=status)
+
+
+def _gateway(runs) -> DiscordControlGateway:
+    store = Mock()
+    store.list_runs.return_value = list(runs)
+
+    def get_run(run_id: str):
+        for run in runs:
+            if run.run_id == run_id:
+                return run
+        raise KeyError(run_id)
+
+    store.get_run.side_effect = get_run
+    engine = Mock()
+    engine.store = store
+    return DiscordControlGateway(
+        engine=engine,
+        bot_token='bot-token',
+        guild_id='123456789',
+        channel_id='main-channel',
+        admin_role_id='role-1',
+        admin_user_ids=[],
+        maximum_dataset_upload_bytes=1024,
+    )
+
+
+def test_status_resolves_run_from_thread_without_run_id() -> None:
+    run = _run(run_id='run-1', state=RunState.AWAITING_PROTOCOL_APPROVAL,
+               thread_id='thread-1')
+    gateway = _gateway([run])
+
+    resolved = gateway._resolve_controlled_run(
+        channel_id='thread-1',
+        run_id=None,
+    )
+
+    assert resolved.run_id == 'run-1'
+
+
+def test_status_requires_run_id_outside_thread() -> None:
+    gateway = _gateway([_run(run_id='run-1', state=RunState.COMPLETE,
+                             thread_id='thread-1')])
+
+    with pytest.raises(ValueError, match='run_id is required'):
+        gateway._resolve_controlled_run(
+            channel_id='main-channel',
+            run_id=None,
+        )
+
+
+def test_status_rejects_unknown_run_id() -> None:
+    gateway = _gateway([_run(run_id='run-1', state=RunState.COMPLETE,
+                             thread_id='thread-1')])
+
+    with pytest.raises(KeyError):
+        gateway._resolve_controlled_run(
+            channel_id='main-channel',
+            run_id='run-missing',
+        )
+
+
+def test_status_rejects_mismatched_thread_and_run() -> None:
+    gateway = _gateway([
+        _run(run_id='run-1', state=RunState.COMPLETE, thread_id='thread-1'),
+        _run(run_id='run-2', state=RunState.JOB_RUNNING, thread_id='thread-2'),
+    ])
+
+    with pytest.raises(ValueError, match='control the run from'):
+        gateway._resolve_controlled_run(
+            channel_id='thread-1',
+            run_id='run-2',
+        )
+
+
+def test_status_rejects_unsupported_channel() -> None:
+    gateway = _gateway([_run(run_id='run-1', state=RunState.COMPLETE,
+                             thread_id='thread-1')])
+
+    with pytest.raises(ValueError, match='control the run from'):
+        gateway._resolve_controlled_run(
+            channel_id='other-channel',
+            run_id='run-1',
+        )
+
+
+def test_pending_human_approval_precedes_automatic_actions() -> None:
+    actions = [
+        _action(
+            type_='read_workspace',
+            classification=PolicyClassification.AUTOMATIC,
+        ),
+        _action(
+            type_='approve_protocol',
+            classification=PolicyClassification.HUMAN_APPROVAL,
+        ),
+    ]
+
+    pending = pending_human_approval(actions)
+
+    assert pending is not None
+    assert pending.type == 'approve_protocol'
+
+
+def test_pending_human_approval_ignores_non_pending_and_agent_gates() -> None:
+    actions = [
+        _action(
+            type_='submit_validation_job',
+            classification=PolicyClassification.HONEYDEW_APPROVAL,
+        ),
+        _action(
+            type_='approve_protocol',
+            classification=PolicyClassification.HUMAN_APPROVAL,
+            status=ApprovalStatus.APPROVED,
+        ),
+    ]
+
+    assert pending_human_approval(actions) is None
+
+
+@pytest.mark.parametrize(
+    ('action_type', 'classification', 'expected'),
+    [
+        ('approve_protocol', PolicyClassification.HUMAN_APPROVAL,
+         'approve the proposed protocol'),
+        ('propose_evaluation_contract',
+         PolicyClassification.HONEYDEW_AND_HUMAN_APPROVAL,
+         'approve evaluation-contract promotion'),
+        ('submit_experiment_matrix',
+         PolicyClassification.HONEYDEW_AND_HUMAN_APPROVAL,
+         'approve cluster execution'),
+        ('accept_final_report', PolicyClassification.HUMAN_APPROVAL,
+         'accept the final report'),
+    ],
+)
+def test_next_action_prefers_pending_approval(
+    action_type, classification, expected,
+) -> None:
+    run = _run(run_id='run-1', state=RunState.AWAITING_PROTOCOL_APPROVAL)
+    actions = [
+        _action(
+            type_=action_type,
+            classification=classification,
+            honeydew_approved=(
+                classification
+                == PolicyClassification.HONEYDEW_AND_HUMAN_APPROVAL
+            ),
+        )
+    ]
+
+    assert next_action_for(run, actions) == expected
+
+
+def test_pending_human_approval_requires_honeydew_gate() -> None:
+    # A combined gate is not human-ready until Honeydew has signed off; before
+    # that, the next action is derived from the Honeydew-review state.
+    run = _run(run_id='run-1', state=RunState.HONEYDEW_REVIEWING)
+    actions = [
+        _action(
+            type_='submit_experiment_matrix',
+            classification=PolicyClassification.HONEYDEW_AND_HUMAN_APPROVAL,
+            honeydew_approved=False,
+        ),
+    ]
+
+    assert pending_human_approval(actions) is None
+    assert next_action_for(run, actions) == (
+        'Honeydew is reviewing the implementation'
+    )
+
+
+def test_job_status_counts_across_states() -> None:
+    jobs = [
+        _job(JobStatus.QUEUED),
+        _job(JobStatus.QUEUED),
+        _job(JobStatus.SUBMITTING),
+        _job(JobStatus.RUNNING),
+        _job(JobStatus.SUCCEEDED),
+        _job(JobStatus.SUCCEEDED),
+        _job(JobStatus.SUCCEEDED),
+        _job(JobStatus.FAILED),
+        _job(JobStatus.UNKNOWN),
+    ]
+
+    counts = job_status_counts(jobs)
+
+    assert counts == {
+        'queued': 2,
+        'submitting': 1,
+        'running': 1,
+        'succeeded': 3,
+        'failed': 1,
+        'cancelled': 0,
+        'unknown': 1,
+    }
+
+
+def test_terminal_run_has_no_pending_action() -> None:
+    run = _run(run_id='run-1', state=RunState.COMPLETE)
+    assert next_action_for(run, []) == 'no action; run is complete'
+
+
+def test_run_list_active_first_then_recent_terminal() -> None:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    runs = [
+        _run(run_id='old-terminal', state=RunState.COMPLETE,
+             updated_at=now),
+        _run(run_id='active-old', state=RunState.JOB_RUNNING,
+             updated_at=now),
+        _run(run_id='active-new', state=RunState.JOB_RUNNING,
+             updated_at=datetime(2026, 2, 1, tzinfo=timezone.utc)),
+        _run(run_id='new-terminal', state=RunState.FAILED,
+             updated_at=datetime(2026, 2, 2, tzinfo=timezone.utc)),
+    ]
+
+    selected = select_runs_for_list(runs)
+
+    assert [run.run_id for run in selected] == [
+        'active-new',
+        'active-old',
+        'new-terminal',
+        'old-terminal',
+    ]
+
+
+def test_run_list_caps_at_ten() -> None:
+    runs = [
+        _run(run_id=f'run-{i}', state=RunState.JOB_RUNNING)
+        for i in range(15)
+    ]
+
+    selected = select_runs_for_list(runs)
+
+    assert len(selected) == 10
+
+
+def test_run_list_uses_stable_tie_breaker() -> None:
+    ts = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    runs = [
+        _run(run_id='run-b', state=RunState.JOB_RUNNING, updated_at=ts),
+        _run(run_id='run-a', state=RunState.JOB_RUNNING, updated_at=ts),
+        _run(run_id='run-c', state=RunState.JOB_RUNNING, updated_at=ts),
+    ]
+
+    forward = select_runs_for_list(runs)
+    reversed_ = select_runs_for_list(list(reversed(runs)))
+
+    # Equal updated_at must order identically regardless of input order.
+    assert [run.run_id for run in forward] == [
+        run.run_id for run in reversed_
+    ]
+    assert len(set(run.run_id for run in forward)) == 3
+
+
+def test_render_run_status_includes_durable_fields() -> None:
+    run = _run(run_id='run-1', state=RunState.AWAITING_EXECUTION_APPROVAL)
+    actions = [
+        _action(
+            type_='submit_experiment_matrix',
+            classification=PolicyClassification.HONEYDEW_AND_HUMAN_APPROVAL,
+            honeydew_approved=True,
+        ),
+    ]
+    jobs = [_job(JobStatus.SUCCEEDED), _job(JobStatus.RUNNING)]
+
+    view = build_run_status_view(run, actions, jobs)
+    message = render_run_status(view)
+
+    assert 'run-1' in message
+    assert 'AWAITING_EXECUTION_APPROVAL' in message
+    assert 'approve cluster execution' in message
+    assert 'succeeded 1' in message
+    assert 'running 1' in message
+    assert 'submit_experiment_matrix' in message
+
+
+def test_render_run_list_marks_terminal() -> None:
+    runs = [
+        _run(run_id='run-1', state=RunState.COMPLETE),
+        _run(run_id='run-2', state=RunState.JOB_RUNNING),
+    ]
+
+    message = render_run_list(select_runs_for_list(runs))
+
+    assert 'run-1' in message
+    assert 'terminal' in message
+    assert 'run-2' in message
+
+
+def test_bound_discord_message_truncates() -> None:
+    long = 'x' * (DISCORD_MESSAGE_LIMIT + 100)
+    bounded = bound_discord_message(long)
+    assert len(bounded) <= DISCORD_MESSAGE_LIMIT
+    assert bounded.endswith('...')
+
+    short = 'hello'
+    assert bound_discord_message(short) == short
 
 def test_execute_discord_research_question_delegates_to_engine() -> None:
     engine = Mock()
