@@ -20,11 +20,17 @@ from discord import app_commands
 
 from .artifact_delivery import ArtifactBundle, build_run_artifact_bundle
 from .schemas import (
+    ActionRecord,
     ApprovalStatus,
     IngestedDatasetRecord,
+    JobRecord,
+    JobStatus,
+    PolicyClassification,
     ResearchAnswer,
     RunCreateRequest,
     RunRecord,
+    RunState,
+    TERMINAL_STATES,
 )
 from .turn_inspection import (
     DEFAULT_DISCORD_TURN_LIMIT,
@@ -38,6 +44,186 @@ if TYPE_CHECKING:
 
 
 CONTROL_PREFIX = 'glasslab'
+
+RUN_LIST_LIMIT = 10
+DISCORD_MESSAGE_LIMIT = 2000
+
+# Action types that represent a pending human approval in the workflow. The
+# mapped value is the instruction shown to the operator as the next action.
+_PENDING_APPROVAL_ACTIONS = {
+    'approve_protocol': 'approve the proposed protocol',
+    'propose_evaluation_contract': 'approve evaluation-contract promotion',
+    'submit_experiment_matrix': 'approve cluster execution',
+    'accept_final_report': 'accept the final report',
+}
+
+_PHASE_LABELS = {
+    RunState.CREATED: 'created',
+    RunState.PREPARING: 'preparing',
+    RunState.HONEYDEW_DRAFTING_PROTOCOL: 'drafting protocol',
+    RunState.AWAITING_PROTOCOL_APPROVAL: 'awaiting protocol approval',
+    RunState.BEAKER_DRAFTING_CONTRACT: 'drafting evaluation contract',
+    RunState.HONEYDEW_REVIEWING_CONTRACT: 'reviewing contract candidate',
+    RunState.AWAITING_CONTRACT_PROMOTION: 'awaiting contract promotion',
+    RunState.BEAKER_PLANNING: 'planning implementation',
+    RunState.BEAKER_IMPLEMENTING: 'implementing workload',
+    RunState.BEAKER_FINALIZING: 'finalizing workload',
+    RunState.HONEYDEW_REVIEWING: 'honeydew reviewing implementation',
+    RunState.BEAKER_REVISING: 'revising implementation',
+    RunState.AWAITING_EXECUTION_APPROVAL: 'awaiting execution approval',
+    RunState.JOB_QUEUED: 'jobs queued',
+    RunState.JOB_RUNNING: 'jobs running',
+    RunState.BEAKER_ANALYZING: 'analyzing results',
+    RunState.HONEYDEW_VERIFYING: 'verifying results',
+    RunState.HONEYDEW_WRITING_REPORT: 'writing report',
+    RunState.AWAITING_FINAL_ACCEPTANCE: 'awaiting final acceptance',
+    RunState.COMPLETE: 'complete',
+    RunState.PAUSED: 'paused',
+    RunState.FAILED: 'failed',
+    RunState.CANCELLED: 'cancelled',
+    RunState.TIMED_OUT: 'timed out',
+}
+
+_NEXT_ACTION_BY_STATE = {
+    RunState.CREATED: 'orchestrator is preparing the run',
+    RunState.PREPARING: 'orchestrator is preparing workspaces',
+    RunState.HONEYDEW_DRAFTING_PROTOCOL: 'Honeydew is drafting the protocol',
+    RunState.BEAKER_DRAFTING_CONTRACT: 'Beaker is drafting the contract candidate',
+    RunState.HONEYDEW_REVIEWING_CONTRACT: 'Honeydew is reviewing the contract candidate',
+    RunState.BEAKER_PLANNING: 'Beaker is planning the implementation',
+    RunState.BEAKER_IMPLEMENTING: 'Beaker is implementing the workload',
+    RunState.BEAKER_FINALIZING: 'Beaker is finalizing the workload',
+    RunState.HONEYDEW_REVIEWING: 'Honeydew is reviewing the implementation',
+    RunState.BEAKER_REVISING: 'Beaker is revising the implementation',
+    RunState.JOB_QUEUED: 'waiting for cluster jobs to run',
+    RunState.JOB_RUNNING: 'cluster jobs are running',
+    RunState.BEAKER_ANALYZING: 'Beaker is analyzing results',
+    RunState.HONEYDEW_VERIFYING: 'Honeydew is verifying results',
+    RunState.HONEYDEW_WRITING_REPORT: 'Honeydew is writing the report',
+}
+
+# Statuses whose counts are always rendered in a fixed order. Every JobStatus
+# is included so queued/running/succeeded/failed/cancelled/submitting/unknown
+# jobs are never silently omitted from the projection.
+_RENDERED_JOB_STATUSES = tuple(JobStatus)
+
+
+@dataclass(frozen=True)
+class RunStatusView:
+    """Durable-derived status snapshot for a single run."""
+
+    run_id: str
+    state: str
+    phase: str
+    pending_approval: str | None
+    job_counts: dict[str, int]
+    next_action: str
+
+
+def pending_human_approval(actions: list[ActionRecord]) -> ActionRecord | None:
+    # Only actions that still require a human decision are "next action" worthy.
+    # A combined HONEYDEW_AND_HUMAN_APPROVAL gate is not human-ready until
+    # Honeydew has signed off (honeydew_approved); before that, the next action
+    # is derived from the current Honeydew-review state instead.
+    for action in actions:
+        if action.approval_status != ApprovalStatus.PENDING:
+            continue
+        if action.policy_classification == PolicyClassification.HUMAN_APPROVAL:
+            return action
+        if (
+            action.policy_classification
+            == PolicyClassification.HONEYDEW_AND_HUMAN_APPROVAL
+            and action.honeydew_approved
+        ):
+            return action
+    return None
+
+
+def job_status_counts(jobs: list[JobRecord]) -> dict[str, int]:
+    counts = {status.value: 0 for status in _RENDERED_JOB_STATUSES}
+    for job in jobs:
+        if job.status.value in counts:
+            counts[job.status.value] += 1
+    return counts
+
+
+def next_action_for(run: RunRecord, actions: list[ActionRecord]) -> str:
+    pending = pending_human_approval(actions)
+    if pending is not None:
+        return _PENDING_APPROVAL_ACTIONS.get(
+            pending.type,
+            f'resolve pending {pending.type}',
+        )
+    if run.state in TERMINAL_STATES:
+        return f'no action; run is {run.state.value.lower()}'
+    if run.state == RunState.PAUSED:
+        return 'resume the paused run'
+    return _NEXT_ACTION_BY_STATE.get(run.state, f'progress through {run.state.value}')
+
+
+def build_run_status_view(
+    run: RunRecord,
+    actions: list[ActionRecord],
+    jobs: list[JobRecord],
+) -> RunStatusView:
+    pending = pending_human_approval(actions)
+    return RunStatusView(
+        run_id=run.run_id,
+        state=run.state.value,
+        phase=_PHASE_LABELS.get(run.state, run.state.value),
+        pending_approval=pending.type if pending is not None else None,
+        job_counts=job_status_counts(jobs),
+        next_action=next_action_for(run, actions),
+    )
+
+
+def render_run_status(view: RunStatusView) -> str:
+    jobs = ', '.join(
+        f'{status} {view.job_counts[status]}'
+        for status in (s.value for s in _RENDERED_JOB_STATUSES)
+    )
+    lines = [
+        f'Research run `{view.run_id}`',
+        f'State: {view.state} ({view.phase})',
+        f'Pending approval: {view.pending_approval or "none"}',
+        f'Jobs: {jobs}',
+        f'Next action: {view.next_action}',
+    ]
+    return '\n'.join(lines)
+
+
+def select_runs_for_list(
+    runs: list[RunRecord],
+    *,
+    limit: int = RUN_LIST_LIMIT,
+) -> list[RunRecord]:
+    # Active runs first, then the most recently updated terminal runs, capped at
+    # `limit`. Both halves are ordered by updated_at (newest first); run_id is a
+    # stable tie-breaker so equal timestamps still produce a deterministic order
+    # regardless of the store's creation order.
+    active = [run for run in runs if run.state not in TERMINAL_STATES]
+    terminal = [run for run in runs if run.state in TERMINAL_STATES]
+    active.sort(key=lambda run: (run.updated_at, run.run_id), reverse=True)
+    terminal.sort(key=lambda run: (run.updated_at, run.run_id), reverse=True)
+    return (active + terminal)[:limit]
+
+
+def render_run_list(runs: list[RunRecord]) -> str:
+    if not runs:
+        return 'No Glasslab research runs.'
+    lines = ['Glasslab research runs:']
+    for run in runs:
+        state = run.state.value
+        if run.state in TERMINAL_STATES:
+            state = f'{state} (terminal)'
+        lines.append(f'- `{run.run_id}` — {state}')
+    return '\n'.join(lines)
+
+
+def bound_discord_message(text: str, limit: int = DISCORD_MESSAGE_LIMIT) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + '...'
 
 
 @dataclass(frozen=True)
@@ -333,60 +519,24 @@ class DiscordControlGateway:
 
     def _register_commands(self) -> None:
         @self.tree.command(
-            name='research-start',
-            description='Start a Glasslab research run from an objective.',
-            guild=self.guild,
-        )
-        @app_commands.describe(
-            objective=(
-                'Research objective for Honeydew to turn into a protocol '
-                'and evaluation contract proposal.'
-            )
-        )
-        async def research_start(
-            interaction: discord.Interaction,
-            objective: app_commands.Range[str, 10, 2000],
-        ) -> None:
-            await self._on_research_start(
-                interaction,
-                objective=str(objective),
-            )
-
-        @self.tree.command(
-            name='benchmark-start',
-            description='Import and start a supported Glasslab ML benchmark.',
-            guild=self.guild,
-        )
-        @app_commands.describe(
-            archive='One supported ML_Benchmark_*.zip task bundle.',
-            objective='Optional narrower objective for this benchmark run.',
-        )
-        async def benchmark_start(
-            interaction: discord.Interaction,
-            archive: discord.Attachment,
-            objective: app_commands.Range[str, 10, 1000] | None = None,
-        ) -> None:
-            await self._on_benchmark_start(
-                interaction,
-                archive=archive,
-                objective=str(objective) if objective else None,
-            )
-
-        @self.tree.command(
             name='task-start',
-            description='Compile, preflight, and start a Glasslab research task.',
+            description=(
+                'Start a Glasslab investigation: attach a task ZIP '
+                '(problem.md + rubric) OR give an objective — Honeydew '
+                'drafts the protocol either way.'
+            ),
             guild=self.guild,
         )
         @app_commands.describe(
-            archive='ZIP containing one problem.md and an optional evaluator rubric.',
-            objective='Optional narrower objective for this research run.',
+            archive='Optional ZIP containing problem.md and an evaluator rubric.',
+            objective='Research objective (required when no archive is attached).',
         )
         async def task_start(
             interaction: discord.Interaction,
-            archive: discord.Attachment,
-            objective: app_commands.Range[str, 10, 1000] | None = None,
+            archive: discord.Attachment | None = None,
+            objective: app_commands.Range[str, 10, 2000] | None = None,
         ) -> None:
-            await self._on_benchmark_start(
+            await self._on_task_start(
                 interaction,
                 archive=archive,
                 objective=str(objective) if objective else None,
@@ -490,10 +640,32 @@ class DiscordControlGateway:
             )
 
         @self.tree.command(
+            name='research-status',
+            description='Show the durable status of a Glasslab research run.',
+            guild=self.guild,
+        )
+        @app_commands.describe(
+            run_id='Optional in a run thread; required from the main channel.',
+        )
+        async def research_status(
+            interaction: discord.Interaction,
+            run_id: str | None = None,
+        ) -> None:
+            await self._on_research_status(interaction, run_id=run_id)
+
+        @self.tree.command(
+            name='research-list',
+            description='List active and recent Glasslab research runs.',
+            guild=self.guild,
+        )
+        async def research_list(interaction: discord.Interaction) -> None:
+            await self._on_research_list(interaction)
+
+        @self.tree.command(
             name='research-question',
             description=(
-                'Ask a research question; Honeydew answers from the '
-                'knowledge corpus with citations.'
+                'Ask the knowledge corpus — a ~1-minute cited answer, no run. '
+                'Use task-start to launch an investigation.'
             ),
             guild=self.guild,
         )
@@ -508,7 +680,6 @@ class DiscordControlGateway:
                 interaction,
                 question=str(question),
             )
-
     def _register_run_control_command(self, operation: str) -> None:
         async def callback(
             interaction: discord.Interaction,
@@ -581,99 +752,57 @@ class DiscordControlGateway:
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    async def _on_research_start(
+    async def _on_task_start(
         self,
         interaction: discord.Interaction,
         *,
-        objective: str,
-    ) -> None:
-        actor = self._actor(interaction)
-        if not self.policy.is_authorized(actor):
-            await self._respond(
-                interaction,
-                'You are not authorized to start Glasslab research runs.',
-            )
-            return
-        if str(interaction.channel_id) != self.channel_id:
-            await self._respond(
-                interaction,
-                'Start research runs from the configured Glasslab channel.',
-            )
-            return
-        await self._respond(
-            interaction,
-            (
-                'Research request accepted. Honeydew is drafting the protocol '
-                'and evaluation contract proposal; a run thread will appear '
-                'in this channel.'
-            ),
-        )
-        task = asyncio.create_task(
-            self._create_run(
-                interaction=interaction,
-                objective=objective,
-            )
-        )
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-
-    async def _create_run(
-        self,
-        *,
-        interaction: discord.Interaction,
-        objective: str,
-    ) -> None:
-        try:
-            # Engine work is synchronous and disk/DB bound; run it in a worker
-            # thread so the gateway event loop stays responsive.
-            run = await asyncio.to_thread(
-                execute_discord_run_creation,
-                self.engine,
-                objective=objective,
-            )
-            destination = (
-                f'<#{run.discord_thread_id}>'
-                if run.discord_thread_id
-                else f'run `{run.run_id}`'
-            )
-            await interaction.followup.send(
-                (
-                    f'Research run created in {destination}. '
-                    'Review the proposed protocol and evaluation contract there.'
-                ),
-                ephemeral=True,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except Exception as exc:
-            try:
-                await interaction.followup.send(
-                    f'Research run creation failed: {exc}',
-                    ephemeral=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            except discord.HTTPException:
-                return
-
-    async def _on_benchmark_start(
-        self,
-        interaction: discord.Interaction,
-        *,
-        archive: discord.Attachment,
+        archive: discord.Attachment | None,
         objective: str | None,
     ) -> None:
         actor = self._actor(interaction)
         if not self.policy.is_authorized(actor):
             await self._respond(
                 interaction,
-                'You are not authorized to start Glasslab benchmark runs.',
+                'You are not authorized to start Glasslab investigations.',
             )
             return
         if str(interaction.channel_id) != self.channel_id:
             await self._respond(
                 interaction,
-                'Start benchmark runs from the configured Glasslab channel.',
+                'Start investigations from the configured Glasslab channel.',
             )
             return
+        if archive is None and not objective:
+            await self._respond(
+                interaction,
+                (
+                    'Attach a task ZIP (problem.md + rubric) or provide an '
+                    'objective to start an investigation.'
+                ),
+            )
+            return
+        if archive is None:
+            # Objective-only path: accept immediately and create the run in
+            # the background; the run thread appears in the channel shortly.
+            await self._respond(
+                interaction,
+                (
+                    'Research request accepted. Honeydew is drafting the '
+                    'protocol and evaluation contract proposal; a run thread '
+                    'will appear in this channel.'
+                ),
+            )
+            task = asyncio.create_task(
+                self._create_objective_run(
+                    interaction=interaction,
+                    objective=objective or '',
+                )
+            )
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+            return
+        # Archived path: compile + preflight + start (a 40-90s import), so
+        # defer first and reply once the run is created.
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             if archive.size > self.engine.task_bundles.MAX_ARCHIVE_BYTES:
@@ -703,10 +832,45 @@ class DiscordControlGateway:
             )
         except Exception as exc:
             await interaction.followup.send(
-                f'Benchmark import or run creation failed: {exc}',
+                f'Task import or run creation failed: {exc}',
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+
+    async def _create_objective_run(
+        self,
+        *,
+        interaction: discord.Interaction,
+        objective: str,
+    ) -> None:
+        try:
+            run = await asyncio.to_thread(
+                execute_discord_run_creation,
+                self.engine,
+                objective=objective,
+            )
+            destination = (
+                f'<#{run.discord_thread_id}>'
+                if run.discord_thread_id
+                else f'run `{run.run_id}`'
+            )
+            await interaction.followup.send(
+                (
+                    f'Research run created in {destination}. '
+                    'Review the proposed protocol and evaluation contract there.'
+                ),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as exc:
+            try:
+                await interaction.followup.send(
+                    f'Research run creation failed: {exc}',
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                return
 
     def _resolve_controlled_run(
         self,
@@ -1047,6 +1211,75 @@ class DiscordControlGateway:
                 interaction,
                 f'Run cancellation failed: {exc}',
             )
+
+    async def _on_research_status(
+        self,
+        interaction: discord.Interaction,
+        *,
+        run_id: str | None,
+    ) -> None:
+        actor = self._actor(interaction)
+        if not self.policy.is_authorized(actor):
+            await self._respond(
+                interaction,
+                'You are not authorized to inspect Glasslab research runs.',
+            )
+            return
+        try:
+            run, actions, jobs = await asyncio.to_thread(
+                self._load_run_status,
+                channel_id=str(interaction.channel_id),
+                run_id=run_id,
+            )
+        except Exception as exc:
+            await self._respond(interaction, f'Status lookup failed: {exc}')
+            return
+        view = build_run_status_view(run, actions, jobs)
+        await self._respond(
+            interaction,
+            bound_discord_message(render_run_status(view)),
+        )
+
+    def _load_run_status(
+        self,
+        *,
+        channel_id: str,
+        run_id: str | None,
+    ) -> tuple[RunRecord, list[ActionRecord], list[JobRecord]]:
+        # Synchronous, disk/DB-bound reads run in a worker thread so the
+        # gateway event loop stays responsive; resolution is re-checked against
+        # the durable store at this point, never trusted from Discord.
+        run = self._resolve_controlled_run(
+            channel_id=channel_id,
+            run_id=run_id,
+        )
+        actions = self.engine.store.list_actions(run.run_id)
+        jobs = self.engine.store.list_jobs(run.run_id)
+        return run, actions, jobs
+
+    async def _on_research_list(self, interaction: discord.Interaction) -> None:
+        actor = self._actor(interaction)
+        if not self.policy.is_authorized(actor):
+            await self._respond(
+                interaction,
+                'You are not authorized to list Glasslab research runs.',
+            )
+            return
+        if str(interaction.channel_id) != self.channel_id:
+            await self._respond(
+                interaction,
+                'List research runs from the configured Glasslab channel.',
+            )
+            return
+        try:
+            runs = await asyncio.to_thread(self.engine.store.list_runs)
+        except Exception as exc:
+            await self._respond(interaction, f'Run list failed: {exc}')
+            return
+        await self._respond(
+            interaction,
+            bound_discord_message(render_run_list(select_runs_for_list(runs))),
+        )
 
     async def _on_interaction(
         self,

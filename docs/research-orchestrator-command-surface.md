@@ -13,21 +13,25 @@ and approval role or explicit administrator allowlist.
 
 | Command | Where | Effect |
 | --- | --- | --- |
-| `/research-start objective:<text>` | Main Glasslab channel | Starts a question-driven run. Honeydew drafts the protocol and evaluation contract proposal. |
-| `/task-start archive:<zip> [objective:<text>]` | Main Glasslab channel | Compiles an arbitrary task archive, performs preflight, and starts the run only when required inputs are ready. |
-| `/benchmark-start archive:<zip> [objective:<text>]` | Main Glasslab channel | Compatibility alias for `/task-start`; do not build new integrations around this name. |
+| `/task-start [archive:<zip>] [objective:<text>]` | Main Glasslab channel | Starts an investigation: with an archive, compiles + preflights + starts the task; without one, starts an objective-driven run. Honeydew drafts the protocol and evaluation contract proposal either way. |
+| `/research-question question:<text>` | Main Glasslab channel | Asks the knowledge corpus — a ~1-minute cited answer, no run. Use `/task-start` to launch an investigation from the direction. |
 | `/dataset-upload dataset:<file> name:<name> [role:<role>] [contains_labels:<bool>]` | Main Glasslab channel | Stores a file immutably and returns a checksum-addressed `glasslab-dataset://` reference. |
 | `/research-artifacts [run_id:<id>] [include_source:<bool>]` | Run thread, or main channel with `run_id` | Downloads a digest-verified ZIP of the latest run-level artifacts and successful-job outputs. |
 | `/research-turns [run_id:<id>] [limit:<int>]` | Run thread, or main channel with `run_id` | Shows the run's most recent redacted agent turns (default 5, max 20) with agent identity, status, and timestamps. |
 | `/research-pause [run_id:<id>] [reason:<text>]` | Run thread, or main channel with `run_id` | Aborts an active model turn, preserves state, and records where to resume. |
 | `/research-resume [run_id:<id>] [reason:<text>]` | Run thread, or main channel with `run_id` | Restores a paused run to its prior state and restarts workflow recovery. |
 | `/research-cancel [run_id:<id>] [reason:<text>]` | Run thread, or main channel with `run_id` | Cancels the run, aborts active Hermes turns, requests cancellation of active jobs, and records the Discord actor and reason. |
+| `/research-status [run_id:<id>]` | Run thread, or main channel with `run_id` | Shows a durable-derived snapshot of the run: state, phase, pending approval, job counts by status, and next required action. |
+| `/research-list` | Main Glasslab channel | Lists active runs first, then the most recently updated terminal runs, up to 10 total. |
 
-Inside a run thread, pause, resume, and cancel resolve the run from the thread
-and do not require an ID.
+Inside a run thread, pause, resume, cancel, and status resolve the run from the
+thread and do not require an ID. `/research-status` without a `run_id` in the
+main channel is rejected; `/research-list` takes no arguments.
 
-Discord does not currently expose list or status slash commands. Status is
-shown by the run thread's editable status message.
+`/research-status` and `/research-list` are read-only projections: they derive
+their output only from durable run, action, and job records and never mutate
+state, append events, create actions, or trigger recovery. Pending human
+approval takes precedence when deriving the "next action" field.
 
 ## Intended End-To-End Run
 
@@ -58,7 +62,8 @@ The bot creates one public thread for the run. Continue from that thread:
 Approve and Reject are message buttons, not slash commands. An approval only
 authorizes the described action; it is not evidence that execution succeeded.
 
-For a question without an archive, use `/research-start`. Honeydew still begins
+For a question without an archive, use `/task-start` with only an objective.
+Honeydew still begins
 with the protocol and evaluation contract. For local data, run
 `/dataset-upload` first and put the returned `glasslab-dataset://<sha256>`
 reference in `problem.md` or the objective.
