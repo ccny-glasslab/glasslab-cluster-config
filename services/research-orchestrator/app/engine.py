@@ -4875,7 +4875,22 @@ class ResearchOrchestrator:
                 else:
                     self._fail_run(run.run_id, exc)
             recovered.append(run.run_id)
+        self._rebuild_dense_index_if_needed()
         return recovered
+
+    def _rebuild_dense_index_if_needed(self) -> None:
+        dense_index = getattr(self.knowledge, 'dense_index', None)
+        if (
+            dense_index is None
+            or self.settings.knowledge_dense_mode != 'dense'
+        ):
+            return
+        try:
+            from .knowledge_dense import ensure_index_built
+
+            ensure_index_built(dense_index, self.knowledge.store)
+        except Exception:  # noqa: BLE001 - dense stays additive
+            return
 
     def _backfill_local_artifacts(self, run_id: str) -> None:
         for event in self.store.list_events(run_id):

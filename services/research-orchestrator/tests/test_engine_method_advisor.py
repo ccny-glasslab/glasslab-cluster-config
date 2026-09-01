@@ -272,3 +272,45 @@ def test_uploaded_source_reachable_via_dense_on_next_advisory(
     ]
     assert retrieval
     assert retrieval[-1].payload.get('retrieval_mode_actual') == 'dense'
+
+
+def test_recover_builds_dense_index_when_mode_dense(
+    tmp_path: Path, monkeypatch
+) -> None:
+    engine, _, _ = _build(
+        tmp_path,
+        stability_text='Recovery hook must trigger a dense index build.',
+    )
+    assert engine.settings.knowledge_dense_mode == 'dense'
+    calls: list[tuple[object, object]] = []
+
+    def fake_build(index, store):
+        calls.append((index, store))
+
+    monkeypatch.setattr(
+        'app.knowledge_dense.ensure_index_built', fake_build
+    )
+    engine._rebuild_dense_index_if_needed()
+    assert len(calls) == 1
+    assert calls[0][0] is engine.knowledge.dense_index
+
+    engine.settings.knowledge_dense_mode = 'lexical'
+    engine._rebuild_dense_index_if_needed()
+    assert len(calls) == 1
+
+
+def test_recover_build_never_blocks_on_provider_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    engine, _, _ = _build(
+        tmp_path,
+        stability_text='A provider failure must not break recovery.',
+    )
+
+    def broken_build(index, store):
+        raise RuntimeError('sentence-transformers unavailable')
+
+    monkeypatch.setattr(
+        'app.knowledge_dense.ensure_index_built', broken_build
+    )
+    engine._rebuild_dense_index_if_needed()  # must not raise
