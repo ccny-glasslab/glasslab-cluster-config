@@ -403,6 +403,10 @@ def test_discord_gateway_registers_component_handler() -> None:
     )
     assert archive_param.required is False
     assert objective_param.required is False
+    for command in gateway.tree.get_commands(guild=discord.Object(id=123456789)):
+        assert len(command.description) <= 100, (
+            f'{command.name} description exceeds Discord\'s 100-char limit'
+        )
     for retired_name in ('research-start', 'benchmark-start'):
         assert gateway.tree.get_command(
             retired_name,
