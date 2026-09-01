@@ -23,6 +23,10 @@ data:
   # Whole books are uploaded as single sources; the 2 MiB default rejects
   # textbook-size text extracts, so the corpus upload cap is raised.
   GLASSLAB_ORCHESTRATOR_KNOWLEDGE_MAX_SOURCE_BYTES: "16777216"
+  # Pinned HF revision of snowflake-arctic-embed-m-v1.5 so the dense
+  # provider's lineage resolves without a lazy model load (resolved from the
+  # cached model refs/main on 2026-09-01).
+  GLASSLAB_ORCHESTRATOR_KNOWLEDGE_EMBEDDING_REVISION: e58a8f756156a1293d763f17e3aae643474e9b8a
   GLASSLAB_ORCHESTRATOR_EVALUATION_CONTRACT_ROOT: /app/evaluation-contracts
   GLASSLAB_ORCHESTRATOR_PROMOTED_CONTRACT_ROOT: /mnt/artifacts/research-orchestrator/trusted-contracts/bundles
   GLASSLAB_ORCHESTRATOR_SEALED_CONTRACT_CANDIDATE_ROOT: /mnt/artifacts/research-orchestrator/contract-candidates
