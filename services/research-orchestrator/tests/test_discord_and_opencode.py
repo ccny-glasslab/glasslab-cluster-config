@@ -9,9 +9,10 @@ repair, workspace-file materialization, and per-agent runtime isolation.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import discord
 import httpx
@@ -389,11 +390,24 @@ def test_discord_gateway_registers_component_handler() -> None:
 
     assert gateway.client.on_interaction == gateway._on_interaction
     assert gateway.client.on_ready == gateway._on_ready
-    command = gateway.tree.get_command(
-        'research-start',
+    start_command = gateway.tree.get_command(
+        'task-start',
         guild=discord.Object(id=123456789),
     )
-    assert command is not None
+    assert start_command is not None
+    archive_param = next(
+        p for p in start_command.parameters if p.name == 'archive'
+    )
+    objective_param = next(
+        p for p in start_command.parameters if p.name == 'objective'
+    )
+    assert archive_param.required is False
+    assert objective_param.required is False
+    for retired_name in ('research-start', 'benchmark-start'):
+        assert gateway.tree.get_command(
+            retired_name,
+            guild=discord.Object(id=123456789),
+        ) is None
     cancel_command = gateway.tree.get_command(
         'research-cancel',
         guild=discord.Object(id=123456789),
@@ -1665,3 +1679,147 @@ def test_format_research_answer_truncates_long_answers_and_excerpts() -> None:
     rendered = format_research_answer(answer)
     assert len(rendered) <= 2000
     assert '...' in rendered
+
+
+def _task_start_interaction() -> MagicMock:
+    interaction = MagicMock()
+    interaction.user.id = '142100176322953216'
+    interaction.user.display_name = 'Tyler'
+    interaction.guild_id = '123456789'
+    interaction.channel_id = '987654321'
+    interaction.user.roles = [SimpleNamespace(id='role-1')]
+    interaction.response.send_message = AsyncMock()
+    return interaction
+
+
+def _task_start_interaction() -> MagicMock:
+    interaction = MagicMock()
+    interaction.user.id = '142100176322953216'
+    interaction.user.display_name = 'Tyler'
+    interaction.guild_id = '123456789'
+    interaction.channel_id = '987654321'
+    interaction.user.roles = []
+    interaction.response.send_message = AsyncMock()
+    return interaction
+
+
+def _authorize(gateway: DiscordControlGateway) -> None:
+    # MagicMock users are not discord.Member instances, so _actor() cannot
+    # collect roles from them; substitute a real authorized actor directly.
+    gateway._actor = lambda interaction: DiscordControlActor(
+        user_id='142100176322953216',
+        display_name='Tyler',
+        guild_id='123456789',
+        role_ids=frozenset({'role-1'}),
+    )
+
+
+def test_task_start_without_archive_creates_objective_run() -> None:
+    engine = Mock()
+    engine.create_run.return_value = SimpleNamespace(
+        run_id='run-1',
+        discord_thread_id='1234',
+    )
+    gateway = DiscordControlGateway(
+        engine=engine,
+        bot_token='bot-token',
+        guild_id='123456789',
+        channel_id='987654321',
+        admin_role_id='role-1',
+        admin_user_ids=[],
+        maximum_dataset_upload_bytes=1024,
+    )
+    _authorize(gateway)
+    interaction = _task_start_interaction()
+
+    async def run_all() -> None:
+        await gateway._on_task_start(
+            interaction,
+            archive=None,
+            objective='Compare two uncertainty quantification methods on a held-out split.',
+        )
+        while gateway._tasks:
+            tasks = list(gateway._tasks)
+            gateway._tasks.clear()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(run_all())
+
+    interaction.response.send_message.assert_called_once()
+    engine.create_run.assert_called_once()
+    created = engine.create_run.call_args.args[0]
+    assert 'uncertainty quantification' in created.objective
+
+
+def test_task_start_with_archive_compiles_and_starts() -> None:
+    engine = Mock()
+    engine.task_bundles.MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
+    engine.import_task_bundle.return_value = SimpleNamespace(
+        run_id='run-2',
+        discord_thread_id='5678',
+        task_id='task-2',
+        display_name='UCI Adult Income',
+        digest='a' * 64,
+    )
+    gateway = DiscordControlGateway(
+        engine=engine,
+        bot_token='bot-token',
+        guild_id='123456789',
+        channel_id='987654321',
+        admin_role_id='role-1',
+        admin_user_ids=[],
+        maximum_dataset_upload_bytes=1024,
+    )
+    _authorize(gateway)
+    interaction = _task_start_interaction()
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    archive = MagicMock()
+    archive.size = 100
+    archive.filename = 'task.zip'
+    archive.read = AsyncMock(return_value=b'zip-bytes')
+
+    asyncio.run(
+        gateway._on_task_start(
+            interaction,
+            archive=archive,
+            objective=None,
+        )
+    )
+
+    interaction.response.defer.assert_called_once()
+    interaction.followup.send.assert_called_once()
+    engine.import_task_bundle.assert_called_once_with(
+        filename='task.zip',
+        content=b'zip-bytes',
+    )
+    engine.create_run.assert_called_once()
+    created = engine.create_run.call_args.args[0]
+    assert created.task_id == engine.import_task_bundle.return_value.task_id
+
+
+def test_task_start_requires_archive_or_objective() -> None:
+    engine = Mock()
+    gateway = DiscordControlGateway(
+        engine=engine,
+        bot_token='bot-token',
+        guild_id='123456789',
+        channel_id='987654321',
+        admin_role_id='role-1',
+        admin_user_ids=[],
+        maximum_dataset_upload_bytes=1024,
+    )
+    _authorize(gateway)
+    interaction = _task_start_interaction()
+
+    asyncio.run(
+        gateway._on_task_start(
+            interaction,
+            archive=None,
+            objective=None,
+        )
+    )
+
+    interaction.response.send_message.assert_called_once()
+    engine.create_run.assert_not_called()
+    engine.import_task_bundle.assert_not_called()
