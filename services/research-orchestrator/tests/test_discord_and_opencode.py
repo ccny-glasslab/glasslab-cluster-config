@@ -24,10 +24,12 @@ from app.discord_controls import (
     DiscordControlPolicy,
     execute_discord_action,
     execute_discord_dataset_ingestion,
+    execute_discord_research_question,
     execute_discord_run_control,
     execute_discord_run_cancellation,
     execute_discord_run_creation,
     execute_discord_turn_history,
+    format_research_answer,
 )
 from app.opencode_runtime import (
     OpenCodeProcessRuntime,
@@ -41,7 +43,9 @@ from app.opencode_runtime import (
 from app.schemas import (
     AgentName,
     AgentTurnResult,
+    Citation,
     EventRecord,
+    ResearchAnswer,
     RunRecord,
     RunState,
     TurnKind,
@@ -385,6 +389,7 @@ def test_discord_gateway_registers_component_handler() -> None:
         'research-resume',
         'research-artifacts',
         'research-turns',
+        'research-question',
         'dataset-upload',
     ):
         assert gateway.tree.get_command(
@@ -1231,3 +1236,81 @@ def test_opencode_repairs_missing_structured_output(
     assert 'Return only the structured result' in (
         repair_payload['parts'][0]['text']
     )
+
+
+def test_execute_discord_research_question_delegates_to_engine() -> None:
+    engine = Mock()
+    expected = ResearchAnswer(
+        answer='Conformal prediction guarantees coverage by construction.',
+        citations=[
+            Citation(
+                knowledge_uri='knowledge://context/abc123',
+                source='conformal-prediction-paper',
+                excerpt='guarantees coverage without distributional assumptions',
+            )
+        ],
+    )
+    engine.answer_research_question.return_value = expected
+
+    result = execute_discord_research_question(
+        engine,
+        question='how does conformal prediction guarantee coverage',
+        conversation_id='discord-123',
+    )
+
+    assert result is expected
+    engine.answer_research_question.assert_called_once_with(
+        question='how does conformal prediction guarantee coverage',
+        conversation_id='discord-123',
+    )
+
+
+def test_format_research_answer_cites_sources_with_excerpts() -> None:
+    answer = ResearchAnswer(
+        answer='Batch normalization accelerates training by stabilizing '
+        'layer-input distributions.',
+        citations=[
+            Citation(
+                knowledge_uri='knowledge://context/abc',
+                source='batch-norm-paper',
+                excerpt='fixes the means and variances of layer inputs',
+            ),
+            Citation(
+                knowledge_uri='knowledge://context/abc',
+                source='another-source',
+                excerpt='reduces the need for Dropout',
+            ),
+        ],
+    )
+    rendered = format_research_answer(answer)
+    assert 'batch-norm-paper' in rendered
+    assert 'fixes the means and variances of layer inputs' in rendered
+    assert 'Sources (2)' in rendered
+    assert len(rendered) <= 2000
+
+
+def test_format_research_answer_marks_unanswerable() -> None:
+    rendered = format_research_answer(
+        ResearchAnswer(
+            answer='The corpus does not cover this.',
+            unanswerable=True,
+        )
+    )
+    assert 'does not contain material' in rendered
+    assert len(rendered) <= 2000
+
+
+def test_format_research_answer_truncates_long_answers_and_excerpts() -> None:
+    answer = ResearchAnswer(
+        answer=('word ' * 500).strip(),
+        citations=[
+            Citation(
+                knowledge_uri='knowledge://context/abc',
+                source='long-source-name',
+                excerpt=('sentence ' * 60).strip(),
+            )
+        ],
+    )
+    rendered = format_research_answer(answer)
+    assert len(rendered) <= 2000
+    assert '...' in rendered
