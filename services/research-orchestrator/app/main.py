@@ -56,7 +56,9 @@ from .schemas import (
     ActionRecord,
     ApprovalRequest,
     ArtifactListResponse,
-    ChatRequest,
+ChatRequest,
+    ConversationSourceBindRequest,
+    ConversationSourceBinding,
     ContextPacket,
     ContextPacketListResponse,
     EventListResponse,
@@ -789,6 +791,61 @@ def create_app(
                 engine.answer_research_question,
                 question=request.question,
                 conversation_id=conversation_id,
+                bind_source_ids=request.bind_source_ids,
+            )
+        except Exception as exc:
+            raise map_error(exc) from exc
+
+    @app.get(
+        '/chat/{conversation_id}',
+        response_model=dict[str, object],
+    )
+    def get_conversation(
+        conversation_id: str,
+        _: None = Depends(require_operator),
+    ) -> dict[str, object]:
+        binding = engine.store.get_conversation_binding(conversation_id)
+        turns = [
+            {
+                'question': turn.input_event.get('question'),
+                'answer': (
+                    turn.structured_output.research_answer.answer
+                    if turn.structured_output
+                    and turn.structured_output.research_answer
+                    else None
+                ),
+                'citations': [
+                    citation.model_dump(mode='json')
+                    for citation in (
+                        turn.structured_output.research_answer.citations
+                        if turn.structured_output
+                        and turn.structured_output.research_answer
+                        else []
+                    )
+                ],
+                'status': turn.status,
+            }
+            for turn in engine.store.list_turns(conversation_id)
+        ]
+        return {
+            'conversation_id': conversation_id,
+            'sources': binding.source_ids if binding else [],
+            'turns': turns,
+        }
+
+    @app.post(
+        '/chat/{conversation_id}/sources',
+        response_model=ConversationSourceBinding,
+    )
+    def bind_conversation_sources(
+        conversation_id: str,
+        request: ConversationSourceBindRequest,
+        _: None = Depends(require_operator),
+    ) -> ConversationSourceBinding:
+        try:
+            return engine.store.bind_conversation_sources(
+                conversation_id,
+                request.source_ids,
             )
         except Exception as exc:
             raise map_error(exc) from exc

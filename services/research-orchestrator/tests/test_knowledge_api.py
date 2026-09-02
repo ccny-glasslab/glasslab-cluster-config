@@ -344,3 +344,43 @@ def test_chat_requires_operator_token(tmp_path: Path) -> None:
             headers={'X-Glasslab-Operator-Token': 'expected-token'},
         )
         assert allowed.status_code == 201
+
+
+def test_chat_conversation_binding_and_view(tmp_path: Path) -> None:
+    _, settings, engine = _bundle(tmp_path)
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        first = client.post(
+            '/chat',
+            json={
+                'question': 'how does conformal prediction guarantee coverage',
+                'conversation_id': 'chat-p3',
+            },
+        )
+        assert first.status_code == 201
+
+        bound = client.post(
+            '/chat/chat-p3/sources',
+            json={'source_ids': ['source-1', 'source-2']},
+        )
+        assert bound.status_code == 200
+        assert bound.json()['source_ids'] == ['source-1', 'source-2']
+
+        second = client.post(
+            '/chat',
+            json={
+                'question': 'and what about metric search',
+                'conversation_id': 'chat-p3',
+                'bind_source_ids': ['source-3'],
+            },
+        )
+        assert second.status_code == 201
+
+        view = client.get('/chat/chat-p3')
+        assert view.status_code == 200
+        body = view.json()
+        assert body['sources'] == ['source-1', 'source-2', 'source-3']
+        assert len(body['turns']) == 2
+        assert body['turns'][-1]['question'] == 'and what about metric search'
+        assert body['turns'][-1]['answer']
+        assert body['turns'][-1]['status'] == 'completed'

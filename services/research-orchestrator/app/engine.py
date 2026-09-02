@@ -778,6 +778,7 @@ class ResearchOrchestrator:
         *,
         question: str,
         conversation_id: str,
+        bind_source_ids: list[str] | None = None,
     ) -> ResearchAnswer:
         """Answer a research question over the knowledge corpus.
 
@@ -789,6 +790,10 @@ class ResearchOrchestrator:
         never holds the single-active-run slot) so its events, packet, and
         turn stay durable and FK-consistent. An output with the wrong kind
         or no answer variant is rejected.
+
+        Phase 3: follow-ups feed the last few prior turns back as bounded
+        prompt context, and operator-bound sources (ConversationSourceBinding)
+        pin retrieval to a curated source set for the conversation.
         """
         paths = self.workspaces.paths(conversation_id)
         workspace = paths.honeydew
@@ -823,6 +828,14 @@ class ResearchOrchestrator:
             workspace=workspace,
             existing_session_id=None,
         )
+        if bind_source_ids:
+            self.store.bind_conversation_sources(
+                conversation_id, bind_source_ids
+            )
+        binding = self.store.get_conversation_binding(conversation_id)
+        bound_sources = binding.source_ids if binding else None
+        prior_context = self._conversation_prior_context(conversation_id)
+
         packet = self.knowledge.retrieve(
             run_id=conversation_id,
             agent='honeydew',
@@ -834,6 +847,7 @@ class ResearchOrchestrator:
             token_budget=self.settings.knowledge_token_budget,
             run_scope=conversation_id,
             allowed_source_types=None,
+            source_ids=bound_sources,
         )
         prompt = (
             'You are Honeydew, answering a direct research question from an '
@@ -843,8 +857,13 @@ class ResearchOrchestrator:
             'source + a short verbatim excerpt). If the retrieved material '
             'does not answer the question, set unanswerable: true and leave '
             'citations empty rather than guessing.\n\n'
-            f'QUESTION: {question}\n'
         )
+        if prior_context:
+            prompt += (
+                'PRIOR CONVERSATION (for context only; cite only this turn\'s '
+                'retrieved material):\n' + prior_context + '\n\n'
+            )
+        prompt += f'QUESTION: {question}\n'
         if packet and packet.exact_text_supplied:
             prompt = packet.exact_text_supplied + '\n\n' + prompt
             self._event(
@@ -906,11 +925,47 @@ class ResearchOrchestrator:
                 agent=AgentName.HONEYDEW,
                 opencode_session_id=session.session_id,
                 opencode_message_id=message_id,
+                input_event={'question': question},
                 structured_output=result,
                 status='completed',
             )
         )
         return result.research_answer
+
+    def _conversation_prior_context(
+        self,
+        conversation_id: str,
+        *,
+        max_turns: int = 5,
+        max_tokens: int = 2000,
+    ) -> str:
+        """Format the last few completed turns as bounded follow-up context.
+
+        Reads the durable TurnRecords (which survive process restarts) and
+        renders the most recent completed turns, trimmed oldest-first to the
+        token budget. Follow-ups therefore stay grounded in what Honeydew
+        already said without unbounded prompt growth.
+        """
+        turns = [
+            turn
+            for turn in self.store.list_turns(conversation_id)
+            if turn.status == 'completed'
+            and turn.structured_output is not None
+            and turn.structured_output.research_answer is not None
+        ]
+        turns = turns[-max_turns:]
+        blocks: list[str] = []
+        budget = 0
+        for turn in turns:
+            question = str(turn.input_event.get('question', '?'))
+            answer = turn.structured_output.research_answer.answer
+            text = f'Q: {question}\nA: {answer}'
+            tokens = max(1, len(text.split()))
+            if budget + tokens > max_tokens:
+                break
+            budget += tokens
+            blocks.append(text)
+        return '\n\n'.join(blocks)
 
     def _should_retry_turn(
         self,

@@ -33,6 +33,7 @@ from .schemas import (
     ApprovalStatus,
     ArtifactRecord,
     ContextPacket,
+    ConversationSourceBinding,
     EventRecord,
     IngestedDatasetRecord,
     JobRecord,
@@ -268,6 +269,15 @@ class SqliteStore:
                 );
                 CREATE INDEX IF NOT EXISTS knowledge_chunk_vectors_model_idx
                 ON knowledge_chunk_vectors(model_id);
+
+                -- Conversation source bindings: operator-bound knowledge
+                -- sources per research-chat conversation (Phase 3). JSON
+                -- payload row, additive and durable like the other record
+                -- tables.
+                CREATE TABLE IF NOT EXISTS conversation_bindings (
+                    conversation_id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL
+                );
 
                 -- FTS5 is the lexical half of hybrid retrieval. chunk_id is
                 -- the rowid-style key linking to knowledge_chunks; the rank is
@@ -1206,6 +1216,70 @@ class SqliteStore:
                 (run_id, after_sequence),
             ).fetchall()
         return [EventRecord.model_validate_json(row['payload']) for row in rows]
+
+    def save_conversation_binding(
+        self,
+        record: ConversationSourceBinding,
+    ) -> ConversationSourceBinding:
+        with self.transaction() as connection:
+            connection.execute(
+                '''
+                INSERT INTO conversation_bindings (conversation_id, payload)
+                VALUES (?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    payload = excluded.payload
+                ''',
+                (record.conversation_id, json.dumps(record.model_dump(mode='json'))),
+            )
+        return record
+
+    def get_conversation_binding(
+        self,
+        conversation_id: str,
+    ) -> ConversationSourceBinding | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                'SELECT payload FROM conversation_bindings'
+                ' WHERE conversation_id = ?',
+                (conversation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ConversationSourceBinding.model_validate(json.loads(row['payload']))
+
+    def bind_conversation_sources(
+        self,
+        conversation_id: str,
+        source_ids: list[str],
+        *,
+        created_by: str = 'operator',
+    ) -> ConversationSourceBinding:
+        existing = self.get_conversation_binding(conversation_id)
+        merged = sorted(set((existing.source_ids if existing else []) + source_ids))
+        binding = ConversationSourceBinding(
+            conversation_id=conversation_id,
+            source_ids=merged,
+            created_by=existing.created_by if existing else created_by,
+            created_at=existing.created_at if existing else utc_now(),
+            updated_at=utc_now(),
+        )
+        return self.save_conversation_binding(binding)
+
+    def unbind_conversation_source(
+        self,
+        conversation_id: str,
+        source_id: str,
+    ) -> ConversationSourceBinding | None:
+        existing = self.get_conversation_binding(conversation_id)
+        if existing is None:
+            return None
+        remaining = [sid for sid in existing.source_ids if sid != source_id]
+        if remaining == existing.source_ids:
+            return existing
+        binding = existing.model_copy(
+            update={'source_ids': remaining, 'updated_at': utc_now()}
+        )
+        return self.save_conversation_binding(binding)
 
     def save_knowledge_source(self, record: KnowledgeSource) -> KnowledgeSource:
         with self.transaction() as connection:

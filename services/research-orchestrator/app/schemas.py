@@ -321,6 +321,15 @@ class ChatRequest(BaseModel):
 
     question: str = Field(min_length=1, max_length=2000)
     conversation_id: str | None = None
+    # Operator-curated sources pinned to this conversation (Phase 3): follow-up
+    # retrieval is scoped to them.
+    bind_source_ids: list[str] | None = None
+
+
+class ConversationSourceBindRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    source_ids: list[str] = Field(min_length=1)
 
 
 class ResourceRequest(BaseModel):
@@ -522,6 +531,24 @@ class TurnRecord(BaseModel):
     structured_output: AgentTurnResult | None = None
     status: Literal['running', 'completed', 'failed', 'aborted']
     error: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ConversationSourceBinding(BaseModel):
+    """Durable operator binding of knowledge sources to a conversation.
+
+    Follow-up turns in a conversation retrieve with these source ids scoped
+    explicitly, so bound sources are guaranteed to be retrievable and citable
+    regardless of corpus-wide ranking. The record is a JSON payload row in
+    both stores and survives process restarts.
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    conversation_id: str = Field(min_length=1)
+    source_ids: list[str] = Field(default_factory=list)
+    created_by: str = 'operator'
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

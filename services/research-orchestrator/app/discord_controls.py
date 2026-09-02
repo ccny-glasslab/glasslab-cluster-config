@@ -727,6 +727,10 @@ class DiscordControlGateway:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
     @staticmethod
+    def _is_thread(interaction: discord.Interaction) -> bool:
+        return isinstance(getattr(interaction, 'channel', None), discord.Thread)
+
+    @staticmethod
     def _actor(interaction: discord.Interaction) -> DiscordControlActor:
         role_ids: set[str] = set()
         if isinstance(interaction.user, discord.Member):
@@ -1149,10 +1153,17 @@ class DiscordControlGateway:
                 'You are not authorized to ask Glasslab research questions.',
             )
             return
-        if str(interaction.channel_id) != self.channel_id:
+        # Allow the configured main channel (one-shot) or a run/research
+        # thread (conversational). In a thread, the channel id becomes the
+        # stable conversation id so follow-up questions chain.
+        if (
+            str(interaction.channel_id) != self.channel_id
+            and not self._is_thread(interaction)
+        ):
             await self._respond(
                 interaction,
-                'Ask research questions from the configured Glasslab channel.',
+                'Ask research questions from the configured Glasslab channel '
+                'or a research thread.',
             )
             return
         # A research_answer turn is a bounded agent turn (about a minute);
@@ -1170,12 +1181,18 @@ class DiscordControlGateway:
             )
             return
         logger.info('research_question starting: %.120s', question)
+        if self._is_thread(interaction):
+            # Stable per-thread conversation: follow-ups in the thread chain
+            # against the same conversation (prior turns + bound sources).
+            conversation_id = f'discord-thread-{interaction.channel_id}'
+        else:
+            conversation_id = f'discord-{uuid4().hex[:16]}'
         try:
             answer = await asyncio.to_thread(
                 execute_discord_research_question,
                 self.engine,
                 question=question,
-                conversation_id=f'discord-{uuid4().hex[:16]}',
+                conversation_id=conversation_id,
             )
             await interaction.followup.send(
                 format_research_answer(answer),

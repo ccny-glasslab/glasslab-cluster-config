@@ -389,6 +389,38 @@ def test_knowledge_and_context_records_round_trip(store) -> None:
     assert store.list_context_packets(run.run_id)[0].packet_id == packet.packet_id
 
 
+def test_conversation_source_binding_round_trip_and_reopen(store, tmp_path) -> None:
+    binding = store.bind_conversation_sources(
+        'chat-contract', ['source-a', 'source-b']
+    )
+    assert set(binding.source_ids) == {'source-a', 'source-b'}
+    assert store.get_conversation_binding('chat-contract').source_ids == [
+        'source-a',
+        'source-b',
+    ]
+
+    # Merge is additive + deduped; unbind removes a single source.
+    store.bind_conversation_sources('chat-contract', ['source-b', 'source-c'])
+    assert store.get_conversation_binding('chat-contract').source_ids == [
+        'source-a',
+        'source-b',
+        'source-c',
+    ]
+    store.unbind_conversation_source('chat-contract', 'source-b')
+    assert store.get_conversation_binding('chat-contract').source_ids == [
+        'source-a',
+        'source-c',
+    ]
+
+    # Durable across a process restart (fresh handle on the same database).
+    if isinstance(store, SqliteStore):
+        reopened = SqliteStore(store.database_path)
+        assert reopened.get_conversation_binding('chat-contract').source_ids == [
+            'source-a',
+            'source-c',
+        ]
+
+
 def test_knowledge_search_matches_partial_term_overlap(store) -> None:
     """Long agent-context queries must still hit chunks sharing any term.
 
