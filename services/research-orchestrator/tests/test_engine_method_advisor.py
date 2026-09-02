@@ -523,3 +523,12 @@ def test_topic_phrase_strips_question_openers(orchestrator_bundle) -> None:
         'conformal work'
     )
     assert engine._topic_phrase('explain the protocol') == 'the protocol'
+
+
+def test_topic_phrase_strips_leading_conjunction_before_opener(
+    orchestrator_bundle,
+) -> None:
+    settings, store, _cluster, runtime, engine = orchestrator_bundle
+    assert engine._topic_phrase(
+        'and how does cosine similarity relate to retrieval'
+    ) == 'cosine similarity relate to retrieval'
