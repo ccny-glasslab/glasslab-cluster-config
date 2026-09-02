@@ -34,6 +34,7 @@ from app.discord_controls import (
     execute_discord_run_cancellation,
     execute_discord_run_creation,
     execute_discord_turn_history,
+    format_packet_for_discord,
     format_research_answer,
     job_status_counts,
     next_action_for,
@@ -1910,3 +1911,37 @@ def test_research_question_contains_followup_failure() -> None:
         gateway._on_research_question(interaction, question='some question')
     )
     assert interaction.followup_messages == []
+
+
+def test_format_research_answer_uses_packet_id_not_dead_link() -> None:
+    answer = ResearchAnswer(
+        answer='A metric space pairs a set with a metric.',
+        citations=[
+            Citation(
+                knowledge_uri='knowledge://context/0123456789abcdef',
+                source='real-analysis-trench',
+                excerpt='we must specify the couple (A, rho)',
+            )
+        ],
+    )
+    rendered = format_research_answer(answer)
+    assert 'http://127.0.0.1' not in rendered
+    assert '/packet <id>' in rendered
+    assert '0123456789ab' in rendered
+    assert len(rendered) <= 2000
+
+
+def test_format_packet_for_discord_chunks_exact_text() -> None:
+    engine = Mock()
+    packet = Mock()
+    packet.exact_text_supplied = ('word ' * 2000).strip()
+    packet.ranked_sources = [{'source_id': 'calc-openstax'}]
+    engine.knowledge.get_context_packet.return_value = packet
+
+    chunks = format_packet_for_discord(engine, 'packet-123')
+
+    assert chunks[0].startswith('**Packet `packet-123`**')
+    assert 'calc-openstax' in chunks[0]
+    assert all(len(c) <= 2000 for c in chunks)
+    assert len(chunks) >= 3  # header + at least two body chunks
+    engine.knowledge.get_context_packet.assert_called_once_with('packet-123')
