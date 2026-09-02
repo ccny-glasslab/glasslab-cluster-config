@@ -28,9 +28,9 @@ from .corpus_rag import (
 from .knowledge_search import or_query
 from .schemas import (
     ActionRecord, AgentName, ApprovalStatus, ArtifactRecord, ContextPacket,
-    EventRecord, IngestedDatasetRecord, JobRecord, JobStatus, KnowledgeChunk,
-    KnowledgeSource, RunRecord, RunState, SourceType, TERMINAL_STATES,
-    TurnKind, TurnRecord, utc_now,
+    ConversationSourceBinding, EventRecord, IngestedDatasetRecord, JobRecord,
+    JobStatus, KnowledgeChunk, KnowledgeSource, RunRecord, RunState,
+    SourceType, TERMINAL_STATES, TurnKind, TurnRecord, utc_now,
 )
 from .state_machine import HUMAN_WAIT_STATES, validate_transition
 from .storage import ConcurrencyConflict, RecordNotFound
@@ -130,6 +130,11 @@ class PostgresStore:
           dims INTEGER NOT NULL, index_version TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS orchestrator_knowledge_chunk_vectors_model_idx
           ON orchestrator_knowledge_chunk_vectors(model_id);
+        CREATE TABLE IF NOT EXISTS orchestrator_conversation_bindings (
+          conversation_id TEXT PRIMARY KEY, payload JSONB NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL);
+        CREATE INDEX IF NOT EXISTS orchestrator_conversation_bindings_updated_idx
+          ON orchestrator_conversation_bindings(updated_at);
         CREATE INDEX IF NOT EXISTS orchestrator_knowledge_chunks_fts_idx ON orchestrator_knowledge_chunks USING GIN (to_tsvector('simple', text));
         CREATE TABLE IF NOT EXISTS orchestrator_context_packets (
           packet_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES orchestrator_runs(run_id),
@@ -421,6 +426,72 @@ class PostgresStore:
         with self._connect() as conn: return [IngestedDatasetRecord.model_validate(r['payload']) for r in conn.execute('SELECT payload FROM orchestrator_datasets ORDER BY created_at').fetchall()]
     def list_events(self, run_id: str, *, after_sequence: int = 0) -> list[EventRecord]:
         with self._connect() as conn: return [EventRecord.model_validate(r['payload']) for r in conn.execute('SELECT payload FROM orchestrator_events WHERE run_id=%s AND sequence_number>%s ORDER BY sequence_number', (run_id, after_sequence)).fetchall()]
+
+    def save_conversation_binding(
+        self,
+        record: ConversationSourceBinding,
+    ) -> ConversationSourceBinding:
+        with self.transaction() as conn:
+            conn.execute(
+                'INSERT INTO orchestrator_conversation_bindings'
+                ' (conversation_id, payload, updated_at) VALUES (%s,%s,%s)'
+                ' ON CONFLICT (conversation_id) DO UPDATE SET'
+                ' payload=EXCLUDED.payload, updated_at=EXCLUDED.updated_at',
+                (
+                    record.conversation_id,
+                    json.dumps(record.model_dump(mode='json')),
+                    record.updated_at,
+                ),
+            )
+        return record
+
+    def get_conversation_binding(
+        self,
+        conversation_id: str,
+    ) -> ConversationSourceBinding | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                'SELECT payload FROM orchestrator_conversation_bindings'
+                ' WHERE conversation_id=%s',
+                (conversation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ConversationSourceBinding.model_validate(row['payload'])
+
+    def bind_conversation_sources(
+        self,
+        conversation_id: str,
+        source_ids: list[str],
+        *,
+        created_by: str = 'operator',
+    ) -> ConversationSourceBinding:
+        existing = self.get_conversation_binding(conversation_id)
+        merged = sorted(set((existing.source_ids if existing else []) + source_ids))
+        binding = ConversationSourceBinding(
+            conversation_id=conversation_id,
+            source_ids=merged,
+            created_by=existing.created_by if existing else created_by,
+            created_at=existing.created_at if existing else utc_now(),
+            updated_at=utc_now(),
+        )
+        return self.save_conversation_binding(binding)
+
+    def unbind_conversation_source(
+        self,
+        conversation_id: str,
+        source_id: str,
+    ) -> ConversationSourceBinding | None:
+        existing = self.get_conversation_binding(conversation_id)
+        if existing is None:
+            return None
+        remaining = [sid for sid in existing.source_ids if sid != source_id]
+        if remaining == existing.source_ids:
+            return existing
+        binding = existing.model_copy(
+            update={'source_ids': remaining, 'updated_at': utc_now()}
+        )
+        return self.save_conversation_binding(binding)
 
     def save_knowledge_source(self, record: KnowledgeSource) -> KnowledgeSource:
         with self.transaction() as conn:

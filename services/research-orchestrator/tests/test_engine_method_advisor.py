@@ -30,7 +30,19 @@ from app.policy import ActionPolicy
 from app.smoke import RUNNER_IMAGE, _create_repo
 from app.storage import SqliteStore
 from app.workspaces import WorkspaceManager
-from app.schemas import ApprovalStatus, RunCreateRequest, RunState, SourceType
+from app.schemas import (
+    AgentName,
+    AgentTurnResult,
+    ApprovalStatus,
+    ResearchAnswer,
+    RunCreateRequest,
+    RunRecord,
+    RunState,
+    SourceType,
+    TurnKind,
+    TurnRecord,
+    utc_now,
+)
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 
@@ -314,3 +326,101 @@ def test_recover_build_never_blocks_on_provider_failure(
         'app.knowledge_dense.ensure_index_built', broken_build
     )
     engine._rebuild_dense_index_if_needed()  # must not raise
+
+
+def test_conversation_prior_context_renders_last_turns_bounded(
+    orchestrator_bundle,
+) -> None:
+    settings, store, _cluster, runtime, engine = orchestrator_bundle
+    run_id = 'chat-memory'
+    engine.store.create_run(
+        RunRecord(
+            run_id=run_id,
+            objective='prior context',
+            state=RunState.CREATED,
+            evaluation_contract_id='example-research-v1',
+            evaluation_contract_version='1.0.0',
+            evaluation_contract_digest='a' * 64,
+            beaker_workspace='/tmp/b',
+            honeydew_workspace='/tmp/h',
+            shared_artifacts_path='/tmp/s',
+            reports_path='/tmp/r',
+            maximum_turns=10,
+            maximum_runtime_seconds=3600,
+            maximum_parallel_jobs=1,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        ),
+        one_active_run=False,
+    )
+    for idx in range(3):
+        engine.store.save_turn(
+            TurnRecord(
+                run_id=run_id,
+                agent=AgentName.HONEYDEW,
+                input_event={'question': f'question {idx}'},
+                structured_output=AgentTurnResult(
+                    kind=TurnKind.RESEARCH_ANSWER,
+                    summary='prior turn',
+                    research_answer=ResearchAnswer(
+                        answer=f'answer {idx} with enough words to count toward the token budget',
+                        citations=[],
+                        unanswerable=False,
+                        suggested_followups=[],
+                    ),
+                ),
+                status='completed',
+            )
+        )
+    context = engine._conversation_prior_context(run_id, max_turns=2, max_tokens=10000)
+    assert 'question 2' in context
+    assert 'answer 2' in context
+    assert 'question 0' not in context  # bounded to last max_turns=2
+    assert 'PRIOR CONVERSATION' not in context  # formatting is added by the caller
+
+
+def test_conversation_prior_context_respects_token_budget(
+    orchestrator_bundle,
+) -> None:
+    settings, store, _cluster, runtime, engine = orchestrator_bundle
+    run_id = 'chat-budget'
+    engine.store.create_run(
+        RunRecord(
+            run_id=run_id,
+            objective='prior budget',
+            state=RunState.CREATED,
+            evaluation_contract_id='example-research-v1',
+            evaluation_contract_version='1.0.0',
+            evaluation_contract_digest='a' * 64,
+            beaker_workspace='/tmp/b',
+            honeydew_workspace='/tmp/h',
+            shared_artifacts_path='/tmp/s',
+            reports_path='/tmp/r',
+            maximum_turns=10,
+            maximum_runtime_seconds=3600,
+            maximum_parallel_jobs=1,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        ),
+        one_active_run=False,
+    )
+    engine.store.save_turn(
+        TurnRecord(
+            run_id=run_id,
+            agent=AgentName.HONEYDEW,
+            input_event={'question': 'q'},
+            structured_output=AgentTurnResult(
+                kind=TurnKind.RESEARCH_ANSWER,
+                summary='prior turn',
+                research_answer=ResearchAnswer(
+                    answer='this is a moderately sized answer text',
+                    citations=[],
+                    unanswerable=False,
+                    suggested_followups=[],
+                ),
+            ),
+            status='completed',
+        )
+    )
+    context = engine._conversation_prior_context(run_id, max_turns=5, max_tokens=4)
+    assert context == ''  # first turn alone already exceeds the 4-token budget

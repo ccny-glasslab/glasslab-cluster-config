@@ -425,6 +425,7 @@ class KnowledgeManager:
         allowed_source_types: list[str] | None = None,
         retrieval_mode: str | None = None,
         additional_queries: Sequence[str] | None = None,
+        source_ids: list[str] | None = None,
     ) -> ContextPacket:
         """Retrieve scoped, bounded context and persist a durable packet.
 
@@ -449,6 +450,11 @@ class KnowledgeManager:
             source_types=allowed,
             run_scope=run_scope,
         )
+        if source_ids is not None:
+            # Explicit conversation-bound sources: the caller (research chat)
+            # pins retrieval to a curated set for this conversation.
+            allowed_ids = set(source_ids)
+            sources = [s for s in sources if s.source_id in allowed_ids]
         source_ids = [source.source_id for source in sources]
         source_by_id = {source.source_id: source for source in sources}
 

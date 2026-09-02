@@ -81,6 +81,7 @@ def _retrieve(
     turn_kind: str = 'implementation_plan',
     query: str = 'metrics',
     allowed_source_types: list[str] | None = None,
+    source_ids: list[str] | None = None,
 ):
     return manager.retrieve(
         run_id=run_id,
@@ -88,11 +89,8 @@ def _retrieve(
         turn_number=1,
         turn_kind=turn_kind,
         query=query,
-        index_version='v1',
-        max_results=10,
-        token_budget=4000,
-        run_scope=run_id,
         allowed_source_types=allowed_source_types,
+        source_ids=source_ids,
     )
 
 
@@ -728,3 +726,36 @@ def test_fts_source_filtering_not_crowded_out(tmp_path: Path) -> None:
     assert len(results) == 1
     assert results[0]['source_id'] == target_source.source_id
     assert 'test set' in results[0]['text']
+
+
+def test_retrieve_scopes_to_bound_conversation_source_ids(
+    tmp_path: Path,
+) -> None:
+    manager, store = _manager(tmp_path)
+    run_id = 'run-1'
+    _create_run(store, run_id)
+    source_a = manager.ingest_text(
+        source_type=SourceType.DOCUMENTATION,
+        canonical_uri='repo://docs/a.md',
+        text='Metric learning anchors map inputs to an embedding space.',
+        run_scope=run_id,
+        emit_event_for_run=run_id,
+    )
+    source_b = manager.ingest_text(
+        source_type=SourceType.DOCUMENTATION,
+        canonical_uri='repo://docs/b.md',
+        text='Uncertainty quantification calibrates prediction intervals.',
+        run_scope=run_id,
+        emit_event_for_run=run_id,
+    )
+    scoped = _retrieve(
+        manager,
+        run_id=run_id,
+        query='embedding space',
+        source_ids=[source_a.source_id],
+    )
+    uris = {entry['uri'] for entry in scoped.ranked_sources}
+    assert 'repo://docs/a.md' in uris
+    assert 'repo://docs/b.md' not in uris
+    assert scoped.exact_text_supplied is not None
+    assert 'metric learning' in scoped.exact_text_supplied.lower()
