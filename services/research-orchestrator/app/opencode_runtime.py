@@ -407,7 +407,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
         for path in (data_root, cache_root, state_root, home_root):
             path.mkdir(parents=True, exist_ok=True)
         provider_id = self.settings.agent_model_provider_id
-        model_name = self.settings.effective_agent_model_name
+        model_name = self.settings.agent_model_for(agent)
         config = {
             '$schema': 'https://opencode.ai/config.json',
             'model': f'{provider_id}/{model_name}',
@@ -667,7 +667,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
                         'model': {
                             'providerID': self.settings.agent_model_provider_id,
                             'modelID': (
-                                self.settings.effective_agent_model_name
+                                self.settings.agent_model_for(agent)
                             ),
                         },
                         'agent': 'build',
