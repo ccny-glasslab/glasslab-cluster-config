@@ -447,10 +447,10 @@ MAX_DISCORD_PACKET_CHUNK_CHARS = 1800
 def build_packet_button_view(answer: ResearchAnswer) -> discord.ui.View:
     """One button per unique packet: click -> that citation's source text.
 
-    The custom id carries a normalized excerpt prefix so the renderer can
-    pick the exact ranked-source block the citation quoted (citations often
-    repeat the same packet). Discord rejects duplicated custom ids, so
-    buttons are deduplicated by packet id.
+    The custom id carries the citation index + a normalized excerpt prefix so
+    the renderer can pick the exact ranked-source block the citation quoted
+    (excerpt match first, then the citation's rank as fallback). Discord
+    rejects duplicated custom ids, so buttons are deduplicated by packet id.
     """
     view = discord.ui.View(timeout=None)
     seen: set[str] = set()
@@ -465,7 +465,9 @@ def build_packet_button_view(answer: ResearchAnswer) -> discord.ui.View:
         button = discord.ui.Button(
             label=f'Source [{index}]',
             style=discord.ButtonStyle.secondary,
-            custom_id=f'{PACKET_PREFIX}:{packet_id}:{excerpt_prefix}',
+            custom_id=(
+                f'{PACKET_PREFIX}:{packet_id}:{index}:{excerpt_prefix}'
+            ),
         )
         view.add_item(button)
     return view
@@ -475,12 +477,14 @@ def format_packet_for_discord(
     engine: ResearchOrchestrator,
     packet_id: str,
     excerpt_prefix: str = '',
+    source_index: int | None = None,
 ) -> list[str]:
     """Render a knowledge packet's source text as bounded Discord messages.
 
     With an excerpt prefix (from a citation button), only the ranked-source
     block whose text contains the normalized excerpt is shown — the exact
-    chunk the citation quoted — instead of the whole packet.
+    chunk the citation quoted. If the excerpt does not match, the citation's
+    rank in the packet is used; otherwise the whole packet is shown.
     """
     packet = engine.knowledge.get_context_packet(packet_id)
     exact = ' '.join((packet.exact_text_supplied or '').split())
@@ -491,13 +495,13 @@ def format_packet_for_discord(
         )
         return chunks
     header = f'**Packet `{packet_id}`**'
+    blocks = re.findall(
+        r'<knowledge-context[^>]*>(.*?)</knowledge-context>',
+        packet.exact_text_supplied or '',
+        flags=re.S,
+    )
     if excerpt_prefix:
         excerpt_prefix = re.sub(r'[^A-Za-z0-9]', '', excerpt_prefix)
-        blocks = re.findall(
-            r'<knowledge-context[^>]*>(.*?)</knowledge-context>',
-            packet.exact_text_supplied or '',
-            flags=re.S,
-        )
         match = next(
             (
                 index for index, block in enumerate(blocks)
@@ -506,11 +510,16 @@ def format_packet_for_discord(
             ),
             None,
         )
-        if match is not None:
-            header += f' — cited source {match + 1}'
-            exact = ' '.join(blocks[match].split())
-        else:
-            header += ' — full packet (excerpt not matched)'
+    else:
+        match = None
+    if match is None and source_index is not None and blocks:
+        if 1 <= source_index <= len(blocks):
+            match = source_index - 1
+    if match is not None:
+        header += f' — cited source {match + 1}'
+        exact = ' '.join(blocks[match].split())
+    else:
+        header += ' — full packet (excerpt not matched)'
     sources = ' · '.join(
         str(s.get('source_id', '?'))[:40] for s in packet.ranked_sources
     ) or 'no ranked sources'
@@ -1360,14 +1369,22 @@ class DiscordControlGateway:
                 message for message in format_research_answer(answer)
                 if message
             ]
+            view = build_packet_button_view(answer)
+            if not view.children:
+                view = None
+            sources_message_index = next(
+                (i for i, m in enumerate(rendered) if m.startswith('**Sources')),
+                len(rendered) - 1,
+            )
             await placeholder.edit(
                 content=rendered[0],
-                view=build_packet_button_view(answer),
+                view=view if sources_message_index == 0 else None,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-            for extra in rendered[1:]:
+            for index, extra in enumerate(rendered[1:], start=1):
                 await placeholder.channel.send(
                     extra,
+                    view=view if index == sources_message_index else None,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
         except Exception as exc:  # noqa: BLE001 - report, never crash the gateway
@@ -1466,6 +1483,7 @@ class DiscordControlGateway:
         *,
         packet_id: str,
         excerpt_prefix: str = '',
+        source_index: int | None = None,
     ) -> None:
         actor = self._actor(interaction)
         if not self.policy.is_authorized(actor):
@@ -1481,6 +1499,7 @@ class DiscordControlGateway:
                 self.engine,
                 packet_id,
                 excerpt_prefix,
+                source_index,
             )
             await interaction.followup.send(
                 chunks[0],
@@ -1692,11 +1711,15 @@ class DiscordControlGateway:
             return
         custom_id = str(data.get('custom_id', ''))
         if custom_id.startswith(f'{PACKET_PREFIX}:'):
-            parts = custom_id[len(PACKET_PREFIX) + 1:].split(':', 1)
+            parts = custom_id[len(PACKET_PREFIX) + 1:].split(':', 2)
+            packet_id = parts[0]
+            source_index = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+            excerpt_prefix = parts[2] if len(parts) > 2 else ''
             await self._on_packet_button(
                 interaction,
-                packet_id=parts[0],
-                excerpt_prefix=parts[1] if len(parts) > 1 else '',
+                packet_id=packet_id,
+                excerpt_prefix=excerpt_prefix,
+                source_index=source_index,
             )
             return
         parts = custom_id.split(':', 2)

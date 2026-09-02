@@ -2077,7 +2077,9 @@ def test_format_packet_for_discord_shows_cited_block_only() -> None:
     packet.ranked_sources = [{'source_id': 'src-a'}, {'source_id': 'src-b'}]
     engine.knowledge.get_context_packet.return_value = packet
 
-    chunks = format_packet_for_discord(engine, 'packet-1', 'triangleinequality')
+    chunks = format_packet_for_discord(
+        engine, 'packet-1', 'triangleinequality', source_index=2
+    )
 
     joined = '\n'.join(chunks)
     assert 'the triangle inequality holds' in joined
@@ -2118,3 +2120,40 @@ def test_format_research_answer_never_emits_empty_messages() -> None:
     assert rendered, 'must produce at least one message'
     assert all(message for message in rendered)
     assert 'only wrapper markup' in rendered[0]
+
+
+def test_format_packet_for_discord_uses_rank_when_excerpt_misses() -> None:
+    engine = Mock()
+    packet = Mock()
+    packet.exact_text_supplied = (
+        '<knowledge-context source="src-a">first block text here</knowledge-context>'
+        '<knowledge-context source="src-b">second block content</knowledge-context>'
+    )
+    packet.ranked_sources = [{'source_id': 'src-a'}, {'source_id': 'src-b'}]
+    engine.knowledge.get_context_packet.return_value = packet
+
+    chunks = format_packet_for_discord(
+        engine, 'packet-1', 'nomatchxyz', source_index=1
+    )
+
+    joined = '\n'.join(chunks)
+    assert 'first block text here' in joined
+    assert 'second block content' not in joined
+    assert 'cited source 1' in chunks[0]
+
+
+def test_build_packet_button_view_carries_index_and_excerpt() -> None:
+    answer = ResearchAnswer(
+        answer='x',
+        citations=[
+            Citation(
+                knowledge_uri='knowledge://context/0123456789abcdef0123456789abcdef',
+                source='trench',
+                excerpt='we must specify the couple (A,rho)',
+            )
+        ],
+    )
+    view = build_packet_button_view(answer)
+    assert view.children[0].custom_id.startswith(
+        'packet:0123456789abcdef0123456789abcdef:1:'
+    )
