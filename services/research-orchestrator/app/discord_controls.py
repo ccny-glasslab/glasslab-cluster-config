@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 
 
 CONTROL_PREFIX = 'glasslab'
+PACKET_PREFIX = 'packet'
 
 RUN_LIST_LIMIT = 10
 DISCORD_MESSAGE_LIMIT = 2000
@@ -440,6 +441,20 @@ def execute_discord_research_question(
 
 
 MAX_DISCORD_PACKET_CHUNK_CHARS = 1800
+
+
+def build_packet_button_view(answer: ResearchAnswer) -> discord.ui.View:
+    """One button per citation: click -> /packet-equivalent source post."""
+    view = discord.ui.View(timeout=None)
+    for index, citation in enumerate(answer.citations[:5], start=1):
+        packet_id = citation.knowledge_uri.rsplit('/', 1)[-1]
+        button = discord.ui.Button(
+            label=f'Source [{index}]',
+            style=discord.ButtonStyle.secondary,
+            custom_id=f'{PACKET_PREFIX}:{packet_id}',
+        )
+        view.add_item(button)
+    return view
 
 
 def format_packet_for_discord(
@@ -1269,6 +1284,7 @@ class DiscordControlGateway:
             )
             await placeholder.edit(
                 content=format_research_answer(answer),
+                view=build_packet_button_view(answer),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except Exception as exc:  # noqa: BLE001 - report, never crash the gateway
@@ -1287,6 +1303,50 @@ class DiscordControlGateway:
                 logger.error(
                     'research_question: could not deliver failure notice: '
                     '%s: %s',
+                    type(followup_exc).__name__,
+                    followup_exc,
+                )
+
+    async def _on_packet_button(
+        self,
+        interaction: discord.Interaction,
+        *,
+        packet_id: str,
+    ) -> None:
+        actor = self._actor(interaction)
+        if not self.policy.is_authorized(actor):
+            await self._respond(
+                interaction,
+                'You are not authorized to inspect knowledge packets.',
+            )
+            return
+        await interaction.response.defer(thinking=True)
+        try:
+            chunks = await asyncio.to_thread(
+                format_packet_for_discord,
+                self.engine,
+                packet_id=packet_id,
+            )
+            await interaction.followup.send(
+                chunks[0],
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            for chunk in chunks[1:]:
+                await interaction.followup.send(
+                    chunk,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        except Exception as exc:
+            logger.error('packet button failed: %s: %s', type(exc).__name__, exc)
+            try:
+                await interaction.followup.send(
+                    f'Packet lookup failed: {type(exc).__name__}: {exc}',
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception as followup_exc:  # noqa: BLE001 - best effort
+                logger.error(
+                    'packet button: could not deliver failure notice: %s: %s',
                     type(followup_exc).__name__,
                     followup_exc,
                 )
@@ -1472,6 +1532,12 @@ class DiscordControlGateway:
         if not isinstance(data, dict):
             return
         custom_id = str(data.get('custom_id', ''))
+        if custom_id.startswith(f'{PACKET_PREFIX}:'):
+            await self._on_packet_button(
+                interaction,
+                packet_id=custom_id[len(PACKET_PREFIX) + 1:],
+            )
+            return
         parts = custom_id.split(':', 2)
         if len(parts) != 3 or parts[0] != CONTROL_PREFIX:
             return

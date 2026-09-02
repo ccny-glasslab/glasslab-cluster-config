@@ -34,6 +34,7 @@ from app.discord_controls import (
     execute_discord_run_cancellation,
     execute_discord_run_creation,
     execute_discord_turn_history,
+    build_packet_button_view,
     format_packet_for_discord,
     format_research_answer,
     job_status_counts,
@@ -1945,3 +1946,26 @@ def test_format_packet_for_discord_chunks_exact_text() -> None:
     assert all(len(c) <= 2000 for c in chunks)
     assert len(chunks) >= 3  # header + at least two body chunks
     engine.knowledge.get_context_packet.assert_called_once_with('packet-123')
+
+
+def test_build_packet_button_view_has_one_button_per_citation() -> None:
+    answer = ResearchAnswer(
+        answer='A metric space pairs a set with a metric.',
+        citations=[
+            Citation(
+                knowledge_uri='knowledge://context/0123456789abcdef0123456789abcdef',
+                source='real-analysis-trench',
+                excerpt='we must specify the couple (A, rho)',
+            ),
+            Citation(
+                knowledge_uri='knowledge://context/fedcba9876543210fedcba9876543210',
+                source='calc-openstax',
+                excerpt='the triangle inequality holds',
+            ),
+        ],
+    )
+    view = build_packet_button_view(answer)
+    assert len(view.children) == 2
+    first = view.children[0]
+    assert first.custom_id == 'packet:0123456789abcdef0123456789abcdef'
+    assert first.label == 'Source [1]'
