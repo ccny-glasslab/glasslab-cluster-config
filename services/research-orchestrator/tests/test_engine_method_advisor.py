@@ -454,3 +454,72 @@ def test_promoted_run_seeds_protocol_and_binds_existing_thread(
         'promoted from a research conversation' in prompt
         for prompt in honeydew_prompts
     )
+
+
+def test_conversation_objective_is_descriptive_synthesis(
+    orchestrator_bundle,
+) -> None:
+    settings, store, _cluster, runtime, engine = orchestrator_bundle
+    run_id = 'chat-objective'
+    engine.store.create_run(
+        RunRecord(
+            run_id=run_id,
+            objective='synthesis',
+            state=RunState.CREATED,
+            evaluation_contract_id='example-research-v1',
+            evaluation_contract_version='1.0.0',
+            evaluation_contract_digest='a' * 64,
+            beaker_workspace='/tmp/b',
+            honeydew_workspace='/tmp/h',
+            shared_artifacts_path='/tmp/s',
+            reports_path='/tmp/r',
+            maximum_turns=10,
+            maximum_runtime_seconds=3600,
+            maximum_parallel_jobs=1,
+            conversation=True,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        ),
+        one_active_run=False,
+    )
+    for idx, question in enumerate(
+        (
+            'what is metric learning',
+            'how does cosine similarity relate to embedding retrieval',
+        )
+    ):
+        engine.store.save_turn(
+            TurnRecord(
+                run_id=run_id,
+                agent=AgentName.HONEYDEW,
+                input_event={'question': question},
+                structured_output=AgentTurnResult(
+                    kind=TurnKind.RESEARCH_ANSWER,
+                    summary='prior turn',
+                    research_answer=ResearchAnswer(
+                        answer=f'grounded answer {idx}',
+                        citations=[],
+                        unanswerable=False,
+                        suggested_followups=[],
+                    ),
+                ),
+                status='completed',
+            )
+        )
+    objective = engine._conversation_objective(
+        [t for t in engine.store.list_turns(run_id)]
+    )
+    assert objective.startswith('Investigate metric learning')
+    assert 'cosine similarity relate to embedding retrieval' in objective
+    assert 'what is' not in objective
+
+
+def test_topic_phrase_strips_question_openers(orchestrator_bundle) -> None:
+    settings, store, _cluster, runtime, engine = orchestrator_bundle
+    assert engine._topic_phrase('what is metric learning?') == (
+        'metric learning'
+    )
+    assert engine._topic_phrase('how does conformal work') == (
+        'conformal work'
+    )
+    assert engine._topic_phrase('explain the protocol') == 'the protocol'

@@ -1052,10 +1052,29 @@ class ResearchOrchestrator:
         return run
 
     def _conversation_objective(self, turns: list[TurnRecord]) -> str:
-        first_question = str(turns[0].input_event.get('question', '') or '')
-        last_answer = turns[-1].structured_output.research_answer.answer
-        objective = first_question or last_answer
-        return ' '.join(objective.split())[:500]
+        questions = [
+            ' '.join(str(turn.input_event.get('question', '') or '').split())
+            for turn in turns
+            if turn.input_event.get('question')
+        ]
+        fallback = turns[-1].structured_output.research_answer.answer
+        if not questions:
+            return fallback[:500]
+        if len(questions) == 1:
+            return f'Investigate {self._topic_phrase(questions[0])}.'[:500]
+        first = self._topic_phrase(questions[0])
+        last = self._topic_phrase(questions[-1])
+        return f'Investigate {first}, with follow-up on {last}.'[:500]
+
+    def _topic_phrase(self, question: str) -> str:
+        phrase = re.sub(
+            r'^(what is|what are|what does|how does|how do|how can|explain|'
+            r'describe|tell me about|can you|why|when|where)\s+',
+            '',
+            question,
+            flags=re.IGNORECASE,
+        ).strip()
+        return phrase.rstrip('?').strip() or question
 
     def _should_retry_turn(
         self,
