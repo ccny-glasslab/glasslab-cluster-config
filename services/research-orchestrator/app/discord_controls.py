@@ -444,10 +444,19 @@ MAX_DISCORD_PACKET_CHUNK_CHARS = 1800
 
 
 def build_packet_button_view(answer: ResearchAnswer) -> discord.ui.View:
-    """One button per citation: click -> /packet-equivalent source post."""
+    """One button per unique packet: click -> /packet-equivalent source post.
+
+    Citations frequently cite the same packet more than once (different
+    excerpts), and Discord rejects duplicated custom ids, so buttons are
+    deduplicated by packet id.
+    """
     view = discord.ui.View(timeout=None)
-    for index, citation in enumerate(answer.citations[:5], start=1):
+    seen: set[str] = set()
+    for index, citation in enumerate(answer.citations, start=1):
         packet_id = citation.knowledge_uri.rsplit('/', 1)[-1]
+        if packet_id in seen or index > 5:
+            continue
+        seen.add(packet_id)
         button = discord.ui.Button(
             label=f'Source [{index}]',
             style=discord.ButtonStyle.secondary,
