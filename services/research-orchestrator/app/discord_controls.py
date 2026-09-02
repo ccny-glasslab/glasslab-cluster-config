@@ -13,6 +13,7 @@ import asyncio
 from dataclasses import dataclass
 import io
 import logging
+import re
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -444,11 +445,12 @@ MAX_DISCORD_PACKET_CHUNK_CHARS = 1800
 
 
 def build_packet_button_view(answer: ResearchAnswer) -> discord.ui.View:
-    """One button per unique packet: click -> /packet-equivalent source post.
+    """One button per unique packet: click -> that citation's source text.
 
-    Citations frequently cite the same packet more than once (different
-    excerpts), and Discord rejects duplicated custom ids, so buttons are
-    deduplicated by packet id.
+    The custom id carries a normalized excerpt prefix so the renderer can
+    pick the exact ranked-source block the citation quoted (citations often
+    repeat the same packet). Discord rejects duplicated custom ids, so
+    buttons are deduplicated by packet id.
     """
     view = discord.ui.View(timeout=None)
     seen: set[str] = set()
@@ -457,10 +459,13 @@ def build_packet_button_view(answer: ResearchAnswer) -> discord.ui.View:
         if packet_id in seen or index > 5:
             continue
         seen.add(packet_id)
+        excerpt_prefix = re.sub(
+            r'[^A-Za-z0-9]', '', ' '.join(citation.excerpt.split())
+        )[:36]
         button = discord.ui.Button(
             label=f'Source [{index}]',
             style=discord.ButtonStyle.secondary,
-            custom_id=f'{PACKET_PREFIX}:{packet_id}',
+            custom_id=f'{PACKET_PREFIX}:{packet_id}:{excerpt_prefix}',
         )
         view.add_item(button)
     return view
@@ -469,20 +474,47 @@ def build_packet_button_view(answer: ResearchAnswer) -> discord.ui.View:
 def format_packet_for_discord(
     engine: ResearchOrchestrator,
     packet_id: str,
+    excerpt_prefix: str = '',
 ) -> list[str]:
-    """Render a knowledge packet's exact text as bounded Discord messages."""
+    """Render a knowledge packet's source text as bounded Discord messages.
+
+    With an excerpt prefix (from a citation button), only the ranked-source
+    block whose text contains the normalized excerpt is shown — the exact
+    chunk the citation quoted — instead of the whole packet.
+    """
     packet = engine.knowledge.get_context_packet(packet_id)
     exact = ' '.join((packet.exact_text_supplied or '').split())
-    sources = ' · '.join(
-        str(s.get('source_id', '?'))[:40] for s in packet.ranked_sources
-    ) or 'no ranked sources'
     chunks: list[str] = []
     if not exact:
         chunks.append(
             f'Packet `{packet_id}` has no attached text (0 ranked sources).'
         )
         return chunks
-    header = f'**Packet `{packet_id}`** — sources: {sources}'
+    header = f'**Packet `{packet_id}`**'
+    if excerpt_prefix:
+        excerpt_prefix = re.sub(r'[^A-Za-z0-9]', '', excerpt_prefix)
+        blocks = re.findall(
+            r'<knowledge-context[^>]*>(.*?)</knowledge-context>',
+            packet.exact_text_supplied or '',
+            flags=re.S,
+        )
+        match = next(
+            (
+                index for index, block in enumerate(blocks)
+                if excerpt_prefix
+                in re.sub(r'[^A-Za-z0-9]', '', ' '.join(block.split()))
+            ),
+            None,
+        )
+        if match is not None:
+            header += f' — cited source {match + 1}'
+            exact = ' '.join(blocks[match].split())
+        else:
+            header += ' — full packet (excerpt not matched)'
+    sources = ' · '.join(
+        str(s.get('source_id', '?'))[:40] for s in packet.ranked_sources
+    ) or 'no ranked sources'
+    header += f' — sources: {sources}'
     chunks.append(header)
     body = exact
     while body:
@@ -494,46 +526,56 @@ def format_packet_for_discord(
 MAX_DISCORD_RESEARCH_ANSWER_CHARS = 2000
 
 
-def format_research_answer(answer: ResearchAnswer) -> str:
-    """Render a research answer within Discord's message length bound.
+def strip_knowledge_wrappers(text: str) -> str:
+    """Remove <knowledge-context ...> wrapper tags the model echoes back.
 
-    The answer text is capped first, then citation lines (source + verbatim
-    excerpt) fill the remaining budget so the trust loop — checking a claim
-    against its source — survives even a long answer.
+    The retrieved material is wrapped in <knowledge-context> blocks before
+    injection; the model sometimes quotes the wrapper markup verbatim. The
+    inner source text is kept, only the tags (plain and HTML-escaped) are
+    dropped.
+    """
+    cleaned = re.sub(r'<\s*/?\s*knowledge-context[^>]*>', '', text)
+    cleaned = re.sub(r'&lt;\s*/?\s*knowledge-context[^>]*&gt;', '', cleaned)
+    return cleaned
+
+
+def format_research_answer(answer: ResearchAnswer) -> list[str]:
+    """Render a research answer as bounded Discord messages (no truncation).
+
+    The answer text is chunked to Discord's message limit (knowledge-context
+    wrappers stripped), then a citations block lists each source with its
+    packet id.
     """
     if answer.unanswerable:
-        return (
+        return [
             'The knowledge corpus does not contain material to answer this '
             'question. Rephrase it against the corpus domain (ML methods, '
             'uncertainty quantification, metric learning, and similar).'
+        ]
+    messages: list[str] = []
+    answer_text = strip_knowledge_wrappers(
+        ' '.join(answer.answer.strip().split())
+    )
+    body = answer_text
+    while body:
+        messages.append(body[:1800])
+        body = body[1800:]
+    if answer.citations:
+        messages.append('')
+        messages.append(
+            '**Sources (' + str(len(answer.citations)) + ')** — '
+            'click a Source button below to see its text'
         )
-    lines: list[str] = []
-    answer_text = ' '.join(answer.answer.strip().split())
-    if len(answer_text) > 1100:
-        answer_text = answer_text[:1097].rstrip() + '...'
-    lines.append(answer_text)
-    budget = MAX_DISCORD_RESEARCH_ANSWER_CHARS - len(answer_text) - 2
-    citations = answer.citations
-    if citations:
-        header = f'**Sources ({len(citations)})** — run `/packet <id>` to see the full source text'
-        budget -= len(header) + 2
-        lines.extend(['', header])
-        for index, citation in enumerate(citations, start=1):
+        for index, citation in enumerate(answer.citations, start=1):
             excerpt = ' '.join(citation.excerpt.split())
             if len(excerpt) > 100:
                 excerpt = excerpt[:97].rstrip() + '...'
             packet_id = citation.knowledge_uri.rsplit('/', 1)[-1]
-            # Full 32-char id: /packet resolves by exact match, so the
-            # citation must not truncate it.
-            line = (
+            messages.append(
                 f'[{index}] {citation.source} — "{excerpt}" — '
                 f'`{packet_id}`'
             )
-            if len(line) > budget:
-                break
-            lines.append(line)
-            budget -= len(line) + 1
-    return '\n'.join(lines)
+    return messages
 
 
 # Compatibility name for callers that predate generic task compilation.
@@ -1310,11 +1352,17 @@ class DiscordControlGateway:
                 question=question,
                 conversation_id=conversation_id,
             )
+            rendered = format_research_answer(answer)
             await placeholder.edit(
-                content=format_research_answer(answer),
+                content=rendered[0],
                 view=build_packet_button_view(answer),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+            for extra in rendered[1:]:
+                await placeholder.channel.send(
+                    extra,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
         except Exception as exc:  # noqa: BLE001 - report, never crash the gateway
             logger.error(
                 'research_question failed: %s: %s',
@@ -1410,6 +1458,7 @@ class DiscordControlGateway:
         interaction: discord.Interaction,
         *,
         packet_id: str,
+        excerpt_prefix: str = '',
     ) -> None:
         actor = self._actor(interaction)
         if not self.policy.is_authorized(actor):
@@ -1423,7 +1472,8 @@ class DiscordControlGateway:
             chunks = await asyncio.to_thread(
                 format_packet_for_discord,
                 self.engine,
-                packet_id=packet_id,
+                packet_id,
+                excerpt_prefix,
             )
             await interaction.followup.send(
                 chunks[0],
@@ -1635,9 +1685,11 @@ class DiscordControlGateway:
             return
         custom_id = str(data.get('custom_id', ''))
         if custom_id.startswith(f'{PACKET_PREFIX}:'):
+            parts = custom_id[len(PACKET_PREFIX) + 1:].split(':', 1)
             await self._on_packet_button(
                 interaction,
-                packet_id=custom_id[len(PACKET_PREFIX) + 1:],
+                packet_id=parts[0],
+                excerpt_prefix=parts[1] if len(parts) > 1 else '',
             )
             return
         parts = custom_id.split(':', 2)
