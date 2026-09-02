@@ -1326,25 +1326,16 @@ class DiscordControlGateway:
                     followup_exc,
                 )
 
-<<<<<<< HEAD
     async def _on_research_promote(
         self,
         interaction: discord.Interaction,
         *,
         objective: str | None,
-=======
-    async def _on_packet_button(
-        self,
-        interaction: discord.Interaction,
-        *,
-        packet_id: str,
->>>>>>> origin/main
     ) -> None:
         actor = self._actor(interaction)
         if not self.policy.is_authorized(actor):
             await self._respond(
                 interaction,
-<<<<<<< HEAD
                 'You are not authorized to promote Glasslab research threads.',
             )
             return
@@ -1394,7 +1385,27 @@ class DiscordControlGateway:
             try:
                 await interaction.followup.send(
                     f'Promotion failed: {type(exc).__name__}: {exc}',
-=======
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception as followup_exc:  # noqa: BLE001 - best effort
+                logger.error(
+                    'research_promote: could not deliver failure notice: '
+                    '%s: %s',
+                    type(followup_exc).__name__,
+                    followup_exc,
+                )
+
+    async def _on_packet_button(
+        self,
+        interaction: discord.Interaction,
+        *,
+        packet_id: str,
+    ) -> None:
+        actor = self._actor(interaction)
+        if not self.policy.is_authorized(actor):
+            await self._respond(
+                interaction,
                 'You are not authorized to inspect knowledge packets.',
             )
             return
@@ -1414,23 +1425,21 @@ class DiscordControlGateway:
                     chunk,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-        except Exception as exc:
-            logger.error('packet button failed: %s: %s', type(exc).__name__, exc)
+        except Exception as exc:  # noqa: BLE001 - report, never crash the gateway
+            logger.error(
+                'packet button failed: %s: %s',
+                type(exc).__name__,
+                exc,
+            )
             try:
                 await interaction.followup.send(
                     f'Packet lookup failed: {type(exc).__name__}: {exc}',
->>>>>>> origin/main
                     ephemeral=True,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             except Exception as followup_exc:  # noqa: BLE001 - best effort
                 logger.error(
-<<<<<<< HEAD
-                    'research_promote: could not deliver failure notice: '
-                    '%s: %s',
-=======
                     'packet button: could not deliver failure notice: %s: %s',
->>>>>>> origin/main
                     type(followup_exc).__name__,
                     followup_exc,
                 )
