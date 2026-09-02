@@ -1068,8 +1068,9 @@ class ResearchOrchestrator:
 
     def _topic_phrase(self, question: str) -> str:
         phrase = re.sub(
-            r'^(what is|what are|what does|how does|how do|how can|explain|'
-            r'describe|tell me about|can you|why|when|where)\s+',
+            r'^(?:(?:and|also|then|plus)\s+)?(?:what is|what are|what does|'
+            r'how does|how do|how can|explain|describe|tell me about|can you|'
+            r'why|when|where)\s+',
             '',
             question,
             flags=re.IGNORECASE,
