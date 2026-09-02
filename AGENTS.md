@@ -295,6 +295,10 @@ work around this release flow.
 
 ## Reading Order
 
+Two coding agents edit this repository concurrently. Before touching a shared
+file (see `docs/agent-coordination.md` — the lane map and keep-both conflict
+rule), read that document.
+
 1. `HANDOFF.md`
 2. `TODO.md`
 3. `README.md`
