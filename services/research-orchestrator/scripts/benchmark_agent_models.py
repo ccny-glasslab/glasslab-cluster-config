@@ -197,7 +197,7 @@ def _post_stream(
     t0 = time.monotonic()
     first_token_at: float | None = None
     content_parts: list[str] = []
-    with urllib.request.urlopen(req, timeout=600) as resp:
+    with urllib.request.urlopen(req, timeout=1800) as resp:
         for raw in resp:
             line = raw.decode(errors='replace').strip()
             if not line.startswith('data:'):
@@ -250,7 +250,7 @@ def _post_once(
         headers={'Content-Type': 'application/json'},
     )
     t0 = time.monotonic()
-    with urllib.request.urlopen(req, timeout=600) as resp:
+    with urllib.request.urlopen(req, timeout=1800) as resp:
         payload = json.load(resp)
     elapsed = time.monotonic() - t0
     content = (payload.get('choices') or [{}])[0].get('message', {}).get('content') or ''
