@@ -873,7 +873,11 @@ class ResearchOrchestrator:
              'Render all mathematics as plain Unicode text (for example '
              'ρ(u,v) ≤ ρ(u,w)+ρ(w,v), ℝ, ∈, ∑, ∞) — never LaTeX $...$ '
              'markup — the answer is displayed on Discord, which cannot '
-             'render LaTeX.\n\n'
+             'render LaTeX.\n'
+             'Do not reproduce the retrieved material\'s internal '
+             'bibliographic reference numbers (e.g. "[21, 51]") — they refer '
+             'to the source\'s own bibliography and mean nothing to the '
+             'reader. Cite sources only through the citations[] field.\n\n'
              f'QUESTION: {question}\n'
         )
         if prior_context:
