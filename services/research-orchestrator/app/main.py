@@ -60,6 +60,7 @@ from .schemas import (
 ChatRequest,
     ConversationSourceBindRequest,
     ConversationSourceBinding,
+    ConversationPromoteRequest,
     ContextPacket,
     ContextPacketListResponse,
     EventListResponse,
@@ -847,6 +848,27 @@ def create_app(
             return engine.store.bind_conversation_sources(
                 conversation_id,
                 request.source_ids,
+            )
+        except Exception as exc:
+            raise map_error(exc) from exc
+
+    @app.post(
+        '/chat/{conversation_id}/promote',
+        response_model=RunRecord,
+    )
+    def promote_conversation(
+        conversation_id: str,
+        request: ConversationPromoteRequest,
+        _: None = Depends(require_operator),
+    ) -> RunRecord:
+        try:
+            return engine.promote_conversation(
+                conversation_id,
+                objective=request.objective,
+                evaluation_contract_id=request.evaluation_contract_id,
+                evaluation_contract_version=(
+                    request.evaluation_contract_version
+                ),
             )
         except Exception as exc:
             raise map_error(exc) from exc

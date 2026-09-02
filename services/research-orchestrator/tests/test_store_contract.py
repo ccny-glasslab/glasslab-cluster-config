@@ -130,6 +130,27 @@ def store(request: pytest.FixtureRequest, tmp_path: Path):
     return PostgresStore(dsn)
 
 
+def test_run_seed_fields_round_trip(store) -> None:
+    run = _run()
+    seeded = run.model_copy(
+        update={
+            'seed_context': 'Q: what is metric learning\nA: grounded answer',
+            'seed_source_ids': ['source-a', 'source-b'],
+            'discord_thread_id': 'thread-123',
+        }
+    )
+    stored = store.create_run(seeded, one_active_run=False)
+    loaded = store.get_run(stored.run_id)
+    assert loaded.seed_context == seeded.seed_context
+    assert loaded.seed_source_ids == ['source-a', 'source-b']
+    assert loaded.discord_thread_id == 'thread-123'
+    updated = store.replace_run(
+        loaded.model_copy(update={'seed_source_ids': ['source-c']}),
+        expected_version=loaded.version,
+    )
+    assert store.get_run(stored.run_id).seed_source_ids == ['source-c']
+
+
 def test_run_transitions_and_optimistic_concurrency(store) -> None:
     run = store.create_run(_run(), one_active_run=False)
     assert store.get_run(run.run_id).state is RunState.CREATED

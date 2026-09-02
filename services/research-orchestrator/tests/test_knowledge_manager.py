@@ -82,6 +82,7 @@ def _retrieve(
     query: str = 'metrics',
     allowed_source_types: list[str] | None = None,
     source_ids: list[str] | None = None,
+    pinned_source_ids: list[str] | None = None,
 ):
     return manager.retrieve(
         run_id=run_id,
@@ -91,6 +92,7 @@ def _retrieve(
         query=query,
         allowed_source_types=allowed_source_types,
         source_ids=source_ids,
+        pinned_source_ids=pinned_source_ids,
     )
 
 
@@ -759,3 +761,42 @@ def test_retrieve_scopes_to_bound_conversation_source_ids(
     assert 'repo://docs/b.md' not in uris
     assert scoped.exact_text_supplied is not None
     assert 'metric learning' in scoped.exact_text_supplied.lower()
+
+
+def test_retrieve_pins_sources_without_excluding_defaults(
+    tmp_path: Path,
+) -> None:
+    manager, store = _manager(tmp_path)
+    run_id = 'run-1'
+    _create_run(store, run_id)
+    source_a = manager.ingest_text(
+        source_type=SourceType.DOCUMENTATION,
+        canonical_uri='repo://docs/a.md',
+        text='Bound source: metric learning anchors map inputs to embeddings.',
+        run_scope=run_id,
+        emit_event_for_run=run_id,
+    )
+    source_b = manager.ingest_text(
+        source_type=SourceType.DOCUMENTATION,
+        canonical_uri='repo://docs/b.md',
+        text='Default corpus: embedding retrieval prefers cosine similarity.',
+        run_scope=run_id,
+        emit_event_for_run=run_id,
+    )
+    source_c = manager.ingest_text(
+        source_type=SourceType.DOCUMENTATION,
+        canonical_uri='repo://docs/c.md',
+        text='Bound source: this file is only about kitchen recipes and pasta.',
+        run_scope=run_id,
+        emit_event_for_run=run_id,
+    )
+    packet = _retrieve(
+        manager,
+        run_id=run_id,
+        query='embedding anchors',
+        pinned_source_ids=[source_a.source_id, source_c.source_id],
+    )
+    uris = {entry['uri'] for entry in packet.ranked_sources}
+    assert 'repo://docs/a.md' in uris
+    assert 'repo://docs/b.md' in uris
+    assert 'repo://docs/c.md' in uris

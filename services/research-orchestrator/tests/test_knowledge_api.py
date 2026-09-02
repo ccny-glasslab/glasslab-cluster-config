@@ -408,3 +408,81 @@ def test_context_packet_html_page_renders_exact_text(tmp_path: Path) -> None:
         assert 'text/html' in response.headers['content-type']
         assert packet.exact_text_supplied[:60] in response.text
         assert 'Ranked sources' in response.text
+
+
+def _seed_chat(client, conversation_id: str) -> None:
+    for question in (
+        'how does conformal prediction guarantee coverage',
+        'and what about metric search',
+    ):
+        response = client.post(
+            '/chat',
+            json={
+                'question': question,
+                'conversation_id': conversation_id,
+            },
+        )
+        assert response.status_code == 201
+
+
+def test_chat_promote_creates_seeded_run(tmp_path: Path) -> None:
+    _, settings, engine = _bundle(tmp_path)
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        _seed_chat(client, 'chat-p4')
+        client.post(
+            '/chat/chat-p4/sources',
+            json={'source_ids': ['source-1']},
+        )
+        promoted = client.post(
+            '/chat/chat-p4/promote',
+            json={'objective': 'Run the promoted conversation as a study.'},
+        )
+        assert promoted.status_code == 200
+        body = promoted.json()
+        assert body['run_id']
+        assert body['seed_source_ids'] == ['source-1']
+        assert body['seed_context']
+        assert 'metric search' in body['seed_context'] or 'conformal' in body['seed_context']
+
+        # second promote is rejected with the prior run id
+        again = client.post(
+            '/chat/chat-p4/promote',
+            json={'objective': 'Duplicate attempt.'},
+        )
+        assert again.status_code in (400, 409)
+        assert body['run_id'] in again.text
+
+
+def test_chat_promote_requires_operator_and_turns(tmp_path: Path) -> None:
+    _, settings, engine = _bundle(tmp_path)
+    settings.require_operator_auth = True
+    settings.operator_api_token = 'expected-token'
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        denied = client.post(
+            '/chat/chat-auth/promote',
+            json={'objective': 'Should be denied without a token.'},
+        )
+        assert denied.status_code in (401, 403)
+
+        allowed = client.post(
+            '/chat/chat-auth/promote',
+            json={'objective': 'Should fail: no turns yet.'},
+            headers={'X-Glasslab-Operator-Token': 'expected-token'},
+        )
+        assert allowed.status_code in (400, 409)
+        assert 'no answered turns' in allowed.text
+
+
+def test_chat_promote_thread_binds_discord_thread(tmp_path: Path) -> None:
+    _, settings, engine = _bundle(tmp_path)
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        _seed_chat(client, 'discord-thread-987654321')
+        promoted = client.post(
+            '/chat/discord-thread-987654321/promote',
+            json={'objective': 'Thread conversation becomes a run.'},
+        )
+        assert promoted.status_code == 200
+        assert promoted.json()['discord_thread_id'] == '987654321'

@@ -1834,6 +1834,17 @@ class _FakeFollowup:
         self._sink = sink
 
     async def send(self, content, **kwargs):
+        message = _FakeMessage(self._sink, content)
+        self._sink.append(content)
+        return message
+
+
+class _FakeMessage:
+    def __init__(self, sink, content):
+        self._sink = sink
+        self._content = content
+
+    async def edit(self, content, **kwargs):
         self._sink.append(content)
 
 
@@ -1969,3 +1980,45 @@ def test_build_packet_button_view_has_one_button_per_citation() -> None:
     first = view.children[0]
     assert first.custom_id == 'packet:0123456789abcdef0123456789abcdef'
     assert first.label == 'Source [1]'
+def test_research_promote_in_thread_creates_run() -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    gateway = _build_test_gateway()
+    gateway.engine.promote_conversation = Mock(
+        return_value=SimpleNamespace(
+            run_id='run-promoted',
+            state=SimpleNamespace(value='AWAITING_PROTOCOL_APPROVAL'),
+        )
+    )
+    interaction = _FakeInteraction(channel_id='987654321')
+    interaction.channel = discord.Thread.__new__(discord.Thread)
+    asyncio.run(
+        gateway._on_research_promote(interaction, objective='Run it.')
+    )
+    assert gateway.engine.promote_conversation.call_args[0] == (
+        'discord-thread-987654321',
+    )
+    joined = ' '.join(interaction.followup_messages)
+    assert 'run-promoted' in joined
+    assert 'AWAITING_PROTOCOL_APPROVAL' in joined
+
+
+def test_research_promote_requires_thread_and_authorization() -> None:
+    import asyncio
+
+    gateway = _build_test_gateway()
+    main = _FakeInteraction(channel_id='main-channel')
+    asyncio.run(
+        gateway._on_research_promote(main, objective='Not a thread.')
+    )
+    assert gateway.engine.promote_conversation.called is False
+
+    gateway_deny = _build_test_gateway()
+    gateway_deny.engine.promote_conversation = lambda *a, **k: (_ for _ in ()).throw(AssertionError('must not run'))
+    thread_interaction = _FakeInteraction(channel_id='987654321', user_id='stranger')
+    thread_interaction.channel = discord.Thread.__new__(discord.Thread)
+    asyncio.run(
+        gateway_deny._on_research_promote(thread_interaction, objective='Nope.')
+    )
+    assert thread_interaction.followup_messages == []

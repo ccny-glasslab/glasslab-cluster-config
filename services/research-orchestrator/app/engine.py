@@ -346,20 +346,28 @@ class ResearchOrchestrator:
                 active_since=now,
                 created_at=now,
                 updated_at=now,
+                seed_context=request.seed_context,
+                seed_source_ids=request.seed_source_ids,
             )
             self.store.create_run(
                 record,
                 one_active_run=self.settings.one_active_run,
             )
-            try:
-                thread_id = self.discord.create_thread(
-                    run_id=run_id,
-                    objective=request.objective,
-                )
-            except Exception:
-                # Discord is a replaceable projection; a thread failure must not
-                # fail run creation (the run itself is already committed above).
-                thread_id = None
+            if request.existing_discord_thread_id:
+                # A promoted research-chat thread IS the run's home: bind it
+                # directly instead of creating a fresh thread.
+                thread_id = request.existing_discord_thread_id
+            else:
+                try:
+                    thread_id = self.discord.create_thread(
+                        run_id=run_id,
+                        objective=request.objective,
+                    )
+                except Exception:
+                    # Discord is a replaceable projection; a thread failure
+                    # must not fail run creation (the run itself is already
+                    # committed above).
+                    thread_id = None
             if thread_id:
                 current = self.store.get_run(run_id)
                 record = self.store.replace_run(
@@ -713,6 +721,7 @@ class ResearchOrchestrator:
         turn_number: int,
         turn_kind: TurnKind,
         query: str,
+        pinned_source_ids: list[str] | None = None,
     ) -> ContextPacket | None:
         """Retrieve and persist scoped context for an agent turn.
 
@@ -720,7 +729,9 @@ class ResearchOrchestrator:
         is additive context, never a hard dependency of a turn. The workflow
         must not stall an experiment because the index or embedding endpoint
         is briefly unavailable. Scope is decided inside KnowledgeManager.retrieve
-        from the agent/turn_kind, so this caller cannot widen it.
+        from the agent/turn_kind, so this caller cannot widen it. Promoted runs
+        pass their conversation-bound source ids as pins (guaranteed-included,
+        never exclusive).
         """
         try:
             return self.knowledge.retrieve(
@@ -734,6 +745,7 @@ class ResearchOrchestrator:
                 token_budget=self.settings.knowledge_token_budget,
                 run_scope=run_id,
                 allowed_source_types=None,
+                pinned_source_ids=pinned_source_ids,
             )
         except Exception:
             return None
@@ -972,6 +984,78 @@ class ResearchOrchestrator:
             blocks.append(text)
         return '\n\n'.join(blocks)
 
+    def promote_conversation(
+        self,
+        conversation_id: str,
+        *,
+        objective: str | None = None,
+        evaluation_contract_id: str | None = None,
+        evaluation_contract_version: str | None = None,
+    ) -> RunRecord:
+        """Promote a research conversation into a real run (Phase 4).
+
+        The conversation's prior turns become the run's seed context, its
+        bound sources pin retrieval for every turn of the run, and (for
+        Discord-thread conversations) the run is bound to the existing thread
+        so the thread becomes its home. One promotion per conversation: a
+        second call returns the prior run id in the error.
+        """
+        events = self.store.list_events(conversation_id)
+        promoted = [
+            event
+            for event in events
+            if event.event_type == 'conversation.promoted'
+        ]
+        if promoted:
+            prior = promoted[-1].payload.get('run_id')
+            raise WorkflowError(
+                f'conversation already promoted to run {prior}'
+            )
+        turns = [
+            turn
+            for turn in self.store.list_turns(conversation_id)
+            if turn.status == 'completed'
+            and turn.structured_output is not None
+            and turn.structured_output.research_answer is not None
+        ]
+        if not turns:
+            raise WorkflowError(
+                'conversation has no answered turns to promote'
+            )
+        binding = self.store.get_conversation_binding(conversation_id)
+        seed_source_ids = binding.source_ids if binding else None
+        resolved_objective = objective or self._conversation_objective(turns)
+        run = self.create_run(
+            RunCreateRequest(
+                objective=resolved_objective,
+                evaluation_contract_id=evaluation_contract_id,
+                evaluation_contract_version=evaluation_contract_version,
+                seed_context=self._conversation_prior_context(conversation_id),
+                seed_source_ids=seed_source_ids,
+                existing_discord_thread_id=(
+                    conversation_id.removeprefix('discord-thread-')
+                    if conversation_id.startswith('discord-thread-')
+                    else None
+                ),
+            )
+        )
+        self._event(
+            conversation_id,
+            source='orchestrator',
+            event_type='conversation.promoted',
+            payload={
+                'run_id': run.run_id,
+                'objective': resolved_objective,
+            },
+        )
+        return run
+
+    def _conversation_objective(self, turns: list[TurnRecord]) -> str:
+        first_question = str(turns[0].input_event.get('question', '') or '')
+        last_answer = turns[-1].structured_output.research_answer.answer
+        objective = first_question or last_answer
+        return ' '.join(objective.split())[:500]
+
     def _should_retry_turn(
         self,
         exc: Exception,
@@ -1110,6 +1194,7 @@ class ResearchOrchestrator:
                     prompt=prompt,
                     turn_kind=expected_kind,
                 ),
+                pinned_source_ids=run.seed_source_ids,
             )
             if context_packet and context_packet.exact_text_supplied:
                 prompt = (
@@ -1880,6 +1965,15 @@ class ResearchOrchestrator:
         )
         if feedback:
             prompt += f'\n\nHuman rejection feedback:\n{feedback}'
+        if run.seed_context:
+            prompt = (
+                'This run was promoted from a research conversation. The '
+                'conversation\'s prior turns are context only; cite only '
+                'retrieved material:\n\n'
+                + run.seed_context
+                + '\n\n'
+                + prompt
+            )
         turn, result = self._run_agent_turn(
             run_id=run_id,
             agent=AgentName.HONEYDEW,

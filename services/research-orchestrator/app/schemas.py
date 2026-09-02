@@ -332,6 +332,25 @@ class ConversationSourceBindRequest(BaseModel):
     source_ids: list[str] = Field(min_length=1)
 
 
+class ConversationPromoteRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    objective: str | None = Field(default=None, min_length=10, max_length=1000)
+    evaluation_contract_id: str | None = None
+    evaluation_contract_version: str | None = None
+
+    @model_validator(mode='after')
+    def require_contract_pair(self) -> 'ConversationPromoteRequest':
+        if bool(self.evaluation_contract_id) != bool(
+            self.evaluation_contract_version
+        ):
+            raise ValueError(
+                'evaluation_contract_id and evaluation_contract_version '
+                'must be provided together'
+            )
+        return self
+
+
 class ResourceRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
@@ -502,6 +521,11 @@ class RunRecord(BaseModel):
     methodology_revision_count: int = Field(default=0, ge=0)
     discord_thread_id: str | None = None
     discord_status_message_id: str | None = None
+    # Research-chat promotion (Phase 4): seed context renders the promoted
+    # conversation's prior turns into the protocol draft, and seed source ids
+    # pin retrieval for every turn of the run.
+    seed_context: str | None = None
+    seed_source_ids: list[str] | None = None
     maximum_turns: int
     maximum_runtime_seconds: int
     maximum_parallel_jobs: int
@@ -846,6 +870,9 @@ class RunCreateRequest(BaseModel):
         default=None,
         pattern=r'^[a-f0-9]{64}$',
     )
+    seed_context: str | None = None
+    seed_source_ids: list[str] | None = None
+    existing_discord_thread_id: str | None = None
 
     @model_validator(mode='after')
     def require_contract_pair(self) -> 'RunCreateRequest':

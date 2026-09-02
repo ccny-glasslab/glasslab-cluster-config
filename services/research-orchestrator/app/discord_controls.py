@@ -732,6 +732,25 @@ class DiscordControlGateway:
             )
 
         @self.tree.command(
+            name='research-promote',
+            description=(
+                'Turn this research thread into a run (protocol draft starts).'
+            ),
+            guild=self.guild,
+        )
+        @app_commands.describe(
+            objective='Optional run objective (default: from the thread).',
+        )
+        async def research_promote(
+            interaction: discord.Interaction,
+            objective: app_commands.Range[str, 10, 1000] | None = None,
+        ) -> None:
+            await self._on_research_promote(
+                interaction,
+                objective=objective,
+            )
+
+        @self.tree.command(
             name='packet',
             description=(
                 'Show the full source text behind a citation packet id.'
@@ -1307,6 +1326,76 @@ class DiscordControlGateway:
                     followup_exc,
                 )
 
+    async def _on_research_promote(
+        self,
+        interaction: discord.Interaction,
+        *,
+        objective: str | None,
+    ) -> None:
+        actor = self._actor(interaction)
+        if not self.policy.is_authorized(actor):
+            await self._respond(
+                interaction,
+                'You are not authorized to promote Glasslab research threads.',
+            )
+            return
+        if not self._is_thread(interaction):
+            await self._respond(
+                interaction,
+                'Promote a research thread from inside the thread.',
+            )
+            return
+        try:
+            await interaction.response.defer(thinking=True)
+        except Exception as exc:  # noqa: BLE001 - ack can race or expire
+            logger.error(
+                'research_promote: could not acknowledge interaction: '
+                '%s: %s',
+                type(exc).__name__,
+                exc,
+            )
+            return
+        conversation_id = f'discord-thread-{interaction.channel_id}'
+        logger.info('research_promote starting for %s', conversation_id)
+        try:
+            placeholder = await interaction.followup.send(
+                'Promoting this conversation into a run… (drafting the '
+                'protocol)',
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            run = await asyncio.to_thread(
+                self.engine.promote_conversation,
+                conversation_id,
+                objective=objective,
+            )
+            await placeholder.edit(
+                content=(
+                    f'Promoted to run **{run.run_id}** — protocol drafted, '
+                    f'state `{run.state.value}`. Use `/research-status` in '
+                    'this thread to follow it.'
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as exc:  # noqa: BLE001 - report, never crash the gateway
+            logger.error(
+                'research_promote failed: %s: %s',
+                type(exc).__name__,
+                exc,
+            )
+            try:
+                await interaction.followup.send(
+                    f'Promotion failed: {type(exc).__name__}: {exc}',
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception as followup_exc:  # noqa: BLE001 - best effort
+                logger.error(
+                    'research_promote: could not deliver failure notice: '
+                    '%s: %s',
+                    type(followup_exc).__name__,
+                    followup_exc,
+                )
+
     async def _on_packet_button(
         self,
         interaction: discord.Interaction,
@@ -1336,8 +1425,12 @@ class DiscordControlGateway:
                     chunk,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-        except Exception as exc:
-            logger.error('packet button failed: %s: %s', type(exc).__name__, exc)
+        except Exception as exc:  # noqa: BLE001 - report, never crash the gateway
+            logger.error(
+                'packet button failed: %s: %s',
+                type(exc).__name__,
+                exc,
+            )
             try:
                 await interaction.followup.send(
                     f'Packet lookup failed: {type(exc).__name__}: {exc}',
