@@ -1948,6 +1948,33 @@ def test_format_packet_for_discord_chunks_exact_text() -> None:
     engine.knowledge.get_context_packet.assert_called_once_with('packet-123')
 
 
+def test_build_packet_button_view_deduplicates_packet_ids() -> None:
+    answer = ResearchAnswer(
+        answer='Citations often repeat the same packet.',
+        citations=[
+            Citation(
+                knowledge_uri='knowledge://context/0123456789abcdef0123456789abcdef',
+                source='real-analysis-trench',
+                excerpt='we must specify the couple (A, rho)',
+            ),
+            Citation(
+                knowledge_uri='knowledge://context/0123456789abcdef0123456789abcdef',
+                source='real-analysis-trench',
+                excerpt='the triangle inequality holds',
+            ),
+            Citation(
+                knowledge_uri='knowledge://context/fedcba9876543210fedcba9876543210',
+                source='calc-openstax',
+                excerpt='a different source',
+            ),
+        ],
+    )
+    view = build_packet_button_view(answer)
+    custom_ids = [b.custom_id for b in view.children]
+    assert len(custom_ids) == 2, custom_ids
+    assert len(set(custom_ids)) == len(custom_ids)  # no duplicates
+
+
 def test_build_packet_button_view_has_one_button_per_citation() -> None:
     answer = ResearchAnswer(
         answer='A metric space pairs a set with a metric.',
