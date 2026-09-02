@@ -20,6 +20,7 @@ from app.engine import ResearchOrchestrator
 from app.main import create_app
 from app.mock_runtime import ScriptedMockRuntime
 from app.policy import ActionPolicy
+from app.schemas import RunCreateRequest
 from app.storage import SqliteStore
 from app.workspaces import WorkspaceManager
 from conftest import RUNNER_IMAGE, create_test_repo
@@ -384,3 +385,26 @@ def test_chat_conversation_binding_and_view(tmp_path: Path) -> None:
         assert body['turns'][-1]['question'] == 'and what about metric search'
         assert body['turns'][-1]['answer']
         assert body['turns'][-1]['status'] == 'completed'
+
+
+def test_context_packet_html_page_renders_exact_text(tmp_path: Path) -> None:
+    _, settings, engine = _bundle(tmp_path)
+    app = create_app(settings, engine=engine, start_watcher=False)
+    run = engine.create_run(RunCreateRequest(objective='what is a metric space'))
+    with TestClient(app) as client:
+        packet = engine.knowledge.retrieve(
+            run_id=run.run_id,
+            agent='honeydew',
+            turn_number=1,
+            turn_kind='research_answer',
+            query='what is a metric space',
+            run_scope=run.run_id,
+            allowed_source_types=None,
+        )
+        response = client.get(
+            f'/knowledge/packets/{packet.packet_id}'
+        )
+        assert response.status_code == 200
+        assert 'text/html' in response.headers['content-type']
+        assert packet.exact_text_supplied[:60] in response.text
+        assert 'Ranked sources' in response.text

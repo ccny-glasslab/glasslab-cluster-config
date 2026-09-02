@@ -470,7 +470,14 @@ def format_research_answer(answer: ResearchAnswer) -> str:
             excerpt = ' '.join(citation.excerpt.split())
             if len(excerpt) > 100:
                 excerpt = excerpt[:97].rstrip() + '...'
-            line = f'[{index}] {citation.source} — "{excerpt}"'
+            packet_id = citation.knowledge_uri.rsplit('/', 1)[-1]
+            packet_link = (
+                f'http://127.0.0.1:18080/knowledge/packets/{packet_id}'
+            )
+            line = (
+                f'[{index}] {citation.source} — "{excerpt}" — '
+                f'[packet]({packet_link})'
+            )
             if len(line) > budget:
                 break
             lines.append(line)
@@ -1167,9 +1174,11 @@ class DiscordControlGateway:
             )
             return
         # A research_answer turn is a bounded agent turn (about a minute);
-        # the followup window is generous enough to hold it.
+        # the followup window is generous enough to hold it. The answer lands
+        # visibly: in an existing thread via the followup, otherwise in a new
+        # public thread named from the question.
         try:
-            await interaction.response.defer(ephemeral=True, thinking=True)
+            await interaction.response.defer(thinking=True)
         except Exception as exc:  # noqa: BLE001 - ack can race an earlier
             # interaction (duplicate invocation) or expire; nothing can be
             # delivered then, but it must be logged, not silent.
@@ -1181,12 +1190,12 @@ class DiscordControlGateway:
             )
             return
         logger.info('research_question starting: %.120s', question)
-        if self._is_thread(interaction):
-            # Stable per-thread conversation: follow-ups in the thread chain
-            # against the same conversation (prior turns + bound sources).
-            conversation_id = f'discord-thread-{interaction.channel_id}'
-        else:
-            conversation_id = f'discord-{uuid4().hex[:16]}'
+        in_thread = self._is_thread(interaction)
+        conversation_id = (
+            f'discord-thread-{interaction.channel_id}'
+            if in_thread
+            else f'discord-{uuid4().hex[:16]}'
+        )
         try:
             answer = await asyncio.to_thread(
                 execute_discord_research_question,
@@ -1194,11 +1203,22 @@ class DiscordControlGateway:
                 question=question,
                 conversation_id=conversation_id,
             )
-            await interaction.followup.send(
-                format_research_answer(answer),
-                ephemeral=True,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            rendered = format_research_answer(answer)
+            if in_thread:
+                await interaction.followup.send(
+                    rendered,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                thread = await interaction.channel.create_thread(
+                    name=f'research: {question[:80]}',
+                    type=discord.ChannelType.public_thread,
+                    auto_archive_duration=1440,
+                )
+                await thread.send(
+                    rendered,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
         except Exception as exc:  # noqa: BLE001 - report, never crash the gateway
             logger.error(
                 'research_question failed: %s: %s',
@@ -1218,6 +1238,7 @@ class DiscordControlGateway:
                     type(followup_exc).__name__,
                     followup_exc,
                 )
+
 
     async def _on_research_cancel(
         self,
