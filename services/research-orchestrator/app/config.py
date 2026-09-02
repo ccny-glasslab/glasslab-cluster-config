@@ -15,6 +15,8 @@ from typing import Annotated, Literal
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from .schemas import AgentName
+
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 
@@ -125,6 +127,11 @@ class Settings(BaseSettings):
     )
     agent_model_provider_id: str = 'exo'
     agent_model_name: str | None = None
+    # Per-agent overrides (#319): when set, the agent's turns run against its
+    # own model on the shared endpoint; otherwise the shared
+    # effective_agent_model_name applies to both agents.
+    agent_model_honeydew: str | None = None
+    agent_model_beaker: str | None = None
     qwen_base_url: str = 'http://192.168.1.17:52415/v1'
     qwen_model_name: str = 'mlx-community/Qwen3-Coder-Next-4bit'
     opencode_runtime_image: str = (
@@ -195,6 +202,14 @@ class Settings(BaseSettings):
     @property
     def effective_agent_model_name(self) -> str:
         return self.agent_model_name or self.qwen_model_name
+
+    def agent_model_for(self, agent: AgentName) -> str:
+        override = (
+            self.agent_model_honeydew
+            if agent is AgentName.HONEYDEW
+            else self.agent_model_beaker
+        )
+        return override or self.effective_agent_model_name
 
     @field_validator('evidence_snapshot_max_bytes')
     @classmethod

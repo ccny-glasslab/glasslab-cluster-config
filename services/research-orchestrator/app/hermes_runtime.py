@@ -180,7 +180,7 @@ class HermesProcessRuntime(AgentRuntime):
         (hermes_home / '.no-bundled-skills').touch()
         config = {
             'model': {
-                'default': self.settings.qwen_model_name,
+                'default': self.settings.agent_model_for(agent),
                 'provider': 'custom',
                 'base_url': self.settings.qwen_base_url,
                 'api_key': '',
@@ -423,7 +423,7 @@ class HermesProcessRuntime(AgentRuntime):
                         'instructions': self._system_prompts[agent],
                         'session_id': session_id,
                         'provider': 'custom',
-                        'model': self.settings.qwen_model_name,
+                        'model': self.settings.agent_model_for(agent),
                     },
                 )
                 response.raise_for_status()
