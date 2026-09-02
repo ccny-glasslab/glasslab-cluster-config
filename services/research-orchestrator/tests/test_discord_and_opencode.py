@@ -2101,3 +2101,20 @@ def test_build_packet_button_view_carries_excerpt_prefix() -> None:
         'packet:0123456789abcdef0123456789abcdef:'
     )
     assert 'wemustspecifythecoupleA' in view.children[0].custom_id
+
+
+def test_format_research_answer_never_emits_empty_messages() -> None:
+    answer = ResearchAnswer(
+        answer='<knowledge-context source="x" kind="chunk">only wrapper markup</knowledge-context>',
+        citations=[
+            Citation(
+                knowledge_uri='knowledge://context/0123456789abcdef0123456789abcdef',
+                source='trench',
+                excerpt='we must specify the couple',
+            )
+        ],
+    )
+    rendered = format_research_answer(answer)
+    assert rendered, 'must produce at least one message'
+    assert all(message for message in rendered)
+    assert 'only wrapper markup' in rendered[0]
