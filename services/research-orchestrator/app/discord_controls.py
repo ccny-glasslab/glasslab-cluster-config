@@ -556,12 +556,16 @@ def format_research_answer(answer: ResearchAnswer) -> list[str]:
     answer_text = strip_knowledge_wrappers(
         ' '.join(answer.answer.strip().split())
     )
-    body = answer_text
-    while body:
-        messages.append(body[:1800])
-        body = body[1800:]
+    if not answer_text:
+        messages.append(
+            'The answer contained only formatting markup and no text.'
+        )
+    else:
+        body = answer_text
+        while body:
+            messages.append(body[:1800])
+            body = body[1800:]
     if answer.citations:
-        messages.append('')
         messages.append(
             '**Sources (' + str(len(answer.citations)) + ')** — '
             'click a Source button below to see its text'
@@ -1352,7 +1356,10 @@ class DiscordControlGateway:
                 question=question,
                 conversation_id=conversation_id,
             )
-            rendered = format_research_answer(answer)
+            rendered = [
+                message for message in format_research_answer(answer)
+                if message
+            ]
             await placeholder.edit(
                 content=rendered[0],
                 view=build_packet_button_view(answer),
