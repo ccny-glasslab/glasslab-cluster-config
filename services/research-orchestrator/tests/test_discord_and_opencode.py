@@ -1654,10 +1654,11 @@ def test_format_research_answer_cites_sources_with_excerpts() -> None:
         ],
     )
     rendered = format_research_answer(answer)
-    assert 'batch-norm-paper' in rendered
-    assert 'fixes the means and variances of layer inputs' in rendered
-    assert 'Sources (2)' in rendered
-    assert len(rendered) <= 2000
+    joined = '\n'.join(rendered)
+    assert 'batch-norm-paper' in joined
+    assert 'fixes the means and variances of layer inputs' in joined
+    assert 'Sources (2)' in joined
+    assert all(len(m) <= 2000 for m in rendered)
 
 
 def test_format_research_answer_marks_unanswerable() -> None:
@@ -1667,8 +1668,8 @@ def test_format_research_answer_marks_unanswerable() -> None:
             unanswerable=True,
         )
     )
-    assert 'does not contain material' in rendered
-    assert len(rendered) <= 2000
+    assert 'does not contain material' in '\n'.join(rendered)
+    assert all(len(m) <= 2000 for m in rendered)
 
 
 def test_format_research_answer_truncates_long_answers_and_excerpts() -> None:
@@ -1683,8 +1684,9 @@ def test_format_research_answer_truncates_long_answers_and_excerpts() -> None:
         ],
     )
     rendered = format_research_answer(answer)
-    assert len(rendered) <= 2000
-    assert '...' in rendered
+    joined = '\n'.join(rendered)
+    assert all(len(m) <= 2000 for m in rendered)
+    assert len(joined) > 2000  # chunked, not truncated
 
 
 def _task_start_interaction() -> MagicMock:
@@ -1937,10 +1939,10 @@ def test_format_research_answer_uses_packet_id_not_dead_link() -> None:
         ],
     )
     rendered = format_research_answer(answer)
-    assert 'http://127.0.0.1' not in rendered
-    assert '/packet <id>' in rendered
-    assert '0123456789abcdef' in rendered
-    assert len(rendered) <= 2000
+    joined = '\n'.join(rendered)
+    assert 'http://127.0.0.1' not in joined
+    assert '0123456789abcdef' in joined
+    assert all(len(m) <= 2000 for m in rendered)
 
 
 def test_format_packet_for_discord_chunks_exact_text() -> None:
@@ -2005,7 +2007,7 @@ def test_build_packet_button_view_has_one_button_per_citation() -> None:
     view = build_packet_button_view(answer)
     assert len(view.children) == 2
     first = view.children[0]
-    assert first.custom_id == 'packet:0123456789abcdef0123456789abcdef'
+    assert first.custom_id.startswith('packet:0123456789abcdef0123456789abcdef:')
     assert first.label == 'Source [1]'
 def test_research_promote_in_thread_creates_run() -> None:
     import asyncio
@@ -2049,3 +2051,53 @@ def test_research_promote_requires_thread_and_authorization() -> None:
         gateway_deny._on_research_promote(thread_interaction, objective='Nope.')
     )
     assert thread_interaction.followup_messages == []
+
+
+def test_format_research_answer_strips_knowledge_wrappers() -> None:
+    answer = ResearchAnswer(
+        answer=(
+            'A metric space is a pair (A, rho). '
+            '</knowledge-context> <knowledge-context source="abc123" '
+            'kind="chunk" score="0.512" uri="upload://x.txt">'
+            'we must specify the couple (A, rho).'
+        ),
+    )
+    rendered = '\n'.join(format_research_answer(answer))
+    assert 'knowledge-context' not in rendered
+    assert 'we must specify the couple (A, rho)' in rendered
+
+
+def test_format_packet_for_discord_shows_cited_block_only() -> None:
+    engine = Mock()
+    packet = Mock()
+    packet.exact_text_supplied = (
+        '<knowledge-context source="src-a">first block text here</knowledge-context>'
+        '<knowledge-context source="src-b">the triangle inequality holds</knowledge-context>'
+    )
+    packet.ranked_sources = [{'source_id': 'src-a'}, {'source_id': 'src-b'}]
+    engine.knowledge.get_context_packet.return_value = packet
+
+    chunks = format_packet_for_discord(engine, 'packet-1', 'triangleinequality')
+
+    joined = '\n'.join(chunks)
+    assert 'the triangle inequality holds' in joined
+    assert 'first block text here' not in joined
+    assert 'cited source 2' in chunks[0]
+
+
+def test_build_packet_button_view_carries_excerpt_prefix() -> None:
+    answer = ResearchAnswer(
+        answer='x',
+        citations=[
+            Citation(
+                knowledge_uri='knowledge://context/0123456789abcdef0123456789abcdef',
+                source='trench',
+                excerpt='we must specify the couple (A,rho)',
+            )
+        ],
+    )
+    view = build_packet_button_view(answer)
+    assert view.children[0].custom_id.startswith(
+        'packet:0123456789abcdef0123456789abcdef:'
+    )
+    assert 'wemustspecifythecoupleA' in view.children[0].custom_id
