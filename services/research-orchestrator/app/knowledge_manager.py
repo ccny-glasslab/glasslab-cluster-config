@@ -426,6 +426,7 @@ class KnowledgeManager:
         retrieval_mode: str | None = None,
         additional_queries: Sequence[str] | None = None,
         source_ids: list[str] | None = None,
+        pinned_source_ids: list[str] | None = None,
     ) -> ContextPacket:
         """Retrieve scoped, bounded context and persist a durable packet.
 
@@ -455,6 +456,16 @@ class KnowledgeManager:
             # pins retrieval to a curated set for this conversation.
             allowed_ids = set(source_ids)
             sources = [s for s in sources if s.source_id in allowed_ids]
+        elif pinned_source_ids:
+            # Promoted-run seeding: bound sources are guaranteed-included on
+            # top of the normally-scoped set (union), never exclusive.
+            pinned_ids = set(pinned_source_ids)
+            sources += [
+                s
+                for s in self.store.list_knowledge_sources()
+                if s.source_id in pinned_ids
+                and s not in sources
+            ]
         source_ids = [source.source_id for source in sources]
         source_by_id = {source.source_id: source for source in sources}
 
@@ -521,6 +532,42 @@ class KnowledgeManager:
         # source so one long source cannot crowd out the rest of the packet;
         # the token budget finally truncates the largest context that fits.
         ranked = self._diversify(self._rank(entries), max_results)
+        if pinned_source_ids:
+            pinned_present = {
+                entry.get('source_id')
+                for entry in ranked
+                if entry.get('source_id')
+            }
+            for pinned in pinned_source_ids:
+                if pinned in pinned_present or pinned not in source_by_id:
+                    continue
+                candidates = [
+                    entry
+                    for entry in entries
+                    if entry.get('source_id') == pinned
+                ]
+                if candidates:
+                    ranked.append(
+                        max(candidates, key=lambda e: e.get('score', 0))
+                    )
+                    continue
+                chunks = self.store.list_knowledge_chunks(pinned)
+                if chunks:
+                    chunk = chunks[0]
+                    source = source_by_id[pinned]
+                    ranked.append(
+                        {
+                            'kind': 'chunk',
+                            'entry_id': chunk.chunk_id,
+                            'source_id': pinned,
+                            'uri': source.canonical_uri,
+                            'digest': chunk.digest,
+                            'scope': source.run_scope,
+                            'text': chunk.text,
+                            'token_count': chunk.token_count,
+                            'score': 0.0,
+                        }
+                    )
         tokenized = self._enforce_token_budget(ranked, token_budget)
         exact_text = self._build_context_string(tokenized)
         packet = ContextPacket(

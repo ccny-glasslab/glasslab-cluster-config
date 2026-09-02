@@ -424,3 +424,33 @@ def test_conversation_prior_context_respects_token_budget(
     )
     context = engine._conversation_prior_context(run_id, max_turns=5, max_tokens=4)
     assert context == ''  # first turn alone already exceeds the 4-token budget
+
+
+def test_promoted_run_seeds_protocol_and_binds_existing_thread(
+    tmp_path: Path,
+) -> None:
+    engine, store, _approved = _build(tmp_path, stability_text=STABILITY_TEXT)
+    run = engine.create_run(
+        RunCreateRequest(
+            objective='Seed the protocol from a research conversation.',
+            seed_context='Q: what is metric learning\nA: embeddings and anchors',
+            seed_source_ids=['source-a'],
+            existing_discord_thread_id='thread-999',
+        )
+    )
+    assert run.state == RunState.AWAITING_PROTOCOL_APPROVAL
+    assert run.discord_thread_id == 'thread-999'
+    assert run.seed_context
+    assert run.seed_source_ids == ['source-a']
+    honeydew_prompts = [
+        prompt
+        for (agent, prompt) in engine.runtime.prompts
+        if agent == AgentName.HONEYDEW
+    ]
+    assert any(
+        'Q: what is metric learning' in prompt for prompt in honeydew_prompts
+    )
+    assert any(
+        'promoted from a research conversation' in prompt
+        for prompt in honeydew_prompts
+    )
