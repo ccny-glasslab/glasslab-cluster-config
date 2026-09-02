@@ -830,6 +830,7 @@ class ResearchOrchestrator:
                 maximum_turns=self.settings.maximum_turns,
                 maximum_runtime_seconds=self.settings.maximum_runtime_seconds,
                 maximum_parallel_jobs=1,
+                conversation=True,
                 created_at=now,
                 updated_at=now,
             )

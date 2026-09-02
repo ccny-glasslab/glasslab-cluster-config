@@ -592,3 +592,23 @@ def test_pgvector_absence_degrades_without_aborting_store(
     # No aborted transaction may survive the degraded halfvec projection.
     run = store.create_run(_run(), one_active_run=False)
     assert store.get_run(run.run_id).state is RunState.CREATED
+
+
+def test_conversation_runs_do_not_hold_active_slot(store) -> None:
+    conversation = store.create_run(
+        _run('chat-abc').model_copy(update={'conversation': True}),
+        one_active_run=False,
+    )
+    assert store.get_run('chat-abc').conversation is True
+    real = store.create_run(
+        _run('run-real').model_copy(update={'conversation': False}),
+        one_active_run=True,
+    )
+    assert real.run_id == 'run-real'
+    assert conversation.run_id == 'chat-abc'
+
+
+def test_non_conversation_run_still_holds_active_slot(store) -> None:
+    store.create_run(_run('run-a'), one_active_run=False)
+    with pytest.raises(ConcurrencyConflict):
+        store.create_run(_run('run-b'), one_active_run=True)
