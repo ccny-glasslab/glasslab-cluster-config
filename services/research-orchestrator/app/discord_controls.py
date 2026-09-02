@@ -439,6 +439,34 @@ def execute_discord_research_question(
     )
 
 
+MAX_DISCORD_PACKET_CHUNK_CHARS = 1800
+
+
+def format_packet_for_discord(
+    engine: ResearchOrchestrator,
+    packet_id: str,
+) -> list[str]:
+    """Render a knowledge packet's exact text as bounded Discord messages."""
+    packet = engine.knowledge.get_context_packet(packet_id)
+    exact = ' '.join((packet.exact_text_supplied or '').split())
+    sources = ' · '.join(
+        str(s.get('source_id', '?'))[:40] for s in packet.ranked_sources
+    ) or 'no ranked sources'
+    chunks: list[str] = []
+    if not exact:
+        chunks.append(
+            f'Packet `{packet_id}` has no attached text (0 ranked sources).'
+        )
+        return chunks
+    header = f'**Packet `{packet_id}`** — sources: {sources}'
+    chunks.append(header)
+    body = exact
+    while body:
+        chunks.append(body[:MAX_DISCORD_PACKET_CHUNK_CHARS])
+        body = body[MAX_DISCORD_PACKET_CHUNK_CHARS:]
+    return chunks
+
+
 MAX_DISCORD_RESEARCH_ANSWER_CHARS = 2000
 
 
@@ -463,7 +491,7 @@ def format_research_answer(answer: ResearchAnswer) -> str:
     budget = MAX_DISCORD_RESEARCH_ANSWER_CHARS - len(answer_text) - 2
     citations = answer.citations
     if citations:
-        header = f'**Sources ({len(citations)})**'
+        header = f'**Sources ({len(citations)})** — run `/packet <id>` to see the full source text'
         budget -= len(header) + 2
         lines.extend(['', header])
         for index, citation in enumerate(citations, start=1):
@@ -471,12 +499,9 @@ def format_research_answer(answer: ResearchAnswer) -> str:
             if len(excerpt) > 100:
                 excerpt = excerpt[:97].rstrip() + '...'
             packet_id = citation.knowledge_uri.rsplit('/', 1)[-1]
-            packet_link = (
-                f'http://127.0.0.1:18080/knowledge/packets/{packet_id}'
-            )
             line = (
                 f'[{index}] {citation.source} — "{excerpt}" — '
-                f'[packet]({packet_link})'
+                f'`{packet_id[:12]}`'
             )
             if len(line) > budget:
                 break
@@ -687,6 +712,25 @@ class DiscordControlGateway:
             await self._on_research_question(
                 interaction,
                 question=str(question),
+            )
+
+        @self.tree.command(
+            name='packet',
+            description=(
+                'Show the full source text behind a citation packet id.'
+            ),
+            guild=self.guild,
+        )
+        @app_commands.describe(
+            packet_id='The citation packet id (see [n] citations on answers).',
+        )
+        async def packet(
+            interaction: discord.Interaction,
+            packet_id: app_commands.Range[str, 1, 64],
+        ) -> None:
+            await self._on_packet(
+                interaction,
+                packet_id=str(packet_id),
             )
     def _register_run_control_command(self, operation: str) -> None:
         async def callback(
@@ -1197,16 +1241,12 @@ class DiscordControlGateway:
             else f'discord-{uuid4().hex[:16]}'
         )
         try:
-            answer = await asyncio.to_thread(
-                execute_discord_research_question,
-                self.engine,
-                question=question,
-                conversation_id=conversation_id,
-            )
-            rendered = format_research_answer(answer)
+            # Thread first: the conversation is visible immediately (follow-ups
+            # can be typed), then the placeholder edits in the answer when the
+            # turn completes — a poor-man's stream over a ~1-minute turn.
             if in_thread:
-                await interaction.followup.send(
-                    rendered,
+                placeholder = await interaction.followup.send(
+                    'Working on it… (retrieving sources + drafting the answer)',
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             else:
@@ -1215,10 +1255,20 @@ class DiscordControlGateway:
                     type=discord.ChannelType.public_thread,
                     auto_archive_duration=1440,
                 )
-                await thread.send(
-                    rendered,
+                placeholder = await thread.send(
+                    'Working on it… (retrieving sources + drafting the answer)',
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+            answer = await asyncio.to_thread(
+                execute_discord_research_question,
+                self.engine,
+                question=question,
+                conversation_id=conversation_id,
+            )
+            await placeholder.edit(
+                content=format_research_answer(answer),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         except Exception as exc:  # noqa: BLE001 - report, never crash the gateway
             logger.error(
                 'research_question failed: %s: %s',
@@ -1239,6 +1289,71 @@ class DiscordControlGateway:
                     followup_exc,
                 )
 
+    async def _on_packet(
+        self,
+        interaction: discord.Interaction,
+        *,
+        packet_id: str,
+    ) -> None:
+        actor = self._actor(interaction)
+        if not self.policy.is_authorized(actor):
+            await self._respond(
+                interaction,
+                'You are not authorized to inspect knowledge packets.',
+            )
+            return
+        if (
+            str(interaction.channel_id) != self.channel_id
+            and not self._is_thread(interaction)
+        ):
+            await self._respond(
+                interaction,
+                'Run /packet from the configured Glasslab channel or a '
+                'research thread.',
+            )
+            return
+        await interaction.response.defer(thinking=True)
+        try:
+            chunks = await asyncio.to_thread(
+                format_packet_for_discord,
+                self.engine,
+                packet_id=packet_id,
+            )
+            if self._is_thread(interaction):
+                first, *rest = chunks
+                await interaction.followup.send(
+                    first,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                for chunk in rest:
+                    await interaction.followup.send(
+                        chunk,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+            else:
+                await interaction.channel.send(
+                    chunks[0],
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                for chunk in chunks[1:]:
+                    await interaction.channel.send(
+                        chunk,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+        except Exception as exc:
+            logger.error('packet lookup failed: %s: %s', type(exc).__name__, exc)
+            try:
+                await interaction.followup.send(
+                    f'Packet lookup failed: {type(exc).__name__}: {exc}',
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception as followup_exc:  # noqa: BLE001 - best effort
+                logger.error(
+                    'packet: could not deliver failure notice: %s: %s',
+                    type(followup_exc).__name__,
+                    followup_exc,
+                )
 
     async def _on_research_cancel(
         self,
