@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import asyncio
+import html
 import json
 import secrets
 from typing import AsyncIterator
@@ -29,7 +30,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import SecretStr
 
 from .cluster import FakeClusterExecutor, WorkflowApiClusterExecutor
@@ -900,6 +901,59 @@ def create_app(
             return engine.knowledge.get_context_packet(packet_id)
         except Exception as exc:
             raise map_error(exc) from exc
+
+    @app.get(
+        '/knowledge/packets/{packet_id}',
+        response_class=HTMLResponse,
+    )
+    def render_context_packet(packet_id: str) -> HTMLResponse:
+        # Level-3 citation page: a Discord citation link resolves here and the
+        # operator's browser renders the exact text the agent saw + source
+        # metadata. MathJax renders LaTeX when the cluster can reach the CDN;
+        # without it the raw LaTeX remains readable.
+        try:
+            packet = engine.knowledge.get_context_packet(packet_id)
+        except Exception as exc:
+            raise map_error(exc) from exc
+        exact = (packet.exact_text_supplied or '').strip()
+        sources = '\n'.join(
+            '<tr>'
+            f'<td>{index}</td>'
+            f'<td><code>{html.escape(str(s.get("kind", "")))}</code></td>'
+            f'<td>{html.escape(str(s.get("source_id", "")))}</td>'
+            f'<td><code>{html.escape(str(s.get("uri", "")))}</code></td>'
+            f'<td>{html.escape(str(s.get("digest", "")))[:16]}</td>'
+            f'<td>{s.get("score", 0):.3f}</td>'
+            '</tr>'
+            for index, s in enumerate(packet.ranked_sources, start=1)
+        ) or '<tr><td colspan="6">no ranked sources</td></tr>'
+        body = (
+            '<html><head><title>Knowledge packet</title>'
+            '<meta charset="utf-8">'
+            '<style>body{font-family:system-ui,sans-serif;max-width:900px;'
+            'margin:2rem auto;padding:0 1rem;line-height:1.5}'
+            'h1{font-size:1.2rem} pre{white-space:pre-wrap;background:#f6f8fa;'
+            'padding:1rem;border-radius:6px;font-size:.9rem}'
+            'table{border-collapse:collapse;width:100%} '
+            'td,th{border:1px solid #d0d7de;padding:.3rem .5rem;'
+            'font-size:.85rem;text-align:left}</style>'
+            '<script id="MathJax-script" async '
+            'src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js">'
+            '</script></head><body>'
+            f'<h1>Knowledge packet <code>{html.escape(packet_id)}</code></h1>'
+            f'<p><strong>Query:</strong> {html.escape(packet.query)}</p>'
+            f'<p><strong>Agent:</strong> {packet.agent} · '
+            f'<strong>turn:</strong> {packet.turn_kind} '
+            f'#{packet.turn_number} · '
+            f'<strong>budget:</strong> {packet.token_budget} tokens</p>'
+            '<h2>Exact text supplied to the agent</h2>'
+            f'<pre>{html.escape(exact)}</pre>'
+            '<h2>Ranked sources</h2>'
+            '<table><tr><th>#</th><th>kind</th><th>source_id</th>'
+            '<th>uri</th><th>digest</th><th>score</th></tr>'
+            f'{sources}</table></body></html>'
+        )
+        return HTMLResponse(content=body)
 
     @app.get('/runs', response_model=RunListResponse)
     def list_runs() -> RunListResponse:

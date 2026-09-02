@@ -856,7 +856,12 @@ class ResearchOrchestrator:
             'knowledge:// citation in the citations[] field (knowledge_uri + '
             'source + a short verbatim excerpt). If the retrieved material '
             'does not answer the question, set unanswerable: true and leave '
-            'citations empty rather than guessing.\n\n'
+'citations empty rather than guessing.\n'
+             'Render all mathematics as plain Unicode text (for example '
+             'ρ(u,v) ≤ ρ(u,w)+ρ(w,v), ℝ, ∈, ∑, ∞) — never LaTeX $...$ '
+             'markup — the answer is displayed on Discord, which cannot '
+             'render LaTeX.\n\n'
+             f'QUESTION: {question}\n'
         )
         if prior_context:
             prompt += (

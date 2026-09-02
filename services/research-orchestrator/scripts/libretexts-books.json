@@ -1,0 +1,10 @@
+[
+  {"domain": "math", "shelf": "Calculus", "book": "Calculus_(OpenStax)"},
+  {"domain": "math", "shelf": "Linear_Algebra", "book": "A_First_Course_in_Linear_Algebra_(Kuttler)"},
+  {"domain": "math", "shelf": "Analysis", "book": "Introduction_to_Real_Analysis_(Trench)"},
+  {"domain": "math", "shelf": "Differential_Equations", "book": "Elementary_Differential_Equations_with_Boundary_Value_Problems_(Trench)"},
+  {"domain": "math", "shelf": "Combinatorics_and_Discrete_Mathematics", "book": "A_Cool_Brisk_Walk_Through_Discrete_Mathematics_(Davies)"},
+  {"domain": "stats", "shelf": "Probability_Theory", "book": "Probability_Mathematical_Statistics_and_Stochastic_Processes_(Siegrist)"},
+  {"domain": "stats", "shelf": "Introductory_Statistics", "book": "Introductory_Statistics_2e_(OpenStax)"},
+  {"domain": "math", "shelf": "Abstract_and_Geometric_Algebra", "book": "Abstract_Algebra%3A_Theory_and_Applications_(Judson)"}
+]

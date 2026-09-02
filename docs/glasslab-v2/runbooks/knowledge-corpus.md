@@ -182,3 +182,26 @@ retrieval stack.
 - **Embedding revision pinning**: if `knowledge_embedding_revision` is set,
   the loader honors it and stored vectors from other revisions are ignored
   (reported via readiness reason), not silently mixed.
+
+## Scraping open textbooks (LibreTexts)
+
+For foundations coverage (undergraduate math/stats), scrape LibreTexts books
+to clean markdown and upload them:
+
+```bash
+python services/research-orchestrator/scripts/scrape_libretexts.py \
+    --all --out corpus-textbooks
+python services/research-orchestrator/scripts/upload_knowledge_dir.py \
+    --url http://127.0.0.1:18080 --dir corpus-textbooks \
+    --source-type documentation --skip-rebuild
+```
+
+- The curated 8-book manifest (Calculus OpenStax, Linear Algebra Kuttler,
+  Real Analysis Trench, DEs Trench, Discrete Math Davies, Probability
+  Siegrist, Intro Stats OpenStax, Abstract Algebra Judson) lives in
+  `services/research-orchestrator/scripts/libretexts-books.json`.
+- Requires `pandoc` + `beautifulsoup4`; math is preserved as LaTeX
+  (`$...$`), figures are excluded.
+- `--skip-rebuild` then trigger the (long) dense rebuild separately:
+  `curl -X POST -m 3600 .../knowledge/index/rebuild` with the operator
+  token — re-embedding the whole corpus takes tens of minutes on CPU.
