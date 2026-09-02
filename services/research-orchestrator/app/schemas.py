@@ -526,6 +526,9 @@ class RunRecord(BaseModel):
     # pin retrieval for every turn of the run.
     seed_context: str | None = None
     seed_source_ids: list[str] | None = None
+    # Inert research-chat conversations never hold the single-active-run
+    # slot; the store excludes them from the active-run predicate.
+    conversation: bool = False
     maximum_turns: int
     maximum_runtime_seconds: int
     maximum_parallel_jobs: int

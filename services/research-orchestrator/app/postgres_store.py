@@ -84,6 +84,9 @@ class PostgresStore:
           run_id TEXT PRIMARY KEY, state TEXT NOT NULL, version INTEGER NOT NULL,
           payload JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL);
         CREATE INDEX IF NOT EXISTS orchestrator_runs_state_idx ON orchestrator_runs(state);
+        ALTER TABLE orchestrator_runs ADD COLUMN IF NOT EXISTS conversation BOOLEAN NOT NULL DEFAULT FALSE;
+        UPDATE orchestrator_runs SET conversation = TRUE WHERE conversation = FALSE
+          AND (run_id LIKE 'chat-%' OR run_id LIKE 'discord-%');
         CREATE TABLE IF NOT EXISTS orchestrator_turns (
           turn_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES orchestrator_runs(run_id),
           status TEXT NOT NULL, payload JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL);
@@ -245,10 +248,10 @@ class PostgresStore:
         with self.transaction() as conn:
             if one_active_run:
                 states = [state.value for state in TERMINAL_STATES]
-                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) LIMIT 1', (states,)).fetchone()
+                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE LIMIT 1', (states,)).fetchone()
                 if active:
                     raise ConcurrencyConflict(f"active run already exists: {active['run_id']}")
-            conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at))
+            conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at, conversation) VALUES (%s, %s, %s, %s, %s, %s, %s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at, record.conversation))
             self._append_event_conn(conn, run_id=record.run_id, source='orchestrator', event_type='run.created', payload={'objective': record.objective, 'state': record.state.value})
         return record
 
@@ -264,9 +267,9 @@ class PostgresStore:
             if parent['state'] not in terminal:
                 raise ConcurrencyConflict('terminal retry source is not terminal')
             if one_active_run:
-                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) LIMIT 1', ([state.value for state in TERMINAL_STATES],)).fetchone()
+                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE LIMIT 1', ([state.value for state in TERMINAL_STATES],)).fetchone()
                 if active: raise ConcurrencyConflict(f"active run already exists: {active['run_id']}")
-            conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at))
+            conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at, conversation) VALUES (%s,%s,%s,%s,%s,%s,%s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at, record.conversation))
             if existing is None:
                 conn.execute('INSERT INTO orchestrator_terminal_run_retries (parent_run_id, child_run_id, retry_key, checkpoint_digest, created_at) VALUES (%s,%s,%s,%s,%s)', (parent_run_id, record.run_id, retry_key, checkpoint_digest, record.created_at))
             else:

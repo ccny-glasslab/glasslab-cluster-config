@@ -383,6 +383,25 @@ class SqliteStore:
                 ON rag_chunk_vectors(model_id);
                 '''
             )
+            # Runs column drift: CREATE TABLE IF NOT EXISTS cannot add a
+            # column to an existing table, so conversation (Phase 4 inert-run
+            # marker) is applied as a guarded ALTER.
+            columns = {
+                row['name']
+                for row in connection.execute('PRAGMA table_info(runs)')
+            }
+            if 'conversation' not in columns:
+                connection.execute(
+                    'ALTER TABLE runs ADD COLUMN conversation INTEGER'
+                    ' NOT NULL DEFAULT 0'
+                )
+            # Backfill pre-Phase-4 conversation runs (they predate the marker)
+            # so they do not block the single-active-run slot.
+            connection.execute(
+                'UPDATE runs SET conversation = 1 WHERE conversation = 0'
+                ' AND (run_id LIKE ? OR run_id LIKE ?)',
+                ('chat-%', 'discord-%'),
+            )
 
     def ping(self) -> bool:
         with self._connect() as connection:
@@ -463,7 +482,8 @@ class SqliteStore:
             # paths that create runs through this store.
             if one_active_run:
                 active = connection.execute(
-                    f'SELECT run_id FROM runs WHERE state NOT IN ({placeholders}) LIMIT 1',
+                    f'SELECT run_id FROM runs WHERE state NOT IN ({placeholders})'
+                    ' AND conversation = 0 LIMIT 1',
                     terminal,
                 ).fetchone()
                 if active is not None:
@@ -473,8 +493,9 @@ class SqliteStore:
             connection.execute(
                 '''
                 INSERT INTO runs (
-                    run_id, state, version, payload, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    run_id, state, version, payload, created_at, updated_at,
+                    conversation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ''',
                 (
                     record.run_id,
@@ -483,6 +504,7 @@ class SqliteStore:
                     _dump(record),
                     record.created_at.isoformat(),
                     record.updated_at.isoformat(),
+                    int(record.conversation),
                 ),
             )
             self._append_event_conn(
@@ -525,14 +547,15 @@ class SqliteStore:
                 raise ConcurrencyConflict('terminal retry source is not terminal')
             if one_active_run:
                 active = connection.execute(
-                    f'SELECT run_id FROM runs WHERE state NOT IN ({placeholders}) LIMIT 1',
+                    f'SELECT run_id FROM runs WHERE state NOT IN ({placeholders})'
+                    ' AND conversation = 0 LIMIT 1',
                     terminal,
                 ).fetchone()
                 if active is not None:
                     raise ConcurrencyConflict(f'active run already exists: {active["run_id"]}')
             connection.execute(
-                'INSERT INTO runs (run_id, state, version, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
-                (record.run_id, record.state.value, record.version, _dump(record), record.created_at.isoformat(), record.updated_at.isoformat()),
+                'INSERT INTO runs (run_id, state, version, payload, created_at, updated_at, conversation) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (record.run_id, record.state.value, record.version, _dump(record), record.created_at.isoformat(), record.updated_at.isoformat(), int(record.conversation)),
             )
             if existing is None:
                 connection.execute(
