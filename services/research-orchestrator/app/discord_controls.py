@@ -499,9 +499,11 @@ def format_research_answer(answer: ResearchAnswer) -> str:
             if len(excerpt) > 100:
                 excerpt = excerpt[:97].rstrip() + '...'
             packet_id = citation.knowledge_uri.rsplit('/', 1)[-1]
+            # Full 32-char id: /packet resolves by exact match, so the
+            # citation must not truncate it.
             line = (
                 f'[{index}] {citation.source} — "{excerpt}" — '
-                f'`{packet_id[:12]}`'
+                f'`{packet_id}`'
             )
             if len(line) > budget:
                 break

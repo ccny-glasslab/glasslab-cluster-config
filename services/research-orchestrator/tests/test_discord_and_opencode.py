@@ -1927,7 +1927,7 @@ def test_format_research_answer_uses_packet_id_not_dead_link() -> None:
     rendered = format_research_answer(answer)
     assert 'http://127.0.0.1' not in rendered
     assert '/packet <id>' in rendered
-    assert '0123456789ab' in rendered
+    assert '0123456789abcdef' in rendered
     assert len(rendered) <= 2000
 
 
