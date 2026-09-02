@@ -5,6 +5,15 @@ into engine calls that persist to the authoritative store, and authorization is
 re-checked server-side at the point of execution (never trusted from the
 rendered button). Heavy engine work is pushed to threads so the discord.py
 event loop is never blocked.
+
+Lane map (two agents share this file — keep additive on conflicts):
+- Research-chat orchestration: /research-promote + _on_research_promote,
+  _is_thread + the thread-conversation behavior in _on_research_question
+  (conversation id = discord-thread-{channel_id}).
+- Discord surface: the citation/answer/packet flow (/research-question
+  rendering, /packet, _on_packet_button + the Source-button routing).
+Before touching either lane, check for open PRs on this file and rebase
+after (never during) the other lane's merges.
 """
 
 from __future__ import annotations
