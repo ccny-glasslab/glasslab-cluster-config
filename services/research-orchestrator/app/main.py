@@ -60,7 +60,9 @@ from .schemas import (
 ChatRequest,
     ConversationSourceBindRequest,
     ConversationSourceBinding,
-    ConversationPromoteRequest,
+ConversationPromoteRequest,
+    ProjectCreateRequest,
+    ProjectRecord,
     ContextPacket,
     ContextPacketListResponse,
     EventListResponse,
@@ -869,6 +871,7 @@ def create_app(
                 evaluation_contract_version=(
                     request.evaluation_contract_version
                 ),
+                project_id=request.project_id,
             )
         except Exception as exc:
             raise map_error(exc) from exc
@@ -883,6 +886,45 @@ def create_app(
     ) -> dict[str, object]:
         removed = engine.knowledge.delete_source(source_id)
         return {'source_id': source_id, 'removed': removed}
+
+    @app.post('/projects', response_model=ProjectRecord)
+    def create_project(
+        request: ProjectCreateRequest,
+        _: None = Depends(require_operator),
+    ) -> ProjectRecord:
+        try:
+            manifest = request.model_dump(mode='json')
+            if request.default_contract:
+                manifest['default_contract'] = request.default_contract.model_dump()
+            return engine.create_project(manifest)
+        except Exception as exc:
+            raise map_error(exc) from exc
+
+    @app.get('/projects', response_model=list[ProjectRecord])
+    def list_projects(
+        _: None = Depends(require_operator),
+    ) -> list[ProjectRecord]:
+        return engine.store.list_projects()
+
+    @app.get('/projects/{project_id}', response_model=ProjectRecord)
+    def get_project(
+        project_id: str,
+        _: None = Depends(require_operator),
+    ) -> ProjectRecord:
+        try:
+            return engine.store.get_project(project_id)
+        except Exception as exc:
+            raise map_error(exc) from exc
+
+    @app.post('/projects/{project_id}/archive', response_model=ProjectRecord)
+    def archive_project(
+        project_id: str,
+        _: None = Depends(require_operator),
+    ) -> ProjectRecord:
+        try:
+            return engine.archive_project(project_id)
+        except Exception as exc:
+            raise map_error(exc) from exc
 
     @app.delete(
         '/knowledge/sources/by-digest/{digest}',
