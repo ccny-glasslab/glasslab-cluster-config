@@ -482,6 +482,7 @@ def test_task_asset_fetch_retries_transient_timeout_then_succeeds(
             name='training_data',
             role='train',
             source_url='https://example.com/data.csv',
+            expected_sha256=sha256(b'feature,label\n1,0\n').hexdigest(),
         ),
     )
     assert state['calls'] == 3
@@ -510,6 +511,7 @@ def test_task_asset_fetch_exhausts_retries_with_guidance(tmp_path: Path) -> None
                 name='training_data',
                 role='train',
                 source_url='https://example.com/data.csv',
+                expected_sha256=sha256(b'x').hexdigest(),
             ),
         )
     assert state['calls'] == 3  # initial + 2 retries
