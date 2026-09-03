@@ -29,7 +29,7 @@ from .knowledge_search import or_query
 from .schemas import (
     ActionRecord, AgentName, ApprovalStatus, ArtifactRecord, ContextPacket,
     ConversationSourceBinding, EventRecord, IngestedDatasetRecord, JobRecord,
-    JobStatus, KnowledgeChunk, KnowledgeSource, RunRecord, RunState,
+    JobStatus, KnowledgeChunk, KnowledgeSource, ProjectRecord, RunRecord, RunState,
     SourceType, TERMINAL_STATES, TurnKind, TurnRecord, utc_now,
 )
 from .state_machine import HUMAN_WAIT_STATES, validate_transition
@@ -85,6 +85,7 @@ class PostgresStore:
           payload JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL);
         CREATE INDEX IF NOT EXISTS orchestrator_runs_state_idx ON orchestrator_runs(state);
         ALTER TABLE orchestrator_runs ADD COLUMN IF NOT EXISTS conversation BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE orchestrator_runs ADD COLUMN IF NOT EXISTS project_id TEXT;
         UPDATE orchestrator_runs SET conversation = TRUE WHERE conversation = FALSE
           AND (run_id LIKE 'chat-%' OR run_id LIKE 'discord-%');
         CREATE TABLE IF NOT EXISTS orchestrator_turns (
@@ -138,6 +139,12 @@ class PostgresStore:
           updated_at TIMESTAMPTZ NOT NULL);
         CREATE INDEX IF NOT EXISTS orchestrator_conversation_bindings_updated_idx
           ON orchestrator_conversation_bindings(updated_at);
+        CREATE TABLE IF NOT EXISTS orchestrator_projects (
+          project_id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE,
+          payload JSONB NOT NULL, status TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL);
+        CREATE INDEX IF NOT EXISTS orchestrator_projects_status_idx
+          ON orchestrator_projects(status);
         CREATE INDEX IF NOT EXISTS orchestrator_knowledge_chunks_fts_idx ON orchestrator_knowledge_chunks USING GIN (to_tsvector('simple', text));
         CREATE TABLE IF NOT EXISTS orchestrator_context_packets (
           packet_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES orchestrator_runs(run_id),
@@ -248,10 +255,10 @@ class PostgresStore:
         with self.transaction() as conn:
             if one_active_run:
                 states = [state.value for state in TERMINAL_STATES]
-                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE LIMIT 1', (states,)).fetchone()
+                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE AND project_id IS NOT DISTINCT FROM %s LIMIT 1', (*states, record.project_id)).fetchone()
                 if active:
                     raise ConcurrencyConflict(f"active run already exists: {active['run_id']}")
-            conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at, conversation) VALUES (%s, %s, %s, %s, %s, %s, %s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at, record.conversation))
+            conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at, conversation, project_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at, record.conversation, record.project_id))
             self._append_event_conn(conn, run_id=record.run_id, source='orchestrator', event_type='run.created', payload={'objective': record.objective, 'state': record.state.value})
         return record
 
@@ -267,9 +274,9 @@ class PostgresStore:
             if parent['state'] not in terminal:
                 raise ConcurrencyConflict('terminal retry source is not terminal')
             if one_active_run:
-                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE LIMIT 1', ([state.value for state in TERMINAL_STATES],)).fetchone()
+                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE AND project_id IS NOT DISTINCT FROM %s LIMIT 1', (*[state.value for state in TERMINAL_STATES], record.project_id)).fetchone()
                 if active: raise ConcurrencyConflict(f"active run already exists: {active['run_id']}")
-            conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at, conversation) VALUES (%s,%s,%s,%s,%s,%s,%s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at, record.conversation))
+            conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at, conversation, project_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at, record.conversation, record.project_id))
             if existing is None:
                 conn.execute('INSERT INTO orchestrator_terminal_run_retries (parent_run_id, child_run_id, retry_key, checkpoint_digest, created_at) VALUES (%s,%s,%s,%s,%s)', (parent_run_id, record.run_id, retry_key, checkpoint_digest, record.created_at))
             else:
@@ -429,6 +436,77 @@ class PostgresStore:
         with self._connect() as conn: return [IngestedDatasetRecord.model_validate(r['payload']) for r in conn.execute('SELECT payload FROM orchestrator_datasets ORDER BY created_at').fetchall()]
     def list_events(self, run_id: str, *, after_sequence: int = 0) -> list[EventRecord]:
         with self._connect() as conn: return [EventRecord.model_validate(r['payload']) for r in conn.execute('SELECT payload FROM orchestrator_events WHERE run_id=%s AND sequence_number>%s ORDER BY sequence_number', (run_id, after_sequence)).fetchall()]
+
+    def save_project(self, record: ProjectRecord) -> ProjectRecord:
+        with self.transaction() as conn:
+            conn.execute(
+                'INSERT INTO orchestrator_projects'
+                ' (project_id, slug, payload, status, created_at, updated_at)'
+                ' VALUES (%s,%s,%s,%s,%s,%s)'
+                ' ON CONFLICT (project_id) DO UPDATE SET'
+                ' slug=EXCLUDED.slug, payload=EXCLUDED.payload,'
+                ' status=EXCLUDED.status, updated_at=EXCLUDED.updated_at',
+                (
+                    record.project_id,
+                    record.slug,
+                    json.dumps(record.model_dump(mode='json')),
+                    record.status.value,
+                    record.created_at,
+                    record.updated_at,
+                ),
+            )
+        return record
+
+    def get_project(self, project_id: str) -> ProjectRecord:
+        with self._connect() as conn:
+            row = conn.execute(
+                'SELECT payload FROM orchestrator_projects'
+                ' WHERE project_id=%s',
+                (project_id,),
+            ).fetchone()
+        if row is None:
+            raise RecordNotFound(f'project {project_id}')
+        return ProjectRecord.model_validate(row['payload'])
+
+    def get_project_by_slug(self, slug: str) -> ProjectRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                'SELECT payload FROM orchestrator_projects WHERE slug=%s',
+                (slug,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ProjectRecord.model_validate(row['payload'])
+
+    def list_projects(self) -> list[ProjectRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                'SELECT payload FROM orchestrator_projects'
+                ' ORDER BY created_at'
+            ).fetchall()
+        return [
+            ProjectRecord.model_validate(row['payload']) for row in rows
+        ]
+
+    def replace_project(
+        self,
+        record: ProjectRecord,
+        *,
+        expected_version: int | None = None,
+    ) -> ProjectRecord:
+        with self.transaction() as conn:
+            conn.execute(
+                'UPDATE orchestrator_projects'
+                ' SET payload=%s, status=%s, updated_at=%s'
+                ' WHERE project_id=%s',
+                (
+                    json.dumps(record.model_dump(mode='json')),
+                    record.status.value,
+                    record.updated_at,
+                    record.project_id,
+                ),
+            )
+        return record
 
     def save_conversation_binding(
         self,

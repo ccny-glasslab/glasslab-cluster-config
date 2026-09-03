@@ -11,6 +11,8 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4, uuid5, NAMESPACE_URL
 
+import yaml
+
 from .analysis_notebook import write_analysis_notebook
 from .artifact_delivery import ArtifactDeliveryError
 from .cluster import ClusterExecutor
@@ -47,6 +49,8 @@ from .schemas import (
     JobRecord,
     JobStatus,
     PolicyClassification,
+    ProjectRecord,
+    ProjectStatus,
     ResearchAnswer,
     RequestedAction,
     RunCreateRequest,
@@ -275,6 +279,74 @@ class ResearchOrchestrator:
         self._publish_latest(run_id)
         return run
 
+    def create_project(self, manifest: dict[str, Any]) -> ProjectRecord:
+        """Import a project manifest (research-project-design.md).
+
+        Idempotent by slug: re-importing the same slug updates metadata
+        (title, objective, datasets, contract) while preserving the
+        project_id, status, and creation time.
+        """
+        slug = str(manifest.get('slug') or '').strip().lower()
+        title = str(manifest.get('title') or '').strip()
+        objective = str(manifest.get('objective') or '').strip()
+        if not slug or not title or not objective:
+            raise WorkflowError(
+                'project manifest requires slug, title, and objective'
+            )
+        contract_ref = manifest.get('default_contract') or {}
+        contract_id = str(contract_ref.get('id') or '')
+        contract_version = str(contract_ref.get('version') or '')
+        if not contract_id or not contract_version:
+            contract_id = self.settings.default_evaluation_contract_id
+            contract_version = self.settings.default_evaluation_contract_version
+        contract = self.contracts.resolve(contract_id, contract_version)
+        dataset_ids = sorted(
+            {str(d) for d in manifest.get('datasets', []) if str(d)}
+        )
+        created_by = str(manifest.get('created_by') or 'operator')
+        now = utc_now()
+        existing = self.store.get_project_by_slug(slug)
+        if existing is not None:
+            updated = existing.model_copy(
+                update={
+                    'title': title,
+                    'objective': objective,
+                    'dataset_ids': dataset_ids,
+                    'default_contract_id': contract_id,
+                    'default_contract_version': contract_version,
+                    'default_contract_digest': contract.digest,
+                    'created_by': created_by,
+                    'updated_at': now,
+                }
+            )
+            return self.store.save_project(updated)
+        record = ProjectRecord(
+            slug=slug,
+            title=title,
+            objective=objective,
+            dataset_ids=dataset_ids,
+            default_contract_id=contract_id,
+            default_contract_version=contract_version,
+            default_contract_digest=contract.digest,
+            created_by=created_by,
+            created_at=now,
+            updated_at=now,
+        )
+        return self.store.save_project(record)
+
+    def archive_project(self, project_id: str) -> ProjectRecord:
+        project = self.store.get_project(project_id)
+        if project.status is ProjectStatus.ARCHIVED:
+            return project
+        return self.store.replace_project(
+            project.model_copy(
+                update={
+                    'status': ProjectStatus.ARCHIVED,
+                    'updated_at': utc_now(),
+                }
+            )
+        )
+
     def create_run(self, request: RunCreateRequest) -> RunRecord:
         with self._advance_lock:
             task = (
@@ -348,6 +420,7 @@ class ResearchOrchestrator:
                 updated_at=now,
                 seed_context=request.seed_context,
                 seed_source_ids=request.seed_source_ids,
+                project_id=request.project_id,
             )
             self.store.create_run(
                 record,
@@ -996,6 +1069,7 @@ class ResearchOrchestrator:
         objective: str | None = None,
         evaluation_contract_id: str | None = None,
         evaluation_contract_version: str | None = None,
+        project_id: str | None = None,
     ) -> RunRecord:
         """Promote a research conversation into a real run (Phase 4).
 
@@ -1037,6 +1111,7 @@ class ResearchOrchestrator:
                 evaluation_contract_version=evaluation_contract_version,
                 seed_context=self._conversation_prior_context(conversation_id),
                 seed_source_ids=seed_source_ids,
+                project_id=project_id,
                 existing_discord_thread_id=(
                     conversation_id.removeprefix('discord-thread-')
                     if conversation_id.startswith('discord-thread-')
@@ -1044,6 +1119,12 @@ class ResearchOrchestrator:
                 ),
             )
         )
+        if project_id:
+            conversation_run = self.store.get_run(conversation_id)
+            self.store.replace_run(
+                conversation_run.model_copy(update={'project_id': project_id}),
+                expected_version=conversation_run.version,
+            )
         self._event(
             conversation_id,
             source='orchestrator',
@@ -1051,6 +1132,7 @@ class ResearchOrchestrator:
             payload={
                 'run_id': run.run_id,
                 'objective': resolved_objective,
+                'project_id': project_id,
             },
         )
         return run
