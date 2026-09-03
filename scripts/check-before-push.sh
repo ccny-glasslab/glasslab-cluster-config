@@ -68,6 +68,7 @@ run_secret_boundary_tests() {
     tests.security.test_secret_process_boundaries \
     tests.security.test_secret_backup_restore \
     tests.security.test_lab_security_agent \
+    tests.scripts.test_exo_launchd \
     tests.scripts.test_glasslab_opencode \
     tests.scripts.test_resolve_runner_image \
     tests.security.test_workflow_security_manifests \
@@ -86,6 +87,7 @@ run_shell() {
   bash -n \
     scripts/check-before-push.sh \
     scripts/glasslab-opencode.sh \
+    scripts/macos/glasslab-exo-run.sh \
     scripts/lab-security-agent \
     scripts/research-session-cli.sh \
     scripts/smoke-test-research-orchestrator.sh \
