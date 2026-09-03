@@ -255,7 +255,7 @@ class PostgresStore:
         with self.transaction() as conn:
             if one_active_run:
                 states = [state.value for state in TERMINAL_STATES]
-                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE AND project_id IS NOT DISTINCT FROM %s LIMIT 1', (*states, record.project_id)).fetchone()
+                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE AND project_id IS NOT DISTINCT FROM %s LIMIT 1', (states, record.project_id)).fetchone()
                 if active:
                     raise ConcurrencyConflict(f"active run already exists: {active['run_id']}")
             conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at, conversation, project_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at, record.conversation, record.project_id))
@@ -274,7 +274,7 @@ class PostgresStore:
             if parent['state'] not in terminal:
                 raise ConcurrencyConflict('terminal retry source is not terminal')
             if one_active_run:
-                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE AND project_id IS NOT DISTINCT FROM %s LIMIT 1', (*[state.value for state in TERMINAL_STATES], record.project_id)).fetchone()
+                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE AND project_id IS NOT DISTINCT FROM %s LIMIT 1', ([state.value for state in TERMINAL_STATES], record.project_id)).fetchone()
                 if active: raise ConcurrencyConflict(f"active run already exists: {active['run_id']}")
             conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at, conversation, project_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at, record.conversation, record.project_id))
             if existing is None:
