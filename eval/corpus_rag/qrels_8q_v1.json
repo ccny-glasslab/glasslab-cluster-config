@@ -1,0 +1,52 @@
+{
+  "description": "Chunk-level graded relevance for corpus-RAG benchmark (8 questions).",
+  "key_scheme": "manifest_id::chunk_index",
+  "note": "Each qid maps chunk keys (manifest_id::chunk_index) to relevance grades (0=irrelevant, 1=supporting, 2=directly answers).",
+  "questions": {
+    "q-clustering-geometry": {
+      "luxburg-stability::0": 2,
+      "luxburg-stability::1": 1,
+      "islr2::0": 1,
+      "esl::0": 1,
+      "senbabaoglu-consensus::0": 1
+    },
+    "q-cluster-stability": {
+      "luxburg-stability::0": 2,
+      "luxburg-stability::1": 1,
+      "senbabaoglu-consensus::0": 2,
+      "senbabaoglu-consensus::1": 1,
+      "stability-selection::0": 1
+    },
+    "q-highdim-nllp": {
+      "glmnet-jss::0": 2,
+      "glmnet-jss::1": 1,
+      "esl::0": 1,
+      "islr2::0": 1
+    },
+    "q-imbalance-eval": {
+      "saito-pr-roc::0": 2,
+      "saito-pr-roc::1": 1,
+      "smote-jair::0": 1
+    },
+    "q-nested-cv": {
+      "cawley-talbot::0": 2,
+      "cawley-talbot::1": 1,
+      "islr2::0": 1,
+      "esl::0": 1
+    },
+    "q-linear-alternatives": {
+      "koenker-quantile::0": 2,
+      "koenker-quantile::1": 1,
+      "esl::0": 1
+    },
+    "q-calibration": {
+      "guo-calibration::0": 2,
+      "guo-calibration::1": 1,
+      "islr2::0": 1
+    },
+    "q-multiple-testing": {
+      "bhy-fdr::0": 2,
+      "bhy-fdr::1": 1
+    }
+  }
+}

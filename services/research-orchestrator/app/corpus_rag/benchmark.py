@@ -85,24 +85,25 @@ def ndcg_at_k(
     if not relevant:
         return 0.0
 
-    def dcg(gains: list[float]) -> float:
+    def dcg(gains: list[tuple[int, float]]) -> float:
         return sum(
             gain / math.log2(position + 1)
-            for position, gain in enumerate(gains, start=1)
+            for position, gain in gains
         )
 
-    run_gains = [
-        float(2**relevant[id_] - 1)
-        for id_ in ranking[:k]
-        if id_ in relevant
-    ]
+    run_gains_with_positions: list[tuple[int, float]] = []
+    for i, id_ in enumerate(ranking[:k], start=1):
+        if id_ in relevant:
+            run_gains_with_positions.append((i, float(2 ** relevant[id_] - 1)))
+
     ideal_gains = sorted(
         (float(2**grade - 1) for grade in relevant.values()), reverse=True
     )[:k]
-    ideal = dcg(ideal_gains)
+    ideal_gains_with_positions: list[tuple[int, float]] = list(enumerate(ideal_gains, start=1))
+    ideal = dcg(ideal_gains_with_positions)
     if ideal <= 0.0:
         return 0.0
-    return dcg(run_gains) / ideal
+    return dcg(run_gains_with_positions) / ideal
 
 
 def distinct_sources_at_k(
