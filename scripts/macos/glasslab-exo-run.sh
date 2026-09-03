@@ -33,11 +33,6 @@ until /sbin/ifconfig "$IFACE" 2>/dev/null | /usr/bin/grep -q "inet ${SELF_IP} ";
   sleep 10
 done
 
-until /sbin/ping -S "$SELF_IP" -c 1 -t 3 "$PEER_IP" >/dev/null 2>&1; do
-  log "waiting for Thunderbolt peer ${PEER_IP}"
-  sleep 10
-done
-
 common_args=(
   -vv
   --libp2p-port "$LIBP2P_PORT"
@@ -58,6 +53,11 @@ if [[ "$ROLE" == "master" ]]; then
     -m \
     --api-port "$API_PORT"
 fi
+
+until /sbin/ping -S "$SELF_IP" -c 1 -t 3 "$PEER_IP" >/dev/null 2>&1; do
+  log "waiting for Thunderbolt peer ${PEER_IP}"
+  sleep 10
+done
 
 master_id=""
 until master_id=$(/usr/bin/curl -fsS --max-time 5 \
