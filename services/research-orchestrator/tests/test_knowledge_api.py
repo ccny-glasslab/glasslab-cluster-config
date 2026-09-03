@@ -488,57 +488,22 @@ def test_chat_promote_thread_binds_discord_thread(tmp_path: Path) -> None:
         assert promoted.json()['discord_thread_id'] == '987654321'
 
 
-def test_project_api_create_list_archive(tmp_path: Path) -> None:
+
+
+
+def test_promote_with_investigation_tags_conversation_and_run(tmp_path: Path) -> None:
     _, settings, engine = _bundle(tmp_path)
     app = create_app(settings, engine=engine, start_watcher=False)
     with TestClient(app) as client:
-        body = {
-            'slug': 'wine-quality',
-            'title': 'Wine quality',
-            'objective': 'Predict wine quality from physicochemical features.',
-            'datasets': ['wine_train'],
-            'default_contract': {
-                'id': 'example-research-v1',
-                'version': '1.0.0',
-            },
-        }
-        created = client.post('/projects', json=body)
-        assert created.status_code == 200
-        project = created.json()
-        assert project['slug'] == 'wine-quality'
-        assert project['project_id']
-        listed = client.get('/projects')
-        assert listed.status_code == 200
-        assert any(p['slug'] == 'wine-quality' for p in listed.json())
-        archived = client.post(
-            f"/projects/{project['project_id']}/archive"
-        )
-        assert archived.status_code == 200
-        assert archived.json()['status'] == 'ARCHIVED'
-
-
-def test_promote_with_project_tags_conversation_and_run(tmp_path: Path) -> None:
-    _, settings, engine = _bundle(tmp_path)
-    app = create_app(settings, engine=engine, start_watcher=False)
-    with TestClient(app) as client:
-        project = client.post(
-            '/projects',
-            json={
-                'slug': 'promo-project',
-                'title': 'Promotion project',
-                'objective': 'Promote a conversation into this project.',
-                'datasets': [],
-            },
-        ).json()
-        _seed_chat(client, 'chat-pj')
+        _seed_chat(client, 'chat-inv')
         promoted = client.post(
-            '/chat/chat-pj/promote',
+            '/chat/chat-inv/promote',
             json={
-                'objective': 'Run the promoted conversation in a project.',
-                'project_id': project['project_id'],
+                'objective': 'Run the promoted conversation in an investigation.',
+                'investigation_id': 'inv-abc123',
             },
         )
         assert promoted.status_code == 200
-        assert promoted.json()['project_id'] == project['project_id']
-        conversation_view = client.get('/chat/chat-pj')
+        assert promoted.json()['investigation_id'] == 'inv-abc123'
+        conversation_view = client.get('/chat/chat-inv')
         assert conversation_view.status_code == 200

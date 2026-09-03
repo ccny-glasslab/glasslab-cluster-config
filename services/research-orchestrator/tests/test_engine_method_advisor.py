@@ -533,36 +533,3 @@ def test_topic_phrase_strips_leading_conjunction_before_opener(
         'and how does cosine similarity relate to retrieval'
     ) == 'cosine similarity relate to retrieval'
 
-
-def test_create_project_idempotent_by_slug(tmp_path: Path) -> None:
-    engine, store, _approved = _build(tmp_path, stability_text=STABILITY_TEXT)
-    first = engine.create_project(
-        {
-            'slug': 'metric-learning-survey',
-            'title': 'Metric learning survey',
-            'objective': 'Survey metric learning and embedding retrieval.',
-            'datasets': ['titanic_train'],
-            'default_contract': {
-                'id': 'example-research-v1',
-                'version': '1.0.0',
-            },
-        }
-    )
-    assert first.slug == 'metric-learning-survey'
-    assert first.default_contract_digest
-    second = engine.create_project(
-        {
-            'slug': 'metric-learning-survey',
-            'title': 'Metric learning survey (revised)',
-            'objective': 'Survey metric learning and embedding retrieval.',
-            'datasets': ['titanic_train'],
-            'default_contract': {
-                'id': 'example-research-v1',
-                'version': '1.0.0',
-            },
-        }
-    )
-    assert second.project_id == first.project_id
-    assert second.title == 'Metric learning survey (revised)'
-    archived = engine.archive_project(first.project_id)
-    assert archived.status.value == 'ARCHIVED'

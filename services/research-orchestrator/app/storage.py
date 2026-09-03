@@ -34,7 +34,6 @@ from .schemas import (
     ArtifactRecord,
     ContextPacket,
 ConversationSourceBinding,
-    ProjectRecord,
     EventRecord,
     IngestedDatasetRecord,
     JobRecord,
@@ -279,16 +278,6 @@ class SqliteStore:
                     conversation_id TEXT PRIMARY KEY,
                     payload TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS projects (
-                    project_id TEXT PRIMARY KEY,
-                    slug TEXT NOT NULL UNIQUE,
-                    payload TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS projects_status_idx
-                ON projects(status);
 
                 -- FTS5 is the lexical half of hybrid retrieval. chunk_id is
                 -- the rowid-style key linking to knowledge_chunks; the rank is
@@ -406,9 +395,9 @@ class SqliteStore:
                     'ALTER TABLE runs ADD COLUMN conversation INTEGER'
                     ' NOT NULL DEFAULT 0'
                 )
-            if 'project_id' not in columns:
+            if 'investigation_id' not in columns:
                 connection.execute(
-                    'ALTER TABLE runs ADD COLUMN project_id TEXT'
+                    'ALTER TABLE runs ADD COLUMN investigation_id TEXT'
                 )
             # Backfill pre-Phase-4 conversation runs (they predate the marker)
             # so they do not block the single-active-run slot.
@@ -499,8 +488,8 @@ class SqliteStore:
                 active = connection.execute(
                     f'SELECT run_id FROM runs WHERE state NOT IN ({placeholders})'
                     ' AND conversation = 0'
-                    ' AND project_id IS ? LIMIT 1',
-                    (*terminal, record.project_id),
+                    ' AND investigation_id IS ? LIMIT 1',
+                    (*terminal, record.investigation_id),
                 ).fetchone()
                 if active is not None:
                     raise ConcurrencyConflict(
@@ -510,7 +499,7 @@ class SqliteStore:
                 '''
                 INSERT INTO runs (
                     run_id, state, version, payload, created_at, updated_at,
-                    conversation, project_id
+                    conversation, investigation_id
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 (
@@ -521,7 +510,7 @@ class SqliteStore:
                     record.created_at.isoformat(),
                     record.updated_at.isoformat(),
                     int(record.conversation),
-                    record.project_id,
+                    record.investigation_id,
                 ),
             )
             self._append_event_conn(
@@ -566,14 +555,14 @@ class SqliteStore:
                 active = connection.execute(
                     f'SELECT run_id FROM runs WHERE state NOT IN ({placeholders})'
                     ' AND conversation = 0'
-                    ' AND project_id IS ? LIMIT 1',
-                    (*terminal, record.project_id),
+                    ' AND investigation_id IS ? LIMIT 1',
+                    (*terminal, record.investigation_id),
                 ).fetchone()
                 if active is not None:
                     raise ConcurrencyConflict(f'active run already exists: {active["run_id"]}')
             connection.execute(
-                'INSERT INTO runs (run_id, state, version, payload, created_at, updated_at, conversation, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                (record.run_id, record.state.value, record.version, _dump(record), record.created_at.isoformat(), record.updated_at.isoformat(), int(record.conversation), record.project_id),
+                'INSERT INTO runs (run_id, state, version, payload, created_at, updated_at, conversation, investigation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                (record.run_id, record.state.value, record.version, _dump(record), record.created_at.isoformat(), record.updated_at.isoformat(), int(record.conversation), record.investigation_id),
             )
             if existing is None:
                 connection.execute(
@@ -1257,82 +1246,6 @@ class SqliteStore:
                 (run_id, after_sequence),
             ).fetchall()
         return [EventRecord.model_validate_json(row['payload']) for row in rows]
-
-    def save_project(self, record: ProjectRecord) -> ProjectRecord:
-        with self.transaction() as connection:
-            connection.execute(
-                '''
-                INSERT INTO projects (
-                    project_id, slug, payload, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(project_id) DO UPDATE SET
-                    payload = excluded.payload,
-                    slug = excluded.slug,
-                    status = excluded.status,
-                    updated_at = excluded.updated_at
-                ''',
-                (
-                    record.project_id,
-                    record.slug,
-                    json.dumps(record.model_dump(mode='json')),
-                    record.status.value,
-                    record.created_at.isoformat(),
-                    record.updated_at.isoformat(),
-                ),
-            )
-        return record
-
-    def get_project(self, project_id: str) -> ProjectRecord:
-        with self._connect() as connection:
-            row = connection.execute(
-                'SELECT payload FROM projects WHERE project_id = ?',
-                (project_id,),
-            ).fetchone()
-        if row is None:
-            raise RecordNotFound(f'project {project_id}')
-        return ProjectRecord.model_validate(json.loads(row['payload']))
-
-    def get_project_by_slug(self, slug: str) -> ProjectRecord | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                'SELECT payload FROM projects WHERE slug = ?',
-                (slug,),
-            ).fetchone()
-        if row is None:
-            return None
-        return ProjectRecord.model_validate(json.loads(row['payload']))
-
-    def list_projects(self) -> list[ProjectRecord]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                'SELECT payload FROM projects ORDER BY created_at'
-            ).fetchall()
-        return [
-            ProjectRecord.model_validate(json.loads(row['payload']))
-            for row in rows
-        ]
-
-    def replace_project(
-        self,
-        record: ProjectRecord,
-        *,
-        expected_version: int | None = None,
-    ) -> ProjectRecord:
-        with self.transaction() as connection:
-            connection.execute(
-                '''
-                UPDATE projects
-                SET payload = ?, status = ?, updated_at = ?
-                WHERE project_id = ?
-                ''',
-                (
-                    json.dumps(record.model_dump(mode='json')),
-                    record.status.value,
-                    record.updated_at.isoformat(),
-                    record.project_id,
-                ),
-            )
-        return record
 
     def save_conversation_binding(
         self,
