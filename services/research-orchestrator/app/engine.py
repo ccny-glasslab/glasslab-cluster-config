@@ -26,6 +26,7 @@ from .evidence import (
     build_evidence_snapshot,
     serialize_evidence,
 )
+from .evidence_resolver import EvidenceURIResolver
 from .matrix import expand_experiment_matrix
 import httpx
 
@@ -39,6 +40,7 @@ from .schemas import (
     AgentTurnResult,
     ApprovalStatus,
     ArtifactRecord,
+    Claim,
     Citation,
     ContractCandidateRequest,
     ContextPacket,
@@ -4649,6 +4651,35 @@ class ResearchOrchestrator:
         self._transition(run_id, RunState.HONEYDEW_VERIFYING)
         self._verify_results(run_id)
 
+    def _validate_claims(self, claims: list[Claim], run_id: str) -> tuple[bool, list[ResolvedEvidence]]:
+        """Validate claim evidence URIs against the store.
+
+        Returns (all_resolved, unresolved_evidence).
+        Unresolved URIs emit an event and downgrade verification status.
+        """
+        resolver = EvidenceURIResolver(self.store)
+        all_resolved = True
+        unresolved: list[ResolvedEvidence] = []
+
+        for claim in claims:
+            for uri in claim.evidence:
+                result = resolver.resolve(uri)
+                if not result.resolved:
+                    all_resolved = False
+                    unresolved.append(result)
+                    self._event(
+                        run_id,
+                        source='orchestrator',
+                        event_type='verification.evidence_unresolved',
+                        payload={
+                            'uri': uri,
+                            'claim_text': claim.text,
+                            'error': result.error,
+                        },
+                    )
+
+        return all_resolved, unresolved
+
     def _verify_results(self, run_id: str) -> None:
         evidence = self._evidence_snapshot(
             run_id, phase=EvidencePhase.VERIFICATION
@@ -4666,6 +4697,31 @@ class ResearchOrchestrator:
             expected_kind=TurnKind.VERIFICATION,
             input_event=evidence,
         )
+
+        # Validate claims against authoritative records
+        if result.claims:
+            all_resolved, unresolved = self._validate_claims(result.claims, run_id)
+
+            if not all_resolved:
+                self.store.reset_methodology_revision_budget(
+                    run_id,
+                    reason=(
+                        f'verification failed: {len(unresolved)} evidence URI(s) '
+                        'could not be resolved against authoritative records'
+                    ),
+                )
+                self._publish_latest(run_id)
+                self._transition(run_id, RunState.BEAKER_REVISING)
+                self._beaker_revise(
+                    run_id,
+                    feedback=(
+                        f'{len(unresolved)} claim(s) cite evidence URIs that do not '
+                        f'resolve to authoritative records. Review the unresolved URIs '
+                        f'in the event log and revise the implementation.'
+                    ),
+                )
+                return
+
         if not result.done:
             self.store.reset_methodology_revision_budget(
                 run_id,
