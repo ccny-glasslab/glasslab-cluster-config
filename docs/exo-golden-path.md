@@ -31,12 +31,16 @@ System `LaunchDaemon` jobs own exo. Do not start another copy with `nohup`.
 On `.17`:
 
 - `com.glasslab.exo` supervises the exo master/API.
+- The master starts as soon as its own Thunderbolt address is available; it
+  does not wait for `.18`, so the reconciler can restore a single-node fallback
+  after a cold start while the worker or cable is unavailable.
 - `com.glasslab.exo-reconcile` waits for both RDMA-connected nodes and restores
   the approved Qwen placement when no active instance exists.
 
 On `.18`:
 
 - `com.glasslab.exo` supervises the worker.
+- The worker waits for peer reachability before contacting the master API.
 - the worker obtains `.17`'s current peer ID from the master API and uses an
   explicit Thunderbolt bootstrap multiaddress.
 
