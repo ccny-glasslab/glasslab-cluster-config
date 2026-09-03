@@ -20,11 +20,6 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class ProjectStatus(StrEnum):
-    ACTIVE = 'ACTIVE'
-    ARCHIVED = 'ARCHIVED'
-
-
 class RunState(StrEnum):
     CREATED = 'CREATED'
     PREPARING = 'PREPARING'
@@ -343,7 +338,7 @@ class ConversationPromoteRequest(BaseModel):
     objective: str | None = Field(default=None, min_length=10, max_length=1000)
     evaluation_contract_id: str | None = None
     evaluation_contract_version: str | None = None
-    project_id: str | None = None
+    investigation_id: str | None = None
 
     @model_validator(mode='after')
     def require_contract_pair(self) -> 'ConversationPromoteRequest':
@@ -355,29 +350,6 @@ class ConversationPromoteRequest(BaseModel):
                 'must be provided together'
             )
         return self
-
-
-class ProjectContractRef(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-
-    id: str = Field(min_length=1)
-    version: str = Field(min_length=1)
-
-
-class ProjectCreateRequest(BaseModel):
-    """The git manifest form (projects/<slug>/project.yaml), as an API body."""
-
-    model_config = ConfigDict(extra='forbid')
-
-    slug: str = Field(
-        min_length=1,
-        pattern=r'^[a-z0-9][a-z0-9-]{1,62}$',
-    )
-    title: str = Field(min_length=1, max_length=300)
-    objective: str = Field(min_length=1, max_length=2000)
-    datasets: list[str] = Field(default_factory=list)
-    default_contract: ProjectContractRef | None = None
-    created_by: str = 'operator'
 
 
 class ResourceRequest(BaseModel):
@@ -558,9 +530,10 @@ class RunRecord(BaseModel):
     # Inert research-chat conversations never hold the single-active-run
     # slot; the store excludes them from the active-run predicate.
     conversation: bool = False
-    # Project scoping (research-project-design.md): runs executed under a
-    # project; per-project active-slot semantics.
-    project_id: str | None = None
+    # Investigation scoping (research-investigation-design.md): runs executed
+    # under an investigation owned by workflow-api; per-investigation
+    # active-slot semantics.
+    investigation_id: str | None = None
     maximum_turns: int
     maximum_runtime_seconds: int
     maximum_parallel_jobs: int
@@ -608,35 +581,6 @@ class ConversationSourceBinding(BaseModel):
     conversation_id: str = Field(min_length=1)
     source_ids: list[str] = Field(default_factory=list)
     created_by: str = 'operator'
-    created_at: datetime = Field(default_factory=utc_now)
-    updated_at: datetime = Field(default_factory=utc_now)
-
-
-class ProjectRecord(BaseModel):
-    """The organizing unit of research (research-project-design.md).
-
-    A research question pursued over conversations, catalog datasets, and a
-    campaign of project-scoped bounded runs, with an accumulating published
-    report log. Declared as a git manifest (projects/<slug>/project.yaml),
-    imported idempotently by slug; runtime state lives in the store.
-    """
-
-    model_config = ConfigDict(extra='forbid')
-
-    project_id: str = Field(default_factory=lambda: uuid4().hex)
-    slug: str = Field(
-        min_length=1,
-        pattern=r'^[a-z0-9][a-z0-9-]{1,62}$',
-    )
-    title: str = Field(min_length=1, max_length=300)
-    objective: str = Field(min_length=1, max_length=2000)
-    status: ProjectStatus = ProjectStatus.ACTIVE
-    dataset_ids: list[str] = Field(default_factory=list)
-    default_contract_id: str = Field(min_length=1)
-    default_contract_version: str = Field(min_length=1)
-    default_contract_digest: str = Field(min_length=1)
-    created_by: str = 'operator'
-    report_count: int = Field(default=0, ge=0)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -937,7 +881,7 @@ class RunCreateRequest(BaseModel):
     seed_context: str | None = None
     seed_source_ids: list[str] | None = None
     existing_discord_thread_id: str | None = None
-    project_id: str | None = None
+    investigation_id: str | None = None
 
     @model_validator(mode='after')
     def require_contract_pair(self) -> 'RunCreateRequest':

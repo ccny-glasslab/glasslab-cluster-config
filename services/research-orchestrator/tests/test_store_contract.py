@@ -35,8 +35,6 @@ from app.schemas import (
     SourceType,
     TurnKind,
     TurnRecord,
-    ProjectRecord,
-    ProjectStatus,
 )
 from app.state_machine import validate_transition
 from app.storage import ConcurrencyConflict, SqliteStore
@@ -614,77 +612,24 @@ def test_conversation_runs_do_not_hold_active_slot(store) -> None:
         # run must never be the blocker.
         assert 'chat-abc' not in str(exc)
     assert conversation.run_id == 'chat-abc'
-
-
-def test_non_conversation_run_still_holds_active_slot(store) -> None:
-    store.create_run(_run('run-a'), one_active_run=False)
-    with pytest.raises(ConcurrencyConflict):
-        store.create_run(_run('run-b'), one_active_run=True)
-
-
-def _project(slug: str | None = None) -> ProjectRecord:
-    slug = slug or f'demo-{_id("project")}'
-    return ProjectRecord(
-        slug=slug,
-        title='Demo project',
-        objective='Test the project entity.',
-        dataset_ids=['titanic_train'],
-        default_contract_id='example-research-v1',
-        default_contract_version='1.0.0',
-        default_contract_digest='0' * 64,
-    )
-
-
-def test_project_round_trip_and_slug_lookup(store) -> None:
-    stored = store.save_project(_project())
-    assert store.get_project_by_slug(stored.slug).project_id == (
-        stored.project_id
-    )
-    assert [p.slug for p in store.list_projects()].count(stored.slug) == 1
-    updated = store.save_project(
-        stored.model_copy(
-            update={
-                'title': 'Updated title',
-                'updated_at': stored.updated_at,
-            }
-        )
-    )
-    assert updated.project_id == stored.project_id
-    assert store.get_project(stored.project_id).title == 'Updated title'
-    assert stored.slug in [p.slug for p in store.list_projects()]
-
-
-def test_project_archive_round_trip(store) -> None:
-    stored = store.save_project(_project())
-    archived = store.replace_project(
-        stored.model_copy(
-            update={
-                'status': ProjectStatus.ARCHIVED,
-                'updated_at': stored.updated_at,
-            }
-        )
-    )
-    assert store.get_project(stored.project_id).status is ProjectStatus.ARCHIVED
-
-
-def test_active_slot_is_per_project(store) -> None:
+def test_active_slot_is_per_investigation(store) -> None:
     store.create_run(
-        _run('run-p1').model_copy(update={'project_id': 'proj-1'}),
+        _run('run-p1').model_copy(update={'investigation_id': 'inv-1'}),
         one_active_run=True,
     )
     store.create_run(
-        _run('run-p2').model_copy(update={'project_id': 'proj-2'}),
+        _run('run-p2').model_copy(update={'investigation_id': 'inv-2'}),
         one_active_run=True,
     )
     with pytest.raises(ConcurrencyConflict):
         store.create_run(
-            _run('run-p1b').model_copy(update={'project_id': 'proj-1'}),
+            _run('run-p1b').model_copy(update={'investigation_id': 'inv-1'}),
             one_active_run=True,
         )
     try:
-        unprojected = store.create_run(_run('run-free'), one_active_run=True)
-        assert unprojected.run_id == 'run-free'
+        unscoped = store.create_run(_run('run-free'), one_active_run=True)
+        assert unscoped.run_id == 'run-free'
     except ConcurrencyConflict:
         # The postgres contract fixture shares one database; an earlier
-        # test may already hold the legacy unprojected slot.
+        # test may already hold the legacy unscoped slot.
         pass
