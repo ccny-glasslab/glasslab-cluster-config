@@ -35,6 +35,7 @@ from app.schemas import (
     SourceType,
     TurnKind,
     TurnRecord,
+    CatalogDatasetRecord,
 )
 from app.state_machine import validate_transition
 from app.storage import ConcurrencyConflict, SqliteStore
@@ -633,3 +634,23 @@ def test_active_slot_is_per_investigation(store) -> None:
         # The postgres contract fixture shares one database; an earlier
         # test may already hold the legacy unscoped slot.
         pass
+
+
+def test_catalog_dataset_round_trip_and_name_lookup(store) -> None:
+    record = CatalogDatasetRecord(
+        name='titanic_train',
+        reference_uri=f'glasslab-dataset://{"a" * 64}',
+        artifact_uri='s3://artifacts/dataset-uploads/abc/titanic.csv',
+        sha256='b' * 64,
+        size_bytes=1024,
+        provenance='url',
+        source_url='https://example.com/titanic.csv',
+        created_by='operator',
+    )
+    stored = store.save_catalog_dataset(record)
+    assert store.get_catalog_dataset(stored.catalog_id).name == 'titanic_train'
+    assert store.get_catalog_dataset_by_name('titanic_train').sha256 == (
+        'b' * 64
+    )
+    assert store.get_catalog_dataset_by_name('missing') is None
+    assert [r.name for r in store.list_catalog_datasets()] == ['titanic_train']

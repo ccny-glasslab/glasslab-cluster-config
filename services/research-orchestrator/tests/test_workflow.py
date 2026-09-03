@@ -1945,7 +1945,7 @@ def test_http_api_with_mock_runtime(orchestrator_bundle) -> None:
         assert dataset.json()['reference_uri'].startswith(
             'glasslab-dataset://'
         )
-        dataset_id = dataset.json()['dataset_id']
+        dataset_id = dataset.json()['sha256']
         assert client.get(f'/datasets/{dataset_id}').status_code == 200
         assert len(client.get('/datasets').json()) == 1
         action = _pending_action(store, run_id, 'approve_protocol')

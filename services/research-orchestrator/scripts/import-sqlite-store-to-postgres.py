@@ -29,6 +29,7 @@ TABLES = (
     ('jobs', 'orchestrator_jobs', ('job_id', 'run_id', 'action_id', 'status', 'idempotency_key', 'payload', 'created_at', 'updated_at'), ('job_id', 'run_id', 'action_id', 'status', 'idempotency_key', 'payload', 'created_at', 'updated_at')),
     ('artifacts', 'orchestrator_artifacts', ('artifact_id', 'run_id', 'job_id', 'payload', 'created_at'), ('artifact_id', 'run_id', 'job_id', 'payload', 'created_at')),
     ('datasets', 'orchestrator_datasets', ('dataset_id', 'payload', 'created_at'), ('dataset_id', 'payload', 'created_at')),
+    ('dataset_catalog', 'orchestrator_dataset_catalog', ('catalog_id', 'name', 'payload', 'created_at'), ('catalog_id', 'name', 'payload', 'created_at')),
     ('events', 'orchestrator_events', ('event_id', 'run_id', 'sequence_number', 'source', 'event_type', 'payload', 'timestamp'), ('event_id', 'run_id', 'sequence_number', 'source', 'event_type', 'payload', 'timestamp')),
     ('knowledge_sources', 'orchestrator_knowledge_sources', ('source_id', 'source_type', 'canonical_uri', 'run_scope', 'access_policy', 'source_version', 'digest', 'ingested_at', 'index_version', 'title', 'metadata', 'parent_source_id'), ('source_id', 'source_type', 'canonical_uri', 'run_scope', 'digest', 'payload', 'ingested_at')),
     ('knowledge_chunks', 'orchestrator_knowledge_chunks', ('chunk_id', 'source_id', 'chunk_index', 'text', 'digest', 'token_count', 'index_version'), ('chunk_id', 'source_id', 'chunk_index', 'text', 'payload')),

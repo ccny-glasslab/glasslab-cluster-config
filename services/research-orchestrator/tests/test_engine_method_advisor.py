@@ -32,6 +32,8 @@ from app.storage import SqliteStore
 from app.workspaces import WorkspaceManager
 from app.schemas import (
     AgentName,
+    CatalogDatasetRecord,
+    IngestedDatasetRecord,
     AgentTurnResult,
     ApprovalStatus,
     ResearchAnswer,
@@ -533,3 +535,49 @@ def test_topic_phrase_strips_leading_conjunction_before_opener(
         'and how does cosine similarity relate to retrieval'
     ) == 'cosine similarity relate to retrieval'
 
+
+
+def test_materialize_catalog_reference_by_name(tmp_path: Path) -> None:
+    engine, store, _approved = _build(tmp_path, stability_text=STABILITY_TEXT)
+    source = tmp_path / 'titanic.csv'
+    source.write_text('survived,fare\n1,7.25\n')
+    digest = __import__('hashlib').sha256(source.read_bytes()).hexdigest()
+    store.save_catalog_dataset(
+        CatalogDatasetRecord(
+            name='titanic_train',
+            reference_uri=f'glasslab-dataset://{digest}',
+            artifact_uri=f's3://artifacts/dataset-uploads/{digest}/titanic.csv',
+            sha256=digest,
+            size_bytes=source.stat().st_size,
+            provenance='upload',
+            created_by='operator',
+        )
+    )
+    store.save_dataset(
+        IngestedDatasetRecord(
+            dataset_id=digest,
+            name='titanic_train',
+            filename='titanic.csv',
+            reference_uri=f'glasslab-dataset://{digest}',
+            artifact_uri=f's3://artifacts/dataset-uploads/{digest}/titanic.csv',
+            path=str(source),
+            sha256=digest,
+            size_bytes=source.stat().st_size,
+            media_type='text/csv',
+            role='training-validation dataset',
+            contains_labels=True,
+            uploaded_by='operator',
+        )
+    )
+    run = engine.create_run(
+        RunCreateRequest(
+            objective=(
+                'Predict survival from catalog://titanic_train on held-out '
+                'validation.'
+            )
+        )
+    )
+    engine._materialize_objective_datasets(run.run_id)
+    honeydew_dir = Path(run.honeydew_workspace) / 'datasets' / 'titanic.csv'
+    assert honeydew_dir.exists()
+    assert honeydew_dir.read_text() == source.read_text()

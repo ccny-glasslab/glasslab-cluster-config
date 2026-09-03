@@ -28,7 +28,7 @@ from .corpus_rag import (
 from .knowledge_search import or_query
 from .schemas import (
     ActionRecord, AgentName, ApprovalStatus, ArtifactRecord, ContextPacket,
-    ConversationSourceBinding, EventRecord, IngestedDatasetRecord, JobRecord,
+    CatalogDatasetRecord, ConversationSourceBinding, EventRecord, IngestedDatasetRecord, JobRecord,
     JobStatus, KnowledgeChunk, KnowledgeSource, RunRecord, RunState,
     SourceType, TERMINAL_STATES, TurnKind, TurnRecord, utc_now,
 )
@@ -137,6 +137,9 @@ class PostgresStore:
         CREATE TABLE IF NOT EXISTS orchestrator_conversation_bindings (
           conversation_id TEXT PRIMARY KEY, payload JSONB NOT NULL,
           updated_at TIMESTAMPTZ NOT NULL);
+        CREATE TABLE IF NOT EXISTS orchestrator_dataset_catalog (
+          catalog_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+          payload JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL);
         CREATE INDEX IF NOT EXISTS orchestrator_conversation_bindings_updated_idx
           ON orchestrator_conversation_bindings(updated_at);
         CREATE INDEX IF NOT EXISTS orchestrator_knowledge_chunks_fts_idx ON orchestrator_knowledge_chunks USING GIN (to_tsvector('simple', text));
@@ -430,6 +433,62 @@ class PostgresStore:
         with self._connect() as conn: return [IngestedDatasetRecord.model_validate(r['payload']) for r in conn.execute('SELECT payload FROM orchestrator_datasets ORDER BY created_at').fetchall()]
     def list_events(self, run_id: str, *, after_sequence: int = 0) -> list[EventRecord]:
         with self._connect() as conn: return [EventRecord.model_validate(r['payload']) for r in conn.execute('SELECT payload FROM orchestrator_events WHERE run_id=%s AND sequence_number>%s ORDER BY sequence_number', (run_id, after_sequence)).fetchall()]
+
+    def save_catalog_dataset(
+        self,
+        record: CatalogDatasetRecord,
+    ) -> CatalogDatasetRecord:
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO orchestrator_dataset_catalog"
+                " (catalog_id, name, payload, created_at)"
+                " VALUES (%s,%s,%s,%s)"
+                " ON CONFLICT (catalog_id) DO UPDATE SET"
+                " payload=EXCLUDED.payload, name=EXCLUDED.name",
+                (
+                    record.catalog_id,
+                    record.name,
+                    json.dumps(record.model_dump(mode="json")),
+                    record.created_at,
+                ),
+            )
+        return record
+
+    def get_catalog_dataset(self, catalog_id: str) -> CatalogDatasetRecord:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM orchestrator_dataset_catalog"
+                " WHERE catalog_id=%s",
+                (catalog_id,),
+            ).fetchone()
+        if row is None:
+            raise RecordNotFound(f"catalog dataset {catalog_id}")
+        return CatalogDatasetRecord.model_validate(row["payload"])
+
+    def get_catalog_dataset_by_name(
+        self,
+        name: str,
+    ) -> CatalogDatasetRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM orchestrator_dataset_catalog"
+                " WHERE name=%s",
+                (name,),
+            ).fetchone()
+        if row is None:
+            return None
+        return CatalogDatasetRecord.model_validate(row["payload"])
+
+    def list_catalog_datasets(self) -> list[CatalogDatasetRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT payload FROM orchestrator_dataset_catalog"
+                " ORDER BY created_at"
+            ).fetchall()
+        return [
+            CatalogDatasetRecord.model_validate(row["payload"])
+            for row in rows
+        ]
 
     def save_conversation_binding(
         self,

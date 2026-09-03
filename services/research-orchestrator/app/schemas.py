@@ -705,6 +705,48 @@ class IngestedDatasetRecord(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class DatasetUrlRegisterRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    name: str = Field(
+        min_length=1,
+        pattern=r'^[a-z0-9][a-z0-9_-]{0,62}$',
+    )
+    url: str = Field(min_length=1, max_length=2048)
+    expected_sha256: str | None = Field(
+        default=None,
+        pattern=r'^[a-f0-9]{64}$',
+    )
+    role: str = 'input'
+    contains_labels: bool = False
+    created_by: str | None = None
+
+
+class CatalogDatasetRecord(BaseModel):
+    """Curated catalog entry over the content-addressed dataset registry.
+
+    Wraps an IngestedDatasetRecord with provenance (upload or URL import) and
+    a stable catalog name for reference-by-name resolution. sha256 / size /
+    URIs are the ingested record's, never duplicated or re-derived.
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    catalog_id: str = Field(default_factory=lambda: uuid4().hex)
+    name: str = Field(
+        min_length=1,
+        pattern=r'^[a-z0-9][a-z0-9_-]{0,62}$',
+    )
+    reference_uri: str = Field(pattern=r'^glasslab-dataset://[a-f0-9]{64}$')
+    artifact_uri: str = Field(pattern=r'^s3://artifacts/.+$')
+    sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    size_bytes: int = Field(gt=0)
+    provenance: Literal['upload', 'url'] = 'upload'
+    source_url: str | None = None
+    created_by: str = 'operator'
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class EventRecord(BaseModel):
     model_config = ConfigDict(extra='forbid')
 

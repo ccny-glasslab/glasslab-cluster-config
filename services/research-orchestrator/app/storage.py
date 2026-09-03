@@ -32,6 +32,7 @@ from .schemas import (
     AgentName,
     ApprovalStatus,
     ArtifactRecord,
+    CatalogDatasetRecord,
     ContextPacket,
 ConversationSourceBinding,
     EventRecord,
@@ -277,6 +278,12 @@ class SqliteStore:
                 CREATE TABLE IF NOT EXISTS conversation_bindings (
                     conversation_id TEXT PRIMARY KEY,
                     payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS dataset_catalog (
+                    catalog_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL
                 );
 
                 -- FTS5 is the lexical half of hybrid retrieval. chunk_id is
@@ -1246,6 +1253,62 @@ class SqliteStore:
                 (run_id, after_sequence),
             ).fetchall()
         return [EventRecord.model_validate_json(row['payload']) for row in rows]
+
+    def save_catalog_dataset(
+        self,
+        record: CatalogDatasetRecord,
+    ) -> CatalogDatasetRecord:
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO dataset_catalog (
+                    catalog_id, name, payload, created_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(catalog_id) DO UPDATE SET
+                    payload = excluded.payload,
+                    name = excluded.name
+                """,
+                (
+                    record.catalog_id,
+                    record.name,
+                    json.dumps(record.model_dump(mode="json")),
+                    record.created_at.isoformat(),
+                ),
+            )
+        return record
+
+    def get_catalog_dataset(self, catalog_id: str) -> CatalogDatasetRecord:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM dataset_catalog WHERE catalog_id = ?",
+                (catalog_id,),
+            ).fetchone()
+        if row is None:
+            raise RecordNotFound(f"catalog dataset {catalog_id}")
+        return CatalogDatasetRecord.model_validate(json.loads(row["payload"]))
+
+    def get_catalog_dataset_by_name(
+        self,
+        name: str,
+    ) -> CatalogDatasetRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM dataset_catalog WHERE name = ?",
+                (name,),
+            ).fetchone()
+        if row is None:
+            return None
+        return CatalogDatasetRecord.model_validate(json.loads(row["payload"]))
+
+    def list_catalog_datasets(self) -> list[CatalogDatasetRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM dataset_catalog ORDER BY created_at"
+            ).fetchall()
+        return [
+            CatalogDatasetRecord.model_validate(json.loads(row["payload"]))
+            for row in rows
+        ]
 
     def save_conversation_binding(
         self,

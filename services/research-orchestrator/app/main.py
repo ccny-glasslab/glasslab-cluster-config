@@ -64,7 +64,9 @@ ConversationPromoteRequest,
     ContextPacket,
     ContextPacketListResponse,
     EventListResponse,
-    IngestedDatasetRecord,
+IngestedDatasetRecord,
+    CatalogDatasetRecord,
+    DatasetUrlRegisterRequest,
     KnowledgeSource,
     KnowledgeSourceListResponse,
     KnowledgeSourceRequest,
@@ -560,7 +562,7 @@ def create_app(
 
     @app.post(
         '/datasets/import',
-        response_model=IngestedDatasetRecord,
+        response_model=CatalogDatasetRecord,
         status_code=status.HTTP_201_CREATED,
     )
     async def import_dataset(
@@ -570,22 +572,48 @@ def create_app(
         contains_labels: bool = Form(default=False),
         uploaded_by: str | None = Form(default=None),
         _: None = Depends(require_operator),
-    ) -> IngestedDatasetRecord:
+    ) -> CatalogDatasetRecord:
         try:
             return await asyncio.to_thread(
-                engine.datasets.ingest,
+                engine.datasets.register_upload,
                 dataset.file,
                 filename=dataset.filename or '',
                 name=name,
                 role=role,
                 contains_labels=contains_labels,
                 media_type=dataset.content_type,
-                uploaded_by=uploaded_by,
+                created_by=uploaded_by or 'operator',
             )
         except Exception as exc:
             raise map_error(exc) from exc
         finally:
             await dataset.close()
+
+    @app.get('/datasets/catalog', response_model=list[CatalogDatasetRecord])
+    def list_catalog_datasets(
+        _: None = Depends(require_operator),
+    ) -> list[CatalogDatasetRecord]:
+        return engine.store.list_catalog_datasets()
+
+    @app.post(
+        '/datasets/register-url',
+        response_model=CatalogDatasetRecord,
+    )
+    def register_dataset_url(
+        request: DatasetUrlRegisterRequest,
+        _: None = Depends(require_operator),
+    ) -> CatalogDatasetRecord:
+        try:
+            return engine.datasets.register_url(
+                url=request.url,
+                name=request.name,
+                expected_sha256=request.expected_sha256,
+                role=request.role,
+                contains_labels=request.contains_labels,
+                created_by=request.created_by or 'operator',
+            )
+        except Exception as exc:
+            raise map_error(exc) from exc
 
     @app.get('/datasets', response_model=list[IngestedDatasetRecord])
     def list_datasets() -> list[IngestedDatasetRecord]:

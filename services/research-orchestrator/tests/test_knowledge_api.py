@@ -507,3 +507,100 @@ def test_promote_with_investigation_tags_conversation_and_run(tmp_path: Path) ->
         assert promoted.json()['investigation_id'] == 'inv-abc123'
         conversation_view = client.get('/chat/chat-inv')
         assert conversation_view.status_code == 200
+
+
+def test_dataset_catalog_import_and_list(tmp_path: Path) -> None:
+    _, settings, engine = _bundle(tmp_path)
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        imported = client.post(
+            '/datasets/import',
+            files={
+                'dataset': (
+                    'titanic.csv',
+                    b'titanic,1,0\n',
+                    'text/csv',
+                )
+            },
+            data={
+                'name': 'titanic_train',
+                'role': 'training-validation dataset',
+                'contains_labels': 'true',
+            },
+        )
+        assert imported.status_code == 201
+        body = imported.json()
+        assert body['name'] == 'titanic_train'
+        assert body['provenance'] == 'upload'
+        assert body['reference_uri'].startswith('glasslab-dataset://')
+        listed = client.get('/datasets/catalog')
+        assert listed.status_code == 200
+        assert any(
+            d['name'] == 'titanic_train' for d in listed.json()
+        )
+
+
+def test_register_url_rejects_non_public_targets(tmp_path: Path) -> None:
+    _, settings, engine = _bundle(tmp_path)
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        for bad_url in (
+            'http://example.com/x.csv',
+            'file:///etc/passwd',
+            'https://localhost/x.csv',
+            'https://192.168.1.1/x.csv',
+        ):
+            response = client.post(
+                '/datasets/register-url',
+                json={
+                    'name': 'bad_source',
+                    'url': bad_url,
+                },
+            )
+            assert response.status_code == 409, bad_url
+
+
+def test_register_url_fetches_verifies_and_registers(tmp_path: Path) -> None:
+    import socket
+    import urllib.request
+
+    test_url = (
+        'https://raw.githubusercontent.com/ccny-glasslab/'
+        'glasslab-cluster-config/main/README.md'
+    )
+    try:
+        socket.create_connection(('raw.githubusercontent.com', 443), 5).close()
+    except OSError:
+        import pytest as _pytest
+
+        _pytest.skip('no network access to raw.githubusercontent.com')
+    content = urllib.request.urlopen(test_url, timeout=30).read()
+    expected = __import__('hashlib').sha256(content).hexdigest()
+
+    _, settings, engine = _bundle(tmp_path)
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        ok = client.post(
+            '/datasets/register-url',
+            json={
+                'name': 'readme_source',
+                'url': test_url,
+                'expected_sha256': expected,
+            },
+        )
+        assert ok.status_code == 200
+        body = ok.json()
+        assert body['provenance'] == 'url'
+        assert body['source_url'] == test_url
+        assert body['sha256'] == expected
+
+        bad = client.post(
+            '/datasets/register-url',
+            json={
+                'name': 'readme_tampered',
+                'url': test_url,
+                'expected_sha256': 'f' * 64,
+            },
+        )
+        assert bad.status_code == 409
+        assert 'does not match' in bad.text
