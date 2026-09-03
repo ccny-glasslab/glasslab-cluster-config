@@ -17,7 +17,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 import yaml
 
-from .schemas import ExperimentMatrix, ResolvedEvaluationContract, RunRecord
+from .schemas import (
+    ExperimentMatrix,
+    MIN_COMPARISON_SEEDS,
+    ResolvedEvaluationContract,
+    RunRecord,
+)
 
 
 class MethodologyRequirement(BaseModel):
@@ -483,6 +488,14 @@ def preflight_matrix(
 
     job_count = len(matrix.variants) * len(matrix.seeds)
     checks.append(f'deterministic expansion produces {job_count} job(s)')
+
+    has_comparison_mode = any(r.mode == 'comparison' for r in requirements)
+    if has_comparison_mode and len(matrix.seeds) < MIN_COMPARISON_SEEDS:
+        errors.append(
+            f'comparison contract requires at least {MIN_COMPARISON_SEEDS} '
+            f'matrix seeds; found {len(matrix.seeds)}'
+        )
+
     return MatrixPreflightReport(
         passed=not errors,
         job_count=job_count,

@@ -54,6 +54,8 @@ TERMINAL_STATES = {
     RunState.TIMED_OUT,
 }
 
+MIN_COMPARISON_SEEDS = 3
+
 
 class AgentName(StrEnum):
     HONEYDEW = 'honeydew'
