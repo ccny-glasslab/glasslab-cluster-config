@@ -407,6 +407,22 @@ class ResearchOrchestrator:
                 )
             )
         )
+        catalog_names = sorted(
+            set(
+                re.findall(
+                    r'catalog://([a-z0-9][a-z0-9_-]{0,62})',
+                    run.objective,
+                )
+            )
+        )
+        for name in catalog_names:
+            catalog_record = self.store.get_catalog_dataset_by_name(name)
+            if catalog_record is None:
+                raise WorkflowError(
+                    f'objective references unknown catalog dataset: {name}'
+                )
+            dataset_ids.append(catalog_record.sha256)
+        dataset_ids = sorted(set(dataset_ids))
         if not dataset_ids:
             return
         datasets: list[tuple[str, str]] = []

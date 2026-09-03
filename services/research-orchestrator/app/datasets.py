@@ -8,13 +8,17 @@ were registered.
 from __future__ import annotations
 
 from hashlib import sha256
+import ipaddress
 import os
 from pathlib import Path
 import re
+import socket
 from tempfile import NamedTemporaryFile
 from typing import BinaryIO
+from urllib.parse import urlparse
+import urllib.request
 
-from .schemas import IngestedDatasetRecord
+from .schemas import CatalogDatasetRecord, IngestedDatasetRecord
 from .research_store import ResearchStore
 from .storage import RecordNotFound
 from .task_bundles import DatasetAsset, TaskBundleError
@@ -211,6 +215,167 @@ class DatasetIngestionManager:
             role=role,
             contains_labels=record.contains_labels,
         )
+
+    def register_upload(
+        self,
+        source: BinaryIO,
+        *,
+        filename: str,
+        name: str,
+        role: str = 'input',
+        contains_labels: bool = False,
+        media_type: str | None = None,
+        created_by: str = 'operator',
+    ) -> CatalogDatasetRecord:
+        """Register an uploaded dataset in the catalog (provenance: upload)."""
+        ingested = self.ingest(
+            source,
+            filename=filename,
+            name=name,
+            role=role,
+            contains_labels=contains_labels,
+            media_type=media_type,
+            uploaded_by=created_by,
+        )
+        record = CatalogDatasetRecord(
+            name=ingested.name,
+            reference_uri=ingested.reference_uri,
+            artifact_uri=ingested.artifact_uri,
+            sha256=ingested.sha256,
+            size_bytes=ingested.size_bytes,
+            provenance='upload',
+            created_by=created_by,
+        )
+        return self.store.save_catalog_dataset(record)
+
+    @staticmethod
+    def _validate_public_url(url: str) -> None:
+        try:
+            parsed = urlparse(url)
+            port = parsed.port
+        except ValueError as exc:
+            raise DatasetIngestionError(
+                'dataset URL is malformed'
+            ) from exc
+        if (
+            parsed.scheme != 'https'
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or port not in {None, 443}
+        ):
+            raise DatasetIngestionError(
+                'dataset URLs require a public HTTPS URL'
+            )
+        try:
+            addresses = socket.getaddrinfo(
+                parsed.hostname,
+                443,
+                type=socket.SOCK_STREAM,
+            )
+        except OSError as exc:
+            raise DatasetIngestionError(
+                f'cannot resolve dataset host: {parsed.hostname}'
+            ) from exc
+        for address in addresses:
+            ip = ipaddress.ip_address(address[4][0])
+            if not ip.is_global:
+                raise DatasetIngestionError(
+                    f'dataset host resolves to a non-public address: {ip}'
+                )
+
+    def register_url(
+        self,
+        *,
+        url: str,
+        name: str,
+        expected_sha256: str | None = None,
+        role: str = 'input',
+        contains_labels: bool = False,
+        created_by: str = 'operator',
+    ) -> CatalogDatasetRecord:
+        """Register a dataset by URL (provenance: url).
+
+        Only public HTTPS targets are accepted (mirrors the task-asset
+        fetcher); each redirect hop is re-validated. The stream is size-capped
+        and sha256-verified, then lands through the immutable ingest path.
+        """
+        self._validate_public_url(url)
+        self.root.mkdir(parents=True, exist_ok=True)
+        current = url
+        for _ in range(5):
+            request = urllib.request.Request(
+                current,
+                headers={'User-Agent': 'glasslab-research-orchestrator/1'},
+            )
+            digest = sha256()
+            size = 0
+            with NamedTemporaryFile(dir=self.root, delete=False) as staged:
+                staged_path = Path(staged.name)
+                try:
+                    with urllib.request.urlopen(request, timeout=60) as resp:
+                        if resp.geturl() != current:
+                            self._validate_public_url(resp.geturl())
+                            current = resp.geturl()
+                        while chunk := resp.read(1024 * 1024):
+                            size += len(chunk)
+                            if size > self.maximum_bytes:
+                                raise DatasetIngestionError(
+                                    'dataset URL exceeds the configured '
+                                    'size limit'
+                                )
+                            digest.update(chunk)
+                            staged.write(chunk)
+                except urllib.error.HTTPError as exc:
+                    if exc.code in (301, 302, 303, 307, 308):
+                        location = exc.headers.get('Location')
+                        if not location:
+                            raise DatasetIngestionError(
+                                'dataset URL redirect without a target'
+                            ) from exc
+                        self._validate_public_url(location)
+                        current = location
+                        continue
+                    raise DatasetIngestionError(
+                        f'dataset URL fetch failed: HTTP {exc.code}'
+                    ) from exc
+                except urllib.error.URLError as exc:
+                    raise DatasetIngestionError(
+                        f'dataset URL fetch failed: {exc.reason}'
+                    ) from exc
+                break
+        else:
+            raise DatasetIngestionError(
+                'dataset URL exceeded the redirect limit'
+            )
+        fetched_digest = digest.hexdigest()
+        if expected_sha256 and fetched_digest != expected_sha256:
+            raise DatasetIngestionError(
+                'dataset URL content does not match expected_sha256'
+            )
+        filename = Path(urlparse(url).path).name or 'dataset'
+        with staged_path.open('rb') as handle:
+            ingested = self.ingest(
+                handle,
+                filename=filename,
+                name=name,
+                role=role,
+                contains_labels=contains_labels,
+                media_type='application/octet-stream',
+                uploaded_by=created_by,
+            )
+        staged_path.unlink(missing_ok=True)
+        record = CatalogDatasetRecord(
+            name=ingested.name,
+            reference_uri=ingested.reference_uri,
+            artifact_uri=ingested.artifact_uri,
+            sha256=ingested.sha256,
+            size_bytes=ingested.size_bytes,
+            provenance='url',
+            source_url=url,
+            created_by=created_by,
+        )
+        return self.store.save_catalog_dataset(record)
 
     @staticmethod
     def _file_sha256(path: Path) -> str:
