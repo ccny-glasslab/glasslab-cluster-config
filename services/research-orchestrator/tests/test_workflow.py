@@ -2345,3 +2345,58 @@ def test_verification_marks_partial_with_truncated_evidence(
         result = resolver.resolve(uri)
         if not result.resolved:
             unresolved.append(result)
+
+
+def test_promote_conversation_emits_durable_context_packet(
+    orchestrator_bundle,
+) -> None:
+    """Promoting a conversation materializes its context as a durable packet.
+
+    The promoted run must be self-contained: the conversation's pinned source
+    ids, objective, and prior turn summary are written to the run's
+    shared-artifacts and registered as an artifact record so later stages
+    (preflight, evaluation) can reference the packet URI.
+    """
+    _, store, _, _, engine = orchestrator_bundle
+    conversation_id = 'discord-thread-12345'
+    engine.answer_research_question(
+        question='how does conformal prediction guarantee coverage',
+        conversation_id=conversation_id,
+        bind_source_ids=['src-conformal-prediction', 'src-nixtla'],
+    )
+    engine.answer_research_question(
+        question='what are the calibration requirements',
+        conversation_id=conversation_id,
+    )
+
+    run = engine.promote_conversation(conversation_id)
+
+    packets = [
+        artifact
+        for artifact in store.list_artifacts(run.run_id)
+        if artifact.type == 'conversation_context_packet'
+    ]
+    assert len(packets) == 1
+    packet = packets[0]
+    assert packet.uri.startswith('artifact://')
+    assert packet.uri.startswith(
+        f'artifact://{run.run_id}/shared-artifacts/'
+    )
+
+    # The packet file exists on disk in the run's shared-artifacts.
+    packet_path = (
+        Path(run.shared_artifacts_path) / 'conversation-context-packet.json'
+    )
+    assert packet_path.is_file()
+
+    payload = json.loads(packet_path.read_text())
+    assert set(payload['pinned_source_ids']) == {
+        'src-conformal-prediction',
+        'src-nixtla',
+    }
+    assert payload['objective'] == run.objective
+    assert 'conformal prediction' in payload['prior_turn_summary']
+
+    # The packet URI is threaded into the run's context references.
+    refreshed = store.get_run(run.run_id)
+    assert packet.uri in refreshed.context_references
