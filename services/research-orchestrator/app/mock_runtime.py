@@ -305,7 +305,7 @@ class ScriptedMockRuntime(AgentRuntime):
                     claims=[
                         Claim(
                             text='The job evidence is internally consistent.',
-                            evidence=['event://job.completed'],
+                            evidence=[],
                         )
                     ],
                     recommended_next_state=RunState.HONEYDEW_WRITING_REPORT,
@@ -326,7 +326,7 @@ class ScriptedMockRuntime(AgentRuntime):
                     claims=[
                         Claim(
                             text='The mock workflow reached report generation.',
-                            evidence=['event://report.created'],
+                            evidence=[],
                         )
                     ],
                     produced_files=[
