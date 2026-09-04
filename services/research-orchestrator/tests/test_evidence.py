@@ -1043,3 +1043,47 @@ def test_evidence_uri_resolver_validates_uri_format(orchestrator_bundle) -> None
     result = resolver.resolve('knowledge://')
     assert result.resolved is False
     assert result.error is not None
+
+
+def test_verification_claim_knowledge_uri_resolves_through_engine(
+    orchestrator_bundle,
+) -> None:
+    """Verification claims citing knowledge:// URIs must resolve (T3 contract).
+
+    Issue #310: the verification flow emits knowledge-cited claims when corpus
+    material bears on the results. Those URIs must pass the same
+    EvidenceURIResolver gate as artifact/job URIs, so a knowledge://context:
+    packet URI on a verification claim resolves and the engine's claim
+    validation accepts it.
+    """
+    from app.evidence_resolver import EvidenceURIResolver
+    from app.schemas import Claim, ContextPacket
+
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Knowledge-cited verification claims resolve.')
+    )
+    packet = ContextPacket(
+        packet_id='verify-packet-1',
+        run_id=run.run_id,
+        agent='honeydew',
+        turn_number=1,
+        turn_kind='verification',
+        query='corpus verification',
+        index_version='v1',
+        token_budget=100,
+    )
+    store.save_context_packet(packet)
+    claim = Claim(
+        text='The measured accuracy contradicts the corpus.',
+        evidence=[f'knowledge://context:{packet.packet_id}'],
+    )
+
+    resolver = EvidenceURIResolver(store)
+    resolved = resolver.resolve_all(claim.evidence)
+    assert all(result.resolved for result in resolved)
+    assert resolved[0].resolved_to == 'knowledge_chunk'
+
+    all_resolved, unresolved = engine._validate_claims([claim], run.run_id)
+    assert all_resolved is True
+    assert unresolved == []

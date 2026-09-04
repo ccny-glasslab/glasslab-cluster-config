@@ -26,6 +26,7 @@ from .schemas import (
     RunState,
     TaskSpecProposal,
     TurnKind,
+    VerificationVerdict,
 )
 
 
@@ -308,6 +309,14 @@ class ScriptedMockRuntime(AgentRuntime):
                             evidence=[],
                         )
                     ],
+                    verification_verdict=VerificationVerdict(
+                        status='consistent',
+                        summary=(
+                            'The measured results are consistent with the '
+                            'retrieved corpus material.'
+                        ),
+                        citations=[],
+                    ),
                     recommended_next_state=RunState.HONEYDEW_WRITING_REPORT,
                     done=True,
                 ),

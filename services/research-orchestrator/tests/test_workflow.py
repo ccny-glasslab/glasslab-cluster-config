@@ -33,6 +33,7 @@ from app.schemas import (
     ApprovalStatus,
     ArtifactRecord,
     Claim,
+    ContextPacket,
     ExperimentMatrix,
     IngestedDatasetRecord,
     JobStatus,
@@ -43,6 +44,7 @@ from app.schemas import (
     RunState,
     TurnKind,
     TurnRecord,
+    VerificationVerdict,
     utc_now,
 )
 from app.storage import SqliteStore
@@ -2455,3 +2457,142 @@ def test_promote_conversation_emits_durable_context_packet(
     # The packet URI is threaded into the run's context references.
     refreshed = store.get_run(run.run_id)
     assert packet.uri in refreshed.context_references
+
+
+def test_verification_retrieval_query_includes_result_terms(
+    orchestrator_bundle,
+) -> None:
+    """The verification turn's retrieval query must bear on Beaker's results.
+
+    Issue #310 item 1: the query is built from the serialized evidence snapshot
+    (metric names/values, job statuses), not just the objective + prompt head,
+    so the corpus material retrieved for the verification turn is relevant to
+    the actual claims and numbers being sanity-checked.
+    """
+    settings, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Verify result-aware retrieval.')
+    )
+    metrics_path = Path(settings.shared_mount_root) / 'artifacts/job-1/metrics.json'
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_content = b'{"accuracy":0.95,"loss":0.05}'
+    metrics_path.write_bytes(metrics_content)
+    store.save_artifact(
+        ArtifactRecord(
+            run_id=run.run_id,
+            type='metrics',
+            uri='artifacts/job-1/metrics.json',
+            sha256=sha256(metrics_content).hexdigest(),
+        )
+    )
+    verifying = store.replace_run(
+        run.model_copy(update={'state': RunState.HONEYDEW_VERIFYING}),
+        expected_version=run.version,
+    )
+
+    engine._verify_results(verifying.run_id)
+
+    verification_packets = [
+        packet
+        for packet in store.list_context_packets(run.run_id)
+        if packet.turn_kind == TurnKind.VERIFICATION
+    ]
+    assert verification_packets
+    query = verification_packets[0].query
+    assert 'accuracy' in query
+    assert '0.95' in query
+    assert 'loss' in query
+
+
+def test_verification_contradiction_flags_corpus_and_does_not_pass(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    """Beaker's result contradicting the corpus must fail verification.
+
+    Issue #310 items 2-3: Honeydew flags the contradiction with a
+    knowledge:// citation (which resolves), the verdict is recorded as
+    'contradicts', and the run returns to BEAKER_REVISING instead of passing.
+    """
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Flag corpus contradictions.')
+    )
+    packet = ContextPacket(
+        packet_id='verify-packet-1',
+        run_id=run.run_id,
+        agent='honeydew',
+        turn_number=1,
+        turn_kind='verification',
+        query='corpus verification',
+        index_version='v1',
+        token_budget=100,
+    )
+    store.save_context_packet(packet)
+    verifying = store.replace_run(
+        run.model_copy(update={'state': RunState.HONEYDEW_VERIFYING}),
+        expected_version=run.version,
+    )
+    monkeypatch.setattr(
+        engine,
+        '_run_agent_turn',
+        lambda **_kwargs: (
+            None,
+            AgentTurnResult(
+                kind=TurnKind.VERIFICATION,
+                summary='The measured accuracy contradicts the corpus.',
+                claims=[
+                    Claim(
+                        text='The measured accuracy contradicts the corpus.',
+                        evidence=[f'knowledge://context:{packet.packet_id}'],
+                    )
+                ],
+                verification_verdict=VerificationVerdict(
+                    status='contradicts',
+                    summary=(
+                        'The measured accuracy contradicts the retrieved '
+                        'corpus material.'
+                    ),
+                    citations=[f'knowledge://context:{packet.packet_id}'],
+                ),
+                done=False,
+            ),
+        ),
+    )
+    monkeypatch.setattr(engine, '_beaker_revise', lambda *_args, **_kwargs: None)
+
+    engine._verify_results(verifying.run_id)
+
+    revised = store.get_run(run.run_id)
+    assert revised.state == RunState.BEAKER_REVISING
+    verdict_event = next(
+        event
+        for event in store.list_events(run.run_id)
+        if event.event_type == 'verification.corpus_verdict'
+    )
+    assert verdict_event.payload['status'] == 'contradicts'
+    assert verdict_event.payload['citations'] == [
+        f'knowledge://context:{packet.packet_id}'
+    ]
+
+
+def test_corpus_verification_verdict_surfaced_in_report(
+    orchestrator_bundle,
+) -> None:
+    """The corpus-verification verdict must appear in the final report payload.
+
+    Issue #310 item 4: after a consistent verification, the report turn prompt
+    carries the corpus-verification verdict (status + citations) so Honeydew
+    surfaces it in report.md.
+    """
+    _, store, cluster, runtime, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    _complete_jobs(engine, store, cluster, run.run_id)
+    report_prompt = next(
+        prompt
+        for agent, prompt in runtime.prompts
+        if agent == AgentName.HONEYDEW and 'Write report.md' in prompt
+    )
+    assert 'CORPUS VERIFICATION VERDICT' in report_prompt
+    assert 'consistent' in report_prompt.lower()
+    assert 'knowledge://' in report_prompt.lower()
