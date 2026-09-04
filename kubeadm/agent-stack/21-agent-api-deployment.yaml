@@ -4,7 +4,7 @@ metadata:
   name: glasslab-agent-api
   namespace: glasslab-agents
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: glasslab-agent-api
