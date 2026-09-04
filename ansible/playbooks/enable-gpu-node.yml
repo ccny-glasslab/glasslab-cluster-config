@@ -47,9 +47,18 @@
       when: gpu_driver_install_enabled | bool
 
     - name: Install NVIDIA container toolkit keyring
+      ansible.builtin.get_url:
+        url: "{{ gpu_nvidia_container_repo_key_url }}"
+        dest: "/tmp/glasslab-nvidia-container-key.asc"
+        checksum: "{{ gpu_nvidia_container_repo_key_checksum }}"
+        mode: '0644'
+      when: gpu_nvidia_container_toolkit_enabled | bool
+
+    - name: Dearmor the verified NVIDIA container toolkit keyring
       ansible.builtin.shell: |
         set -euo pipefail
-        curl -fsSL "{{ gpu_nvidia_container_repo_key_url }}" | gpg --dearmor --batch --yes -o "{{ gpu_nvidia_container_keyring }}"
+        gpg --dearmor --batch --yes -o "{{ gpu_nvidia_container_keyring }}" /tmp/glasslab-nvidia-container-key.asc
+        rm -f /tmp/glasslab-nvidia-container-key.asc
       args:
         executable: /bin/bash
       when: gpu_nvidia_container_toolkit_enabled | bool

@@ -36,7 +36,7 @@
         url: "{{ kubernetes_repo_key_url }}"
         dest: "{{ k8s_key_tempfile.path }}"
         mode: '0600'
-        checksum: "{{ kubernetes_repo_key_checksum | default(omit) }}"
+        checksum: "{{ kubernetes_repo_key_checksum }}"
 
     - name: Install Kubernetes repository keyring
       ansible.builtin.command:

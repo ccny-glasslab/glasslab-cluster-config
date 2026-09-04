@@ -9,6 +9,7 @@ gpu_driver_package: nvidia-driver-580-open
 gpu_driver_strategy: ubuntu-drivers
 gpu_nvidia_container_toolkit_enabled: false
 gpu_nvidia_container_repo_key_url: https://nvidia.github.io/libnvidia-container/gpgkey
+gpu_nvidia_container_repo_key_checksum: "sha256:c880576d6cf75a48e5027a871bac70fd0421ab07d2b55f30877b21f1c87959c9"
 gpu_nvidia_container_repo_base: https://nvidia.github.io/libnvidia-container/stable/deb/amd64
 gpu_nvidia_container_repo_list: /etc/apt/sources.list.d/nvidia-container-toolkit.list
 gpu_nvidia_container_keyring: /etc/apt/keyrings/nvidia-container-toolkit-keyring.gpg
