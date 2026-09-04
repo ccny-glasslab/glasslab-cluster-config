@@ -16,7 +16,7 @@ log() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
 }
 
-if ! /usr/sbin/ibv_devices 2>/dev/null | /usr/bin/awk '{print $1}' | grep -qx "$RDMA_DEVICE"; then
+if ! /usr/bin/ibv_devices 2>/dev/null | /usr/bin/awk '{print $1}' | grep -qx "$RDMA_DEVICE"; then
   log "RDMA device ${RDMA_DEVICE} is NOT registered (ibv_devices). Two-node JACCL placement will fail. Reboot this Mac to re-register (launchd auto-restores exo); the reconcile keeps a single-node fallback serving meanwhile." >>"$LOG_FILE"
   exit 1
 fi

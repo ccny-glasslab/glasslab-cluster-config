@@ -24,8 +24,23 @@ placement_grace_until=0
 pair_down_checks=0
 serving_single=0
 
+rdma_registered() {
+  # The macOS RDMA verbs device must be registered for a two-node JACCL
+  # placement to work. ibv_devices lives in /usr/bin (NOT /usr/sbin).
+  /usr/bin/ibv_devices 2>/dev/null | /usr/bin/awk '{print $1}' | /usr/bin/grep -qx "$RDMA_IFACE"
+}
+
 topology_ok() {
   local state="$1"
+  # A libp2p topology can report two nodes with rdma connections while the
+  # local RDMA verbs device is unregistered (device drift). JACCL then
+  # "verifies" a 1-token probe yet hangs on real generations. Gate the
+  # two-node decision on the device actually being registered so a dead
+  # pair falls back to single-node instead of submitting a hanging
+  # placement.
+  if ! rdma_registered; then
+    return 1
+  fi
   printf '%s' "$state" | /usr/bin/jq -e --arg iface "$RDMA_IFACE" '
     (.topology.nodes | length) == 2 and
     ([
@@ -133,7 +148,7 @@ while true; do
   else
     pair_down_checks=$((pair_down_checks + 1))
     if (( pair_down_checks == 1 )); then
-      if ! /usr/sbin/ibv_devices 2>/dev/null | /usr/bin/awk '{print $1}' | grep -qx "$RDMA_IFACE"; then
+      if ! /usr/bin/ibv_devices 2>/dev/null | /usr/bin/awk '{print $1}' | grep -qx "$RDMA_IFACE"; then
         log "REPAIR REQUIRED: ${RDMA_IFACE} is not registered on this Mac (ibv_devices); reboot to re-register"
       fi
       log "two-node ${RDMA_IFACE} topology unavailable; will fall back to single-node after ${PAIR_GRACE_CHECKS} checks"
