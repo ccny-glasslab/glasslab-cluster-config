@@ -1,0 +1,65 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: corpus-arxiv-sync
+  namespace: glasslab-v2
+spec:
+  # Daily pull of new preprints (06:00 UTC) for the allowlisted categories.
+  schedule: "0 6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 7200
+      template:
+        spec:
+          serviceAccountName: glasslab-gpu-runner
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: glasslab-ghcr-pull
+          containers:
+            - name: ingest-arxiv
+              # CPU variant of the same pinned commit-derived tag family as
+              # corpus-gpu-embed.yaml; bump both together when the runner
+              # image changes.
+              image: ghcr.io/ccny-glasslab/glasslab-research-workspace-runner:sha-bfe70da6dffcabd833411a0d19ca857a112c370d-benchmark-cpu
+              command:
+                - /bin/sh
+                - -c
+                - >
+                  python /mnt/scripts/corpus_rag/ingest_arxiv.py
+                  --categories cs.LG stat.ML cs.CL cs.AI
+                  --days 1
+                  --max-results 50
+                  --store /mnt/artifacts/research-orchestrator/rag/orchestrator-rag.db
+                  --corpus arxiv-preprints
+                  --with-index
+              resources:
+                limits:
+                  memory: 4Gi
+                  cpu: "2"
+                requests:
+                  memory: 2Gi
+                  cpu: "1"
+              env:
+                - name: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+                  valueFrom:
+                    secretKeyRef:
+                      name: glasslab-research-orchestrator
+                      key: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+              volumeMounts:
+                - name: scripts
+                  mountPath: /mnt/scripts
+                - name: artifacts
+                  mountPath: /mnt/artifacts
+          volumes:
+            - name: scripts
+              configMap:
+                name: corpus-arxiv-sync-script
+                defaultMode: 0444
+            - name: artifacts
+              persistentVolumeClaim:
+                claimName: glasslab-shared-artifacts
