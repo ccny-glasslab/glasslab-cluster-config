@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     # app/storage_retention.py; this never affects protocol/reports/
     # shared-artifacts, only agent process scratch space.
     terminal_run_retention_days: int = 14
+    # How long a conversation (inert, conversation=True) run's storage is
+    # kept before cleanup-run-storage.py is eligible to remove it. Conversation
+    # runs never reach a terminal state, so they use a separate retention
+    # window measured from created_at. This never affects protocol/reports/
+    # shared-artifacts, only agent process scratch space.
+    conversation_run_retention_days: int = 30
     # Knowledge store: chunk sizing and the per-turn retrieval budget bound
     # context cost regardless of model or content; the allowlist roots are the
     # only places ingestion may read from (in production these are the mounted

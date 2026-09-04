@@ -106,6 +106,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        '--conversation-retention-days',
+        type=int,
+        default=None,
+        help=(
+            'Override Settings.conversation_run_retention_days '
+            '(GLASSLAB_ORCHESTRATOR_CONVERSATION_RUN_RETENTION_DAYS).'
+        ),
+    )
+    parser.add_argument(
         '--dry-run',
         action='store_true',
         help='Report what would be deleted. This is also the default.',
@@ -126,11 +135,17 @@ def main() -> int:
         if args.retention_days is not None
         else settings.terminal_run_retention_days
     )
+    conversation_retention_days = (
+        args.conversation_retention_days
+        if args.conversation_retention_days is not None
+        else settings.conversation_run_retention_days
+    )
 
     report = run_cleanup(
         store=_store(settings),
         workspace_root=Path(settings.workspace_root),
         retention_days=retention_days,
+        conversation_retention_days=conversation_retention_days,
         dry_run=not args.apply,
     )
     _print_report(report)

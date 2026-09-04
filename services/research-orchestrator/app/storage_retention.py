@@ -156,25 +156,58 @@ def plan_cleanup(
     store: Any,
     workspace_root: Path,
     retention_days: int,
+    conversation_retention_days: int | None = None,
     now: datetime | None = None,
 ) -> list[RunCleanupPlan]:
     """Read-only: decide what cleanup would do, touching no filesystem state.
 
-    A run is a candidate once ``run.state in TERMINAL_STATES``. ``updated_at``
-    is used as "terminal since": every state transition (including into a
-    terminal state) sets it, and terminal states are not left once entered,
-    so nothing legitimately bumps it afterward. If that assumption is ever
-    wrong the effect is only a later cleanup, never an early one.
+    A run is a candidate in two cases:
+
+    1. Terminal runs (run.state in TERMINAL_STATES): eligible once they've
+       stayed in a terminal state for at least ``retention_days`` (the terminal
+       run retention window), using ``updated_at`` as the "terminal since"
+       timestamp. Every state transition (including into a terminal state) sets
+       it, and terminal states are not left once entered, so nothing legitimately
+       bumps it afterward. If that assumption is ever wrong the effect is only a
+       later cleanup, never an early one.
+
+    2. Conversation runs (run.conversation=True): inert runs that never reach a
+       terminal state. They become eligible after ``conversation_retention_days``
+       based on their ``updated_at`` timestamp (last activity). This separate
+       retention window ensures long-lived conversation runs don't cause unbounded
+       storage growth.
+
+    Both eligibility paths are checked independently; a run qualifies if it meets
+    EITHER condition.
     """
     now = now or utc_now()
-    threshold = timedelta(days=retention_days)
+    terminal_threshold = timedelta(days=retention_days)
+    conversation_threshold = (
+        timedelta(days=conversation_retention_days)
+        if conversation_retention_days is not None
+        else None
+    )
     plans: list[RunCleanupPlan] = []
     for run in store.list_runs():
-        if run.state not in TERMINAL_STATES:
+        # Determine if run is eligible based on terminal or conversation criteria
+        is_terminal = run.state in TERMINAL_STATES
+        is_conversation = run.conversation
+
+        if not is_terminal and not is_conversation:
             continue
-        terminal_since = run.updated_at
-        if now - terminal_since < threshold:
-            continue
+
+        # Calculate eligibility timestamp and threshold
+        if is_terminal:
+            eligibility_timestamp = run.updated_at
+            if now - eligibility_timestamp < terminal_threshold:
+                continue
+        else:
+            # Conversation run: eligibility based on updated_at (last activity)
+            if conversation_threshold is None:
+                continue
+            eligibility_timestamp = run.updated_at
+            if now - eligibility_timestamp < conversation_threshold:
+                continue
         run_root = workspace_root / run.run_id
         referenced = _referenced_paths(store, run.run_id)
         subdirectories: list[SubdirectoryCleanupPlan] = []
@@ -208,7 +241,7 @@ def plan_cleanup(
                 RunCleanupPlan(
                     run_id=run.run_id,
                     state=run.state.value,
-                    terminal_since=terminal_since,
+                    terminal_since=eligibility_timestamp,
                     subdirectories=tuple(subdirectories),
                 )
             )
@@ -236,6 +269,7 @@ def run_cleanup(
     store: Any,
     workspace_root: Path,
     retention_days: int,
+    conversation_retention_days: int | None = None,
     dry_run: bool,
     now: datetime | None = None,
 ) -> CleanupReport:
@@ -255,6 +289,7 @@ def run_cleanup(
         store=store,
         workspace_root=workspace_root,
         retention_days=retention_days,
+        conversation_retention_days=conversation_retention_days,
         now=now,
     )
     if dry_run:
@@ -282,6 +317,23 @@ def run_cleanup(
                 continue
             if item.path.is_symlink() or not item.path.is_dir():
                 continue
+            try:
+                current = store.get_run(plan.run_id)
+            except RecordNotFound:
+                continue
+            is_terminal = current.state in TERMINAL_STATES
+            is_conversation = current.conversation
+            if not is_terminal and not is_conversation:
+                continue
+            if is_terminal:
+                terminal_since = current.updated_at
+                if now - terminal_since < timedelta(days=retention_days):
+                    continue
+            else:
+                if conversation_retention_days is None:
+                    continue
+                if now - current.updated_at < timedelta(days=conversation_retention_days):
+                    continue
             shutil.rmtree(item.path, ignore_errors=False)
 
     usage_after = report_storage_usage(
