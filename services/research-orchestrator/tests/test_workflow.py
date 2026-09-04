@@ -89,6 +89,47 @@ def test_human_approval_states_stop_active_runtime_clock(
     assert revising.active_runtime_seconds == waiting.active_runtime_seconds
 
 
+def test_run_serial_increments_per_investigation(orchestrator_bundle) -> None:
+    # Each new run within an investigation gets an incrementing serial number
+    # (run #1, #2, #3 per investigation_id), and two investigations each start
+    # at #1. Runs without an investigation carry no serial.
+    _, _, _, _, engine = orchestrator_bundle
+
+    first = engine.create_run(
+        RunCreateRequest(
+            objective='Serial assignment investigation A.',
+            investigation_id='investigation-a',
+        )
+    )
+    second = engine.create_run(
+        RunCreateRequest(
+            objective='Serial assignment investigation A again.',
+            investigation_id='investigation-a',
+        )
+    )
+    third = engine.create_run(
+        RunCreateRequest(
+            objective='Serial assignment investigation A third.',
+            investigation_id='investigation-a',
+        )
+    )
+    other = engine.create_run(
+        RunCreateRequest(
+            objective='Serial assignment investigation B.',
+            investigation_id='investigation-b',
+        )
+    )
+    ungrouped = engine.create_run(
+        RunCreateRequest(objective='No investigation at all.')
+    )
+
+    assert first.run_serial == 1
+    assert second.run_serial == 2
+    assert third.run_serial == 3
+    assert other.run_serial == 1
+    assert ungrouped.run_serial is None
+
+
 def test_failed_result_starts_a_fresh_methodology_revision_budget(
     orchestrator_bundle,
     monkeypatch,
