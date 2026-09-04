@@ -21,6 +21,7 @@ import pytest
 from app.corpus_rag.contracts import (
     MAX_CHUNKS_PER_SOURCE,
     RAG_INDEX_VERSION,
+    RRF_K,
     ChunkVectorMeta,
     RagChunkRecord,
 )
@@ -194,6 +195,78 @@ def test_hybrid_rrf_recovers_vocabulary_mismatch_hit(mismatch_store) -> None:
     b1_hit = next(h for h in hybrid.hits if h.chunk.chunk_id == b1_id)
     assert b1_hit.dense_rank == 1
     assert b1_hit.lexical_rank is None
+
+
+# --- S1.5: RRF determinism + tuned k (benchmark T1: k=60 optimum) -----------
+
+
+def test_rrf_k_constant_matches_benchmarked_value() -> None:
+    """Production RRF k must equal the benchmarked optimum (T1, k=60).
+
+    The corpus-RAG benchmark (eval/corpus_rag, run_benchmark_km.py) swept
+    RRF k and measured k=60 as the best hybrid config; the production
+    constant must not drift from it.
+    """
+    assert RRF_K == 60
+
+
+def test_rrf_merge_is_deterministic_across_repeated_calls(mismatch_store) -> None:
+    """Same input must yield the same ranked output on every call."""
+    ns = mismatch_store
+    retriever = HybridRetriever(
+        ns.store,
+        vector_index=_vector_index(ns.store),
+        embedding_provider=_FixedQueryEmbedding(),
+        model_id=MODEL_ID,
+    )
+    options = RetrievalOptions(mode='hybrid')
+    first = retriever.retrieve(
+        'cohesive groups unknown geometry', options=options
+    )
+    second = retriever.retrieve(
+        'cohesive groups unknown geometry', options=options
+    )
+    first_ids = [hit.chunk.chunk_id for hit in first.hits]
+    second_ids = [hit.chunk.chunk_id for hit in second.hits]
+    assert first_ids, 'expected nonempty hits'
+    assert first_ids == second_ids
+    assert [hit.score for hit in first.hits] == [hit.score for hit in second.hits]
+
+
+def test_rrf_tie_break_orders_equal_scores_by_chunk_id(tmp_path: Path) -> None:
+    """Equal RRF scores must order by chunk_id, never by insertion order.
+
+    X is lexically first (higher term frequency) but dense-second (seeded
+    off the query axis); Y is dense-first (seeded on the query axis) but
+    lexically second. Each chunk holds one rank-1 and one rank-2 slot, so
+    the RRF scores are exactly equal and the tie-break decides.
+    """
+    store = SqliteStore(str(tmp_path / 'tie.db'))
+    source = _source('repo://docs/tie.md')
+    store.save_knowledge_source(source)
+    x = _chunk(
+        source.source_id, 0,
+        'cohesive groups cohesive groups cohesive groups',
+    )
+    y = _chunk(source.source_id, 1, 'cohesive groups')
+    assert store.replace_rag_chunks(source.source_id, [x, y]) == 2
+    _seed_vector(store, x.chunk_id, _unit(DIMS, 1))
+    _seed_vector(store, y.chunk_id, _unit(DIMS, 0))
+
+    retriever = HybridRetriever(
+        store,
+        vector_index=_vector_index(store),
+        embedding_provider=_FixedQueryEmbedding(),
+        model_id=MODEL_ID,
+    )
+    result = retriever.retrieve(
+        'cohesive groups', options=RetrievalOptions(mode='hybrid')
+    )
+    ids = [hit.chunk.chunk_id for hit in result.hits]
+    assert set(ids) == {x.chunk_id, y.chunk_id}
+    scores = {hit.chunk.chunk_id: hit.score for hit in result.hits}
+    assert scores[x.chunk_id] == scores[y.chunk_id]
+    assert ids == sorted([x.chunk_id, y.chunk_id])
 
 
 def test_source_diversity_cap_three(tmp_path: Path) -> None:
