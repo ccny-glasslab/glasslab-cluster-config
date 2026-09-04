@@ -1503,6 +1503,7 @@ class DiscordControlGateway:
                 conversation_id,
                 objective=objective,
                 existing_discord_thread_id=thread_id,
+                answer_driven=True,
             )
             await placeholder.edit(
                 content=(

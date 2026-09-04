@@ -1895,10 +1895,19 @@ class _FakeFollowup:
         return message
 
 
+class _FakeChannel:
+    def __init__(self, sink):
+        self._sink = sink
+
+    async def send(self, content, **kwargs):
+        self._sink.append(content)
+
+
 class _FakeMessage:
     def __init__(self, sink, content):
         self._sink = sink
         self._content = content
+        self.channel = _FakeChannel(sink)
 
     async def edit(self, content, **kwargs):
         self._sink.append(content)
@@ -2089,6 +2098,66 @@ def test_research_promote_in_thread_creates_run() -> None:
     joined = ' '.join(interaction.followup_messages)
     assert 'run-promoted' in joined
     assert 'AWAITING_PROTOCOL_APPROVAL' in joined
+
+
+def test_research_question_then_promote_creates_answer_driven_run() -> None:
+    """/research-question -> promote creates the run with the synthesized
+    objective + citation grounding (issue #308 item 5).
+
+    The promote interaction must hand the engine the durable conversation id
+    and request an answer-driven promotion so the run's objective is
+    synthesized from the answer and its citations, never the raw chat text.
+    """
+    import asyncio
+
+    gateway = _build_test_gateway()
+    gateway.engine.answer_research_question = Mock(
+        return_value=ResearchAnswer(
+            answer=(
+                'Two methodologies are compared for time-series forecasting: '
+                'conformal-prediction and split-conformal.'
+            ),
+            citations=[
+                Citation(
+                    knowledge_uri='knowledge://context/abc123',
+                    source='conformal-prediction-nixtla',
+                    excerpt='Setting up Conformal Intervals Parameter Requirements',
+                )
+            ],
+        )
+    )
+    gateway.engine.promote_conversation = Mock(
+        return_value=SimpleNamespace(
+            run_id='run-answer-driven',
+            state=SimpleNamespace(value='AWAITING_PROTOCOL_APPROVAL'),
+        )
+    )
+    interaction = _FakeInteraction(channel_id='987654321')
+    thread = discord.Thread.__new__(discord.Thread)
+    thread.id = 987654321
+    thread.name = 'research:discord-abc1234567890 which forecasting method'
+    interaction.channel = thread
+    asyncio.run(
+        gateway._on_research_question(
+            interaction,
+            question='which forecasting method should we use',
+        )
+    )
+    asyncio.run(
+        gateway._on_research_promote(interaction, objective=None)
+    )
+    gateway.engine.answer_research_question.assert_called_once_with(
+        question='which forecasting method should we use',
+        conversation_id='discord-abc1234567890',
+    )
+    gateway.engine.promote_conversation.assert_called_once_with(
+        'discord-abc1234567890',
+        objective=None,
+        existing_discord_thread_id='987654321',
+        answer_driven=True,
+    )
+    joined = ' '.join(interaction.followup_messages)
+    assert 'run-answer-driven' in joined
 
 
 def test_research_promote_requires_thread_and_authorization() -> None:
