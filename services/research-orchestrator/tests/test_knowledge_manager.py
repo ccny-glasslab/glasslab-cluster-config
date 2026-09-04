@@ -800,3 +800,38 @@ def test_retrieve_pins_sources_without_excluding_defaults(
     assert 'repo://docs/a.md' in uris
     assert 'repo://docs/b.md' in uris
     assert 'repo://docs/c.md' in uris
+
+
+def test_lexical_score_stopword_only_query_scores_near_zero(
+    tmp_path: Path,
+) -> None:
+    manager, _ = _manager(tmp_path)
+    stopword_only = "the and of the in on at to for with"
+    stopword_query = "the and of the in on at to for with"
+    score = manager._lexical_score(stopword_only, stopword_query)
+    assert score == 0
+
+
+def test_lexical_score_evidence_uri_fragments_dont_inflate_score(
+    tmp_path: Path,
+) -> None:
+    manager, _ = _manager(tmp_path)
+    text_with_uris = (
+        "The model achieved 0.95 accuracy. "
+        "artifact://run-1/evidence.json "
+        '{"event_id": "evt-123", "score": 0.95}'
+    )
+    score = manager._lexical_score(text_with_uris, "accuracy")
+    assert score == 1
+
+
+def test_lexical_score_mixed_content_filters_stopwords_and_uris(
+    tmp_path: Path,
+) -> None:
+    manager, _ = _manager(tmp_path)
+    text = (
+        "The experiment achieved accuracy 0.95. "
+        "See artifact://run-1/results.json for details."
+    )
+    score = manager._lexical_score(text, "the accuracy of the experiment")
+    assert score == 2
