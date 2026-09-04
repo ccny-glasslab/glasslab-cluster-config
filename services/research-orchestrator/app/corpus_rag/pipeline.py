@@ -84,6 +84,7 @@ def ingest_document(
         detect_sections,
         ingest_document_bytes,
     )
+    from app.corpus_rag.normalize import normalize_chunks
     from app.corpus_rag.pdf_backend import PyMuPdfBackend
 
     source, record = ingest_document_bytes(
@@ -109,6 +110,7 @@ def ingest_document(
         doc_id=record.doc_id,
         page_for_char=_page_resolver(document),
     )
+    chunks = normalize_chunks(chunks)
     store.replace_rag_sections(record.doc_id, sections)
     store.replace_rag_chunks(source.source_id, chunks)
     return IngestReport(

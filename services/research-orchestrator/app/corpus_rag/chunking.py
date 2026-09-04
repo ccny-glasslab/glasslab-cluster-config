@@ -53,6 +53,7 @@ from app.corpus_rag.spans import (
 
 __all__ = [
     'ChunkPlan',
+    'MAX_CHUNK_TOKENS',
     'SupportsSpan',
     'build_chunks',
     'estimate_tokens',
@@ -68,6 +69,13 @@ class ChunkPlan:
     EVIDENCE_MAX = 340
     UNIT_TARGET_TOKENS = 1200
     UNIT_MAX = 1260
+
+
+# Explicit ingest-time ceiling on any single stored chunk. build_chunks already
+# bounds units at UNIT_MAX and evidence spans at EVIDENCE_MAX; this constant is
+# the standalone cap normalize_chunks enforces so a chunk from any path can
+# never exceed it.
+MAX_CHUNK_TOKENS = ChunkPlan.UNIT_MAX
 
 
 class SupportsSpan(Protocol):
