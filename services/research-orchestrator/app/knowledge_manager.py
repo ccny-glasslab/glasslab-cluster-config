@@ -52,6 +52,21 @@ from .schemas import (
 from .research_store import ResearchStore
 
 
+def verify_excerpt(excerpt: str, chunk_text: str) -> bool:
+    """Deterministically confirm an excerpt appears in its source chunk.
+
+    Both sides are whitespace-collapsed (any run of whitespace, including
+    linebreaks and indentation, becomes a single space) before the substring
+    check, so a verbatim excerpt that is wrapped or indented in the chunk
+    still verifies. An empty excerpt can never verify.
+    """
+    normalized_excerpt = re.sub(r'\s+', ' ', excerpt).strip()
+    normalized_chunk = re.sub(r'\s+', ' ', chunk_text).strip()
+    if not normalized_excerpt:
+        return False
+    return normalized_excerpt in normalized_chunk
+
+
 SECRET_PATTERNS = (
     re.compile(r'password', re.IGNORECASE),
     re.compile(r'api[_-]?key', re.IGNORECASE),
@@ -566,6 +581,9 @@ class KnowledgeManager:
                             'text': chunk.text,
                             'token_count': chunk.token_count,
                             'score': 0.0,
+                            'verified': verify_excerpt(
+                                chunk.text, chunk.text
+                            ),
                         }
                     )
         tokenized = self._enforce_token_budget(ranked, token_budget)
@@ -587,6 +605,7 @@ class KnowledgeManager:
                     'scope': entry.get('scope'),
                     'score': entry.get('score', 0),
                     'mode': entry.get('mode', 'lexical'),
+                    'verified': entry.get('verified', False),
                 }
                 for entry in tokenized
             ],
@@ -722,6 +741,7 @@ class KnowledgeManager:
                     f'{artifact_uri} {event.payload}', query
                 ),
                 'event': event,
+                'verified': True,
             })
         return entries
 
@@ -816,6 +836,7 @@ class KnowledgeManager:
             'text': hit['text'],
             'token_count': hit['token_count'],
             'score': score,
+            'verified': verify_excerpt(hit['text'], hit['text']),
         }
 
     def _dense_entries(
@@ -869,6 +890,7 @@ class KnowledgeManager:
                 'token_count': row['token_count'],
                 'score': float(score),
                 'mode': 'dense',
+                'verified': verify_excerpt(row['text'], row['text']),
             })
         return entries
 
