@@ -32,6 +32,7 @@ from app.schemas import (
     ActionRecord,
     ApprovalStatus,
     ArtifactRecord,
+    Citation,
     Claim,
     ContextPacket,
     ExperimentMatrix,
@@ -40,6 +41,7 @@ from app.schemas import (
     RequestedAction,
     PolicyClassification,
     ProposedMetric,
+    ResearchAnswer,
     RunCreateRequest,
     RunState,
     TurnKind,
@@ -2457,6 +2459,90 @@ def test_promote_conversation_emits_durable_context_packet(
     # The packet URI is threaded into the run's context references.
     refreshed = store.get_run(run.run_id)
     assert packet.uri in refreshed.context_references
+
+
+def test_answer_driven_promotion_synthesizes_objective_from_answer(
+    orchestrator_bundle,
+) -> None:
+    """An answer-driven promotion synthesizes the objective from the answer.
+
+    Issue #308 item 1: the promoted run's objective is derived deterministically
+    from the research answer (not the raw chat question verbatim), so the run
+    does not require re-typing the objective and no raw chat text lands in a job.
+    """
+    _, store, _, _, engine = orchestrator_bundle
+    conversation_id = 'discord-thread-answer-a'
+    engine.answer_research_question(
+        question='how does conformal prediction guarantee coverage',
+        conversation_id=conversation_id,
+    )
+    run = engine.promote_conversation(conversation_id, answer_driven=True)
+
+    # The objective is synthesized from the answer, not the question verbatim.
+    assert 'how does conformal prediction guarantee coverage' not in run.objective
+    assert 'coverage guarantees by construction' in run.objective
+    assert run.objective.startswith('Investigate the research direction')
+
+    # Deterministic: an identical conversation promotes to the same objective.
+    second_id = 'discord-thread-answer-b'
+    engine.answer_research_question(
+        question='how does conformal prediction guarantee coverage',
+        conversation_id=second_id,
+    )
+    second = engine.promote_conversation(second_id, answer_driven=True)
+    assert second.objective == run.objective
+
+
+def test_answer_driven_promotion_grounds_protocol_in_answer_citations(
+    orchestrator_bundle,
+) -> None:
+    """The promoted run's protocol grounding references the answer's citations.
+
+    Issue #308 item 2: context_references includes the conversation-context-packet
+    URI, and the packet's pinned_source_ids (which include the answer's citation
+    sources) feed the protocol drafting context via the run's seed source ids.
+    """
+    _, store, _, _, engine = orchestrator_bundle
+    conversation_id = 'discord-thread-citations'
+    engine.answer_research_question(
+        question='how does conformal prediction guarantee coverage',
+        conversation_id=conversation_id,
+        bind_source_ids=['src-conformal-prediction', 'src-nixtla'],
+    )
+
+    captured_pins: list[list[str] | None] = []
+    original = engine._get_agent_context
+
+    def spy(**kwargs):
+        if kwargs.get('turn_kind') == TurnKind.PROTOCOL_DRAFT:
+            captured_pins.append(kwargs.get('pinned_source_ids'))
+        return original(**kwargs)
+
+    engine._get_agent_context = spy
+    run = engine.promote_conversation(conversation_id, answer_driven=True)
+
+    # The packet URI is threaded into the run's context references.
+    packets = [
+        artifact
+        for artifact in store.list_artifacts(run.run_id)
+        if artifact.type == 'conversation_context_packet'
+    ]
+    assert len(packets) == 1
+    refreshed = store.get_run(run.run_id)
+    assert packets[0].uri in refreshed.context_references
+
+    # The packet's pinned sources include the answer's citation sources and
+    # match the run's seed source ids (which feed protocol-draft retrieval).
+    packet_path = (
+        Path(run.shared_artifacts_path) / 'conversation-context-packet.json'
+    )
+    payload = json.loads(packet_path.read_text())
+    assert 'conformal-prediction-nixtla' in payload['pinned_source_ids']
+    assert set(payload['pinned_source_ids']) == set(run.seed_source_ids or [])
+
+    # The protocol draft turn's retrieval was pinned to those sources.
+    assert captured_pins
+    assert 'conformal-prediction-nixtla' in captured_pins[0]
 
 
 def test_verification_retrieval_query_includes_result_terms(
