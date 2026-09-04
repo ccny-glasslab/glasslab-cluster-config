@@ -294,6 +294,23 @@ class AgentTurnResult(BaseModel):
     recommended_next_state: RunState | None = None
     done: bool = False
     research_answer: ResearchAnswer | None = None
+    verification_verdict: VerificationVerdict | None = None
+
+
+class VerificationVerdict(BaseModel):
+    """Corpus-grounded verification outcome for a verification turn.
+
+    Honeydew compares Beaker's claims and numbers against the retrieved
+    knowledge corpus and records whether they are consistent with or
+    contradict the corpus material, with the knowledge:// URIs that bear on
+    the verdict.
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    status: Literal['consistent', 'contradicts']
+    summary: str = Field(min_length=1)
+    citations: list[str] = Field(default_factory=list)
 
 
 class Citation(BaseModel):

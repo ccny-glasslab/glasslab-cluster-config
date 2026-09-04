@@ -60,6 +60,7 @@ from .schemas import (
     TERMINAL_STATES,
     TurnKind,
     TurnRecord,
+    VerificationVerdict,
     utc_now,
 )
 from .storage import ConcurrencyConflict, RecordNotFound
@@ -803,6 +804,35 @@ class ResearchOrchestrator:
         return f'{turn_kind.value} {objective} {prompt_head}'.strip()
 
     @staticmethod
+    def _verification_retrieval_query(evidence: dict[str, Any]) -> str:
+        """Build a result-aware retrieval query from the evidence snapshot.
+
+        The verification turn sanity-checks Beaker's actual claims and numbers
+        against the corpus, so its retrieval query must bear on those results
+        rather than only the objective + prompt head. Metric names and values
+        plus job statuses/variants are extracted deterministically from the
+        serialized evidence snapshot; an empty result falls back to the
+        objective-derived query in ``_run_agent_turn``.
+        """
+        terms: list[str] = []
+        for entry in evidence.get('artifact_contents', []):
+            content = entry.get('content')
+            if isinstance(content, dict):
+                for key, value in content.items():
+                    if isinstance(value, bool):
+                        continue
+                    if isinstance(value, (int, float)):
+                        terms.append(f'{key} {value}')
+                    elif isinstance(value, str) and len(value) <= 40:
+                        terms.append(f'{key} {value}')
+        for job in evidence.get('jobs', []):
+            for key in ('variant_name', 'status'):
+                value = job.get(key)
+                if isinstance(value, str) and value:
+                    terms.append(value)
+        return ' '.join(terms).strip()[:500]
+
+    @staticmethod
     def _required_turn_kind_instruction(expected_kind: TurnKind) -> str:
         """Make the workflow-selected result variant unambiguous to the runtime.
 
@@ -1250,6 +1280,7 @@ class ResearchOrchestrator:
         prompt: str,
         expected_kind: TurnKind,
         input_event: dict[str, Any],
+        retrieval_query: str | None = None,
     ) -> tuple[TurnRecord, AgentTurnResult]:
         run = self.store.get_run(run_id)
         self._check_turn_budget(run)
@@ -1333,7 +1364,7 @@ class ResearchOrchestrator:
                 agent=agent,
                 turn_number=run.turn_number + 1,
                 turn_kind=expected_kind,
-                query=self._retrieval_query(
+                query=retrieval_query or self._retrieval_query(
                     run_id=run_id,
                     objective=run.objective,
                     prompt=prompt,
@@ -4780,14 +4811,29 @@ class ResearchOrchestrator:
             agent=AgentName.HONEYDEW,
             prompt=(
                 'Independently verify Beaker\'s important claims against these '
-                'authoritative records and the approved program.md. Set '
+                'authoritative records and the approved program.md. Sanity-check '
+                'the claims and numbers against the retrieved corpus material; '
+                'flag any contradiction between the results and the corpus. Set '
                 'done=true only if the evidence supports a final report. Cite '
-                'artifact, job, event, Git, or contract URIs.\n\n'
+                'artifact, job, event, Git, contract, or knowledge:// URIs.\n\n'
                 + serialize_evidence(evidence)
             ),
             expected_kind=TurnKind.VERIFICATION,
             input_event=evidence,
+            retrieval_query=self._verification_retrieval_query(evidence),
         )
+
+        if result.verification_verdict is not None:
+            self._event(
+                run_id,
+                source='orchestrator',
+                event_type='verification.corpus_verdict',
+                payload={
+                    'status': result.verification_verdict.status,
+                    'summary': result.verification_verdict.summary,
+                    'citations': result.verification_verdict.citations,
+                },
+            )
 
         # Validate claims against authoritative records
         if result.claims:
@@ -4831,6 +4877,26 @@ class ResearchOrchestrator:
         self._transition(run_id, RunState.HONEYDEW_WRITING_REPORT)
         self._write_report(run_id)
 
+    def _corpus_verification_verdict(
+        self, run_id: str
+    ) -> VerificationVerdict | None:
+        """Return the latest verification turn's corpus verdict, if any.
+
+        The verdict lives on the verification turn's structured output; the
+        report turn reads it back so the corpus-verification outcome is
+        surfaced in the final report regardless of which path reached
+        ``_write_report``.
+        """
+        for turn in reversed(self.store.list_turns(run_id)):
+            output = turn.structured_output
+            if (
+                output is not None
+                and output.kind == TurnKind.VERIFICATION
+                and output.verification_verdict is not None
+            ):
+                return output.verification_verdict
+        return None
+
     def _write_report(self, run_id: str, feedback: str | None = None) -> None:
         evidence = self._evidence_snapshot(run_id, phase=EvidencePhase.REPORT)
         prompt = (
@@ -4846,6 +4912,17 @@ class ResearchOrchestrator:
             'produced file.\n\n'
             + serialize_evidence(evidence)
         )
+        verdict = self._corpus_verification_verdict(run_id)
+        if verdict is not None:
+            prompt += (
+                '\n\nCORPUS VERIFICATION VERDICT (from the verification turn):\n'
+                f'- status: {verdict.status}\n'
+                f'- summary: {verdict.summary}\n'
+                f'- citations: {", ".join(verdict.citations) or "none"}\n'
+                'Surface this verdict in report.md: state whether the results '
+                'are consistent with or contradict the knowledge corpus, and '
+                'cite the knowledge:// URIs that bear on the verdict.\n'
+            )
         if feedback:
             prompt += f'\n\nHuman rejection feedback:\n{feedback}'
         turn, result = self._run_agent_turn(
