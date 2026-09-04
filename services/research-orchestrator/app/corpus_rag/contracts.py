@@ -36,6 +36,9 @@ ADVISORY_TOKEN_BUDGET = 6000
 
 # Query decomposition and fusion parameters.
 MAX_SUBQUERIES = 6
+# RRF fusion constant. Benchmark T1 (eval/corpus_rag, run_benchmark_km.py)
+# swept k and measured k=60 as the best hybrid config; keep in lockstep with
+# the benchmark runner's _RRF_K. Tie-breaks in the fusion sort by chunk_id.
 RRF_K = 60
 
 # Per-source cap on chunks promoted into one retrieval answer; keeps a single
