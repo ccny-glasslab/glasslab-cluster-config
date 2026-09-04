@@ -21,7 +21,9 @@ class RecordingDiscord(DiscordAdapter):
         self.created: list[str] = []
         self.published: list[tuple[str | None, EventRecord]] = []
 
-    def create_thread(self, *, run_id: str, objective: str) -> str | None:
+    def create_thread(
+        self, *, run_id: str, objective: str, run_serial: int | None = None
+    ) -> str | None:
         self.created.append(run_id)
         return f'thread-{len(self.created)}'
 
@@ -35,7 +37,9 @@ class FlakyDiscord(RecordingDiscord):
         super().__init__()
         self.fail_creates = fail_creates
 
-    def create_thread(self, *, run_id: str, objective: str) -> str | None:
+    def create_thread(
+        self, *, run_id: str, objective: str, run_serial: int | None = None
+    ) -> str | None:
         if self.fail_creates:
             self.fail_creates -= 1
             raise RuntimeError('Discord unavailable')

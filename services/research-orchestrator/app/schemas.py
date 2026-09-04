@@ -539,6 +539,10 @@ class RunRecord(BaseModel):
     # under an investigation owned by workflow-api; per-investigation
     # active-slot semantics.
     investigation_id: str | None = None
+    # Human-readable per-investigation sequence number (run #1, #2, ...).
+    # Assigned at creation by counting existing runs in the investigation;
+    # the UUID run_id remains the authoritative key.
+    run_serial: int | None = Field(default=None, ge=1)
     maximum_turns: int
     maximum_runtime_seconds: int
     maximum_parallel_jobs: int

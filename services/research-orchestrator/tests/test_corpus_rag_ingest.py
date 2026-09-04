@@ -15,12 +15,14 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from app.corpus_rag.chunking import MAX_CHUNK_TOKENS
 from app.corpus_rag.documents import (
     SectionNode,
     detect_sections,
     ingest_document_bytes,
 )
 from app.corpus_rag.corpora import CorpusService
+from app.corpus_rag.pipeline import ingest_document
 from app.knowledge_manager import SECRET_PATTERNS, KnowledgeError
 from app.storage import SqliteStore
 
@@ -257,3 +259,109 @@ def test_corpus_registration_via_ingest(store):
         corpus_slug=slug,
     )
     assert len(service.member_source_ids(slug)) == 2
+
+
+# ------------------ ingest-time corpus trimming (T16) ------------------ #
+
+
+class _FakeExtractor:
+    """Duck-typed pdf_backend stand-in returning a prebuilt document."""
+
+    def __init__(self, document: _FakeDocument):
+        self._document = document
+
+    def extract(self, data: bytes) -> _FakeDocument:
+        return self._document
+
+
+def _sent(i: int, n_words: int = 16) -> str:
+    body = ' '.join(f'w{i}k{j}' for j in range(n_words - 1))
+    return f'{body} end{i}.'
+
+
+def _build_ingest_document(bodies):
+    """Build (text, _FakeDocument) from (path, title, level, body) tuples.
+
+    Unnumbered headings (empty path) keep their literal title text so two
+    identical sections produce byte-identical section bodies.
+    """
+    parts: list[str] = []
+    blocks: list[_FakeBlock] = []
+    pos = 0
+    for path, title, level, body in bodies:
+        heading = title if not path else f'{path} {title}'
+        for piece, font_size in ((heading, 14.0), (body, 11.0)):
+            parts.append(piece)
+            blocks.append(
+                _FakeBlock(
+                    text=piece,
+                    char_start=pos,
+                    char_end=pos + len(piece),
+                    font_size=font_size,
+                )
+            )
+            pos += len(piece) + 2
+            parts.append('\n\n')
+    text = ''.join(parts[:-1])
+    page = _FakePage(page_index=0, label='1', text=text, blocks=blocks)
+    document = _FakeDocument(n_pages=1, pages=[page], text=text, metadata={})
+    return text, document
+
+
+def _ingest_duplicate_sections(store, tmp_path):
+    body = ' '.join(_sent(i) for i in range(60))
+    _, document = _build_ingest_document(
+        [('', 'Intro', 1, body), ('', 'Intro', 1, body)]
+    )
+    return ingest_document(
+        store=store,
+        data=b'%PDF-1.4\n%%EOF\n',
+        canonical_uri='file://docs/duplicate-sections.pdf',
+        title='Duplicate Sections',
+        doc_type='paper',
+        corpus_slug='dup-corpus',
+        extractor=_FakeExtractor(document),
+    )
+
+
+def test_ingest_deduplicates_identical_chunks(store):
+    report = _ingest_duplicate_sections(store, None)
+    chunks = store.list_rag_chunks(source_ids=[report.source_id])
+    units = [c for c in chunks if c['kind'] == 'section_unit']
+    evidence = [c for c in chunks if c['kind'] == 'evidence_span']
+
+    assert len(units) == 1
+    assert len(evidence) == len({e['text'] for e in evidence})
+    assert units[0]['text'] == 'Intro\n\n' + ' '.join(_sent(i) for i in range(60))
+
+
+def test_ingest_store_reports_no_duplicate_chunks(store, tmp_path):
+    report = _ingest_duplicate_sections(store, tmp_path)
+    connection = sqlite3.connect(tmp_path / 'i.db')
+    try:
+        dupes = connection.execute(
+            'SELECT source_id, text, COUNT(*) FROM rag_chunks '
+            'GROUP BY source_id, text HAVING COUNT(*) > 1'
+        ).fetchall()
+    finally:
+        connection.close()
+    assert dupes == []
+    assert report.n_section_units == 1
+
+
+def test_ingest_chunks_respect_max_size(store):
+    body = ' '.join(_sent(i) for i in range(90))
+    _, document = _build_ingest_document([('', 'Long', 1, body)])
+    report = ingest_document(
+        store=store,
+        data=b'%PDF-1.4\n%%EOF\n',
+        canonical_uri='file://docs/long-section.pdf',
+        title='Long Section',
+        doc_type='paper',
+        corpus_slug='long-corpus',
+        extractor=_FakeExtractor(document),
+    )
+    chunks = store.list_rag_chunks(source_ids=[report.source_id])
+    assert chunks
+    for chunk in chunks:
+        assert chunk['token_count'] <= MAX_CHUNK_TOKENS
