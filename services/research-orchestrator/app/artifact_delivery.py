@@ -16,11 +16,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 import zipfile
 
+from .report_bundle import (
+    ArtifactDeliveryError,
+    ReportBundle,
+    build_report_bundle,
+)
 from .schemas import ArtifactRecord, JobRecord, JobStatus
-
-
-class ArtifactDeliveryError(ValueError):
-    pass
 
 
 @dataclass(frozen=True)
