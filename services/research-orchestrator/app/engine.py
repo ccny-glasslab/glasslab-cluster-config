@@ -14,7 +14,7 @@ from uuid import uuid4, uuid5, NAMESPACE_URL
 import yaml
 
 from .analysis_notebook import write_analysis_notebook
-from .artifact_delivery import ArtifactDeliveryError
+from .artifact_delivery import ArtifactDeliveryError, build_report_bundle
 from .cluster import ClusterExecutor
 from .config import Settings
 from .contract_candidates import ContractCandidateManager
@@ -352,6 +352,7 @@ class ResearchOrchestrator:
                 updated_at=now,
                 seed_context=request.seed_context,
                 seed_source_ids=request.seed_source_ids,
+                context_references=request.context_references or [],
                 investigation_id=request.investigation_id,
             )
             self.store.create_run(
@@ -1010,6 +1011,63 @@ class ResearchOrchestrator:
             blocks.append(text)
         return '\n\n'.join(blocks)
 
+    def _emit_conversation_context_packet(
+        self,
+        *,
+        run: RunRecord,
+        conversation_id: str,
+        objective: str,
+        pinned_source_ids: list[str] | None,
+    ) -> str:
+        """Materialize the promoted conversation's context as a durable packet.
+
+        Writes the packet to the run's shared-artifacts, registers it as an
+        artifact record, and returns the packet URI for the run's context
+        references.
+        """
+        packet_payload = {
+            'schema_version': 'glasslab-conversation-context-packet-v1',
+            'conversation_id': conversation_id,
+            'objective': objective,
+            'pinned_source_ids': sorted(pinned_source_ids or []),
+            'prior_turn_summary': self._conversation_prior_context(
+                conversation_id
+            ),
+            'dataset_references': sorted(
+                set(
+                    re.findall(
+                        r'glasslab-dataset://[0-9a-f]{64}',
+                        objective,
+                    )
+                )
+            ),
+        }
+        packet_path = (
+            Path(run.shared_artifacts_path)
+            / 'conversation-context-packet.json'
+        )
+        packet_path.parent.mkdir(parents=True, exist_ok=True)
+        packet_path.write_bytes(
+            (json.dumps(packet_payload, indent=2, sort_keys=True) + '\n').encode()
+        )
+        digest = sha256(packet_path.read_bytes()).hexdigest()
+        uri = (
+            f'artifact://{run.run_id}/shared-artifacts/'
+            'conversation-context-packet.json'
+        )
+        self._save_local_artifact(
+            run_id=run.run_id,
+            artifact_type='conversation_context_packet',
+            uri=uri,
+            digest=digest,
+            metadata={
+                'path': str(packet_path),
+                'conversation_id': conversation_id,
+                'objective': objective,
+            },
+        )
+        return uri
+
     def promote_conversation(
         self,
         conversation_id: str,
@@ -1080,6 +1138,19 @@ class ResearchOrchestrator:
                 conversation_run.model_copy(update={'investigation_id': investigation_id}),
                 expected_version=conversation_run.version,
             )
+        packet_uri = self._emit_conversation_context_packet(
+            run=run,
+            conversation_id=conversation_id,
+            objective=resolved_objective,
+            pinned_source_ids=seed_source_ids,
+        )
+        current = self.store.get_run(run.run_id)
+        self.store.replace_run(
+            current.model_copy(
+                update={'context_references': [packet_uri]}
+            ),
+            expected_version=current.version,
+        )
         self._event(
             conversation_id,
             source='orchestrator',
@@ -2547,6 +2618,7 @@ class ResearchOrchestrator:
             if run.state != RunState.AWAITING_FINAL_ACCEPTANCE:
                 return
             self._transition(action.run_id, RunState.COMPLETE)
+            self._register_report_bundle(action.run_id)
             self._event(
                 action.run_id,
                 source='orchestrator',
@@ -4810,6 +4882,56 @@ class ResearchOrchestrator:
             reason='Human acceptance is required to complete the research run.',
         )
         self._transition(run_id, RunState.AWAITING_FINAL_ACCEPTANCE)
+
+    def _register_report_bundle(self, run_id: str) -> None:
+        # Render the accepted report into PDF + DOCX and register both as
+        # artifacts so delivery ships a real bundle, not just report.md.
+        run = self.store.get_run(run_id)
+        report_artifacts = [
+            artifact
+            for artifact in self.store.list_artifacts(run_id)
+            if artifact.type == 'report'
+        ]
+        if not report_artifacts:
+            return
+        report = report_artifacts[-1]
+        path = report.metadata.get('path')
+        if not isinstance(path, str):
+            return
+        body = Path(path).read_text(encoding='utf-8')
+        timestamp = utc_now().strftime('%Y%m%dT%H%M%SZ')
+        bundle = build_report_bundle(
+            run_id=run_id,
+            report_body=body,
+            timestamp=timestamp,
+        )
+        reports_dir = Path(run.reports_path)
+        for filename, content, artifact_type in (
+            (bundle.pdf_filename, bundle.pdf, 'report.pdf'),
+            (bundle.docx_filename, bundle.docx, 'report.docx'),
+        ):
+            destination = reports_dir / filename
+            destination.write_bytes(content)
+            uri = f'artifact://{run_id}/reports/{filename}'
+            self._save_local_artifact(
+                run_id=run_id,
+                artifact_type=artifact_type,
+                uri=uri,
+                digest=sha256(content).hexdigest(),
+                metadata={
+                    'path': str(destination),
+                    'source_uri': report.uri,
+                },
+            )
+        self._event(
+            run_id,
+            source='orchestrator',
+            event_type='report.bundle_created',
+            payload={
+                'pdf': f'artifact://{run_id}/reports/{bundle.pdf_filename}',
+                'docx': f'artifact://{run_id}/reports/{bundle.docx_filename}',
+            },
+        )
 
     def pause_run(
         self,

@@ -17,7 +17,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 import yaml
 
+from .evidence_resolver import EvidenceURIResolver
+from .research_store import ResearchStore
 from .schemas import (
+    Claim,
     ExperimentMatrix,
     MIN_COMPARISON_SEEDS,
     ResolvedEvaluationContract,
@@ -45,6 +48,17 @@ class MatrixPreflightReport(BaseModel):
     comparisons: dict[str, list[str]] = Field(default_factory=dict)
     decisions: dict[str, list[str]] = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
+
+
+class VerificationPreflightReport(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    passed: bool
+    claim_count: int
+    uri_count: int
+    checks: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    unresolved_uris: list[str] = Field(default_factory=list)
 
 
 EVALUATOR_OWNED_LITERALS = {
@@ -503,4 +517,44 @@ def preflight_matrix(
         comparisons=comparisons,
         decisions=decisions,
         errors=errors,
+    )
+
+
+def preflight_verification_evidence(
+    *,
+    claims: list[Claim],
+    store: ResearchStore,
+) -> VerificationPreflightReport:
+    """Deterministic verification preflight over claim evidence URIs.
+
+    Independent verification is satisfied by this deterministic
+    claim-to-evidence layer, not by prompt-only same-model verification: every
+    evidence URI cited by the candidate's claims must resolve to an
+    authoritative store record before the verification evidence is accepted.
+    Unresolved artifact://, job://, event://, and knowledge:// URIs fail the
+    preflight with a specific error listing the offending URIs.
+    """
+    resolver = EvidenceURIResolver(store)
+    errors: list[str] = []
+    unresolved_uris: list[str] = []
+    uri_count = 0
+    for claim in claims:
+        for uri in claim.evidence:
+            uri_count += 1
+            result = resolver.resolve(uri)
+            if not result.resolved:
+                unresolved_uris.append(uri)
+                errors.append(f'evidence URI unresolved: {uri} ({result.error})')
+    checks: list[str] = []
+    if claims:
+        checks.append(
+            f'resolved {uri_count} evidence URI(s) across {len(claims)} claim(s)'
+        )
+    return VerificationPreflightReport(
+        passed=not errors,
+        claim_count=len(claims),
+        uri_count=uri_count,
+        checks=checks,
+        errors=errors,
+        unresolved_uris=unresolved_uris,
     )

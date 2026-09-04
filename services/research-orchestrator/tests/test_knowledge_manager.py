@@ -13,7 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from app.knowledge_manager import KnowledgeError, KnowledgeManager
+from app.knowledge_manager import (
+    KnowledgeError,
+    KnowledgeManager,
+    verify_excerpt,
+)
 from app.schemas import EventRecord, RunRecord, RunState, SourceType, TurnKind
 from app.storage import SqliteStore
 
@@ -835,3 +839,47 @@ def test_lexical_score_mixed_content_filters_stopwords_and_uris(
     )
     score = manager._lexical_score(text, "the accuracy of the experiment")
     assert score == 2
+
+
+def test_verify_excerpt_passes_when_normalized_substring() -> None:
+    chunk = "The model achieved 0.95 accuracy on the held-out test set."
+    assert verify_excerpt("achieved 0.95 accuracy", chunk) is True
+    assert verify_excerpt(chunk, chunk) is True
+
+
+def test_verify_excerpt_fails_when_not_in_chunk() -> None:
+    chunk = "The model achieved 0.95 accuracy on the held-out test set."
+    assert verify_excerpt("fabricated claim about 0.99 accuracy", chunk) is False
+    assert verify_excerpt("", chunk) is False
+
+
+def test_verify_excerpt_normalizes_whitespace_and_linebreaks() -> None:
+    chunk = (
+        "The model achieved 0.95 accuracy\n"
+        "on the held-out test set.\n\n"
+        "  The baseline reached 0.80."
+    )
+    assert (
+        verify_excerpt(
+            "achieved 0.95 accuracy on the held-out test set. The baseline",
+            chunk,
+        )
+        is True
+    )
+    assert verify_excerpt("baseline reached 0.80", chunk) is True
+
+
+def test_retrieval_hits_carry_verified_flag(tmp_path: Path) -> None:
+    manager, store = _manager(tmp_path)
+    run_id = 'run-1'
+    _create_run(store, run_id)
+    store.append_event(
+        run_id=run_id,
+        source='beaker',
+        event_type='artifact.recorded',
+        payload={'uri': 'artifact://run-1/metrics.json', 'note': 'accuracy 0.95'},
+    )
+    packet = _retrieve(manager, run_id=run_id, query='accuracy')
+    assert packet.ranked_sources
+    assert all('verified' in entry for entry in packet.ranked_sources)
+    assert all(entry['verified'] is True for entry in packet.ranked_sources)
