@@ -1060,6 +1060,7 @@ class ResearchOrchestrator:
         conversation_id: str,
         objective: str,
         pinned_source_ids: list[str] | None,
+        answer_citations: list[dict[str, str]] | None = None,
     ) -> str:
         """Materialize the promoted conversation's context as a durable packet.
 
@@ -1072,6 +1073,7 @@ class ResearchOrchestrator:
             'conversation_id': conversation_id,
             'objective': objective,
             'pinned_source_ids': sorted(pinned_source_ids or []),
+            'answer_citations': answer_citations or [],
             'prior_turn_summary': self._conversation_prior_context(
                 conversation_id
             ),
@@ -1119,6 +1121,7 @@ class ResearchOrchestrator:
         evaluation_contract_version: str | None = None,
         investigation_id: str | None = None,
         existing_discord_thread_id: str | None = None,
+        answer_driven: bool = False,
     ) -> RunRecord:
         """Promote a research conversation into a real run (Phase 4).
 
@@ -1127,6 +1130,12 @@ class ResearchOrchestrator:
         Discord-thread conversations) the run is bound to the existing thread
         so the thread becomes its home. One promotion per conversation: a
         second call returns the prior run id in the error.
+
+        ``answer_driven`` (issue #308) promotes a cited research answer into a
+        methodology-comparison run: the objective is synthesized from the
+        answer (never the raw chat text), and the answer's citation sources are
+        pinned alongside the conversation's bound sources so the protocol
+        drafting context is grounded in the answer's citations.
         """
         events = self.store.list_events(conversation_id)
         promoted = [
@@ -1152,7 +1161,16 @@ class ResearchOrchestrator:
             )
         binding = self.store.get_conversation_binding(conversation_id)
         seed_source_ids = binding.source_ids if binding else None
-        resolved_objective = objective or self._conversation_objective(turns)
+        if answer_driven:
+            citation_sources = self._answer_citation_sources(turns)
+            seed_source_ids = sorted(
+                set((seed_source_ids or []) + citation_sources)
+            )
+        resolved_objective = objective or (
+            self._answer_objective(turns)
+            if answer_driven
+            else self._conversation_objective(turns)
+        )
         # Determine the discord thread id to bind to
         if existing_discord_thread_id is not None:
             # Explicitly provided thread id (from Discord controls)
@@ -1185,6 +1203,7 @@ class ResearchOrchestrator:
             conversation_id=conversation_id,
             objective=resolved_objective,
             pinned_source_ids=seed_source_ids,
+            answer_citations=self._answer_citations(turns),
         )
         current = self.store.get_run(run.run_id)
         self.store.replace_run(
@@ -1219,6 +1238,45 @@ class ResearchOrchestrator:
         first = self._topic_phrase(questions[0])
         last = self._topic_phrase(questions[-1])
         return f'Investigate {first}, with follow-up on {last}.'[:500]
+
+    def _answer_objective(self, turns: list[TurnRecord]) -> str:
+        """Synthesize a run objective deterministically from the last answer.
+
+        Issue #308: the promoted run's objective comes from the research answer
+        (the model's cited synthesis), never from the raw chat question. The
+        synthesis is deterministic: the first sentence of the normalized answer
+        plus the cited source names, so identical answers promote to identical
+        objectives without an extra model call.
+        """
+        last = turns[-1].structured_output.research_answer
+        answer = ' '.join(last.answer.split())
+        first_sentence = re.split(r'(?<=[.!?])\s+', answer)[0][:300]
+        sources = sorted({citation.source for citation in last.citations})
+        grounding = f' (grounded in {", ".join(sources)})' if sources else ''
+        return (
+            'Investigate the research direction described in the answer: '
+            f'{first_sentence}{grounding}'
+        )[:500]
+
+    def _answer_citation_sources(self, turns: list[TurnRecord]) -> list[str]:
+        return sorted(
+            {
+                citation.source
+                for turn in turns
+                for citation in turn.structured_output.research_answer.citations
+            }
+        )
+
+    def _answer_citations(self, turns: list[TurnRecord]) -> list[dict[str, str]]:
+        return [
+            {
+                'source': citation.source,
+                'excerpt': citation.excerpt,
+                'knowledge_uri': citation.knowledge_uri,
+            }
+            for turn in turns
+            for citation in turn.structured_output.research_answer.citations
+        ]
 
     def _topic_phrase(self, question: str) -> str:
         phrase = re.sub(
