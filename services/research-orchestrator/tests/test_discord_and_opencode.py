@@ -629,6 +629,60 @@ def test_discord_turn_history_reports_no_turns() -> None:
     assert 'no recorded agent turns' in message
 
 
+def test_discord_status_message_includes_run_serial() -> None:
+    run = RunRecord(
+        run_id='run-abc123',
+        objective='Serial in status.',
+        state=RunState.AWAITING_PROTOCOL_APPROVAL,
+        evaluation_contract_id='contract-1',
+        evaluation_contract_version='1',
+        evaluation_contract_digest='digest-1',
+        beaker_workspace='/tmp/beaker',
+        honeydew_workspace='/tmp/honeydew',
+        shared_artifacts_path='/tmp/shared',
+        reports_path='/tmp/reports',
+        maximum_turns=10,
+        maximum_runtime_seconds=3600,
+        maximum_parallel_jobs=2,
+        investigation_id='investigation-a',
+        run_serial=12,
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+    view = build_run_status_view(run, actions=[], jobs=[])
+    rendered = render_run_status(view)
+
+    assert view.run_serial == 12
+    assert 'Research run #12' in rendered
+    assert 'run-abc123' in rendered
+
+
+def test_discord_run_list_includes_run_serial() -> None:
+    run = RunRecord(
+        run_id='run-abc123',
+        objective='Serial in list.',
+        state=RunState.AWAITING_PROTOCOL_APPROVAL,
+        evaluation_contract_id='contract-1',
+        evaluation_contract_version='1',
+        evaluation_contract_digest='digest-1',
+        beaker_workspace='/tmp/beaker',
+        honeydew_workspace='/tmp/honeydew',
+        shared_artifacts_path='/tmp/shared',
+        reports_path='/tmp/reports',
+        maximum_turns=10,
+        maximum_runtime_seconds=3600,
+        maximum_parallel_jobs=2,
+        investigation_id='investigation-a',
+        run_serial=7,
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+    rendered = render_run_list([run])
+
+    assert 'run #7' in rendered
+    assert 'run-abc123' in rendered
+
+
 def test_discord_run_creation_uses_objective_without_http() -> None:
     engine = Mock()
     expected = SimpleNamespace(

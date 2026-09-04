@@ -486,7 +486,9 @@ class DiscordRenderer:
 
 class DiscordAdapter(ABC):
     @abstractmethod
-    def create_thread(self, *, run_id: str, objective: str) -> str | None:
+    def create_thread(
+        self, *, run_id: str, objective: str, run_serial: int | None = None
+    ) -> str | None:
         raise NotImplementedError
 
     @abstractmethod
@@ -501,7 +503,9 @@ class DiscordAdapter(ABC):
 
 
 class DisabledDiscordAdapter(DiscordAdapter):
-    def create_thread(self, *, run_id: str, objective: str) -> str | None:
+    def create_thread(
+        self, *, run_id: str, objective: str, run_serial: int | None = None
+    ) -> str | None:
         return None
 
     def publish(
@@ -548,8 +552,14 @@ class DiscordHttpAdapter(DiscordAdapter):
             transport=self.transport,
         )
 
-    def create_thread(self, *, run_id: str, objective: str) -> str | None:
-        name = f'research-{run_id[:8]}'
+    def create_thread(
+        self, *, run_id: str, objective: str, run_serial: int | None = None
+    ) -> str | None:
+        name = (
+            f'research #{run_serial} ({run_id[:8]})'
+            if run_serial is not None
+            else f'research-{run_id[:8]}'
+        )
 
         def attempt() -> httpx.Response:
             with self._client() as client:
