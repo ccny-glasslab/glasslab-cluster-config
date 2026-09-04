@@ -142,6 +142,21 @@ Use `--service workflow-api` or `--service research-orchestrator` for a
 single-service rollout. The old workflow-api helper is a compatibility wrapper;
 it no longer builds images locally.
 
+## Documentation Freshness (TTL)
+
+Every document that describes current behavior carries a `Last verified:
+<date>` marker near the top. The marker is the date the document's claims were
+last checked against the live system or committed state.
+
+- A document is stale 30 days after its `Last verified` date unless someone
+  refreshes the marker.
+- When a document's claims are falsified by the live system or committed
+  state, add a `STALE` banner at the top explaining what changed and when.
+- A falsified document is moved to `docs/glasslab-v2/historical/` so readers
+  find it intentionally instead of treating it as current.
+- Refresh the marker when you re-verify the document still describes current
+  behavior, or update the document and re-verify.
+
 ## Pull Request Expectations
 
 A useful PR should say:

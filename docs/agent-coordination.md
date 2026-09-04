@@ -1,5 +1,7 @@
 # Agent Coordination
 
+Last verified: 2026-09-02
+
 Two coding agents work this repository concurrently. This file is the shared
 coordination map. Read it before editing a shared file, and whoever resolves a
 merge conflict in a shared file must apply the keep-both rule below.
