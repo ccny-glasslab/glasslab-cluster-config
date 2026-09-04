@@ -1,6 +1,6 @@
 # Glasslab Current Handoff
 
-Last updated: 2026-08-13
+Last updated: 2026-09-03
 
 This is the compact current-state checkpoint for switching human or coding
 agents. Read `AGENTS.md` first for stable rules, architecture, vocabulary,
@@ -20,11 +20,9 @@ Three distinct layers of truth, in decreasing authority:
 
 ## Runtime And Storage
 
-- **Runtime:** OpenCode is the selected agent runtime for Honeydew and Beaker
-  (issue-98 validation path). Hermes is retained only as an explicit opt-in
-  rollback backend.
-  OpenCode is installed only as a rollback runtime, selected only by setting
-  `GLASSLAB_ORCHESTRATOR_AGENT_RUNTIME_BACKEND` back to `opencode`.
+- **Runtime:** OpenCode is the selected agent runtime for Honeydew and Beaker.
+  Hermes is retained only as an explicit opt-in rollback backend, selected by
+  setting `GLASSLAB_ORCHESTRATOR_AGENT_RUNTIME_BACKEND=hermes`.
 - **Store:** PostgreSQL is the production store
   (`GLASSLAB_ORCHESTRATOR_STORE_BACKEND=postgres`). SQLite remains the local,
   test, and import-migration backend.
@@ -42,12 +40,12 @@ NFS at:
 Both agent runtimes point at the exo OpenAI-compatible service at
 `192.168.1.17:52415`. The cabled exo pair is `.17` and `.18`.
 
-## Deployed State (last verified 2026-08-23)
+## Deployed State (last verified 2026-09-02)
 
-At the last check the deployed research-orchestrator image was commit `c525861`
-(#169), running with `AGENT_RUNTIME_BACKEND=opencode` (flipped for the #98
-validation run) and
-`STORE_BACKEND=postgres`. Re-verify before relying on it:
+The live orchestrator configmap selects `AGENT_RUNTIME_BACKEND=opencode`
+(verified 2026-09-02) with `STORE_BACKEND=postgres`. At the 2026-08-23 check
+the deployed research-orchestrator image was commit `c525861` (#169).
+Re-verify before relying on it:
 
 ```bash
 ssh glasslab-provisioner
@@ -60,7 +58,8 @@ sudo -n env KUBECONFIG=/home/glasslab/.kube/config \
 
 Merged to `main`:
 
-- Hermes runtime for Honeydew and Beaker (#127); OpenCode retained as rollback.
+- OpenCode selected as the agent runtime for Honeydew and Beaker; Hermes
+  retained as an explicit opt-in rollback backend (#127, #98).
 - PostgreSQL orchestrator store with a SQLite import tool (#130).
 - ccny GHCR image namespace cutover (#131, #132) and store migration tooling
   (#133, #134, #135).
@@ -156,8 +155,8 @@ Per-run files are available inside the orchestrator pod at:
   amplify the problem.
 - Terminal checkpoint retry (#145) is merged to `testing` and deployed; a
   terminal retry child is superseded by the next retry rather than reopened.
-- Hermes runtime storage does not yet have the same shared-cache treatment as
-  OpenCode; only per-run cleanup applies (see
+- The Hermes rollback backend's runtime storage does not yet have the same
+  shared-cache treatment as OpenCode; only per-run cleanup applies (see
   `services/research-orchestrator/scripts/cleanup-run-storage.py`).
 - A generic arbitrary-dataset run has not yet completed end to end (#98).
 
