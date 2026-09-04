@@ -454,6 +454,84 @@ class MissingProtocolDeclarationThenRepairRuntime(ScriptedMockRuntime):
         return result, message_id
 
 
+class AnswerMethodologyRuntime(ScriptedMockRuntime):
+    # Issue #308 scripted journey: the research answer names two methodologies,
+    # Honeydew records them in program.md, and Beaker proposes both as matrix
+    # variants so the promoted run compares them in parallel.
+    def __init__(self, *, runner_image: str) -> None:
+        super().__init__(runner_image=runner_image)
+        self.methods: list[str] = []
+
+    def run_turn(self, **kwargs):
+        prompt = kwargs['prompt']
+        if kwargs['agent'] == AgentName.HONEYDEW and 'research question' in prompt:
+            self.methods = ['conformal-prediction', 'split-conformal']
+            return (
+                AgentTurnResult(
+                    kind=TurnKind.RESEARCH_ANSWER,
+                    summary='Answered the research question from the corpus.',
+                    research_answer=ResearchAnswer(
+                        answer=(
+                            'Two methodologies are compared for time-series '
+                            'forecasting: conformal-prediction and '
+                            'split-conformal. Conformal prediction provides '
+                            'coverage guarantees by construction on calibration '
+                            'data.'
+                        ),
+                        citations=[
+                            Citation(
+                                knowledge_uri=(
+                                    'knowledge://context/'
+                                    '00000000000000000000000000000000'
+                                ),
+                                source='conformal-prediction-nixtla',
+                                excerpt='Setting up Conformal Intervals '
+                                'Parameter Requirements',
+                            ),
+                            Citation(
+                                knowledge_uri=(
+                                    'knowledge://context/'
+                                    '00000000000000000000000000000000'
+                                ),
+                                source='split-conformal-paper',
+                                excerpt='Split conformal uses a calibration '
+                                'split.',
+                            ),
+                        ],
+                    ),
+                    done=True,
+                ),
+                'mock-message-answer-methodology',
+            )
+        if (
+            kwargs['agent'] == AgentName.HONEYDEW
+            and 'Draft a concrete program.md' in prompt
+        ):
+            result, message_id = super().run_turn(**kwargs)
+            (kwargs['workspace'] / 'program.md').write_text(
+                '# Program\n\n## Methodologies to compare\n'
+                + '\n'.join(f'- {method}' for method in self.methods)
+                + '\n'
+            )
+            return result, message_id
+        if (
+            kwargs['agent'] == AgentName.BEAKER
+            and 'Execute the task-specific plan' in prompt
+        ):
+            result, message_id = super().run_turn(**kwargs)
+            program = (kwargs['workspace'] / 'program.md').read_text()
+            methods = [
+                line[2:].strip()
+                for line in program.splitlines()
+                if line.startswith('- ')
+            ]
+            result.requested_actions[0].arguments['variants'] = [
+                {'name': method, 'overrides': {}} for method in methods
+            ]
+            return result, message_id
+        return super().run_turn(**kwargs)
+
+
 class RepeatedWrongKindRuntime(ScriptedMockRuntime):
     # Honeydew returns a valid-but-wrong kind on every protocol-draft attempt,
     # exhausting the single focused repair and proving the run fails safely
@@ -2543,6 +2621,101 @@ def test_answer_driven_promotion_grounds_protocol_in_answer_citations(
     # The protocol draft turn's retrieval was pinned to those sources.
     assert captured_pins
     assert 'conformal-prediction-nixtla' in captured_pins[0]
+
+
+def _answer_methodology_engine(orchestrator_bundle):
+    settings, store, cluster, _, original = orchestrator_bundle
+    engine = ResearchOrchestrator(
+        settings=settings,
+        store=store,
+        runtime=AnswerMethodologyRuntime(runner_image=RUNNER_IMAGE),
+        workspaces=original.workspaces,
+        contracts=original.contracts,
+        contract_candidates=original.contract_candidates,
+        policy=original.policy,
+        cluster=cluster,
+        discord=DisabledDiscordAdapter(),
+    )
+    return settings, store, cluster, engine
+
+
+def test_answer_driven_promotion_beaker_variants_reflect_answer_methodologies(
+    orchestrator_bundle,
+) -> None:
+    """Beaker's proposed variants reflect the methodologies in the answer.
+
+    Issue #308 item 3: the answer names two methodologies; the promoted run's
+    Beaker matrix proposes both as variants.
+    """
+    _, store, _, engine = _answer_methodology_engine(orchestrator_bundle)
+    conversation_id = 'discord-thread-methods'
+    engine.answer_research_question(
+        question='which forecasting method should we use',
+        conversation_id=conversation_id,
+    )
+    run = engine.promote_conversation(conversation_id, answer_driven=True)
+
+    protocol = _pending_action(store, run.run_id, 'approve_protocol')
+    engine.approve_action(
+        protocol.action_id,
+        reviewer='test-human',
+        reason='Protocol accepted.',
+    )
+    matrix = _pending_action(store, run.run_id, 'submit_experiment_matrix')
+    engine.approve_action(
+        matrix.action_id,
+        reviewer='test-human',
+        reason='Compare both methodologies.',
+    )
+    proposed = ExperimentMatrix.model_validate(matrix.arguments)
+    variant_names = {variant.name for variant in proposed.variants}
+    assert {'conformal-prediction', 'split-conformal'} <= variant_names
+
+
+def test_answer_driven_promotion_parallel_comparison_end_to_end(
+    orchestrator_bundle,
+) -> None:
+    """Parallel execution + comparison works end-to-end for a promoted answer.
+
+    Issue #308 item 4: two methodologies, one seed each, both jobs complete,
+    and the run reaches final acceptance with side-by-side results.
+    """
+    _, store, cluster, engine = _answer_methodology_engine(orchestrator_bundle)
+    conversation_id = 'discord-thread-parallel'
+    engine.answer_research_question(
+        question='which forecasting method should we use',
+        conversation_id=conversation_id,
+    )
+    run = engine.promote_conversation(conversation_id, answer_driven=True)
+
+    protocol = _pending_action(store, run.run_id, 'approve_protocol')
+    engine.approve_action(
+        protocol.action_id,
+        reviewer='test-human',
+        reason='Protocol accepted.',
+    )
+    matrix = _pending_action(store, run.run_id, 'submit_experiment_matrix')
+    engine.approve_action(
+        matrix.action_id,
+        reviewer='test-human',
+        reason='Compare both methodologies.',
+    )
+    queued = store.list_jobs(run.run_id)
+    assert {job.variant_name for job in queued} == {
+        'conformal-prediction',
+        'split-conformal',
+    }
+    assert len(queued) == 2
+
+    _complete_jobs(engine, store, cluster, run.run_id)
+    jobs = store.list_jobs(run.run_id)
+    assert all(job.status == JobStatus.SUCCEEDED for job in jobs)
+    assert {job.variant_name for job in jobs} == {
+        'conformal-prediction',
+        'split-conformal',
+    }
+    final = store.get_run(run.run_id)
+    assert final.state == RunState.AWAITING_FINAL_ACCEPTANCE
 
 
 def test_verification_retrieval_query_includes_result_terms(
