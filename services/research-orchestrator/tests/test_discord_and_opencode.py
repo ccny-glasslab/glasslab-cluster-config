@@ -2021,10 +2021,14 @@ def test_research_promote_in_thread_creates_run() -> None:
         )
     )
     interaction = _FakeInteraction(channel_id='987654321')
-    interaction.channel = discord.Thread.__new__(discord.Thread)
+    thread = discord.Thread.__new__(discord.Thread)
+    thread.id = 987654321
+    thread.name = 'research-abc123456'  # Legacy naming
+    interaction.channel = thread
     asyncio.run(
         gateway._on_research_promote(interaction, objective='Run it.')
     )
+    # Legacy fallback: thread without conversation id uses channel-based id
     assert gateway.engine.promote_conversation.call_args[0] == (
         'discord-thread-987654321',
     )
@@ -2046,7 +2050,9 @@ def test_research_promote_requires_thread_and_authorization() -> None:
     gateway_deny = _build_test_gateway()
     gateway_deny.engine.promote_conversation = lambda *a, **k: (_ for _ in ()).throw(AssertionError('must not run'))
     thread_interaction = _FakeInteraction(channel_id='987654321', user_id='stranger')
-    thread_interaction.channel = discord.Thread.__new__(discord.Thread)
+    thread = discord.Thread.__new__(discord.Thread)
+    thread.id = 987654321
+    thread_interaction.channel = thread
     asyncio.run(
         gateway_deny._on_research_promote(thread_interaction, objective='Nope.')
     )
@@ -2120,6 +2126,60 @@ def test_format_research_answer_never_emits_empty_messages() -> None:
     assert rendered, 'must produce at least one message'
     assert all(message for message in rendered)
     assert 'only wrapper markup' in rendered[0]
+
+
+def test_thread_conversation_id_extract_from_main_channel_thread_name() -> None:
+    """Main-channel questions embed the durable conversation id in thread name."""
+    gateway = _build_test_gateway()
+    # Main-channel question creates thread with name: "research:discord-abcdef1234567890 question"
+    thread = discord.Thread.__new__(discord.Thread)
+    thread.id = 987654321
+    thread.name = 'research:discord-abcdef1234567890 what is conformal prediction'
+    
+    assert gateway._thread_conversation_id(thread) == 'discord-abcdef1234567890'
+
+
+def test_thread_conversation_id_reuses_id_in_follow_up_thread() -> None:
+    """In-thread follow-ups reuse the same conversation id from thread name."""
+    gateway = _build_test_gateway()
+    # Follow-up question in a thread created by main-channel question
+    thread = discord.Thread.__new__(discord.Thread)
+    thread.id = 987654321
+    thread.name = 'research:discord-abcdef1234567890 follow-up question'
+    
+    # The conversation id should be the same as the original main-channel question
+    assert gateway._thread_conversation_id(thread) == 'discord-abcdef1234567890'
+
+
+def test_thread_conversation_id_falls_back_to_legacy_for_plain_thread() -> None:
+    """Legacy threads without conversation id metadata use channel_id fallback."""
+    gateway = _build_test_gateway()
+    # Legacy thread (no conversation id embedded in name)
+    thread = discord.Thread.__new__(discord.Thread)
+    thread.id = 987654321
+    thread.name = 'research-abc123456'  # Legacy naming
+    
+    # Falls back to discord-thread-{thread_id}
+    assert gateway._thread_conversation_id(thread) == 'discord-thread-987654321'
+
+
+def test_thread_conversation_id_with_guild_channel_fallback() -> None:
+    """If not a thread, falls back to channel-based id."""
+    gateway = _build_test_gateway()
+    # When interaction.channel is not a Thread (shouldn't happen normally)
+    channel = SimpleNamespace(id=111111111)
+    
+    assert gateway._thread_conversation_id(channel) == 'discord-thread-111111111'
+
+
+def test_thread_conversation_id_handles_name_without_space() -> None:
+    """Thread name might not have space after id (edge case)."""
+    gateway = _build_test_gateway()
+    thread = discord.Thread.__new__(discord.Thread)
+    thread.id = 987654321
+    thread.name = 'research:discord-abcdef1234567890'  # No question after id
+    
+    assert gateway._thread_conversation_id(thread) == 'discord-abcdef1234567890'
 
 
 def test_format_packet_for_discord_uses_rank_when_excerpt_misses() -> None:

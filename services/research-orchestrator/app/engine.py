@@ -1018,6 +1018,7 @@ class ResearchOrchestrator:
         evaluation_contract_id: str | None = None,
         evaluation_contract_version: str | None = None,
         investigation_id: str | None = None,
+        existing_discord_thread_id: str | None = None,
     ) -> RunRecord:
         """Promote a research conversation into a real run (Phase 4).
 
@@ -1052,6 +1053,16 @@ class ResearchOrchestrator:
         binding = self.store.get_conversation_binding(conversation_id)
         seed_source_ids = binding.source_ids if binding else None
         resolved_objective = objective or self._conversation_objective(turns)
+        # Determine the discord thread id to bind to
+        if existing_discord_thread_id is not None:
+            # Explicitly provided thread id (from Discord controls)
+            thread_id = existing_discord_thread_id
+        elif conversation_id.startswith('discord-thread-'):
+            # Legacy: extract thread id from conversation id
+            thread_id = conversation_id.removeprefix('discord-thread-')
+        else:
+            # No thread to bind
+            thread_id = None
         run = self.create_run(
             RunCreateRequest(
                 objective=resolved_objective,
@@ -1060,11 +1071,7 @@ class ResearchOrchestrator:
                 seed_context=self._conversation_prior_context(conversation_id),
                 seed_source_ids=seed_source_ids,
                 investigation_id=investigation_id,
-                existing_discord_thread_id=(
-                    conversation_id.removeprefix('discord-thread-')
-                    if conversation_id.startswith('discord-thread-')
-                    else None
-                ),
+                existing_discord_thread_id=thread_id,
             )
         )
         if investigation_id:

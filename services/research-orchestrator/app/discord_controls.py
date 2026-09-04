@@ -887,6 +887,19 @@ class DiscordControlGateway:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
     @staticmethod
+    def _thread_conversation_id(thread: discord.Thread | discord.abc.GuildChannel) -> str:
+        if isinstance(thread, discord.Thread):
+            name = getattr(thread, 'name', '')
+            # Thread name format: "research:<conversation_id> <question>"
+            # Extract conversation_id by removing "research:" prefix
+            if name and name.startswith('research:'):
+                conv_id = name[len('research:'):].split(' ', 1)[0]
+                if conv_id and (conv_id.startswith('discord-') or conv_id.startswith('discord-thread-')):
+                    return conv_id
+        # Fall back to channel-based id for legacy threads
+        return f'discord-thread-{thread.id}'
+
+    @staticmethod
     def _is_thread(interaction: discord.Interaction) -> bool:
         return isinstance(getattr(interaction, 'channel', None), discord.Thread)
 
@@ -1354,13 +1367,25 @@ class DiscordControlGateway:
             # can be typed), then the placeholder edits in the answer when the
             # turn completes — a poor-man's stream over a ~1-minute turn.
             if in_thread:
+                # In-thread follow-up: reuse the thread's conversation id
+                # Read from thread metadata (thread name contains id for main-channel
+                # questions, channel_id for pure in-thread)
+                thread = interaction.channel
+                if not isinstance(thread, discord.Thread):
+                    # Should not happen, but fallback to channel id
+                    thread_conversation_id = f'discord-thread-{interaction.channel_id}'
+                else:
+                    thread_conversation_id = self._thread_conversation_id(thread)
                 placeholder = await interaction.followup.send(
                     'Working on it… (retrieving sources + drafting the answer)',
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+                answer_conv_id = thread_conversation_id
             else:
+                # Main-channel question: store conversation_id in thread name
+                # so follow-ups can find it
                 thread = await interaction.channel.create_thread(
-                    name=f'research: {question[:80]}',
+                    name=f'research:{conversation_id} {question[:80]}',
                     type=discord.ChannelType.public_thread,
                     auto_archive_duration=1440,
                 )
@@ -1368,11 +1393,12 @@ class DiscordControlGateway:
                     'Working on it… (retrieving sources + drafting the answer)',
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+                answer_conv_id = conversation_id
             answer = await asyncio.to_thread(
                 execute_discord_research_question,
                 self.engine,
                 question=question,
-                conversation_id=conversation_id,
+                conversation_id=answer_conv_id,
             )
             rendered = [
                 message for message in format_research_answer(answer)
@@ -1445,7 +1471,14 @@ class DiscordControlGateway:
                 exc,
             )
             return
-        conversation_id = f'discord-thread-{interaction.channel_id}'
+        # Read the conversation id from thread metadata
+        thread = interaction.channel
+        if not isinstance(thread, discord.Thread):
+            thread_id = str(interaction.channel_id)
+            conversation_id = f'discord-thread-{thread_id}'
+        else:
+            thread_id = str(thread.id)
+            conversation_id = self._thread_conversation_id(thread)
         logger.info('research_promote starting for %s', conversation_id)
         try:
             placeholder = await interaction.followup.send(
@@ -1457,6 +1490,7 @@ class DiscordControlGateway:
                 self.engine.promote_conversation,
                 conversation_id,
                 objective=objective,
+                existing_discord_thread_id=thread_id,
             )
             await placeholder.edit(
                 content=(
