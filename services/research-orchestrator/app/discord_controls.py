@@ -127,6 +127,7 @@ class RunStatusView:
     """Durable-derived status snapshot for a single run."""
 
     run_id: str
+    run_serial: int | None
     state: str
     phase: str
     pending_approval: str | None
@@ -183,6 +184,7 @@ def build_run_status_view(
     pending = pending_human_approval(actions)
     return RunStatusView(
         run_id=run.run_id,
+        run_serial=getattr(run, 'run_serial', None),
         state=run.state.value,
         phase=_PHASE_LABELS.get(run.state, run.state.value),
         pending_approval=pending.type if pending is not None else None,
@@ -196,8 +198,13 @@ def render_run_status(view: RunStatusView) -> str:
         f'{status} {view.job_counts[status]}'
         for status in (s.value for s in _RENDERED_JOB_STATUSES)
     )
+    label = (
+        f'Research run #{view.run_serial} `{view.run_id}`'
+        if view.run_serial is not None
+        else f'Research run `{view.run_id}`'
+    )
     lines = [
-        f'Research run `{view.run_id}`',
+        label,
         f'State: {view.state} ({view.phase})',
         f'Pending approval: {view.pending_approval or "none"}',
         f'Jobs: {jobs}',
@@ -230,7 +237,12 @@ def render_run_list(runs: list[RunRecord]) -> str:
         state = run.state.value
         if run.state in TERMINAL_STATES:
             state = f'{state} (terminal)'
-        lines.append(f'- `{run.run_id}` — {state}')
+        label = (
+            f'run #{run.run_serial} `{run.run_id}`'
+            if getattr(run, 'run_serial', None) is not None
+            else f'`{run.run_id}`'
+        )
+        lines.append(f'- {label} — {state}')
     return '\n'.join(lines)
 
 

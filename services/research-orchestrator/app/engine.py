@@ -308,6 +308,16 @@ class ResearchOrchestrator:
                         + '; '.join(preflight.blocking_issues)
                     )
             run_id = uuid4().hex
+            run_serial = None
+            if request.investigation_id:
+                run_serial = (
+                    sum(
+                        1
+                        for run in self.store.list_runs()
+                        if run.investigation_id == request.investigation_id
+                    )
+                    + 1
+                )
             paths = self.workspaces.prepare(run_id)
             base_commit = self.workspaces.worktree_base_commit(run_id)
             if task:
@@ -354,6 +364,7 @@ class ResearchOrchestrator:
                 seed_source_ids=request.seed_source_ids,
                 context_references=request.context_references or [],
                 investigation_id=request.investigation_id,
+                run_serial=run_serial,
             )
             self.store.create_run(
                 record,
@@ -368,6 +379,7 @@ class ResearchOrchestrator:
                     thread_id = self.discord.create_thread(
                         run_id=run_id,
                         objective=request.objective,
+                        run_serial=run_serial,
                     )
                 except Exception:
                     # Discord is a replaceable projection; a thread failure
