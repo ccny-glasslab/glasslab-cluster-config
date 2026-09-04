@@ -13,11 +13,13 @@ import hashlib
 from dataclasses import dataclass
 
 from app.corpus_rag.chunking import (
+    MAX_CHUNK_TOKENS,
     ChunkPlan,
     build_chunks,
     estimate_tokens,
 )
-from app.corpus_rag.contracts import RAG_INDEX_VERSION
+from app.corpus_rag.contracts import RAG_INDEX_VERSION, RagChunkRecord
+from app.corpus_rag.normalize import normalize_chunks
 
 
 @dataclass(frozen=True)
@@ -209,3 +211,65 @@ def test_short_section_single_unit_and_tail_merge():
     assert ev.section_path == unit.section_path == '1'
     assert ev.section_id == unit.section_id
     assert sections_out[0].doc_id == 'doc-3'
+
+
+def _raw_chunk(index: int, text: str, *, kind: str = 'section_unit') -> RagChunkRecord:
+    return RagChunkRecord(
+        chunk_id=f'legacy-{index}',
+        source_id='src-1',
+        doc_id='doc-1',
+        section_id='sec-1',
+        kind=kind,  # type: ignore[arg-type]
+        chunk_index=index,
+        text=text,
+        digest=hashlib.sha256(text.encode('utf-8')).hexdigest(),
+        token_count=estimate_tokens(text),
+        char_start=0,
+        char_end=len(text),
+        section_path='1',
+    )
+
+
+def test_normalize_chunks_splits_oversized_chunks():
+    body = ' '.join(_sent(i) for i in range(200))  # ~3200 tokens
+    assert estimate_tokens(body) > MAX_CHUNK_TOKENS
+
+    pieces = normalize_chunks([_raw_chunk(0, body)])
+
+    assert len(pieces) >= 2
+    for piece in pieces:
+        assert piece.token_count <= MAX_CHUNK_TOKENS
+    assert pieces[0].char_start == 0
+    assert pieces[-1].char_end == len(body)
+    for a, b in zip(pieces, pieces[1:]):
+        assert a.char_end <= b.char_start
+        assert body[a.char_end:b.char_start].strip() == ''
+    assert [p.chunk_index for p in pieces] == list(range(len(pieces)))
+    for piece in pieces:
+        assert piece.chunk_id == hashlib.sha256(
+            f'src-1|{piece.kind}|{piece.chunk_index}'.encode()
+        ).hexdigest()[:32]
+
+
+def test_normalize_chunks_deduplicates_identical_text():
+    body = ' '.join(_sent(i) for i in range(30))
+    out = normalize_chunks([_raw_chunk(0, body), _raw_chunk(1, body)])
+
+    assert len(out) == 1
+    assert out[0].text == body
+    assert out[0].chunk_index == 0
+    assert out[0].chunk_id == hashlib.sha256(
+        f'src-1|{out[0].kind}|0'.encode()
+    ).hexdigest()[:32]
+
+
+def test_normalize_chunks_keeps_distinct_texts_and_kinds():
+    body = ' '.join(_sent(i) for i in range(30))
+    unit = _raw_chunk(0, body)
+    span = _raw_chunk(1, body, kind='evidence_span')
+
+    out = normalize_chunks([unit, span])
+
+    assert len(out) == 2
+    assert {c.kind for c in out} == {'section_unit', 'evidence_span'}
+    assert [c.chunk_index for c in out] == [0, 1]
