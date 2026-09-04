@@ -862,6 +862,18 @@ def test_mocked_complete_workflow_and_agent_isolation(orchestrator_bundle) -> No
     assert run.beaker_workspace != run.honeydew_workspace
     assert Path(run.protocol_path or '').is_file()
     assert (Path(run.reports_path) / 'report.md').is_file()
+    bundle_artifacts = {
+        artifact.type: artifact
+        for artifact in store.list_artifacts(run.run_id)
+        if artifact.type in {'report.pdf', 'report.docx'}
+    }
+    assert set(bundle_artifacts) == {'report.pdf', 'report.docx'}
+    for artifact_type, artifact in bundle_artifacts.items():
+        assert Path(artifact.metadata['path']).is_file()
+        assert artifact.uri.startswith(
+            f'artifact://{run.run_id}/reports/glasslab-'
+        )
+        assert artifact.uri.endswith(artifact_type.removeprefix('report.'))
     assert {
         artifact.type for artifact in store.list_artifacts(run.run_id)
     } == {
@@ -870,8 +882,10 @@ def test_mocked_complete_workflow_and_agent_isolation(orchestrator_bundle) -> No
         'source_bundle',
         'metrics',
         'report',
+        'report.pdf',
+        'report.docx',
     }
-    assert len(store.list_artifacts(run.run_id)) == 6
+    assert len(store.list_artifacts(run.run_id)) == 8
     turns = store.list_turns(run.run_id)
     assert len(turns) == 7
     assert all(turn.status == 'completed' for turn in turns)

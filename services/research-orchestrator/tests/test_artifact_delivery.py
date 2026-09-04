@@ -21,6 +21,7 @@ from app.analysis_notebook import build_analysis_notebook
 from app.artifact_delivery import (
     ArtifactDeliveryError,
     VerifiedArtifactReader,
+    build_report_bundle,
     build_run_artifact_bundle,
 )
 from app.schemas import ArtifactRecord, JobStatus
@@ -178,3 +179,30 @@ def test_analysis_notebook_embeds_verified_metrics_and_tables(tmp_path) -> None:
     embedded = ''.join(notebook['cells'][1]['source'])
     assert '0.91' in embedded
     assert 'linear,0.85' in embedded
+
+
+def test_report_bundle_produces_pdf_and_docx_with_deterministic_names() -> None:
+    body = '# Glasslab Report\n\nAccuracy 0.91.\n'
+    bundle = build_report_bundle(
+        run_id='run-abc123',
+        report_body=body,
+        timestamp='20260904T120000Z',
+    )
+
+    assert bundle.pdf_filename == 'glasslab-run-abc123-20260904T120000Z.pdf'
+    assert bundle.docx_filename == 'glasslab-run-abc123-20260904T120000Z.docx'
+    assert bundle.pdf.startswith(b'%PDF-')
+    assert b'Accuracy 0.91' in bundle.pdf
+    assert bundle.docx.startswith(b'PK')
+    with zipfile.ZipFile(io.BytesIO(bundle.docx)) as archive:
+        assert 'word/document.xml' in archive.namelist()
+        assert 'Accuracy 0.91' in archive.read('word/document.xml').decode()
+
+
+def test_report_bundle_rejects_empty_body() -> None:
+    with pytest.raises(ArtifactDeliveryError, match='empty'):
+        build_report_bundle(
+            run_id='run-1',
+            report_body='   \n\t',
+            timestamp='20260904T120000Z',
+        )

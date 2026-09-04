@@ -14,7 +14,7 @@ from uuid import uuid4, uuid5, NAMESPACE_URL
 import yaml
 
 from .analysis_notebook import write_analysis_notebook
-from .artifact_delivery import ArtifactDeliveryError
+from .artifact_delivery import ArtifactDeliveryError, build_report_bundle
 from .cluster import ClusterExecutor
 from .config import Settings
 from .contract_candidates import ContractCandidateManager
@@ -2547,6 +2547,7 @@ class ResearchOrchestrator:
             if run.state != RunState.AWAITING_FINAL_ACCEPTANCE:
                 return
             self._transition(action.run_id, RunState.COMPLETE)
+            self._register_report_bundle(action.run_id)
             self._event(
                 action.run_id,
                 source='orchestrator',
@@ -4810,6 +4811,56 @@ class ResearchOrchestrator:
             reason='Human acceptance is required to complete the research run.',
         )
         self._transition(run_id, RunState.AWAITING_FINAL_ACCEPTANCE)
+
+    def _register_report_bundle(self, run_id: str) -> None:
+        # Render the accepted report into PDF + DOCX and register both as
+        # artifacts so delivery ships a real bundle, not just report.md.
+        run = self.store.get_run(run_id)
+        report_artifacts = [
+            artifact
+            for artifact in self.store.list_artifacts(run_id)
+            if artifact.type == 'report'
+        ]
+        if not report_artifacts:
+            return
+        report = report_artifacts[-1]
+        path = report.metadata.get('path')
+        if not isinstance(path, str):
+            return
+        body = Path(path).read_text(encoding='utf-8')
+        timestamp = utc_now().strftime('%Y%m%dT%H%M%SZ')
+        bundle = build_report_bundle(
+            run_id=run_id,
+            report_body=body,
+            timestamp=timestamp,
+        )
+        reports_dir = Path(run.reports_path)
+        for filename, content, artifact_type in (
+            (bundle.pdf_filename, bundle.pdf, 'report.pdf'),
+            (bundle.docx_filename, bundle.docx, 'report.docx'),
+        ):
+            destination = reports_dir / filename
+            destination.write_bytes(content)
+            uri = f'artifact://{run_id}/reports/{filename}'
+            self._save_local_artifact(
+                run_id=run_id,
+                artifact_type=artifact_type,
+                uri=uri,
+                digest=sha256(content).hexdigest(),
+                metadata={
+                    'path': str(destination),
+                    'source_uri': report.uri,
+                },
+            )
+        self._event(
+            run_id,
+            source='orchestrator',
+            event_type='report.bundle_created',
+            payload={
+                'pdf': f'artifact://{run_id}/reports/{bundle.pdf_filename}',
+                'docx': f'artifact://{run_id}/reports/{bundle.docx_filename}',
+            },
+        )
 
     def pause_run(
         self,
