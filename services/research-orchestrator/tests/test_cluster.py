@@ -162,3 +162,35 @@ def test_submission_error_preserves_workflow_api_detail() -> None:
         match='workflow execution policy rejected the submission',
     ):
         _executor(handler).submit(_spec(workspace=False))
+
+
+def test_cluster_uses_exactly_the_owned_workflow_api_endpoints() -> None:
+    """The orchestrator must call exactly the 4 owned workflow-api routes.
+
+    The workflow-api ownership contract (docs/glasslab-v2/workflow-api-ownership.md)
+    guarantees only POST /experiments/runs, GET /runs/{id},
+    GET /runs/{id}/artifacts, and POST /runs/{id}/cancel. Any additional
+    endpoint used here is a contract violation that must be flagged.
+    """
+    import re
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / 'app' / 'cluster.py'
+    text = source.read_text()
+
+    used: set[str] = set()
+    for method in ('get', 'post'):
+        for match in re.finditer(
+            rf'client\.{method}\(\s*[fr]*([\'"])(.*?)\1', text, re.DOTALL
+        ):
+            path = match.group(2)
+            # Normalize f-string path parameters to a canonical {id} form.
+            path = re.sub(r'\{[^}]*\}', '{id}', path)
+            used.add(f'{method.upper()} {path}')
+
+    assert used == {
+        'POST /experiments/runs',
+        'GET /runs/{id}',
+        'GET /runs/{id}/artifacts',
+        'POST /runs/{id}/cancel',
+    }

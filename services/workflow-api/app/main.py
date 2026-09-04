@@ -31,7 +31,7 @@ from services.common.schemas import ArtifactIndexEntry, ArtifactsIndex, RunManif
 
 from .config import Settings, get_settings
 from .auth import authenticate_request
-from .autoresearch_routes import register_autoresearch_routes
+
 from .digest_scheduling import schedule_is_due
 from .execution_routes import register_execution_routes
 from .execution_preflight import build_execution_preflight_result
@@ -152,7 +152,6 @@ from .schemas import (
     WorkflowFamilySummary,
 )
 from .validation import validate_run_request
-from .transition_routes import register_transitions_routes
 
 UNRESOLVED_PREFIX = 'UNRESOLVED_'
 LOGGER = logging.getLogger(__name__)
@@ -2138,23 +2137,6 @@ def create_app(
         registry=registry,
         store=store,
         launch_experiment_run=launch_generic_experiment_run,
-    )
-    register_transitions_routes(
-        app,
-        settings=settings,
-        registry=registry,
-        store=store,
-        create_run_record_impl=lambda *args, **kwargs: create_run_record(*args, **kwargs),
-        build_research_problem_record_impl=lambda *args, **kwargs: build_research_problem_record(*args, **kwargs),
-    )
-    register_autoresearch_routes(
-        app,
-        settings=settings,
-        registry=registry,
-        store=store,
-        submitter=submitter,
-        create_run_record=lambda *args, **kwargs: create_run_record(*args, **kwargs),
-        record_operation=lambda *args, **kwargs: record_operation(*args, **kwargs),
     )
     register_schedule_routes(
         app,
