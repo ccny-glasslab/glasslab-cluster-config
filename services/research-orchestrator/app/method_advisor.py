@@ -28,6 +28,7 @@ from .corpus_rag.contracts import (
 from .corpus_rag.planner import build_query_plan
 
 ADVISORY_EVENT = 'agent.method_advisory_built'
+ADVICE_GENERATED_EVENT = 'method.advice_generated'
 _MIN_ADVISORY_HITS = 2
 _POSITIVE_MARKERS = ('recommend', 'should', 'useful', 'effective')
 _NEGATIVE_MARKERS = ('limitation', 'failure', 'bias', 'pitfall', 'critical')
@@ -263,6 +264,12 @@ class MethodAdvisor:
                 'n_candidates': len(payload.get('candidates', [])),
                 'retrieval_metadata': retrieval_metadata,
             },
+        )
+        self._km.store.append_event(
+            run_id=run_id,
+            source='orchestrator',
+            event_type=ADVICE_GENERATED_EVENT,
+            payload=payload,
         )
         return self._render(payload), payload
 

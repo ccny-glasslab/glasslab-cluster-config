@@ -203,3 +203,167 @@ def test_extractive_candidates_require_multi_hit_family_evidence() -> None:
     # Single-keyword coincidences in one chunk must not spawn families.
     assert 'False-discovery-rate control' not in labels
     assert 'Assumption-light regression alternatives' not in labels
+
+
+def _fake_knowledge_manager(store: SqliteStore) -> Any:
+    """Minimal KnowledgeManager stand-in: real store, lexical-only retrieve."""
+    from app.schemas import ContextPacket
+
+    class _FakeKnowledgeManager:
+        def __init__(self, store: SqliteStore) -> None:
+            self.store = store
+            self.dense_index = None
+
+        def retrieve(self, **kwargs: Any) -> ContextPacket:
+            chunk_ids = [
+                chunk.chunk_id
+                for source in store.list_knowledge_sources()
+                for chunk in store.list_knowledge_chunks(source.source_id)
+            ]
+            return ContextPacket(
+                run_id=kwargs['run_id'],
+                agent='honeydew',
+                turn_number=kwargs['turn_number'],
+                turn_kind=kwargs['turn_kind'],
+                query=kwargs['query'],
+                index_version='test',
+                ranked_sources=[
+                    {
+                        'kind': 'chunk',
+                        'entry_id': cid,
+                        'source_id': cid.split('::')[0],
+                    }
+                    for cid in chunk_ids
+                ],
+                token_budget=10000,
+                retrieval_mode_actual='lexical',
+            )
+
+    return _FakeKnowledgeManager(store)
+
+
+def _run_record(run_id: str) -> Any:
+    from app.schemas import RunRecord, RunState, utc_now
+
+    return RunRecord(
+        run_id=run_id,
+        objective=QUESTION,
+        state=RunState.CREATED,
+        evaluation_contract_id='example-research-v1',
+        evaluation_contract_version='1.0.0',
+        evaluation_contract_digest='a' * 64,
+        beaker_workspace='/tmp/b',
+        honeydew_workspace='/tmp/h',
+        shared_artifacts_path='/tmp/s',
+        reports_path='/tmp/r',
+        maximum_turns=10,
+        maximum_runtime_seconds=3600,
+        maximum_parallel_jobs=1,
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+
+
+def _seed_knowledge(db: Path, texts: list[str]) -> None:
+    """Seed one knowledge source with the given chunk texts."""
+    from app.schemas import KnowledgeChunk
+
+    store = SqliteStore(str(db))
+    uri = 'rec://knowledge'
+    src = _source(uri)
+    src.source_id = 'deterministic-source'
+    store.save_knowledge_source(src)
+    store.replace_knowledge_chunks(
+        src.source_id,
+        [
+            KnowledgeChunk(
+                chunk_id=f'{src.source_id}::k{index}',
+                source_id=src.source_id,
+                chunk_index=index,
+                text=text,
+                digest=hashlib.sha256(text.encode()).hexdigest(),
+                token_count=max(1, len(text.split())),
+            )
+            for index, text in enumerate(texts)
+        ],
+    )
+
+
+def _build_advisory(db: Path, run_id: str) -> tuple[SqliteStore, dict[str, Any]]:
+    from app.method_advisor import MethodAdvisor
+
+    store = SqliteStore(str(db))
+    store.create_run(_run_record(run_id), one_active_run=False)
+    advisor = MethodAdvisor(_fake_knowledge_manager(store))
+    rendered, payload = advisor.build_and_render(
+        run_id=run_id,
+        objective=QUESTION,
+        turn_number=1,
+        turn_kind='protocol_draft',
+    )
+    assert rendered and payload
+    return store, payload
+
+
+def test_advisory_persisted_as_durable_event_with_payload(tmp_path: Path) -> None:
+    from app.method_advisor import ADVICE_GENERATED_EVENT
+
+    db = tmp_path / 'durable.db'
+    _seed_knowledge(db, [_REC_TEXT])
+    store, payload = _build_advisory(db, 'run-durable')
+
+    events = [
+        event for event in store.list_events('run-durable')
+        if event.event_type == ADVICE_GENERATED_EVENT
+    ]
+    assert len(events) == 1
+    durable = events[0].payload
+    assert durable['advisory_digest'] == payload['advisory_digest']
+    assert durable['kind'] == 'method_advisory'
+    assert durable['candidates'] == payload['candidates']
+    assert durable['citations_all'] == payload['citations_all']
+
+
+def test_advisory_retrievable_after_the_fact(tmp_path: Path) -> None:
+    from app.method_advisor import ADVICE_GENERATED_EVENT
+
+    db = tmp_path / 'retrieve.db'
+    _seed_knowledge(db, [_REC_TEXT])
+    _store, payload = _build_advisory(db, 'run-retrieve')
+
+    # A fresh connection (new process) still sees the advisory: durable, not
+    # ephemeral in-memory state.
+    fresh = SqliteStore(str(db))
+    events = [
+        event for event in fresh.list_events('run-retrieve')
+        if event.event_type == ADVICE_GENERATED_EVENT
+    ]
+    assert len(events) == 1
+    assert events[0].payload['advisory_digest'] == payload['advisory_digest']
+    assert events[0].payload['candidates']
+
+
+def _advisory_content(payload: dict[str, Any]) -> dict[str, Any]:
+    """Advisory content minus the per-run random packet_id and its digest."""
+    content = {
+        key: value
+        for key, value in payload.items()
+        if key not in ('advisory_digest', 'packet_id')
+    }
+    content['retrieval_metadata'] = {
+        key: value
+        for key, value in payload['retrieval_metadata'].items()
+        if key != 'packet_id'
+    }
+    return content
+
+
+def test_advisory_generation_is_deterministic(tmp_path: Path) -> None:
+    db_a = tmp_path / 'det-a.db'
+    _seed_knowledge(db_a, [_REC_TEXT])
+    db_b = tmp_path / 'det-b.db'
+    _seed_knowledge(db_b, [_REC_TEXT])
+    _store_a, payload_a = _build_advisory(db_a, 'run-det-a')
+    _store_b, payload_b = _build_advisory(db_b, 'run-det-b')
+
+    assert _advisory_content(payload_a) == _advisory_content(payload_b)
