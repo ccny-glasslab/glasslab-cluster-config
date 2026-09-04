@@ -352,6 +352,7 @@ class ResearchOrchestrator:
                 updated_at=now,
                 seed_context=request.seed_context,
                 seed_source_ids=request.seed_source_ids,
+                context_references=request.context_references or [],
                 investigation_id=request.investigation_id,
             )
             self.store.create_run(
@@ -1010,6 +1011,63 @@ class ResearchOrchestrator:
             blocks.append(text)
         return '\n\n'.join(blocks)
 
+    def _emit_conversation_context_packet(
+        self,
+        *,
+        run: RunRecord,
+        conversation_id: str,
+        objective: str,
+        pinned_source_ids: list[str] | None,
+    ) -> str:
+        """Materialize the promoted conversation's context as a durable packet.
+
+        Writes the packet to the run's shared-artifacts, registers it as an
+        artifact record, and returns the packet URI for the run's context
+        references.
+        """
+        packet_payload = {
+            'schema_version': 'glasslab-conversation-context-packet-v1',
+            'conversation_id': conversation_id,
+            'objective': objective,
+            'pinned_source_ids': sorted(pinned_source_ids or []),
+            'prior_turn_summary': self._conversation_prior_context(
+                conversation_id
+            ),
+            'dataset_references': sorted(
+                set(
+                    re.findall(
+                        r'glasslab-dataset://[0-9a-f]{64}',
+                        objective,
+                    )
+                )
+            ),
+        }
+        packet_path = (
+            Path(run.shared_artifacts_path)
+            / 'conversation-context-packet.json'
+        )
+        packet_path.parent.mkdir(parents=True, exist_ok=True)
+        packet_path.write_bytes(
+            (json.dumps(packet_payload, indent=2, sort_keys=True) + '\n').encode()
+        )
+        digest = sha256(packet_path.read_bytes()).hexdigest()
+        uri = (
+            f'artifact://{run.run_id}/shared-artifacts/'
+            'conversation-context-packet.json'
+        )
+        self._save_local_artifact(
+            run_id=run.run_id,
+            artifact_type='conversation_context_packet',
+            uri=uri,
+            digest=digest,
+            metadata={
+                'path': str(packet_path),
+                'conversation_id': conversation_id,
+                'objective': objective,
+            },
+        )
+        return uri
+
     def promote_conversation(
         self,
         conversation_id: str,
@@ -1080,6 +1138,19 @@ class ResearchOrchestrator:
                 conversation_run.model_copy(update={'investigation_id': investigation_id}),
                 expected_version=conversation_run.version,
             )
+        packet_uri = self._emit_conversation_context_packet(
+            run=run,
+            conversation_id=conversation_id,
+            objective=resolved_objective,
+            pinned_source_ids=seed_source_ids,
+        )
+        current = self.store.get_run(run.run_id)
+        self.store.replace_run(
+            current.model_copy(
+                update={'context_references': [packet_uri]}
+            ),
+            expected_version=current.version,
+        )
         self._event(
             conversation_id,
             source='orchestrator',

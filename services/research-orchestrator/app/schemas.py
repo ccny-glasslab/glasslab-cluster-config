@@ -529,6 +529,9 @@ class RunRecord(BaseModel):
     # pin retrieval for every turn of the run.
     seed_context: str | None = None
     seed_source_ids: list[str] | None = None
+    # Durable context packet URIs (e.g. the promoted conversation's context
+    # packet) that later stages can reference without re-deriving context.
+    context_references: list[str] = Field(default_factory=list)
     # Inert research-chat conversations never hold the single-active-run
     # slot; the store excludes them from the active-run predicate.
     conversation: bool = False
@@ -924,6 +927,7 @@ class RunCreateRequest(BaseModel):
     )
     seed_context: str | None = None
     seed_source_ids: list[str] | None = None
+    context_references: list[str] | None = None
     existing_discord_thread_id: str | None = None
     investigation_id: str | None = None
 
