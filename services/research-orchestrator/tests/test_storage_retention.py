@@ -316,3 +316,98 @@ def test_run_cleanup_apply_skips_run_removed_mid_scan(tmp_path) -> None:
     )
 
     assert runtime_file.is_file()
+
+
+def test_plan_cleanup_conversation_run_becomes_eligible_after_conversation_retention_days(
+    tmp_path,
+) -> None:
+    # Conversation runs (conversation=True) are inert and never reach a terminal state.
+    # They become eligible for cleanup after conversation_run_retention_days based on
+    # their created_at timestamp (the authoritative "conversation-end" timestamp for
+    # inert conversations). The re-fetch guard re-checks both eligibility branches.
+    now = utc_now()
+    recent_conversation = _run_record(
+        'conv-recent',
+        state=RunState.CREATED,
+        updated_at=now - timedelta(days=1),
+    )
+    recent_conversation = recent_conversation.model_copy(update={'conversation': True})
+    expired_conversation = _run_record(
+        'conv-expired',
+        state=RunState.PAUSED,
+        updated_at=now - timedelta(days=100),
+    )
+    expired_conversation = expired_conversation.model_copy(update={'conversation': True})
+    terminal_expired = _run_record(
+        'term-expired',
+        state=RunState.COMPLETE,
+        updated_at=now - timedelta(days=30),
+    )
+    for run_id in ('conv-recent', 'conv-expired', 'term-expired'):
+        _write(tmp_path / run_id / 'runtime' / 'cache.bin', 10)
+
+    # With conversation_run_retention_days=30, only conv-expired should be eligible
+    plans = plan_cleanup(
+        store=_FakeStore([recent_conversation, expired_conversation, terminal_expired]),
+        workspace_root=tmp_path,
+        retention_days=14,
+        conversation_retention_days=30,
+        now=now,
+    )
+
+    # conv-expired should be included (conversation + 100 days old)
+    # term-expired should be included (terminal + 30 days old, past 14-day terminal threshold)
+    # conv-recent should be excluded (conversation + only 1 day old)
+    assert set(plan.run_id for plan in plans) == {'conv-expired', 'term-expired'}
+
+
+def test_run_cleanup_apply_conversation_run_guard_rechecks_both_branches(tmp_path) -> None:
+    # Regression guard: the re-fetch-before-delete must check BOTH terminal AND
+    # conversation eligibility branches. A conversation run that entered eligible
+    # state mid-scan must survive.
+    now = utc_now()
+    eligible_conversation = _run_record(
+        'conv-1',
+        state=RunState.PAUSED,
+        updated_at=now - timedelta(days=60),
+    )
+    eligible_conversation = eligible_conversation.model_copy(update={'conversation': True})
+    runtime_file = tmp_path / 'conv-1' / 'runtime' / 'beaker' / 'cache.bin'
+    _write(runtime_file, 100)
+
+    # Simulate a conversation run that "resumed" (state changed) between plan_cleanup
+    # and run_cleanup. The stored run is no longer PAUSED but the storage cleanup
+    # must skip it if it's no longer eligible.
+    store = _FakeStore([eligible_conversation])
+
+    # Make get_run return a run that left eligible state (state changed to something
+    # non-terminal and less than conversation_retention_days old)
+    resumed_conversation = eligible_conversation.model_copy(
+        update={'state': RunState.BEAKER_IMPLEMENTING, 'updated_at': now - timedelta(days=1)}
+    )
+    store.get_run = lambda run_id: resumed_conversation  # type: ignore[method-assign]
+
+    # With a short retention window, the conversation would no longer be eligible
+    # (updated_at is only 1 day ago, and conversation eligibility uses created_at
+    # which would also need to be old enough)
+    plans = plan_cleanup(
+        store=store,
+        workspace_root=tmp_path,
+        retention_days=14,
+        conversation_retention_days=30,
+        now=now,
+    )
+    assert len(plans) == 1, 'planning still reports it as eligible (based on created_at)'
+
+    report = run_cleanup(
+        store=store,
+        workspace_root=tmp_path,
+        retention_days=14,
+        conversation_retention_days=30,
+        dry_run=False,
+        now=now,
+    )
+
+    # The re-fetch guard should catch that the run is no longer eligible
+    # (updated_at is now only 1 day ago for a non-terminal run)
+    assert runtime_file.is_file(), 'the guard must have refused the deletion'

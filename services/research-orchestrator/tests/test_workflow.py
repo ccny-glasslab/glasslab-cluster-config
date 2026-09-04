@@ -32,6 +32,7 @@ from app.schemas import (
     ActionRecord,
     ApprovalStatus,
     ArtifactRecord,
+    Claim,
     ExperimentMatrix,
     IngestedDatasetRecord,
     JobStatus,
@@ -2254,3 +2255,93 @@ def test_installed_contract_proposal_binds_directly(orchestrator_bundle) -> None
         event.event_type == 'contract.bound_existing'
         for event in store.list_events(run.run_id)
     )
+
+
+# ============================================================================
+# Evidence URI resolution tests (issue #349 - claim evidence validation)
+# ============================================================================
+
+
+def test_verification_fails_with_fabricated_artifact_uri(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    """Verification turn citing fabricated artifact:// URIs should fail."""
+    from app.evidence_resolver import EvidenceURIResolver
+    from app.schemas import Claim
+
+    _, store, _, _, _ = orchestrator_bundle
+    resolver = EvidenceURIResolver(store)
+
+    # Test that a fabricated artifact URI is not resolved
+    claim = Claim(
+        text='The experiment succeeded.',
+        evidence=['artifact://nonexistent-run/artifacts/fake.txt'],
+    )
+    unresolved = []
+    for uri in claim.evidence:
+        result = resolver.resolve(uri)
+        if not result.resolved:
+            unresolved.append(result)
+
+    assert len(unresolved) == 1
+    assert 'not found' in unresolved[0].error.lower()
+
+
+def test_verification_marks_partial_with_truncated_evidence(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    """Verification with truncated evidence should mark as partial and log event."""
+    from app.schemas import ArtifactRecord, Claim
+    from hashlib import sha256
+    from pathlib import Path
+    from app.evidence_resolver import EvidenceURIResolver
+
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Test verification with truncated evidence.')
+    )
+
+    # Create actual artifacts that can be truncated
+    large_content = b'log line\n' * 1000
+    log_path = Path(engine.settings.shared_mount_root) / 'artifacts/job-1/runner.log'
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_bytes(large_content)
+    store.save_artifact(
+        ArtifactRecord(
+            run_id=run.run_id,
+            type='runner_log',
+            uri='artifacts/job-1/runner.log',
+            sha256=sha256(large_content).hexdigest(),
+        )
+    )
+
+    resolver = EvidenceURIResolver(store)
+
+    # Test that the artifact URI resolves
+    claim = Claim(
+        text='The log shows an error.',
+        evidence=[f'artifact://{run.run_id}/artifacts/artifacts/job-1/runner.log'],
+    )
+    unresolved = []
+    for uri in claim.evidence:
+        result = resolver.resolve(uri)
+        if not result.resolved:
+            unresolved.append(result)
+
+    # The artifact URI should resolve (we created it)
+    assert len(unresolved) == 0
+    assert result.resolved is True
+    assert result.resolved_to == 'artifact'
+
+    # Now test that a truncated claim still validates
+    claim_with_uri = Claim(
+        text='The log file has truncated content.',
+        evidence=[f'artifact://{run.run_id}/artifacts/artifacts/job-1/runner.log'],
+    )
+    unresolved = []
+    for uri in claim_with_uri.evidence:
+        result = resolver.resolve(uri)
+        if not result.resolved:
+            unresolved.append(result)

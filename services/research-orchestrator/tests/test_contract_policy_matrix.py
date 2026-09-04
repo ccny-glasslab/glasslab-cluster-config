@@ -45,7 +45,7 @@ def _matrix() -> ExperimentMatrix:
                 {'name': 'a', 'overrides': {'learning_rate': 0.1}},
                 {'name': 'b', 'overrides': {'learning_rate': 0.2}},
             ],
-            'seeds': [17, 31],
+            'seeds': [17, 31, 49],
             'maximum_parallel_jobs': 2,
             'runner_image': RUNNER_IMAGE,
             'resources': {
@@ -202,10 +202,12 @@ def test_experiment_matrix_expansion_is_deterministic(orchestrator_bundle) -> No
     assert [(item.variant_name, item.seed) for item in first] == [
         ('a', 17),
         ('a', 31),
+        ('a', 49),
         ('b', 17),
         ('b', 31),
+        ('b', 49),
     ]
-    assert len({item.idempotency_key for item in first}) == 4
+    assert len({item.idempotency_key for item in first}) == 6
 
     oversized = _matrix().model_copy(
         update={
@@ -582,3 +584,131 @@ def test_methodology_revision_limit_pauses_for_human_resolution(
         event.event_type == 'methodology.human_resolution_requested'
         for event in store.list_events(run.run_id)
     )
+
+
+def test_comparison_contract_rejects_single_seed(orchestrator_bundle) -> None:
+    """Comparison mode contract with 1 seed must fail preflight."""
+    _, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        request=RunCreateRequest(
+            objective='Reject comparison contract with insufficient seeds.'
+        )
+    )
+    workspace = Path(run.beaker_workspace)
+    config = workspace / 'configs' / 'candidate.yaml'
+    config.write_text(
+        'experiment_dimensions:\n'
+        '  model: [logistic_regression, random_forest]\n'
+    )
+    source = workspace / 'benchmark-workspace' / 'adult-income'
+    source.mkdir(parents=True)
+    (source / 'run.py').write_text(
+        'import json\n'
+        'metrics = {\n'
+        '    "accuracy": 0.9, "balanced_accuracy": 0.8,\n'
+        '    "precision": 0.8, "recall": 0.8, "f1": 0.8,\n'
+        '    "roc_auc": 0.9, "headline_ci_low": 0.85,\n'
+        '    "headline_ci_high": 0.95, "bootstrap_resamples": 1000,\n'
+        '    "test_rows": 16281,\n'
+        '}\n'
+        'payload = {**metrics, "models": {}}\n'
+        'with open("metrics.json", "w") as handle:\n'
+        '    json.dump(payload, handle)\n'
+        'open("report.md", "w").write("report")\n'
+        'open("tables/metrics.csv", "w").write("metrics")\n'
+        'open("tables/fairness.csv", "w").write("fairness")\n'
+    )
+    run = run.model_copy(
+        update={
+            'task_definition': {
+                'source_subdirectory': 'benchmark-workspace/adult-income',
+            }
+        }
+    )
+    contract = engine.contracts.resolve(
+        'ml-benchmark-adult-income-v1',
+        '1.1.0',
+    )
+    matrix = ExperimentMatrix.model_validate(
+        {
+            'base_config': 'configs/candidate.yaml',
+            'variants': [
+                {'name': 'a', 'overrides': {'learning_rate': 0.1}},
+            ],
+            'seeds': [17],
+            'maximum_parallel_jobs': 1,
+            'runner_image': RUNNER_IMAGE,
+            'resources': {
+                'cpu': 1,
+                'memory_gib': 1,
+                'gpus': 0,
+                'wallclock_minutes': 5,
+            },
+            'required_artifacts': ['metrics.json'],
+        }
+    )
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert not report.passed
+    assert any(
+        'comparison contract requires at least 3 matrix seeds' in error
+        for error in report.errors
+    )
+
+
+def test_non_comparison_contract_accepts_single_seed(orchestrator_bundle) -> None:
+    """Non-comparison mode contract with 1 seed must pass preflight."""
+    _, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        request=RunCreateRequest(
+            objective='Accept non-comparison contract with single seed.'
+        )
+    )
+    workspace = Path(run.beaker_workspace)
+    config = workspace / 'configs' / 'candidate.yaml'
+    config.write_text('seeds: [17]\n')
+    source = workspace / 'benchmark-workspace' / 'adult-income'
+    source.mkdir(parents=True)
+    (source / 'run.py').write_text(
+        'import json\n'
+        'metrics = {\n'
+        '    "accuracy": 0.9, "balanced_accuracy": 0.8,\n'
+        '    "precision": 0.8, "recall": 0.8, "f1": 0.8,\n'
+        '    "roc_auc": 0.9, "headline_ci_low": 0.85,\n'
+        '    "headline_ci_high": 0.95, "bootstrap_resamples": 1000,\n'
+        '    "test_rows": 16281,\n'
+        '}\n'
+        'payload = {**metrics, "models": {}}\n'
+        'with open("metrics.json", "w") as handle:\n'
+        '    json.dump(payload, handle)\n'
+        'open("report.md", "w").write("report")\n'
+    )
+    run = run.model_copy(
+        update={
+            'task_definition': {
+                'source_subdirectory': 'benchmark-workspace/adult-income',
+            }
+        }
+    )
+    contract = engine.contracts.resolve('example-research-v1', '1.0.0')
+    matrix = ExperimentMatrix.model_validate(
+        {
+            'base_config': 'configs/candidate.yaml',
+            'variants': [
+                {'name': 'a', 'overrides': {'learning_rate': 0.1}},
+            ],
+            'seeds': [17],
+            'maximum_parallel_jobs': 1,
+            'runner_image': RUNNER_IMAGE,
+            'resources': {
+                'cpu': 1,
+                'memory_gib': 1,
+                'gpus': 0,
+                'wallclock_minutes': 5,
+            },
+            'required_artifacts': ['metrics.json'],
+        }
+    )
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert report.passed

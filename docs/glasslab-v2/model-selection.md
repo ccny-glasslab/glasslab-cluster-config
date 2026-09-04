@@ -1,5 +1,7 @@
 # Model Selection on the exo Pair
 
+Last verified: 2026-09-02
+
 How to choose models for the 2x64 GB exo pair (192.168.1.17:52415) and what the
 tradeoffs are. Written for agents and operators deciding Honeydew/Beaker model
 configuration (issues #319, #321).

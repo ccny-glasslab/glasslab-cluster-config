@@ -885,7 +885,19 @@ class KnowledgeManager:
 
     @staticmethod
     def _lexical_score(text: str, query: str) -> int:
-        terms = set(query.lower().split())
+        from .knowledge_search import STOPWORDS, search_terms
+        tokens = query.split()
+        # Filter tokens: must have len > 2, alphanumeric, and not be a stopword
+        filtered = [
+            token for token in tokens
+            if len(token) > 2
+            and any(c.isalnum() for c in token.lower())
+            and token.lower() not in STOPWORDS
+        ]
+        # If no tokens passed the filter, score is 0
+        if not filtered:
+            return 0
+        terms = {t.lower() for t in filtered}
         lowered = text.lower()
         return sum(1 for term in terms if term in lowered)
 

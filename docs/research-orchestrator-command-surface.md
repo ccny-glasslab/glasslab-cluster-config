@@ -1,5 +1,10 @@
 # Research Orchestrator Command Surface
 
+> **STALE** — this document's runtime claims are falsified by the live
+> orchestrator configmap, which selects `opencode` (verified 2026-09-02).
+> Hermes is an opt-in rollback backend, not the active runtime. See
+> `AGENTS.md` and `HANDOFF.md` for current state.
+
 Last verified: 2026-08-06
 
 This is the concise operator and contributor reference for the Honeydew/Beaker
