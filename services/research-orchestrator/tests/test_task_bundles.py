@@ -339,3 +339,75 @@ def test_preflight_includes_actionable_feedback_when_not_ready(tmp_path: Path) -
     assert not preflight.ready
     assert '## Evaluation rubric' in preflight.feedback
     assert 'No run was started' in preflight.feedback
+
+
+def _flaky_asset_transport(*, fail_times: int, body: bytes):
+    """MockTransport that raises transient read timeouts then serves the body."""
+    import httpx
+
+    state = {'calls': 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        state['calls'] += 1
+        if state['calls'] <= fail_times:
+            raise httpx.ReadTimeout('read timed out', request=request)
+        return httpx.Response(200, content=body, request=request)
+
+    transport = httpx.MockTransport(handler)
+    return transport, state
+
+
+def test_task_asset_fetch_retries_transient_timeout_then_succeeds(
+    tmp_path: Path,
+) -> None:
+    import httpx
+
+    from app.task_bundles import TaskAssetFetcher
+
+    transport, state = _flaky_asset_transport(
+        fail_times=2, body=b'feature,label\n1,0\n'
+    )
+    fetcher = TaskAssetFetcher(
+        root=str(tmp_path / 'assets'),
+        shared_mount_root=str(tmp_path),
+        maximum_bytes=1024 * 1024,
+        transport=transport,
+        max_retries=2,
+    )
+    asset = fetcher.fetch(
+        task_digest='a' * 64,
+        proposal=TaskAssetProposal(
+            name='training_data',
+            role='train',
+            source_url='https://example.com/data.csv',
+        ),
+    )
+    assert state['calls'] == 3
+    assert asset.name == 'training_data'
+    assert asset.uri.startswith('s3://artifacts/')
+    assert len(asset.sha256) == 64
+
+
+def test_task_asset_fetch_exhausts_retries_with_guidance(tmp_path: Path) -> None:
+    import httpx
+
+    from app.task_bundles import TaskAssetFetcher
+
+    transport, state = _flaky_asset_transport(fail_times=10, body=b'x')
+    fetcher = TaskAssetFetcher(
+        root=str(tmp_path / 'assets'),
+        shared_mount_root=str(tmp_path),
+        maximum_bytes=1024 * 1024,
+        transport=transport,
+        max_retries=2,
+    )
+    with pytest.raises(TaskBundleError, match='dataset-upload'):
+        fetcher.fetch(
+            task_digest='a' * 64,
+            proposal=TaskAssetProposal(
+                name='training_data',
+                role='train',
+                source_url='https://example.com/data.csv',
+            ),
+        )
+    assert state['calls'] == 3  # initial + 2 retries

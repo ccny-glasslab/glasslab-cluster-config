@@ -170,10 +170,21 @@ class TaskAssetFetcher:
         root: str,
         shared_mount_root: str,
         maximum_bytes: int,
+        timeout_seconds: float = 300.0,
+        connect_timeout_seconds: float = 15.0,
+        max_retries: int = 2,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.root = Path(root).resolve()
         self.shared_mount_root = Path(shared_mount_root).resolve()
         self.maximum_bytes = maximum_bytes
+        # Large public datasets (e.g. cifar100, ~160 MB at ~100 KB/s from the
+        # canonical host) can take many minutes; the per-read timeout must be
+        # generous and the fetch must retry transient stalls.
+        self.timeout_seconds = timeout_seconds
+        self.connect_timeout_seconds = connect_timeout_seconds
+        self.max_retries = max_retries
+        self.transport = transport
 
     @staticmethod
     def _validate_url(url: str) -> None:
@@ -233,49 +244,70 @@ class TaskAssetFetcher:
         staging.mkdir(parents=True, exist_ok=False)
         asset_path = staging / 'asset'
         current_url = proposal.source_url
-        try:
-            with httpx.Client(follow_redirects=False, timeout=60) as client:
-                for _ in range(6):
-                    # Follow redirects manually so every hop is re-validated
-                    # against the same public-HTTPS + global-address rules;
-                    # automatic redirects would bypass the allowlist.
-                    self._validate_url(current_url)
-                    with client.stream('GET', current_url) as response:
-                        if response.status_code in {301, 302, 303, 307, 308}:
-                            location = response.headers.get('location')
-                            if not location:
-                                raise TaskBundleError(
-                                    'task asset redirect has no location'
-                                )
-                            current_url = urljoin(current_url, location)
-                            continue
-                        response.raise_for_status()
-                        size = 0
-                        digest = sha256()
-                        with asset_path.open('wb') as output:
-                            for chunk in response.iter_bytes():
-                                size += len(chunk)
-                                if size > self.maximum_bytes:
+        last_error: str | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                with httpx.Client(
+                    follow_redirects=False,
+                    timeout=httpx.Timeout(
+                        self.timeout_seconds,
+                        connect=self.connect_timeout_seconds,
+                    ),
+                    transport=self.transport,
+                ) as client:
+                    for _ in range(6):
+                        # Follow redirects manually so every hop is re-validated
+                        # against the same public-HTTPS + global-address rules;
+                        # automatic redirects would bypass the allowlist.
+                        self._validate_url(current_url)
+                        with client.stream('GET', current_url) as response:
+                            if response.status_code in {301, 302, 303, 307, 308}:
+                                location = response.headers.get('location')
+                                if not location:
                                     raise TaskBundleError(
-                                        f'task asset exceeds {self.maximum_bytes} bytes'
+                                        'task asset redirect has no location'
                                     )
-                                digest.update(chunk)
-                                output.write(chunk)
-                        if size == 0:
-                            raise TaskBundleError(
-                                f'task asset is empty: {proposal.name}'
-                            )
-                        break
-                else:
-                    raise TaskBundleError('task asset redirected too many times')
-        except httpx.HTTPError as exc:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise TaskBundleError(
-                f'task asset download failed for {proposal.name}: {exc}'
-            ) from exc
-        except Exception:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
+                                current_url = urljoin(current_url, location)
+                                continue
+                            response.raise_for_status()
+                            size = 0
+                            digest = sha256()
+                            with asset_path.open('wb') as output:
+                                for chunk in response.iter_bytes():
+                                    size += len(chunk)
+                                    if size > self.maximum_bytes:
+                                        raise TaskBundleError(
+                                            f'task asset exceeds {self.maximum_bytes} bytes'
+                                        )
+                                    digest.update(chunk)
+                                    output.write(chunk)
+                            if size == 0:
+                                raise TaskBundleError(
+                                    f'task asset is empty: {proposal.name}'
+                                )
+                            break
+                    else:
+                        raise TaskBundleError('task asset redirected too many times')
+            except httpx.TransportError as exc:
+                if attempt >= self.max_retries:
+                    raise TaskBundleError(
+                        f'task asset download failed for {proposal.name}: {exc}. '
+                        'Retry the import, or upload the dataset via '
+                        '/dataset-upload and reference its '
+                        'glasslab-dataset://<sha256> URI in the task bundle.'
+                    ) from exc
+                last_error = str(exc)
+                shutil.rmtree(staging, ignore_errors=True)
+                staging = self.root / '.staging' / uuid4().hex
+                staging.mkdir(parents=True, exist_ok=False)
+                asset_path = staging / 'asset'
+                current_url = proposal.source_url
+                continue
+            except httpx.HTTPError as exc:
+                raise TaskBundleError(
+                    f'task asset download failed for {proposal.name}: {exc}'
+                ) from exc
+            break
         actual_digest = digest.hexdigest()
         if (
             proposal.expected_sha256
@@ -329,6 +361,9 @@ class TaskBundleManager:
         dataset_catalog_path: str,
         task_asset_root: str | None = None,
         maximum_asset_bytes: int = 2 * 1024 * 1024 * 1024,
+        asset_download_timeout_seconds: float = 300.0,
+        asset_download_connect_timeout_seconds: float = 15.0,
+        asset_download_max_retries: int = 2,
         ingested_datasets=None,
     ) -> None:
         self.root = Path(root).resolve()
@@ -339,6 +374,9 @@ class TaskBundleManager:
             root=task_asset_root or str(self.root.parent / 'task-assets'),
             shared_mount_root=shared_mount_root,
             maximum_bytes=maximum_asset_bytes,
+            timeout_seconds=asset_download_timeout_seconds,
+            connect_timeout_seconds=asset_download_connect_timeout_seconds,
+            max_retries=asset_download_max_retries,
         )
         self.ingested_datasets = ingested_datasets
 

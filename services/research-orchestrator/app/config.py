@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     task_bundle_root: str = '/tmp/glasslab-research-orchestrator/task-bundles'
     task_asset_root: str = '/tmp/glasslab-research-orchestrator/task-assets'
     maximum_task_asset_bytes: int = 2 * 1024 * 1024 * 1024
+    task_asset_download_timeout_seconds: float = 300.0
+    task_asset_download_connect_timeout_seconds: float = 15.0
+    task_asset_download_max_retries: int = 2
     dataset_upload_root: str = (
         '/tmp/glasslab-research-orchestrator/dataset-uploads'
     )
