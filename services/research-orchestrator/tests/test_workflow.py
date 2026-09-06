@@ -2855,3 +2855,29 @@ def test_corpus_verification_verdict_surfaced_in_report(
     assert 'CORPUS VERIFICATION VERDICT' in report_prompt
     assert 'consistent' in report_prompt.lower()
     assert 'knowledge://' in report_prompt.lower()
+
+
+def test_honeydew_protocol_draft_routes_to_structured_model(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, runtime, engine = orchestrator_bundle
+    settings = settings.model_copy(
+        update={
+            'honeydew_structured_agent_model': 'mlx-community/Coder-Next-4bit',
+            'honeydew_structured_agent_base_url': 'http://192.168.1.17:52416/v1',
+            'honeydew_reasoning_agent_model': 'mlx-community/Thinking-4bit',
+            'honeydew_reasoning_agent_base_url': 'http://192.168.1.18:52416/v1',
+        }
+    )
+    engine.settings = settings
+    run = engine.create_run(
+        RunCreateRequest(objective='Compare two bounded methods.')
+    )
+    # The protocol-draft turn must run on the structured model endpoint.
+    assert (AgentName.HONEYDEW, 'mlx-community/Coder-Next-4bit') in (
+        runtime.model_overrides
+    )
+    assert (AgentName.HONEYDEW, 'http://192.168.1.17:52416/v1') in (
+        runtime.base_url_overrides
+    )
+    assert run.run_id

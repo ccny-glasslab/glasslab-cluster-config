@@ -15,7 +15,7 @@ from typing import Annotated, Literal
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from .schemas import AgentName
+from .schemas import AgentName, TurnKind
 
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
@@ -150,6 +150,15 @@ class Settings(BaseSettings):
     # default to the shared coding model unless explicitly overridden.
     task_compiler_agent_model: str | None = None
     task_compiler_agent_base_url: str | None = None
+    # Honeydew's long-context structured turns (protocol draft, contract
+    # review, report writing) carry the task spec + retrieval context and can
+    # exhaust a reasoning model's KV cache on a 64GB Mac. They run on the
+    # structured-output model; only bounded reasoning turns (verification)
+    # use the reasoning model.
+    honeydew_structured_agent_model: str | None = None
+    honeydew_structured_agent_base_url: str | None = None
+    honeydew_reasoning_agent_model: str | None = None
+    honeydew_reasoning_agent_base_url: str | None = None
     # Per-agent endpoint overrides (#319 successor): when set, the agent's
     # turns run against its own OpenAI-compatible server; otherwise both
     # agents share qwen_base_url. Used to split models across machines
@@ -252,6 +261,35 @@ class Settings(BaseSettings):
 
     def task_compiler_base_url(self) -> str:
         return self.task_compiler_agent_base_url or self.qwen_base_url
+
+    def honeydew_structured_model(self) -> str:
+        return self.honeydew_structured_agent_model or self.effective_agent_model_name
+
+    def honeydew_structured_base_url(self) -> str:
+        return self.honeydew_structured_agent_base_url or self.qwen_base_url
+
+    def honeydew_reasoning_model(self) -> str:
+        return self.honeydew_reasoning_agent_model or self.agent_model_for(
+            AgentName.HONEYDEW
+        )
+
+    def honeydew_reasoning_base_url(self) -> str:
+        return self.honeydew_reasoning_agent_base_url or self.base_url_for(
+            AgentName.HONEYDEW
+        )
+
+    def honeydew_model_for(self, turn_kind: TurnKind) -> tuple[str, str]:
+        if turn_kind in {
+            TurnKind.VERIFICATION,
+        }:
+            return (
+                self.honeydew_reasoning_model(),
+                self.honeydew_reasoning_base_url(),
+            )
+        return (
+            self.honeydew_structured_model(),
+            self.honeydew_structured_base_url(),
+        )
 
     @field_validator('evidence_snapshot_max_bytes')
     @classmethod

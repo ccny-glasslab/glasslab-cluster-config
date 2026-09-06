@@ -1002,6 +1002,8 @@ class ResearchOrchestrator:
             agent=AgentName.HONEYDEW,
             workspace=workspace,
             session_id=session.session_id,
+            model_override=self.settings.honeydew_structured_model(),
+            base_url_override=self.settings.honeydew_structured_base_url(),
             prompt=prompt,
         )
         if result.kind != TurnKind.RESEARCH_ANSWER or result.research_answer is None:
@@ -1353,6 +1355,13 @@ class ResearchOrchestrator:
         input_event: dict[str, Any],
         retrieval_query: str | None = None,
     ) -> tuple[TurnRecord, AgentTurnResult]:
+        if agent == AgentName.HONEYDEW:
+            model_override, base_url_override = (
+                self.settings.honeydew_model_for(expected_kind)
+            )
+        else:
+            model_override = None
+            base_url_override = None
         run = self.store.get_run(run_id)
         self._check_turn_budget(run)
         workspace = Path(
@@ -1379,6 +1388,8 @@ class ResearchOrchestrator:
             agent=agent,
             workspace=workspace,
             existing_session_id=existing_session,
+            model_override=model_override,
+            base_url_override=base_url_override,
         )
         run = self.store.get_run(run_id)
         # Persist the live session and turn number before the model does any
@@ -1515,6 +1526,8 @@ class ResearchOrchestrator:
                 workspace=workspace,
                 session_id=session.session_id,
                 prompt=prompt,
+                model_override=model_override,
+                base_url_override=base_url_override,
             )
             if result.kind != expected_kind:
                 returned_kind = result.kind
@@ -1534,6 +1547,8 @@ class ResearchOrchestrator:
                     agent=agent,
                     workspace=workspace,
                     session_id=session.session_id,
+                    model_override=model_override,
+                    base_url_override=base_url_override,
                     prompt=(
                         prompt
                         + '\n\nStructured kind correction. Your previous '

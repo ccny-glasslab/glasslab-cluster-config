@@ -17,7 +17,7 @@ import yaml
 from app.config import Settings
 from app.hermes_runtime import HermesProcessRuntime, _HermesHandle
 from app.opencode_runtime import OpenCodeProcessRuntime
-from app.schemas import AgentName
+from app.schemas import AgentName, TurnKind
 
 
 class FakeProcess:
@@ -346,3 +346,30 @@ def test_task_compiler_model_uses_override_when_set() -> None:
         task_compiler_agent_model='mlx-community/Coder-Next-4bit',
     )
     assert settings.task_compiler_model() == 'mlx-community/Coder-Next-4bit'
+
+
+def test_honeydew_model_for_verification_uses_reasoning_model() -> None:
+    settings = Settings(
+        honeydew_structured_agent_model='mlx-community/Coder-Next-4bit',
+        honeydew_reasoning_agent_model='mlx-community/Thinking-4bit',
+    )
+    model, _ = settings.honeydew_model_for(TurnKind.VERIFICATION)
+    assert model == 'mlx-community/Thinking-4bit'
+
+
+def test_honeydew_model_for_protocol_draft_uses_structured_model() -> None:
+    settings = Settings(
+        honeydew_structured_agent_model='mlx-community/Coder-Next-4bit',
+        honeydew_reasoning_agent_model='mlx-community/Thinking-4bit',
+    )
+    model, _ = settings.honeydew_model_for(TurnKind.PROTOCOL_DRAFT)
+    assert model == 'mlx-community/Coder-Next-4bit'
+
+
+def test_honeydew_structured_base_url_override() -> None:
+    settings = Settings(
+        honeydew_structured_agent_base_url='http://192.168.1.17:52416/v1',
+    )
+    assert settings.honeydew_structured_base_url() == (
+        'http://192.168.1.17:52416/v1'
+    )
