@@ -654,3 +654,51 @@ def test_catalog_dataset_round_trip_and_name_lookup(store) -> None:
     )
     assert store.get_catalog_dataset_by_name('missing') is None
     assert [r.name for r in store.list_catalog_datasets()] == ['titanic_train']
+
+
+def test_stale_paused_run_does_not_hold_active_slot(store) -> None:
+    from datetime import timedelta
+
+    stale = datetime.now(UTC) - timedelta(days=7)
+    store.create_run(
+        _run('run-paused-stale').model_copy(
+            update={'state': RunState.PAUSED, 'updated_at': stale}
+        ),
+        one_active_run=False,
+    )
+    created = store.create_run(
+        _run('run-new'),
+        one_active_run=True,
+        stale_paused_cutoff=datetime.now(UTC) - timedelta(days=3),
+    )
+    assert created.run_id == 'run-new'
+    cancelled = store.get_run('run-paused-stale')
+    assert cancelled.state is RunState.CANCELLED
+    events = store.list_events('run-paused-stale')
+    assert any(
+        event.event_type == 'run.stale_paused_cancelled' for event in events
+    )
+
+
+def test_fresh_paused_run_still_holds_active_slot(store) -> None:
+    from datetime import timedelta
+
+    fresh = datetime.now(UTC) - timedelta(hours=1)
+    store.create_run(
+        _run('run-paused-fresh').model_copy(
+            update={'state': RunState.PAUSED, 'updated_at': fresh}
+        ),
+        one_active_run=False,
+    )
+    with pytest.raises(ConcurrencyConflict):
+        store.create_run(
+            _run('run-blocked'),
+            one_active_run=True,
+            stale_paused_cutoff=datetime.now(UTC) - timedelta(days=3),
+        )
+
+
+def test_active_run_without_cutoff_still_conflicts(store) -> None:
+    store.create_run(_run('run-active-nc'), one_active_run=False)
+    with pytest.raises(ConcurrencyConflict):
+        store.create_run(_run('run-blocked-nc'), one_active_run=True)

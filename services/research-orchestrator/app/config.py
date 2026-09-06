@@ -206,6 +206,10 @@ class Settings(BaseSettings):
     maximum_gpus: int = 1
     maximum_parallel_jobs: int = 4
     one_active_run: bool = True
+    # A run left PAUSED beyond this window is treated as abandoned: it no
+    # longer holds the single-active-run slot and is auto-cancelled with a
+    # durable event the next time a new run is created.
+    paused_run_staleness_days: int = 3
     job_poll_interval_seconds: float = 10.0
     require_operator_auth: bool = False
     operator_api_token: str | None = None

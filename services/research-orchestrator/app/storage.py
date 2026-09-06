@@ -482,7 +482,13 @@ class SqliteStore:
                 payload=payload or {},
             )
 
-    def create_run(self, record: RunRecord, *, one_active_run: bool) -> RunRecord:
+    def create_run(
+        self,
+        record: RunRecord,
+        *,
+        one_active_run: bool,
+        stale_paused_cutoff: datetime | None = None,
+    ) -> RunRecord:
         terminal = tuple(state.value for state in TERMINAL_STATES)
         placeholders = ','.join('?' for _ in terminal)
         with self.transaction() as connection:
@@ -493,15 +499,61 @@ class SqliteStore:
             # paths that create runs through this store.
             if one_active_run:
                 active = connection.execute(
-                    f'SELECT run_id FROM runs WHERE state NOT IN ({placeholders})'
+                    f'SELECT run_id, payload, version FROM runs WHERE state NOT IN ({placeholders})'
                     ' AND conversation = 0'
                     ' AND investigation_id IS ? LIMIT 1',
                     (*terminal, record.investigation_id),
                 ).fetchone()
                 if active is not None:
-                    raise ConcurrencyConflict(
-                        f'active run already exists: {active["run_id"]}'
-                    )
+                    if (
+                        stale_paused_cutoff is not None
+                        and active['payload'] is not None
+                    ):
+                        current = RunRecord.model_validate_json(active['payload'])
+                        if (
+                            current.state is RunState.PAUSED
+                            and current.updated_at < stale_paused_cutoff
+                        ):
+                            now = utc_now()
+                            cancelled = current.model_copy(
+                                update={
+                                    'state': RunState.CANCELLED,
+                                    'version': int(active['version']) + 1,
+                                    'updated_at': now,
+                                }
+                            )
+                            connection.execute(
+                                'UPDATE runs SET state = ?, version = ?,'
+                                ' payload = ?, updated_at = ?'
+                                ' WHERE run_id = ?',
+                                (
+                                    cancelled.state.value,
+                                    cancelled.version,
+                                    _dump(cancelled),
+                                    cancelled.updated_at.isoformat(),
+                                    current.run_id,
+                                ),
+                            )
+                            self._append_event_conn(
+                                connection,
+                                run_id=current.run_id,
+                                source='orchestrator',
+                                event_type='run.stale_paused_cancelled',
+                                payload={
+                                    'reason': (
+                                        'abandoned paused run freed the '
+                                        'single-active-run slot'
+                                    ),
+                                },
+                            )
+                        else:
+                            raise ConcurrencyConflict(
+                                f'active run already exists: {active["run_id"]}'
+                            )
+                    else:
+                        raise ConcurrencyConflict(
+                            f'active run already exists: {active["run_id"]}'
+                        )
             connection.execute(
                 '''
                 INSERT INTO runs (
@@ -531,7 +583,7 @@ class SqliteStore:
 
     def create_terminal_retry(
         self, record: RunRecord, *, parent_run_id: str, retry_key: str,
-        checkpoint_digest: str, one_active_run: bool,
+        checkpoint_digest: str, one_active_run: bool, stale_paused_cutoff: datetime | None = None,
     ) -> tuple[RunRecord, bool]:
         """Atomically point the parent's retry slot at its newest child."""
         terminal = tuple(state.value for state in TERMINAL_STATES)
@@ -560,13 +612,61 @@ class SqliteStore:
                 raise ConcurrencyConflict('terminal retry source is not terminal')
             if one_active_run:
                 active = connection.execute(
-                    f'SELECT run_id FROM runs WHERE state NOT IN ({placeholders})'
+                    f'SELECT run_id, payload, version FROM runs WHERE state NOT IN ({placeholders})'
                     ' AND conversation = 0'
                     ' AND investigation_id IS ? LIMIT 1',
                     (*terminal, record.investigation_id),
                 ).fetchone()
                 if active is not None:
-                    raise ConcurrencyConflict(f'active run already exists: {active["run_id"]}')
+                    if (
+                        stale_paused_cutoff is not None
+                        and active['payload'] is not None
+                    ):
+                        current = RunRecord.model_validate_json(active['payload'])
+                        if (
+                            current.state is RunState.PAUSED
+                            and current.updated_at < stale_paused_cutoff
+                        ):
+                            now = utc_now()
+                            cancelled = current.model_copy(
+                                update={
+                                    'state': RunState.CANCELLED,
+                                    'version': int(active['version']) + 1,
+                                    'updated_at': now,
+                                }
+                            )
+                            connection.execute(
+                                'UPDATE runs SET state = ?, version = ?,'
+                                ' payload = ?, updated_at = ?'
+                                ' WHERE run_id = ?',
+                                (
+                                    cancelled.state.value,
+                                    cancelled.version,
+                                    _dump(cancelled),
+                                    cancelled.updated_at.isoformat(),
+                                    current.run_id,
+                                ),
+                            )
+                            self._append_event_conn(
+                                connection,
+                                run_id=current.run_id,
+                                source='orchestrator',
+                                event_type='run.stale_paused_cancelled',
+                                payload={
+                                    'reason': (
+                                        'abandoned paused run freed the '
+                                        'single-active-run slot'
+                                    ),
+                                },
+                            )
+                        else:
+                            raise ConcurrencyConflict(
+                                f'active run already exists: {active["run_id"]}'
+                            )
+                    else:
+                        raise ConcurrencyConflict(
+                            f'active run already exists: {active["run_id"]}'
+                        )
             connection.execute(
                 'INSERT INTO runs (run_id, state, version, payload, created_at, updated_at, conversation, investigation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                 (record.run_id, record.state.value, record.version, _dump(record), record.created_at.isoformat(), record.updated_at.isoformat(), int(record.conversation), record.investigation_id),

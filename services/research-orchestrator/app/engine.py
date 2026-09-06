@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -280,6 +281,13 @@ class ResearchOrchestrator:
         self._publish_latest(run_id)
         return run
 
+    def _stale_paused_cutoff(self) -> datetime | None:
+        if self.settings.paused_run_staleness_days <= 0:
+            return None
+        return utc_now() - timedelta(
+            days=self.settings.paused_run_staleness_days
+        )
+
     def create_run(self, request: RunCreateRequest) -> RunRecord:
         with self._advance_lock:
             task = (
@@ -370,6 +378,7 @@ class ResearchOrchestrator:
             self.store.create_run(
                 record,
                 one_active_run=self.settings.one_active_run,
+                stale_paused_cutoff=self._stale_paused_cutoff(),
             )
             if request.existing_discord_thread_id:
                 # A promoted research-chat thread IS the run's home: bind it
@@ -1937,7 +1946,7 @@ class ResearchOrchestrator:
             )
             child, created = self.store.create_terminal_retry(
                 child, parent_run_id=parent_run_id, retry_key=retry_key,
-                checkpoint_digest=checkpoint_digest, one_active_run=self.settings.one_active_run,
+                checkpoint_digest=checkpoint_digest, one_active_run=self.settings.one_active_run, stale_paused_cutoff=self._stale_paused_cutoff(),
             )
             if not created:
                 return child

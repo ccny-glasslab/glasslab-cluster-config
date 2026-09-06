@@ -248,18 +248,28 @@ class PostgresStore:
         with self.transaction() as conn:
             return self._append_event_conn(conn, run_id=run_id, source=source, event_type=event_type, payload=payload or {})
 
-    def create_run(self, record: RunRecord, *, one_active_run: bool) -> RunRecord:
+    def create_run(self, record: RunRecord, *, one_active_run: bool, stale_paused_cutoff: datetime | None = None) -> RunRecord:
         with self.transaction() as conn:
             if one_active_run:
                 states = [state.value for state in TERMINAL_STATES]
-                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE AND investigation_id IS NOT DISTINCT FROM %s LIMIT 1', (states, record.investigation_id)).fetchone()
+                active = conn.execute('SELECT run_id, payload, version FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE AND investigation_id IS NOT DISTINCT FROM %s LIMIT 1', (states, record.investigation_id)).fetchone()
                 if active:
-                    raise ConcurrencyConflict(f"active run already exists: {active['run_id']}")
+                    if stale_paused_cutoff is not None and active['payload'] is not None:
+                        current = RunRecord.model_validate_json(active['payload'])
+                        if current.state is RunState.PAUSED and current.updated_at < stale_paused_cutoff:
+                            now = utc_now()
+                            cancelled = current.model_copy(update={'state': RunState.CANCELLED, 'version': int(active['version']) + 1, 'updated_at': now})
+                            conn.execute('UPDATE orchestrator_runs SET state=%s, version=%s, payload=%s, updated_at=%s WHERE run_id=%s', (cancelled.state.value, cancelled.version, self._payload(cancelled), cancelled.updated_at, current.run_id))
+                            self._append_event_conn(conn, run_id=current.run_id, source='orchestrator', event_type='run.stale_paused_cancelled', payload={'reason': 'abandoned paused run freed the single-active-run slot'})
+                        else:
+                            raise ConcurrencyConflict(f"active run already exists: {active['run_id']}")
+                    else:
+                        raise ConcurrencyConflict(f"active run already exists: {active['run_id']}")
             conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at, conversation, investigation_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at, record.conversation, record.investigation_id))
             self._append_event_conn(conn, run_id=record.run_id, source='orchestrator', event_type='run.created', payload={'objective': record.objective, 'state': record.state.value})
         return record
 
-    def create_terminal_retry(self, record: RunRecord, *, parent_run_id: str, retry_key: str, checkpoint_digest: str, one_active_run: bool) -> tuple[RunRecord, bool]:
+    def create_terminal_retry(self, record: RunRecord, *, parent_run_id: str, retry_key: str, checkpoint_digest: str, one_active_run: bool, stale_paused_cutoff: datetime | None = None) -> tuple[RunRecord, bool]:
         terminal = {state.value for state in TERMINAL_STATES}
         with self.transaction() as conn:
             existing = conn.execute('SELECT r.child_run_id, r.retry_key, child.state AS child_state FROM orchestrator_terminal_run_retries r JOIN orchestrator_runs child ON child.run_id = r.child_run_id WHERE r.parent_run_id=%s FOR UPDATE OF r', (parent_run_id,)).fetchone()
@@ -271,8 +281,19 @@ class PostgresStore:
             if parent['state'] not in terminal:
                 raise ConcurrencyConflict('terminal retry source is not terminal')
             if one_active_run:
-                active = conn.execute('SELECT run_id FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE AND investigation_id IS NOT DISTINCT FROM %s LIMIT 1', ([state.value for state in TERMINAL_STATES], record.investigation_id)).fetchone()
-                if active: raise ConcurrencyConflict(f"active run already exists: {active['run_id']}")
+                active = conn.execute('SELECT run_id, payload, version FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE AND investigation_id IS NOT DISTINCT FROM %s LIMIT 1', ([state.value for state in TERMINAL_STATES], record.investigation_id)).fetchone()
+                if active:
+                    if stale_paused_cutoff is not None and active['payload'] is not None:
+                        current = RunRecord.model_validate_json(active['payload'])
+                        if current.state is RunState.PAUSED and current.updated_at < stale_paused_cutoff:
+                            now = utc_now()
+                            cancelled = current.model_copy(update={'state': RunState.CANCELLED, 'version': int(active['version']) + 1, 'updated_at': now})
+                            conn.execute('UPDATE orchestrator_runs SET state=%s, version=%s, payload=%s, updated_at=%s WHERE run_id=%s', (cancelled.state.value, cancelled.version, self._payload(cancelled), cancelled.updated_at, current.run_id))
+                            self._append_event_conn(conn, run_id=current.run_id, source='orchestrator', event_type='run.stale_paused_cancelled', payload={'reason': 'abandoned paused run freed the single-active-run slot'})
+                        else:
+                            raise ConcurrencyConflict(f"active run already exists: {active['run_id']}")
+                    else:
+                        raise ConcurrencyConflict(f"active run already exists: {active['run_id']}")
             conn.execute('INSERT INTO orchestrator_runs (run_id, state, version, payload, created_at, updated_at, conversation, investigation_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)', (record.run_id, record.state.value, record.version, self._payload(record), record.created_at, record.updated_at, record.conversation, record.investigation_id))
             if existing is None:
                 conn.execute('INSERT INTO orchestrator_terminal_run_retries (parent_run_id, child_run_id, retry_key, checkpoint_digest, created_at) VALUES (%s,%s,%s,%s,%s)', (parent_run_id, record.run_id, retry_key, checkpoint_digest, record.created_at))
