@@ -182,7 +182,7 @@ class HermesProcessRuntime(AgentRuntime):
             'model': {
                 'default': self.settings.agent_model_for(agent),
                 'provider': 'custom',
-                'base_url': self.settings.qwen_base_url,
+                'base_url': self.settings.base_url_for(agent),
                 'api_key': '',
             },
             'terminal': {

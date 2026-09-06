@@ -84,3 +84,44 @@ def test_agent_model_falls_back_to_shared_default(tmp_path: Path) -> None:
     )
     config = _read_opencode_config(workspace, AgentName.HONEYDEW)
     assert config['model'] == 'exo/mlx-community/Shared-Model-4bit'
+
+
+def test_opencode_runtime_config_uses_per_agent_base_url(tmp_path: Path) -> None:
+    settings = Settings(
+        agent_base_url_honeydew='http://192.168.1.18:52416/v1',
+        agent_base_url_beaker='http://192.168.1.17:52416/v1',
+    )
+    runtime = OpenCodeProcessRuntime(settings)
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    runtime._write_runtime_config(
+        run_id='run-1',
+        agent=AgentName.HONEYDEW,
+        workspace=workspace,
+    )
+    config = _read_opencode_config(workspace, AgentName.HONEYDEW)
+    provider = config['provider']['exo']
+    assert provider['options']['baseURL'] == 'http://192.168.1.18:52416/v1'
+    runtime._write_runtime_config(
+        run_id='run-2',
+        agent=AgentName.BEAKER,
+        workspace=workspace,
+    )
+    config = _read_opencode_config(workspace, AgentName.BEAKER)
+    provider = config['provider']['exo']
+    assert provider['options']['baseURL'] == 'http://192.168.1.17:52416/v1'
+
+
+def test_opencode_runtime_config_base_url_falls_back_to_shared(tmp_path: Path) -> None:
+    settings = Settings(qwen_base_url='http://192.168.1.17:52415/v1')
+    runtime = OpenCodeProcessRuntime(settings)
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    runtime._write_runtime_config(
+        run_id='run-1',
+        agent=AgentName.HONEYDEW,
+        workspace=workspace,
+    )
+    config = _read_opencode_config(workspace, AgentName.HONEYDEW)
+    provider = config['provider']['exo']
+    assert provider['options']['baseURL'] == 'http://192.168.1.17:52415/v1'

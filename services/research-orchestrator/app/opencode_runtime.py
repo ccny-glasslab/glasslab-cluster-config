@@ -430,7 +430,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
                 'exo': {
                     'npm': '@ai-sdk/openai-compatible',
                     'name': 'Glasslab Exo',
-                    'options': {'baseURL': self.settings.qwen_base_url},
+                    'options': {'baseURL': self.settings.base_url_for(agent)},
                     'models': {
                         model_name: {
                             'name': model_name,

@@ -225,3 +225,46 @@ def test_hermes_turn_payload_passes_per_agent_model(tmp_path: Path) -> None:
     )
 
     assert submitted_models == ['mlx-community/Qwen3.6-27B-4bit']
+
+def test_base_url_for_honeydew_uses_override() -> None:
+    settings = Settings(
+        agent_base_url_honeydew='http://192.168.1.18:52416/v1',
+        agent_base_url_beaker='http://192.168.1.17:52416/v1',
+    )
+    assert settings.base_url_for(AgentName.HONEYDEW) == (
+        'http://192.168.1.18:52416/v1'
+    )
+
+
+def test_base_url_for_beaker_uses_override() -> None:
+    settings = Settings(
+        agent_base_url_honeydew='http://192.168.1.18:52416/v1',
+        agent_base_url_beaker='http://192.168.1.17:52416/v1',
+    )
+    assert settings.base_url_for(AgentName.BEAKER) == (
+        'http://192.168.1.17:52416/v1'
+    )
+
+
+def test_base_url_falls_back_to_shared_qwen_base_url() -> None:
+    settings = Settings(qwen_base_url='http://192.168.1.17:52415/v1')
+    assert settings.base_url_for(AgentName.HONEYDEW) == (
+        'http://192.168.1.17:52415/v1'
+    )
+    assert settings.base_url_for(AgentName.BEAKER) == (
+        'http://192.168.1.17:52415/v1'
+    )
+
+
+def test_per_agent_base_url_override_wins_over_shared() -> None:
+    settings = Settings(
+        qwen_base_url='http://192.168.1.17:52415/v1',
+        agent_base_url_honeydew='http://192.168.1.18:52416/v1',
+        agent_base_url_beaker='http://192.168.1.17:52416/v1',
+    )
+    assert settings.base_url_for(AgentName.HONEYDEW) == (
+        'http://192.168.1.18:52416/v1'
+    )
+    assert settings.base_url_for(AgentName.BEAKER) == (
+        'http://192.168.1.17:52416/v1'
+    )

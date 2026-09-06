@@ -138,6 +138,12 @@ class Settings(BaseSettings):
     # effective_agent_model_name applies to both agents.
     agent_model_honeydew: str | None = None
     agent_model_beaker: str | None = None
+    # Per-agent endpoint overrides (#319 successor): when set, the agent's
+    # turns run against its own OpenAI-compatible server; otherwise both
+    # agents share qwen_base_url. Used to split models across machines
+    # (Honeydew -> Thinking on .18, Beaker -> Coder-Next on .17).
+    agent_base_url_honeydew: str | None = None
+    agent_base_url_beaker: str | None = None
     qwen_base_url: str = 'http://192.168.1.17:52415/v1'
     qwen_model_name: str = 'mlx-community/Qwen3-Coder-Next-4bit'
     opencode_runtime_image: str = (
@@ -216,6 +222,14 @@ class Settings(BaseSettings):
             else self.agent_model_beaker
         )
         return override or self.effective_agent_model_name
+
+    def base_url_for(self, agent: AgentName) -> str:
+        override = (
+            self.agent_base_url_honeydew
+            if agent is AgentName.HONEYDEW
+            else self.agent_base_url_beaker
+        )
+        return override or self.qwen_base_url
 
     @field_validator('evidence_snapshot_max_bytes')
     @classmethod
