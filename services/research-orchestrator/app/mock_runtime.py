@@ -40,6 +40,7 @@ class ScriptedMockRuntime(AgentRuntime):
         self.aborted: list[tuple[str, AgentName, str]] = []
         self.released: list[tuple[str, AgentName]] = []
         self.prompts: list[tuple[AgentName, str]] = []
+        self.model_overrides: list[tuple[AgentName, str]] = []
 
     def ensure_session(
         self,
@@ -70,9 +71,12 @@ class ScriptedMockRuntime(AgentRuntime):
         workspace: Path,
         session_id: str,
         prompt: str,
+        model_override: str | None = None,
     ) -> tuple[AgentTurnResult, str | None]:
         self.turn_counts[agent] += 1
         self.prompts.append((agent, prompt))
+        if model_override is not None:
+            self.model_overrides.append((agent, model_override))
         message_id = f'mock-message-{uuid4().hex[:12]}'
         if agent == AgentName.HONEYDEW and 'research question' in prompt:
             return (

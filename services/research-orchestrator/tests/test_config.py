@@ -284,3 +284,65 @@ def test_turn_timeouts_default_to_2400_for_thinking_overhead() -> None:
 def test_hermes_max_iterations_default_to_80_for_thinking() -> None:
     settings = Settings()
     assert settings.hermes_max_iterations == 80
+
+
+def test_hermes_turn_payload_uses_model_override(tmp_path: Path) -> None:
+    submitted_models: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == 'POST' and request.url.path == '/v1/runs':
+            submitted_models.append(json.loads(request.content)['model'])
+            return httpx.Response(200, json={'run_id': 'hermes-run-1'})
+        if request.method == 'GET' and request.url.path == (
+            '/v1/runs/hermes-run-1'
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    'status': 'completed',
+                    'output': json.dumps(
+                        {
+                            'kind': 'protocol_draft',
+                            'summary': 'Drafted.',
+                            'produced_files': [],
+                        }
+                    ),
+                },
+            )
+        raise AssertionError(f'unexpected request: {request.method} {request.url}')
+
+    settings = Settings(
+        agent_model_honeydew='mlx-community/Thinking-4bit',
+        task_compiler_agent_model='mlx-community/Coder-Next-4bit',
+        hermes_poll_interval_seconds=0,
+        hermes_structured_repair_attempts=0,
+    )
+    runtime = HermesProcessRuntime(
+        settings,
+        transport=httpx.MockTransport(handler),
+    )
+    handle = _handle(tmp_path)
+    runtime._start_process = lambda **_kwargs: handle  # type: ignore[method-assign]
+
+    runtime.run_turn(
+        run_id='run-test',
+        agent=AgentName.HONEYDEW,
+        workspace=handle.workspace,
+        session_id='glasslab-honeydew-run-test',
+        prompt='Compile the task spec.',
+        model_override='mlx-community/Coder-Next-4bit',
+    )
+
+    assert submitted_models == ['mlx-community/Coder-Next-4bit']
+
+
+def test_task_compiler_model_defaults_to_effective_agent_model() -> None:
+    settings = Settings(qwen_model_name='mlx-community/Shared-4bit')
+    assert settings.task_compiler_model() == 'mlx-community/Shared-4bit'
+
+
+def test_task_compiler_model_uses_override_when_set() -> None:
+    settings = Settings(
+        task_compiler_agent_model='mlx-community/Coder-Next-4bit',
+    )
+    assert settings.task_compiler_model() == 'mlx-community/Coder-Next-4bit'

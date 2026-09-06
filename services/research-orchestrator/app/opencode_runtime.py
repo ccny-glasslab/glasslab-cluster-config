@@ -73,6 +73,7 @@ class AgentRuntime(ABC):
         workspace: Path,
         session_id: str,
         prompt: str,
+        model_override: str | None = None,
     ) -> tuple[AgentTurnResult, str | None]:
         raise NotImplementedError
 
@@ -598,6 +599,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
         workspace: Path,
         session_id: str,
         prompt: str,
+        model_override: str | None = None,
     ) -> tuple[AgentTurnResult, str | None]:
         handle = self._start_process(
             run_id=run_id,
@@ -630,6 +632,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
                 workspace=workspace,
                 session_id=session_id,
                 prompt=prompt,
+                model_override=model_override,
             )
             if abort_reasons:
                 reason, failure_class = abort_reasons[0]
@@ -656,6 +659,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
         workspace: Path,
         session_id: str,
         prompt: str,
+        model_override: str | None = None,
     ) -> tuple[AgentTurnResult, str | None]:
         message_id: str | None = None
         current_prompt = prompt
@@ -672,7 +676,8 @@ class OpenCodeProcessRuntime(AgentRuntime):
                         'model': {
                             'providerID': self.settings.agent_model_provider_id,
                             'modelID': (
-                                self.settings.agent_model_for(agent)
+                                model_override
+                                or self.settings.agent_model_for(agent)
                             ),
                         },
                         'agent': 'build',

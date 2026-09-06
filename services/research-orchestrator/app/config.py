@@ -144,6 +144,11 @@ class Settings(BaseSettings):
     # effective_agent_model_name applies to both agents.
     agent_model_honeydew: str | None = None
     agent_model_beaker: str | None = None
+    # Structured-output-critical turns (task-spec compile, protocol draft)
+    # must run on a model that reliably emits the strict JSON envelope.
+    # Thinking-family models prioritize reasoning and can fail to emit it;
+    # default to the shared coding model unless explicitly overridden.
+    task_compiler_agent_model: str | None = None
     # Per-agent endpoint overrides (#319 successor): when set, the agent's
     # turns run against its own OpenAI-compatible server; otherwise both
     # agents share qwen_base_url. Used to split models across machines
@@ -236,6 +241,9 @@ class Settings(BaseSettings):
             else self.agent_base_url_beaker
         )
         return override or self.qwen_base_url
+
+    def task_compiler_model(self) -> str:
+        return self.task_compiler_agent_model or self.effective_agent_model_name
 
     @field_validator('evidence_snapshot_max_bytes')
     @classmethod

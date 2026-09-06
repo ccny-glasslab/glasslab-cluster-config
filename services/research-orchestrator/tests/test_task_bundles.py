@@ -339,3 +339,25 @@ def test_preflight_includes_actionable_feedback_when_not_ready(tmp_path: Path) -
     assert not preflight.ready
     assert '## Evaluation rubric' in preflight.feedback
     assert 'No run was started' in preflight.feedback
+
+
+def test_engine_compiles_task_with_task_compiler_model_override(
+    tmp_path: Path,
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, runtime, engine = orchestrator_bundle
+    settings = settings.model_copy(
+        update={
+            'agent_model_honeydew': 'mlx-community/Thinking-4bit',
+            'task_compiler_agent_model': 'mlx-community/Coder-Next-4bit',
+        }
+    )
+    engine.settings = settings
+    record = engine.import_task_bundle(
+        filename='titanic-task.zip',
+        content=_archive(),
+    )
+    assert record.task_spec is not None
+    assert ('honeydew', 'mlx-community/Coder-Next-4bit') in (
+        runtime.model_overrides
+    )

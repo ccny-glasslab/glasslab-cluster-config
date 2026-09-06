@@ -402,6 +402,7 @@ class HermesProcessRuntime(AgentRuntime):
         workspace: Path,
         session_id: str,
         prompt: str,
+        model_override: str | None = None,
     ) -> tuple[AgentTurnResult, str | None]:
         handle = self._start_process(
             run_id=run_id,
@@ -423,7 +424,10 @@ class HermesProcessRuntime(AgentRuntime):
                         'instructions': self._system_prompts[agent],
                         'session_id': session_id,
                         'provider': 'custom',
-                        'model': self.settings.agent_model_for(agent),
+                        'model': (
+                            model_override
+                            or self.settings.agent_model_for(agent)
+                        ),
                         'max_tokens': self.settings.agent_model_max_output_tokens,
                     },
                 )
