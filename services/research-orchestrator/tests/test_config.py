@@ -268,3 +268,19 @@ def test_per_agent_base_url_override_wins_over_shared() -> None:
     assert settings.base_url_for(AgentName.BEAKER) == (
         'http://192.168.1.17:52416/v1'
     )
+
+
+def test_agent_model_max_output_tokens_default_is_high_for_thinking() -> None:
+    settings = Settings()
+    assert settings.agent_model_max_output_tokens == 8192
+
+
+def test_turn_timeouts_default_to_2400_for_thinking_overhead() -> None:
+    settings = Settings()
+    assert settings.opencode_turn_timeout_seconds == 2400.0
+    assert settings.hermes_turn_timeout_seconds == 2400.0
+
+
+def test_hermes_max_iterations_default_to_80_for_thinking() -> None:
+    settings = Settings()
+    assert settings.hermes_max_iterations == 80

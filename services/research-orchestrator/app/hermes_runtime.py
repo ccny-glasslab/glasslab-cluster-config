@@ -424,6 +424,7 @@ class HermesProcessRuntime(AgentRuntime):
                         'session_id': session_id,
                         'provider': 'custom',
                         'model': self.settings.agent_model_for(agent),
+                        'max_tokens': self.settings.agent_model_max_output_tokens,
                     },
                 )
                 response.raise_for_status()

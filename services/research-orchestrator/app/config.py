@@ -115,13 +115,19 @@ class Settings(BaseSettings):
     opencode_server_host: str = '127.0.0.1'
     opencode_start_port: int = 4210
     opencode_start_timeout_seconds: float = 60.0
-    opencode_turn_timeout_seconds: float = 1800.0
+    opencode_turn_timeout_seconds: float = 2400.0
     opencode_repeated_tool_limit: int = 6
     agent_turn_max_retries: int = 2
     opencode_structured_repair_attempts: int = 1
     opencode_structured_output_mode: Literal['json_schema', 'prompt'] = (
         'json_schema'
     )
+    # Model-output budget per agent turn. Thinking-family models (Honeydew's
+    # Qwen3-Next-80B-A3B-Thinking) emit a long reasoning prefix before the
+    # structured answer; capping output here truncates the reasoning and can
+    # drop the structured envelope entirely. Kept high enough for a full
+    # reasoning+answer turn on the split-model serving (~45 tok/s).
+    agent_model_max_output_tokens: int = 8192
     # OpenCode's package/model download cache (XDG_CACHE_HOME) is shared
     # across every run and both agents instead of copied per run: it is
     # non-essential, regenerable data (the same OpenCode version and plugin
@@ -154,10 +160,10 @@ class Settings(BaseSettings):
     hermes_start_port: int = 4310
     hermes_start_timeout_seconds: float = 30.0
     hermes_http_timeout_seconds: float = 30.0
-    hermes_turn_timeout_seconds: float = 1800.0
+    hermes_turn_timeout_seconds: float = 2400.0
     hermes_poll_interval_seconds: float = 1.0
     hermes_command_timeout_seconds: int = 180
-    hermes_max_iterations: int = 60
+    hermes_max_iterations: int = 80
     hermes_structured_repair_attempts: int = 1
 
     cluster_execution_api_url: str = (

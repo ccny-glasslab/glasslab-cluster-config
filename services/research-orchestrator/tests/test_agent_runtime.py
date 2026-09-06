@@ -125,3 +125,19 @@ def test_opencode_runtime_config_base_url_falls_back_to_shared(tmp_path: Path) -
     config = _read_opencode_config(workspace, AgentName.HONEYDEW)
     provider = config['provider']['exo']
     assert provider['options']['baseURL'] == 'http://192.168.1.17:52415/v1'
+
+
+def test_opencode_runtime_config_sets_max_output_tokens(tmp_path: Path) -> None:
+    settings = Settings(agent_model_max_output_tokens=8192)
+    runtime = OpenCodeProcessRuntime(settings)
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    runtime._write_runtime_config(
+        run_id='run-1',
+        agent=AgentName.HONEYDEW,
+        workspace=workspace,
+    )
+    config = _read_opencode_config(workspace, AgentName.HONEYDEW)
+    provider = config['provider']['exo']
+    model_cfg = next(iter(provider['models'].values()))
+    assert model_cfg['options']['maxOutputTokens'] == 8192

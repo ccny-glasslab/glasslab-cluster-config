@@ -434,6 +434,11 @@ class OpenCodeProcessRuntime(AgentRuntime):
                     'models': {
                         model_name: {
                             'name': model_name,
+                            'options': {
+                                'maxOutputTokens': (
+                                    self.settings.agent_model_max_output_tokens
+                                ),
+                            },
                         }
                     },
                 }
