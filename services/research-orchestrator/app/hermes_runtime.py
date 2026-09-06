@@ -374,6 +374,8 @@ class HermesProcessRuntime(AgentRuntime):
         agent: AgentName,
         workspace: Path,
         existing_session_id: str | None,
+        model_override: str | None = None,
+        base_url_override: str | None = None,
     ) -> RuntimeSession:
         handle = self._start_process(
             run_id=run_id,
@@ -403,6 +405,7 @@ class HermesProcessRuntime(AgentRuntime):
         session_id: str,
         prompt: str,
         model_override: str | None = None,
+        base_url_override: str | None = None,
     ) -> tuple[AgentTurnResult, str | None]:
         handle = self._start_process(
             run_id=run_id,

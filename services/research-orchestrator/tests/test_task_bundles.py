@@ -350,6 +350,7 @@ def test_engine_compiles_task_with_task_compiler_model_override(
         update={
             'agent_model_honeydew': 'mlx-community/Thinking-4bit',
             'task_compiler_agent_model': 'mlx-community/Coder-Next-4bit',
+            'task_compiler_agent_base_url': 'http://192.168.1.17:52416/v1',
         }
     )
     engine.settings = settings
@@ -360,4 +361,7 @@ def test_engine_compiles_task_with_task_compiler_model_override(
     assert record.task_spec is not None
     assert ('honeydew', 'mlx-community/Coder-Next-4bit') in (
         runtime.model_overrides
+    )
+    assert ('honeydew', 'http://192.168.1.17:52416/v1') in (
+        runtime.base_url_overrides
     )

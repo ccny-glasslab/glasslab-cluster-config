@@ -506,6 +506,8 @@ class ResearchOrchestrator:
                 agent=AgentName.HONEYDEW,
                 workspace=workspace,
                 existing_session_id=None,
+                model_override=self.settings.task_compiler_model(),
+                base_url_override=self.settings.task_compiler_base_url(),
             )
             result, _ = self.runtime.run_turn(
                 run_id=compiler_id,
@@ -513,6 +515,7 @@ class ResearchOrchestrator:
                 workspace=workspace,
                 session_id=session.session_id,
                 model_override=self.settings.task_compiler_model(),
+                base_url_override=self.settings.task_compiler_base_url(),
                 prompt=(
                     'Compile this task archive into a Glasslab TaskSpec. Read '
                     '`problem.md` and `eval_agent_prompt.md`. Select only one '

@@ -61,6 +61,8 @@ class AgentRuntime(ABC):
         agent: AgentName,
         workspace: Path,
         existing_session_id: str | None,
+        model_override: str | None = None,
+        base_url_override: str | None = None,
     ) -> RuntimeSession:
         raise NotImplementedError
 
@@ -388,6 +390,8 @@ class OpenCodeProcessRuntime(AgentRuntime):
         run_id: str,
         agent: AgentName,
         workspace: Path,
+        model_override: str | None = None,
+        base_url_override: str | None = None,
     ) -> tuple[Path, Path, Path, Path, Path]:
         runtime_root = workspace.parent / 'runtime' / agent.value
         config_root = runtime_root / 'config'
@@ -408,7 +412,8 @@ class OpenCodeProcessRuntime(AgentRuntime):
         for path in (data_root, cache_root, state_root, home_root):
             path.mkdir(parents=True, exist_ok=True)
         provider_id = self.settings.agent_model_provider_id
-        model_name = self.settings.agent_model_for(agent)
+        model_name = model_override or self.settings.agent_model_for(agent)
+        base_url = base_url_override or self.settings.base_url_for(agent)
         config = {
             '$schema': 'https://opencode.ai/config.json',
             'model': f'{provider_id}/{model_name}',
@@ -431,7 +436,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
                 'exo': {
                     'npm': '@ai-sdk/openai-compatible',
                     'name': 'Glasslab Exo',
-                    'options': {'baseURL': self.settings.base_url_for(agent)},
+                    'options': {'baseURL': base_url},
                     'models': {
                         model_name: {
                             'name': model_name,
@@ -455,6 +460,8 @@ class OpenCodeProcessRuntime(AgentRuntime):
         run_id: str,
         agent: AgentName,
         workspace: Path,
+        model_override: str | None = None,
+        base_url_override: str | None = None,
     ) -> _ProcessHandle:
         key = (run_id, agent)
         existing = self._handles.get(key)
@@ -473,6 +480,8 @@ class OpenCodeProcessRuntime(AgentRuntime):
             run_id=run_id,
             agent=agent,
             workspace=workspace,
+            model_override=model_override,
+            base_url_override=base_url_override,
         )
         runtime_root = config_root.parent
         log_path = runtime_root / 'opencode.log'
@@ -562,11 +571,15 @@ class OpenCodeProcessRuntime(AgentRuntime):
         agent: AgentName,
         workspace: Path,
         existing_session_id: str | None,
+        model_override: str | None = None,
+        base_url_override: str | None = None,
     ) -> RuntimeSession:
         handle = self._start_process(
             run_id=run_id,
             agent=agent,
             workspace=workspace,
+            model_override=model_override,
+            base_url_override=base_url_override,
         )
         params = {'directory': str(workspace)}
         with self._client(handle) as client:
@@ -600,11 +613,14 @@ class OpenCodeProcessRuntime(AgentRuntime):
         session_id: str,
         prompt: str,
         model_override: str | None = None,
+        base_url_override: str | None = None,
     ) -> tuple[AgentTurnResult, str | None]:
         handle = self._start_process(
             run_id=run_id,
             agent=agent,
             workspace=workspace,
+            model_override=model_override,
+            base_url_override=base_url_override,
         )
         stop_watchdog = threading.Event()
         abort_reasons: list[tuple[str, str]] = []

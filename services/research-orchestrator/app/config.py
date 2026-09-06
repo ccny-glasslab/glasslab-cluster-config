@@ -149,6 +149,7 @@ class Settings(BaseSettings):
     # Thinking-family models prioritize reasoning and can fail to emit it;
     # default to the shared coding model unless explicitly overridden.
     task_compiler_agent_model: str | None = None
+    task_compiler_agent_base_url: str | None = None
     # Per-agent endpoint overrides (#319 successor): when set, the agent's
     # turns run against its own OpenAI-compatible server; otherwise both
     # agents share qwen_base_url. Used to split models across machines
@@ -244,6 +245,9 @@ class Settings(BaseSettings):
 
     def task_compiler_model(self) -> str:
         return self.task_compiler_agent_model or self.effective_agent_model_name
+
+    def task_compiler_base_url(self) -> str:
+        return self.task_compiler_agent_base_url or self.qwen_base_url
 
     @field_validator('evidence_snapshot_max_bytes')
     @classmethod
