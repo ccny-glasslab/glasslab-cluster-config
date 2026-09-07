@@ -2202,6 +2202,10 @@ class ResearchOrchestrator:
             f'{run.objective}\n\n'
             f'Evaluation contract: contract://{run.evaluation_contract_id}/'
             f'{run.evaluation_contract_version}@{run.evaluation_contract_digest}\n'
+            f'Orchestrator resource ceilings (your proposal must stay at or '
+            f'below these, never above): cpu={self.policy.maximum_cpu}, '
+            f'memory_gib={self.policy.maximum_memory_gib}, '
+            f'gpus={self.policy.maximum_gpus}.\n'
             'Write program.md in your workspace. Include hypotheses, independent '
             'and dependent variables, controls, baselines, source references, '
             'required artifacts, evaluation criteria, budgets, stopping '
@@ -2441,8 +2445,39 @@ class ResearchOrchestrator:
             or proposal_resources.memory_gib > self.policy.maximum_memory_gib
             or proposal_resources.gpus > self.policy.maximum_gpus
         ):
-            raise WorkflowError(
-                'Honeydew contract proposal exceeds orchestrator resource ceilings'
+            # The model over-proposed resources. Clamp to the orchestrator
+            # ceilings instead of failing the run: the ceiling is policy, and
+            # a deterministic clamp keeps the run moving while staying within
+            # the permitted envelope.
+            proposal = proposal.model_copy(
+                update={
+                    'resource_constraints': proposal_resources.model_copy(
+                        update={
+                            'cpu': min(
+                                proposal_resources.cpu,
+                                self.policy.maximum_cpu,
+                            ),
+                            'memory_gib': min(
+                                proposal_resources.memory_gib,
+                                self.policy.maximum_memory_gib,
+                            ),
+                            'gpus': min(
+                                proposal_resources.gpus,
+                                self.policy.maximum_gpus,
+                            ),
+                        }
+                    )
+                }
+            )
+            self._event(
+                run_id,
+                source='orchestrator',
+                event_type='contract.proposal_resources_clamped',
+                payload={
+                    'proposed_cpu': proposal_resources.cpu,
+                    'proposed_memory_gib': proposal_resources.memory_gib,
+                    'proposed_gpus': proposal_resources.gpus,
+                },
             )
         destination, digest = self.workspaces.copy_agent_output(
             run_id=run_id,
