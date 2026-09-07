@@ -3341,6 +3341,12 @@ class ResearchOrchestrator:
                 contract_version=installed.descriptor.version,
                 contract_digest=installed.digest,
             )
+            if not self._contract_binding_compatible(action.run_id):
+                raise WorkflowError(
+                    'installed contract remains incompatible with the protocol'
+                )
+            self._transition(action.run_id, RunState.BEAKER_PLANNING)
+            self._beaker_plan(action.run_id)
             return
         destination = self.contract_candidates.promote(
             sealed_path=Path(str(artifact.metadata['sealed_path'])),
