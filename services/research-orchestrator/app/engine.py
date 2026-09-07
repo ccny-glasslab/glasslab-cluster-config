@@ -3274,6 +3274,39 @@ class ResearchOrchestrator:
             ),
         )
 
+    def _bind_run_to_contract(
+        self,
+        *,
+        run_id: str,
+        contract_id: str,
+        contract_version: str,
+        contract_digest: str,
+    ) -> None:
+        current = self.store.get_run(run_id)
+        self.store.replace_run(
+            current.model_copy(
+                update={
+                    'evaluation_contract_id': contract_id,
+                    'evaluation_contract_version': contract_version,
+                    'evaluation_contract_digest': contract_digest,
+                }
+            ),
+            expected_version=current.version,
+        )
+        resolved = self.contracts.resolve(contract_id, contract_version)
+        if resolved.digest != contract_digest:
+            raise WorkflowError('contract cannot be resolved by digest')
+        self._event(
+            run_id,
+            source='orchestrator',
+            event_type='contract.bound_installed',
+            payload={
+                'contract_id': contract_id,
+                'version': contract_version,
+                'digest': contract_digest,
+            },
+        )
+
     def _promote_contract_candidate(self, action: ActionRecord) -> None:
         matches = [
             artifact
@@ -3286,12 +3319,32 @@ class ResearchOrchestrator:
                 'approved contract action has no unique sealed candidate'
             )
         artifact = matches[0]
+        descriptor = EvaluationContractDescriptor.model_validate(
+            artifact.metadata['descriptor']
+        )
+        # An approved proposal that references an already-installed contract
+        # binds to it directly: the promoted id/version is immutable, so a
+        # duplicate candidate cannot be promoted, and the installed contract
+        # is already trusted. Fall through to the candidate flow only when
+        # the installed contract does not exist.
+        try:
+            installed = self.contracts.resolve(
+                descriptor.contract_id,
+                descriptor.version,
+            )
+        except ValueError:
+            installed = None
+        if installed is not None:
+            self._bind_run_to_contract(
+                run_id=action.run_id,
+                contract_id=installed.descriptor.contract_id,
+                contract_version=installed.descriptor.version,
+                contract_digest=installed.digest,
+            )
+            return
         destination = self.contract_candidates.promote(
             sealed_path=Path(str(artifact.metadata['sealed_path'])),
             expected_digest=artifact.sha256,
-        )
-        descriptor = EvaluationContractDescriptor.model_validate(
-            artifact.metadata['descriptor']
         )
         current = self.store.get_run(action.run_id)
         # The run's binding is rewritten to the promoted contract; the resolve

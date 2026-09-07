@@ -2881,3 +2881,37 @@ def test_honeydew_protocol_draft_routes_to_structured_model(
         runtime.base_url_overrides
     )
     assert run.run_id
+
+
+def test_promote_binds_already_installed_contract(
+    orchestrator_bundle,
+) -> None:
+    _, store, _, _, original = orchestrator_bundle
+    engine = ResearchOrchestrator(
+        settings=original.settings,
+        store=store,
+        runtime=original.runtime,
+        workspaces=original.workspaces,
+        contracts=original.contracts,
+        contract_candidates=original.contract_candidates,
+        policy=original.policy,
+        cluster=original.cluster,
+        discord=DisabledDiscordAdapter(),
+    )
+    run = engine.create_run(
+        RunCreateRequest(objective='Bind an installed contract.')
+    )
+    engine._bind_run_to_contract(
+        run_id=run.run_id,
+        contract_id='example-research-v1',
+        contract_version='1.0.0',
+        contract_digest=engine.contracts.resolve(
+            'example-research-v1', '1.0.0'
+        ).digest,
+    )
+    rebound = store.get_run(run.run_id)
+    assert rebound.evaluation_contract_id == 'example-research-v1'
+    assert any(
+        event.event_type == 'contract.bound_installed'
+        for event in store.list_events(run.run_id)
+    )
