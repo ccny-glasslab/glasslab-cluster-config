@@ -269,6 +269,12 @@ def run_rehearsal() -> dict[str, object]:
                 if a.type == 'propose_evaluation_contract'
                 and a.approval_status == ApprovalStatus.REJECTED
             ]
+            stages['matrix_rejection_reasons'] = [
+                str(a.reason)
+                for a in store.list_actions(run.run_id)
+                if a.type == 'submit_experiment_matrix'
+                and a.approval_status == ApprovalStatus.REJECTED
+            ]
             raise
 
         # Stage 4: fake cluster jobs complete.
