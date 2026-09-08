@@ -79,8 +79,13 @@ def _create_repo(root: Path) -> Path:
     return repo
 
 
+_stages: dict[str, object] = {}
+
+
 def run_rehearsal() -> dict[str, object]:
+    global _stages
     stages: dict[str, object] = {}
+    _stages = stages
     with tempfile.TemporaryDirectory(prefix='glasslab-orchestrator-rehearse-') as raw:
         root = Path(raw)
         repo = _create_repo(root)
@@ -316,5 +321,12 @@ def _proposal_evaluator_type(store, run_id: str) -> str | None:
 
 
 if __name__ == '__main__':
-    summary = run_rehearsal()
+    try:
+        summary = run_rehearsal()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        summary = _stages
+        print('STAGES_ON_FAILURE ' + json.dumps(summary, indent=2, sort_keys=True))
+        raise
     print(json.dumps(summary, indent=2, sort_keys=True))
