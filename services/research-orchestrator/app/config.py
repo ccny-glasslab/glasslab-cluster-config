@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     opencode_turn_timeout_seconds: float = 2400.0
     opencode_repeated_tool_limit: int = 6
     agent_turn_max_retries: int = 2
+    # Max deterministic redrafts of a contract candidate that fails
+    # validation. Real-model candidates can repeatedly fail the same check;
+    # cap the loop so the run fails fast instead of burning its turn budget.
+    max_contract_redrafts: int = 3
     opencode_structured_repair_attempts: int = 1
     opencode_structured_output_mode: Literal['json_schema', 'prompt'] = (
         'json_schema'

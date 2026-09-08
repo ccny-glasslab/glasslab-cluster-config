@@ -3174,8 +3174,19 @@ class ResearchOrchestrator:
             )
             # Rejection here is a deterministic retry: Beaker re-drafts with the
             # concrete failure as feedback. The retry chain is bounded by the
-            # per-run turn budget, which eventually transitions the run to
-            # TIMED_OUT if the candidate never becomes valid.
+            # per-run turn budget, but a real-model candidate that repeatedly
+            # fails the same validation burns that budget with no progress, so
+            # cap the redrafts and fail the run instead of looping to TIMED_OUT.
+            rejection_count = sum(
+                1
+                for event in self.store.list_events(run_id)
+                if event.event_type == 'contract.candidate_rejected'
+            )
+            if rejection_count >= self.settings.max_contract_redrafts:
+                raise WorkflowError(
+                    'contract candidate failed deterministic validation '
+                    f'{rejection_count} times; giving up'
+                )
             self._beaker_draft_contract(
                 run_id,
                 feedback=feedback_message,
