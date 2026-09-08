@@ -41,7 +41,7 @@ class SealedContractCandidate:
 class ContractCandidateManager:
     MAX_FILES = 64
     MAX_TOTAL_BYTES = 2 * 1024 * 1024
-    ALLOWED_SUFFIXES = {'.json', '.md', '.py', '.txt'}
+    ALLOWED_SUFFIXES = {'.json', '.md', '.py', '.txt', '.yaml', '.yml'}
 
     def __init__(
         self,
