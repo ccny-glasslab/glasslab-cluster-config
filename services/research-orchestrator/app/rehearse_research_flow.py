@@ -138,8 +138,9 @@ def run_rehearsal() -> dict[str, object]:
             task_compiler_agent_model=TASK_COMPILER_MODEL,
             task_compiler_agent_base_url=TASK_COMPILER_URL,
             # Real-model turns are slow; widen the budget so a rehearsal turn
-            # is not killed mid-reasoning on the Thinking model.
-            opencode_turn_timeout_seconds=3600.0,
+            # is not killed mid-reasoning on the Thinking model. Long-context
+            # protocol drafts have exceeded 3600s live, so allow 2h per turn.
+            opencode_turn_timeout_seconds=7200.0,
             hermes_turn_timeout_seconds=3600.0,
         )
         store = SqliteStore(settings.database_path)
