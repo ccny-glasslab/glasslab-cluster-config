@@ -122,6 +122,7 @@ from .schemas import (
     IntakeCreateRequest,
     IntakeRecord,
     InterpretationRecord,
+    JobSubmissionReceipt,
     LogEntry,
     OperationRecord,
     PaperIntakeCandidateRecord,
@@ -1100,7 +1101,13 @@ def create_run_record(
         expected_artifacts=workflow.expected_artifacts.model_dump(mode='json'),
     )
     status_payload = RunStatus(run_id=run_id, status='accepted', updated_at=now, detail='Run accepted by workflow-api.')
-    submission = submitter.submit_run(manifest)
+    pending_receipt = JobSubmissionReceipt(
+        job_name='',
+        namespace='',
+        accepted_at=now,
+        status='pending',
+        detail='Run accepted; submission not yet attempted.',
+    )
     record = RunRecord(
         run_id=run_id,
         workflow_id=workflow.workflow_id,
@@ -1108,7 +1115,7 @@ def create_run_record(
         updated_at=now,
         manifest=manifest,
         status=status_payload,
-        job_submission=submission,
+        job_submission=pending_receipt,
         source_design_id=source_design_id,
         source_intake_id=source_intake_id,
         run_purpose=run_purpose,
@@ -1116,10 +1123,17 @@ def create_run_record(
         session_id=session_id,
     )
     artifacts = build_artifact_index(run_id, workflow.expected_artifacts.required, workflow.expected_artifacts.optional)
+    # Persist the durable 'accepted' record BEFORE submitting so a failure
+    # between submit and save cannot orphan a running Job with no RunRecord.
+    store.save_run(record)
+    submission = submitter.submit_run(manifest)
+    record = record.model_copy(
+        update={'job_submission': submission, 'updated_at': datetime.now(timezone.utc)}
+    )
+    store.save_run(record)
     # Touch the session AFTER the run is stored so a crash before submission
     # doesn't leave a dangling latest_run_id pointer to a run that was never
     # actually submitted.
-    store.save_run(record)
     touch_research_session(store, session_id, latest_run_id=run_id)
     store.save_artifacts(run_id, artifacts)
     store.append_log(

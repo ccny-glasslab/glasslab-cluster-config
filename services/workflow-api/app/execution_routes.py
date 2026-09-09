@@ -38,6 +38,7 @@ from .schemas import (
     GenericExperimentResultIngestRequest,
     GenericExperimentRunRequest,
     InvestigationWorkspaceSpec,
+    JobSubmissionReceipt,
     LogEntry,
     RunArtifactsResponse,
     RunCreateRequest,
@@ -256,7 +257,13 @@ def register_execution_routes(
             updated_at=now,
             detail='Generic experiment accepted by workflow-api.',
         )
-        submission = submitter.submit_run(manifest)
+        pending_receipt = JobSubmissionReceipt(
+            job_name='',
+            namespace='',
+            accepted_at=now,
+            status='pending',
+            detail='Run accepted; submission not yet attempted.',
+        )
         record = RunRecord(
             run_id=run_id,
             workflow_id=workflow.workflow_id,
@@ -264,7 +271,7 @@ def register_execution_routes(
             updated_at=now,
             manifest=manifest,
             status=status_payload,
-            job_submission=submission,
+            job_submission=pending_receipt,
             run_purpose='generic-experiment',
             run_priority=request.run_priority,
             session_id=request.session_id,
@@ -273,6 +280,13 @@ def register_execution_routes(
             source_approval_id=source_approval_id,
             source_execution_id=source_execution_id,
             plan_sha256=plan_sha256,
+        )
+        # Persist the durable 'accepted' record BEFORE submitting so a failure
+        # between submit and save cannot orphan a running Job with no RunRecord.
+        store.save_run(record)
+        submission = submitter.submit_run(manifest)
+        record = record.model_copy(
+            update={'job_submission': submission, 'updated_at': datetime.now(timezone.utc)}
         )
         store.save_run(record)
         store.save_artifacts(run_id, build_artifact_index(run_id, expected_artifacts))

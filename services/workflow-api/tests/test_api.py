@@ -5744,3 +5744,71 @@ def test_cancel_run_does_not_persist_cancelled_when_submitter_fails() -> None:
 
     assert cancelled.status_code == 503
     assert client.get(f'/runs/{run_id}').json()['status']['status'] != 'cancelled'
+
+
+@pytest.mark.parametrize(
+    'endpoint,payload',
+    [
+        (
+            '/experiments/runs',
+            {
+                'objective': 'Observe the durable record when submission fails.',
+                'experiment_type': 'gpu-training-job',
+                'workload_id': 'metric-search-v0',
+                'config_payload': {'search_space_id': 'art-metric-baseline'},
+                'dataset_bindings': {'train_uri': 's3://datasets/art/train.parquet'},
+                'budget': {'max_epochs': 1, 'max_wallclock_minutes': 5},
+                'submitted_by': 'test-suite',
+            },
+        ),
+        (
+            '/runs',
+            {
+                'workflow_id': 'generic-tabular-benchmark',
+                'objective': 'Observe the durable record when submission fails.',
+                'inputs': {
+                    'dataset_name': 'titanic',
+                    'train_uri': 's3://datasets/titanic/train.csv',
+                    'test_uri': 's3://datasets/titanic/test.csv',
+                    'target_column': 'Survived',
+                },
+                'models': ['logistic_regression'],
+                'resource_profile': 'cpu-small',
+            },
+        ),
+    ],
+)
+def test_submit_failure_leaves_adoptable_accepted_record(endpoint: str, payload: dict) -> None:
+    class ExplodingSubmitter(NullJobSubmitter):
+        def __init__(self) -> None:
+            super().__init__(namespace='default')
+            self.seen_manifest = None
+
+        def submit_run(self, manifest):
+            self.seen_manifest = manifest
+            raise RuntimeError('simulated Kubernetes submission failure')
+
+    submitter = ExplodingSubmitter()
+    settings = Settings(
+        registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
+    )
+    registry = LegacyCompatibilityWorkflowRegistry(settings.registry_dir)
+    store = InMemoryRunStore()
+    client = TestClient(
+        create_app(
+            settings=settings,
+            registry=registry,
+            store=store,
+            submitter=submitter,
+        )
+    )
+
+    with pytest.raises(RuntimeError):
+        client.post(endpoint, json=payload)
+
+    assert submitter.seen_manifest is not None
+    run_id = submitter.seen_manifest.run_id
+    record = store.get_run(run_id)
+    assert record is not None
+    assert record.status.status == 'accepted'
+    assert record.job_submission.status == 'pending'
