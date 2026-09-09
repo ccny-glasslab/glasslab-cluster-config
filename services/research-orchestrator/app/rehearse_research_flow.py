@@ -80,107 +80,130 @@ def _create_repo(root: Path) -> Path:
 
 
 _stages: dict[str, object] = {}
+REHEARSE_ROOT = Path(
+    __import__('os').environ.get(
+        'REHEARSE_ROOT', '/tmp/glasslab-rehearse-root'
+    )
+)
 
 
 def _stage_progress(stages: dict[str, object]) -> None:
     print('STAGE_PROGRESS ' + json.dumps(stages, sort_keys=True), flush=True)
+    (REHEARSE_ROOT / 'checkpoint.json').write_text(
+        json.dumps(stages, sort_keys=True)
+    )
+
+
+def _build_engine(root: Path):
+    repo = _create_repo(root)
+    approved = root / 'knowledge-approved'
+    approved.mkdir(exist_ok=True)
+    (approved / 'technique-card.md').write_text(
+        'Technique card: metric-search over GPU clusters. Prefer cosine '
+        'similarity for embedding retrieval and report verified metrics '
+        'with a fixed seed.'
+    )
+    settings = Settings(
+        database_path=str(root / 'orchestrator.db'),
+        workspace_root=str(root / 'runs'),
+        artifact_root=str(root / 'artifacts'),
+        approved_repo_path=str(repo),
+        approved_repo_ref='main',
+        evaluation_contract_root=str(
+            SERVICE_ROOT / 'evaluation-contracts'
+        ),
+        permitted_job_images=[RUNNER_IMAGE],
+        cluster_execution_mode='fake',
+        promoted_contract_root=str(root / 'trusted-contracts'),
+        sealed_contract_candidate_root=str(root / 'contract-candidates'),
+        trusted_contract_catalog_path=str(
+            root / 'trusted-contracts' / 'catalog.json'
+        ),
+        shared_mount_root=str(root),
+        task_bundle_root=str(root / 'task-bundles'),
+        task_asset_root=str(root / 'task-assets'),
+        dataset_upload_root=str(root / 'dataset-uploads'),
+        benchmark_dataset_catalog_path=str(
+            root / 'datasets' / 'catalog.json'
+        ),
+        knowledge_root=str(root / 'knowledge'),
+        knowledge_allowlist_roots=[str(approved)],
+        one_active_run=True,
+        maximum_parallel_jobs=2,
+        # The split-model routing: structured long-context turns on
+        # Coder-Next (.17), verification on Thinking (.18), Beaker on
+        # Coder-Next (.17), task compiler on Coder-Next (.17).
+        agent_model_provider_id='exo',
+        agent_model_honeydew=HONEYDEW_REASONING_MODEL,
+        agent_base_url_honeydew=HONEYDEW_REASONING_URL,
+        agent_model_beaker=BEAKER_MODEL,
+        agent_base_url_beaker=BEAKER_URL,
+        honeydew_structured_agent_model=HONEYDEW_STRUCTURED_MODEL,
+        honeydew_structured_agent_base_url=HONEYDEW_STRUCTURED_URL,
+        honeydew_reasoning_agent_model=HONEYDEW_REASONING_MODEL,
+        honeydew_reasoning_agent_base_url=HONEYDEW_REASONING_URL,
+        task_compiler_agent_model=TASK_COMPILER_MODEL,
+        task_compiler_agent_base_url=TASK_COMPILER_URL,
+        # Real-model turns are slow; widen the budget so a rehearsal turn
+        # is not killed mid-reasoning on the Thinking model. Long-context
+        # protocol drafts have exceeded 3600s live, so allow 2h per turn.
+        opencode_turn_timeout_seconds=7200.0,
+        hermes_turn_timeout_seconds=3600.0,
+    )
+    store = SqliteStore(settings.database_path)
+    cluster = FakeClusterExecutor()
+    engine = ResearchOrchestrator(
+        settings=settings,
+        store=store,
+        runtime=OpenCodeProcessRuntime(settings),
+        workspaces=WorkspaceManager(
+            workspace_root=settings.workspace_root,
+            approved_repo_path=settings.approved_repo_path,
+            approved_repo_ref=settings.approved_repo_ref,
+        ),
+        contracts=EvaluationContractResolver(
+            settings.promoted_contract_root,
+            fallback_roots=[settings.evaluation_contract_root],
+        ),
+        contract_candidates=ContractCandidateManager(
+            sealed_root=settings.sealed_contract_candidate_root,
+            promoted_root=settings.promoted_contract_root,
+            catalog_path=settings.trusted_contract_catalog_path,
+            shared_mount_root=settings.shared_mount_root,
+        ),
+        policy=ActionPolicy(
+            permitted_images=settings.permitted_job_images,
+            maximum_cpu=settings.maximum_cpu,
+            maximum_memory_gib=settings.maximum_memory_gib,
+            maximum_gpus=settings.maximum_gpus,
+            maximum_parallel_jobs=settings.maximum_parallel_jobs,
+        ),
+        cluster=cluster,
+        discord=DisabledDiscordAdapter(),
+    )
+    return settings, store, cluster, engine
 
 
 def run_rehearsal() -> dict[str, object]:
     global _stages
     stages: dict[str, object] = {}
     _stages = stages
-    with tempfile.TemporaryDirectory(prefix='glasslab-orchestrator-rehearse-') as raw:
-        root = Path(raw)
-        repo = _create_repo(root)
-        approved = root / 'knowledge-approved'
-        approved.mkdir()
-        (approved / 'technique-card.md').write_text(
-            'Technique card: metric-search over GPU clusters. Prefer cosine '
-            'similarity for embedding retrieval and report verified metrics '
-            'with a fixed seed.'
-        )
-        settings = Settings(
-            database_path=str(root / 'orchestrator.db'),
-            workspace_root=str(root / 'runs'),
-            artifact_root=str(root / 'artifacts'),
-            approved_repo_path=str(repo),
-            approved_repo_ref='main',
-            evaluation_contract_root=str(
-                SERVICE_ROOT / 'evaluation-contracts'
-            ),
-            permitted_job_images=[RUNNER_IMAGE],
-            cluster_execution_mode='fake',
-            promoted_contract_root=str(root / 'trusted-contracts'),
-            sealed_contract_candidate_root=str(root / 'contract-candidates'),
-            trusted_contract_catalog_path=str(
-                root / 'trusted-contracts' / 'catalog.json'
-            ),
-            shared_mount_root=str(root),
-            task_bundle_root=str(root / 'task-bundles'),
-            task_asset_root=str(root / 'task-assets'),
-            dataset_upload_root=str(root / 'dataset-uploads'),
-            benchmark_dataset_catalog_path=str(
-                root / 'datasets' / 'catalog.json'
-            ),
-            knowledge_root=str(root / 'knowledge'),
-            knowledge_allowlist_roots=[str(approved)],
-            one_active_run=True,
-            maximum_parallel_jobs=2,
-            # The split-model routing: structured long-context turns on
-            # Coder-Next (.17), verification on Thinking (.18), Beaker on
-            # Coder-Next (.17), task compiler on Coder-Next (.17).
-            agent_model_provider_id='exo',
-            agent_model_honeydew=HONEYDEW_REASONING_MODEL,
-            agent_base_url_honeydew=HONEYDEW_REASONING_URL,
-            agent_model_beaker=BEAKER_MODEL,
-            agent_base_url_beaker=BEAKER_URL,
-            honeydew_structured_agent_model=HONEYDEW_STRUCTURED_MODEL,
-            honeydew_structured_agent_base_url=HONEYDEW_STRUCTURED_URL,
-            honeydew_reasoning_agent_model=HONEYDEW_REASONING_MODEL,
-            honeydew_reasoning_agent_base_url=HONEYDEW_REASONING_URL,
-            task_compiler_agent_model=TASK_COMPILER_MODEL,
-            task_compiler_agent_base_url=TASK_COMPILER_URL,
-            # Real-model turns are slow; widen the budget so a rehearsal turn
-            # is not killed mid-reasoning on the Thinking model. Long-context
-            # protocol drafts have exceeded 3600s live, so allow 2h per turn.
-            opencode_turn_timeout_seconds=7200.0,
-            hermes_turn_timeout_seconds=3600.0,
-        )
-        store = SqliteStore(settings.database_path)
-        cluster = FakeClusterExecutor()
-        engine = ResearchOrchestrator(
-            settings=settings,
-            store=store,
-            runtime=OpenCodeProcessRuntime(settings),
-            workspaces=WorkspaceManager(
-                workspace_root=settings.workspace_root,
-                approved_repo_path=settings.approved_repo_path,
-                approved_repo_ref=settings.approved_repo_ref,
-            ),
-            contracts=EvaluationContractResolver(
-                settings.promoted_contract_root,
-                fallback_roots=[settings.evaluation_contract_root],
-            ),
-            contract_candidates=ContractCandidateManager(
-                sealed_root=settings.sealed_contract_candidate_root,
-                promoted_root=settings.promoted_contract_root,
-                catalog_path=settings.trusted_contract_catalog_path,
-                shared_mount_root=settings.shared_mount_root,
-            ),
-            policy=ActionPolicy(
-                permitted_images=settings.permitted_job_images,
-                maximum_cpu=settings.maximum_cpu,
-                maximum_memory_gib=settings.maximum_memory_gib,
-                maximum_gpus=settings.maximum_gpus,
-                maximum_parallel_jobs=settings.maximum_parallel_jobs,
-            ),
-            cluster=cluster,
-            discord=DisabledDiscordAdapter(),
-        )
+    root = REHEARSE_ROOT
+    root.mkdir(parents=True, exist_ok=True)
+    fresh = not (root / 'orchestrator.db').exists()
+    settings, store, cluster, engine = _build_engine(root)
+    if not fresh:
+        checkpoint = root / 'checkpoint.json'
+        if checkpoint.exists():
+            loaded = json.loads(checkpoint.read_text())
+            if isinstance(loaded, dict):
+                stages.update(loaded)
+                _stages = stages
+        engine.recover()
+    else:
         engine.knowledge.ingest_source(
             source_type=SourceType.TECHNIQUE_CARD,
-            path=str(approved / 'technique-card.md'),
+            path=str(root / 'knowledge-approved' / 'technique-card.md'),
             title='GPU metric-search technique card',
         )
         run = engine.create_run(
@@ -193,8 +216,15 @@ def run_rehearsal() -> dict[str, object]:
             )
         )
         stages['run_created'] = run.state.value
+        _stage_progress(stages)
+    runs = store.list_runs()
+    if not runs:
+        raise RuntimeError('rehearsal store has no run')
+    run = runs[-1]
+    run_id = run.run_id
 
-        # Stage 1: protocol draft on the structured model (Coder-Next .17).
+    # Stage 1: protocol draft on the structured model (Coder-Next .17).
+    if 'after_protocol' not in stages:
         try:
             protocol_action = next(
                 action
@@ -225,9 +255,10 @@ def run_rehearsal() -> dict[str, object]:
         )
         _stage_progress(stages)
 
-        # Stage 2: contract candidate on Beaker (Coder-Next .17), then
-        # promotion/bind. The evaluator_type must be task-specific, not a
-        # generic template id, or promotion fails scientific compatibility.
+    # Stage 2: contract candidate on Beaker (Coder-Next .17), then
+    # promotion/bind. The evaluator_type must be task-specific, not a
+    # generic template id, or promotion fails scientific compatibility.
+    if 'after_contract' not in stages:
         try:
             contract_action = next(
                 action
@@ -249,7 +280,8 @@ def run_rehearsal() -> dict[str, object]:
         stages['bound_contract_id'] = run.evaluation_contract_id
         _stage_progress(stages)
 
-        # Stage 3: Beaker plan + implementation, then matrix approval.
+    # Stage 3: Beaker plan + implementation, then matrix approval.
+    if 'jobs_executed' not in stages:
         try:
             execution_action = next(
                 action
@@ -299,7 +331,8 @@ def run_rehearsal() -> dict[str, object]:
         stages['jobs_executed'] = run.state.value
         _stage_progress(stages)
 
-        # Stage 5: verification on the reasoning model (Thinking .18).
+    # Stage 5: verification on the reasoning model (Thinking .18).
+    if 'final_state' not in stages:
         try:
             report_action = next(
                 action
@@ -324,7 +357,7 @@ def run_rehearsal() -> dict[str, object]:
 
         stages['result'] = 'PASS' if run.state is RunState.COMPLETE else 'FAIL'
         _stage_progress(stages)
-        return stages
+    return stages
 
 
 def _proposal_evaluator_type(store, run_id: str) -> str | None:

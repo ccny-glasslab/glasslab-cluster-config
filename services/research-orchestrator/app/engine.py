@@ -33,7 +33,11 @@ import httpx
 
 from .opencode_runtime import AgentRuntime, OpenCodeRuntimeError
 from .policy import ActionPolicy
-from .preflight import MatrixPreflightReport, preflight_matrix
+from .preflight import (
+    MatrixPreflightReport,
+    MethodologyRequirement,
+    preflight_matrix,
+)
 from .research_store import ResearchStore
 from .schemas import (
     ActionRecord,
@@ -3967,14 +3971,32 @@ class ResearchOrchestrator:
             resources = dict(task['resources'])
             required_artifacts = list(task['required_artifacts'])
         else:
-            runner_image = sorted(self.policy.permitted_images)[0]
+            proposal = self._latest_contract_proposal(run.run_id) or {}
+            resources_raw = proposal.get('resource_constraints') or {}
             resources = {
-                'cpu': min(1.0, self.policy.maximum_cpu),
-                'memory_gib': min(2.0, self.policy.maximum_memory_gib),
-                'gpus': 0,
-                'wallclock_minutes': 30,
+                'cpu': min(
+                    float(resources_raw.get('cpu', 1.0)),
+                    self.policy.maximum_cpu,
+                ),
+                'memory_gib': min(
+                    float(resources_raw.get('memory_gib', 2.0)),
+                    self.policy.maximum_memory_gib,
+                ),
+                'gpus': min(
+                    int(resources_raw.get('gpus', 0)),
+                    self.policy.maximum_gpus,
+                ),
+                'wallclock_minutes': int(
+                    resources_raw.get('wallclock_minutes', 30)
+                ),
             }
-            required_artifacts = ['metrics.json']
+            proposal_artifacts = proposal.get('required_artifacts') or []
+            if proposal_artifacts:
+                required_artifacts = list(proposal_artifacts)
+            else:
+                required_artifacts = ['metrics.json']
+            runner_image = sorted(self.policy.permitted_images)[0]
+        seeds = self._matrix_template_seeds(run)
         return {
             'type': 'submit_experiment_matrix',
             'arguments': {
@@ -3985,7 +4007,7 @@ class ResearchOrchestrator:
                         'overrides': {},
                     }
                 ],
-                'seeds': [17],
+                'seeds': seeds,
                 'maximum_parallel_jobs': min(
                     1,
                     self.policy.maximum_parallel_jobs,
@@ -3998,6 +4020,37 @@ class ResearchOrchestrator:
                 'Run the bounded candidate for methodology and human review.'
             ),
         }
+
+    def _matrix_template_seeds(self, run: RunRecord) -> list[int]:
+        # A comparison methodology contract needs at least the comparison
+        # requirement's minimum_distinct_values distinct seeds, and a
+        # fixed-seed decision requirement pins exactly one seed. Deriving the
+        # template's seeds from the contract keeps the proposed matrix
+        # consistent with the methodology the run is bound to.
+        seeds: list[int] = []
+        try:
+            contract = self.contracts.resolve(
+                run.evaluation_contract_id,
+                run.evaluation_contract_version,
+            )
+        except Exception:
+            return [17]
+        requirements = contract.descriptor.manifest.get(
+            'methodology_requirements',
+            [],
+        )
+        for item in requirements:
+            try:
+                requirement = MethodologyRequirement.model_validate(item)
+            except (ValueError, TypeError):
+                continue
+            if requirement.mode == 'comparison':
+                needed = requirement.minimum_distinct_values
+                while len(seeds) < needed:
+                    seeds.append(17 + len(seeds) * 25)
+        if not seeds:
+            seeds = [17]
+        return seeds[: self.policy.maximum_parallel_jobs * 4]
 
     @staticmethod
     def _matrix_revision_feedback(actions: list[ActionRecord]) -> str:
