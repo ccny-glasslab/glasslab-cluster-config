@@ -185,6 +185,7 @@ def test_task_asset_fetcher_rejects_non_public_url(tmp_path: Path) -> None:
                 name='private_data',
                 role='train',
                 source_url='http://127.0.0.1/data.csv',
+                expected_sha256='a' * 64,
             ),
         )
 
@@ -365,3 +366,12 @@ def test_engine_compiles_task_with_task_compiler_model_override(
     assert ('honeydew', 'http://192.168.1.17:52416/v1') in (
         runtime.base_url_overrides
     )
+
+
+def test_source_url_asset_requires_expected_sha256() -> None:
+    with pytest.raises(ValueError, match='expected_sha256'):
+        TaskAssetProposal(
+            name='public_data',
+            role='train',
+            source_url='https://example.com/data.csv',
+        )

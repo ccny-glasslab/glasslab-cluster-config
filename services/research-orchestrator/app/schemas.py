@@ -226,10 +226,11 @@ class TaskAssetProposal(BaseModel):
         default=None,
         pattern=r'^[a-f0-9]{64}$',
         description=(
-            'Only set if a verified SHA-256 checksum is already known for '
-            'this asset. Omit (leave null) for source_url assets, '
-            'multi-file or sharded datasets, or any case where no single '
-            'verified checksum exists. Do not invent or compute a value.'
+            'Required for source_url assets: the agent must propose a '
+            'verified SHA-256 checksum for anything fetched from a network '
+            'URL, so the orchestrator never stamps whatever the URL serves '
+            'as verified. Approved glasslab-dataset:// assets are verified '
+            'at upload and need no checksum here.'
         ),
     )
     contains_labels: bool = False
@@ -242,6 +243,12 @@ class TaskAssetProposal(BaseModel):
         if self.source_url and self.approved_uri:
             raise ValueError(
                 'asset proposal cannot use both source_url and approved_uri'
+            )
+        if self.source_url and not self.expected_sha256:
+            raise ValueError(
+                'source_url assets require a verified expected_sha256 '
+                'checksum; without one the orchestrator would label the '
+                'served bytes as verified'
             )
         return self
 
