@@ -11,8 +11,10 @@ from __future__ import annotations
 from hashlib import sha256
 import io
 from pathlib import Path
+import socket
 import zipfile
 
+import httpx
 import pytest
 
 from app.schemas import TaskAssetProposal, TaskSpecProposal
@@ -22,6 +24,7 @@ from app.storage import SqliteStore
 from app.task_bundles import (
     FIXED_WORKLOAD_RUNNER_IMAGES,
     RUNTIME_PROFILES,
+    TaskAssetFetcher,
     TaskBundleError,
     TaskBundleManager,
 )
@@ -186,6 +189,62 @@ def test_task_asset_fetcher_rejects_non_public_url(tmp_path: Path) -> None:
                 role='train',
                 source_url='http://127.0.0.1/data.csv',
                 expected_sha256='a' * 64,
+            ),
+        )
+
+
+class _FakeNetworkStream:
+    def __init__(self, server_addr: tuple[str, int]) -> None:
+        self._server_addr = server_addr
+
+    def get_extra_info(self, info: str):
+        if info == 'server_addr':
+            return self._server_addr
+        return None
+
+
+class _PrivatePeerTransport(httpx.BaseTransport):
+    def __init__(self, server_addr: tuple[str, int]) -> None:
+        self._server_addr = server_addr
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={'content-type': 'text/plain'},
+            content=b'secret internal data',
+            extensions={'network_stream': _FakeNetworkStream(self._server_addr)},
+        )
+
+
+def test_asset_fetch_revalidates_peer_address(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Validation resolves the host to a public address, but the connection
+    # lands on a link-local peer (a DNS-rebinding attacker answered the
+    # connect-time lookup differently): the fetch must abort before reading
+    # a single byte, so the private content never becomes an asset.
+    monkeypatch.setattr(
+        'app.task_bundles.socket.getaddrinfo',
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443))
+        ],
+    )
+    content = b'secret internal data'
+    fetcher = TaskAssetFetcher(
+        root=str(tmp_path / 'task-assets'),
+        shared_mount_root=str(tmp_path),
+        maximum_bytes=1024,
+        transport=_PrivatePeerTransport(('169.254.169.254', 443)),
+    )
+    with pytest.raises(TaskBundleError, match='non-public'):
+        fetcher.fetch(
+            task_digest='a' * 64,
+            proposal=TaskAssetProposal(
+                name='flipped',
+                role='train',
+                source_url='https://example.com/data.csv',
+                expected_sha256=sha256(content).hexdigest(),
             ),
         )
 
