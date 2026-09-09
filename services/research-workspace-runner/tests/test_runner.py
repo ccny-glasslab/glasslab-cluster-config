@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import sys
+import time
 import zipfile
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -295,3 +299,71 @@ def test_unreadable_workload_file_still_yields_terminal_bundle(tmp_path: Path) -
     )
     assert locked['unhashable'] is True
     assert locked['sha256'] is None
+
+
+def test_run_id_escape_rejected(tmp_path: Path) -> None:
+    dataset_root = tmp_path / 'datasets'
+    dataset_root.mkdir(parents=True)
+    source_path = dataset_root / 'source.zip'
+    source_digest = _zip(
+        source_path,
+        {'run.py': 'raise SystemExit("must not execute")\n'},
+    )
+
+    for bad_run_id in ('../x', '/abs', '.hidden'):
+        env = _environment(tmp_path, source_digest=source_digest)
+        env['GLASSLAB_RUNNER_EXPERIMENT_ID'] = bad_run_id
+        with pytest.raises(ValueError):
+            run_from_environment(env)
+
+
+def _is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # A zombie cannot execute or write; treat it as dead.
+    try:
+        state = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0]
+    except (OSError, IndexError):
+        return False
+    return state != 'Z'
+
+
+def test_timeout_kills_grandchild_process_group(tmp_path: Path) -> None:
+    dataset_root = tmp_path / 'datasets'
+    dataset_root.mkdir(parents=True)
+    source_path = dataset_root / 'source.zip'
+    source_digest = _zip(
+        source_path,
+        {
+            'run.py': (
+                'import os, subprocess, time\n'
+                'from pathlib import Path\n'
+                'out = Path(os.environ["GLASSLAB_OUTPUT_DIR"])\n'
+                'grandchild = subprocess.Popen(\n'
+                '    ["nohup", "sleep", "300"],\n'
+                '    stdout=subprocess.DEVNULL,\n'
+                '    stderr=subprocess.DEVNULL,\n'
+                ')\n'
+                '(out / "grandchild.pid").write_text(str(grandchild.pid))\n'
+                'time.sleep(300)\n'
+            )
+        },
+    )
+
+    result = run_from_environment(_environment(tmp_path, source_digest=source_digest))
+
+    run_root = tmp_path / 'artifacts' / 'run-1'
+    grandchild_pid = int((run_root / 'grandchild.pid').read_text())
+    assert result == 1
+    status = json.loads((run_root / 'status.json').read_text())
+    assert status['status'] == 'failed'
+    assert 'wall-clock budget' in status['detail']
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if not _is_running(grandchild_pid):
+            break
+        time.sleep(0.2)
+    else:
+        pytest.fail('grandchild survived the wall-clock budget')

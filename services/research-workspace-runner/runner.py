@@ -15,7 +15,9 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import signal
 import subprocess
 import tarfile
 import traceback
@@ -322,6 +324,10 @@ def run_from_environment(env: Mapping[str, str] | None = None) -> int:
     ).strip()
     if not run_id:
         raise ValueError('run_id is required')
+    # run_id becomes a single path component under artifacts_root; reject
+    # anything that could escape the root or hide a dotfile.
+    if not re.fullmatch(r'[A-Za-z0-9._-]+', run_id) or run_id.startswith('.'):
+        raise ValueError(f'run_id is not a safe path component: {run_id}')
 
     artifacts_root = Path(env.get('GLASSLAB_RUNNER_ARTIFACTS_ROOT', '/mnt/artifacts'))
     dataset_root = Path(env.get('GLASSLAB_DATASET_ROOT', '/mnt/datasets'))
@@ -437,20 +443,32 @@ def run_from_environment(env: Mapping[str, str] | None = None) -> int:
 
         with runner_log.open('a', encoding='utf-8') as log_handle:
             log_handle.write('Executing frozen workspace command: ' + json.dumps(command) + '\n')
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 [str(item) for item in command],
                 cwd=cwd,
                 env=process_env,
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
-                timeout=timeout_seconds,
-                check=False,
+                start_new_session=True,
             )
-            # check=False: the exit code is recorded and mapped to terminal
-            # status here, and the bundle is written either way.
-            log_handle.write(f'Workspace command exit code: {completed.returncode}\n')
-        if completed.returncode != 0:
-            detail = f'workspace command failed with exit code {completed.returncode}'
+            try:
+                process.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                # The workload runs in its own session, so its process group
+                # is exactly the workload tree; kill the group so forked
+                # grandchildren cannot outlive the budget and keep writing
+                # into run_root after the artifact index snapshot.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                process.wait()
+                raise
+            # The exit code is recorded and mapped to terminal status here,
+            # and the bundle is written either way.
+            log_handle.write(f'Workspace command exit code: {process.returncode}\n')
+        if process.returncode != 0:
+            detail = f'workspace command failed with exit code {process.returncode}'
         else:
             terminal_status = 'succeeded'
     except subprocess.TimeoutExpired:
