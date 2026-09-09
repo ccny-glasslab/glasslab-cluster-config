@@ -170,10 +170,12 @@ class TaskAssetFetcher:
         root: str,
         shared_mount_root: str,
         maximum_bytes: int,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.root = Path(root).resolve()
         self.shared_mount_root = Path(shared_mount_root).resolve()
         self.maximum_bytes = maximum_bytes
+        self._transport = transport
 
     @staticmethod
     def _validate_url(url: str) -> None:
@@ -214,6 +216,30 @@ class TaskAssetFetcher:
                     f'task asset host resolves to a non-public address: {ip}'
                 )
 
+    @staticmethod
+    def _revalidate_peer(response: httpx.Response) -> None:
+        # The hostname is validated before the request, but the connection
+        # resolves the name again; a DNS-rebinding attacker could answer the
+        # second lookup with a link-local or cluster-internal address. The
+        # connected peer is therefore re-checked after connect, before a
+        # single body byte is read, and the fetch aborts on mismatch.
+        stream = response.extensions.get('network_stream')
+        if stream is None:
+            raise TaskBundleError('task asset peer address is not verifiable')
+        peername = stream.get_extra_info('server_addr')
+        if not peername:
+            raise TaskBundleError('task asset peer address is not verifiable')
+        try:
+            ip = ipaddress.ip_address(peername[0])
+        except ValueError as exc:
+            raise TaskBundleError(
+                'task asset peer address is not verifiable'
+            ) from exc
+        if not ip.is_global:
+            raise TaskBundleError(
+                f'task asset peer resolves to a non-public address: {ip}'
+            )
+
     def fetch(
         self,
         *,
@@ -234,13 +260,23 @@ class TaskAssetFetcher:
         asset_path = staging / 'asset'
         current_url = proposal.source_url
         try:
-            with httpx.Client(follow_redirects=False, timeout=60) as client:
+            with httpx.Client(
+                follow_redirects=False,
+                timeout=60,
+                transport=self._transport,
+            ) as client:
                 for _ in range(6):
                     # Follow redirects manually so every hop is re-validated
                     # against the same public-HTTPS + global-address rules;
                     # automatic redirects would bypass the allowlist.
                     self._validate_url(current_url)
                     with client.stream('GET', current_url) as response:
+                        # The peer is re-checked after connect: the hostname
+                        # was validated above, but the connection resolves it
+                        # again, so a DNS-rebinding answer that flipped the
+                        # host to a private address aborts here before any
+                        # body byte is read.
+                        self._revalidate_peer(response)
                         if response.status_code in {301, 302, 303, 307, 308}:
                             location = response.headers.get('location')
                             if not location:
