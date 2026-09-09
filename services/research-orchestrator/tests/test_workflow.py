@@ -10,10 +10,11 @@ workflow safe to restart. Cluster execution runs against FakeClusterExecutor.
 from __future__ import annotations
 
 import json
+import time
 from datetime import timedelta
 from hashlib import sha256
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 
 from fastapi.testclient import TestClient
 import pytest
@@ -134,6 +135,48 @@ def test_run_serial_increments_per_investigation(orchestrator_bundle) -> None:
     assert third.run_serial == 3
     assert other.run_serial == 1
     assert ungrouped.run_serial is None
+
+
+def test_materialization_failure_fails_run_and_does_not_block_creation(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # Issue #237: a failure inside _materialize_objective_datasets (e.g. the
+    # checksum guard) must land the run in a terminal state. A run stranded
+    # in PREPARING would hold the one-active-run slot and reject every
+    # subsequent create_run until an operator intervenes.
+    _, store, _, _, engine = orchestrator_bundle
+    calls = {'count': 0}
+
+    def fail_materialization(_run_id: str) -> None:
+        calls['count'] += 1
+        if calls['count'] == 1:
+            raise WorkflowError(
+                'objective dataset failed checksum verification'
+            )
+
+    monkeypatch.setattr(
+        engine,
+        '_materialize_objective_datasets',
+        fail_materialization,
+    )
+
+    with pytest.raises(WorkflowError, match='checksum'):
+        engine.create_run(
+            RunCreateRequest(
+                objective='Run with a corrupted dataset upload.'
+            )
+        )
+
+    failed = store.list_runs()[0]
+    assert failed.state == RunState.FAILED
+
+    # The failed run is terminal, so a subsequent create_run must succeed
+    # instead of being blocked by a zombie run stuck in PREPARING.
+    second = engine.create_run(
+        RunCreateRequest(objective='A fresh run after the failed materialization.')
+    )
+    assert store.get_run(second.run_id).state == RunState.AWAITING_PROTOCOL_APPROVAL
 
 
 def test_failed_result_starts_a_fresh_methodology_revision_budget(
@@ -2087,6 +2130,88 @@ def test_cancellation_discards_paused_run_without_resuming(orchestrator_bundle) 
     assert store.get_run(run.run_id).state == RunState.CANCELLED
     assert runtime.aborted
     assert store.list_events(run.run_id)[-1].event_type == 'run.cancelled'
+
+
+def test_cancel_blocks_inflight_submission_leak(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # Issue #246: cancelling while a submission is in flight (cluster.submit
+    # returned but update_job not yet committed) must not leave the external
+    # cluster job running forever. cancel_run takes the advancement lock, so
+    # it waits for the submitter to commit the RUNNING row, then cancels the
+    # real external job; the watcher's final sweep then guarantees no RUNNING
+    # job remains under the cancelled run.
+    _, store, cluster, _, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    job = store.list_jobs(run.run_id)[0]
+    # Reset the committed submission so the job is waiting to be submitted
+    # again, recreating the submit -> update_job window under test.
+    store.update_job(
+        job.model_copy(
+            update={
+                'status': JobStatus.QUEUED,
+                'external_run_id': None,
+                'job_name': None,
+                'kubernetes_uid': None,
+            }
+        )
+    )
+    job = store.get_job(job.job_id)
+    assert job.status == JobStatus.QUEUED
+    assert job.external_run_id is None
+
+    submitted = Event()
+    release = Event()
+    real_submit = cluster.submit
+
+    def paused_submit(spec):
+        submission = real_submit(spec)
+        submitted.set()
+        assert release.wait(timeout=10)
+        return submission
+
+    monkeypatch.setattr(cluster, 'submit', paused_submit)
+
+    submitter = Thread(
+        target=engine.reconcile_run,
+        args=(run.run_id,),
+        daemon=True,
+    )
+    submitter.start()
+    assert submitted.wait(timeout=10)
+
+    cancel_thread = Thread(
+        target=engine.cancel_run,
+        args=(run.run_id,),
+        daemon=True,
+    )
+    cancel_thread.start()
+    deadline = time.monotonic() + 2.0
+    while cancel_thread.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert cancel_thread.is_alive()
+
+    release.set()
+    submitter.join(timeout=10)
+    cancel_thread.join(timeout=10)
+    assert not submitter.is_alive()
+    assert not cancel_thread.is_alive()
+
+    assert store.get_run(run.run_id).state == RunState.CANCELLED
+    cancelled_job = store.get_job(job.job_id)
+    assert cancelled_job.status == JobStatus.CANCELLED
+    assert cancelled_job.external_run_id is not None
+    assert (
+        cluster.inspect(cancelled_job.external_run_id).status
+        == JobStatus.CANCELLED
+    )
+
+    engine.sweep_cancelled_run_jobs(run.run_id)
+    assert all(
+        stored.status == JobStatus.CANCELLED
+        for stored in store.list_jobs(run.run_id)
+    )
 
 
 def test_event_sequence_is_append_only_and_ordered(orchestrator_bundle) -> None:
