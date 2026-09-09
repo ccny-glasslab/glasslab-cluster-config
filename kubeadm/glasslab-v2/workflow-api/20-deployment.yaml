@@ -23,7 +23,7 @@ spec:
         - name: glasslab-ghcr-pull
       containers:
         - name: workflow-api
-          image: ghcr.io/ccny-glasslab/glasslab-workflow-api:0fd3f2f
+          image: ghcr.io/ccny-glasslab/glasslab-workflow-api:0fd3f2f48f3add706ffac1874895ab397188896c
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:

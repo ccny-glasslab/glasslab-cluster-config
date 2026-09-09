@@ -14,8 +14,8 @@ spec:
           command: ["sh", "-c"]
           args:
              - |
-               echo "Pre-pulling ghcr.io/ccny-glasslab/glasslab-metric-search:latest..."
-               docker pull ghcr.io/ccny-glasslab/glasslab-metric-search:latest || true
+               echo "Pre-pulling ghcr.io/ccny-glasslab/glasslab-metric-search:03f7062935280c6fd7c6d6598a460d6fb885824b..."
+               docker pull ghcr.io/ccny-glasslab/glasslab-metric-search:03f7062935280c6fd7c6d6598a460d6fb885824b || true
                echo "Pre-pulling ghcr.io/ccny-glasslab/glasslab-metric-search:baseline-v1..."
                docker pull ghcr.io/ccny-glasslab/glasslab-metric-search:baseline-v1 || true
                echo "Pre-pulling ghcr.io/ccny-glasslab/glasslab-metric-search:baseline-v8..."

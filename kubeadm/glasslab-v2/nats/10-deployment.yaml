@@ -19,7 +19,7 @@ spec:
         kubernetes.io/hostname: node05
       containers:
         - name: nats
-          image: nats:2.10-alpine
+          image: nats@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
           imagePullPolicy: IfNotPresent
           args:
             - -js

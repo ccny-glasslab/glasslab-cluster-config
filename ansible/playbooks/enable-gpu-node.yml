@@ -46,12 +46,21 @@
       register: gpu_driver_install
       when: gpu_driver_install_enabled | bool
 
+    - name: Download NVIDIA container toolkit repository key
+      ansible.builtin.get_url:
+        url: "{{ gpu_nvidia_container_repo_key_url }}"
+        dest: "{{ gpu_nvidia_container_keyring }}.asc"
+        mode: '0644'
+        checksum: "{{ gpu_nvidia_container_repo_key_checksum }}"
+      when: gpu_nvidia_container_toolkit_enabled | bool
+
     - name: Install NVIDIA container toolkit keyring
-      ansible.builtin.shell: |
-        set -euo pipefail
-        curl -fsSL "{{ gpu_nvidia_container_repo_key_url }}" | gpg --dearmor --batch --yes -o "{{ gpu_nvidia_container_keyring }}"
-      args:
-        executable: /bin/bash
+      ansible.builtin.command:
+        cmd: >-
+          gpg --dearmor --batch --yes
+          -o "{{ gpu_nvidia_container_keyring }}"
+          "{{ gpu_nvidia_container_keyring }}.asc"
+      changed_when: true
       when: gpu_nvidia_container_toolkit_enabled | bool
 
     - name: Configure NVIDIA container toolkit apt repository
