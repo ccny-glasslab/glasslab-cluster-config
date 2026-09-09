@@ -1768,6 +1768,56 @@ def test_deterministic_matrix_execution_failure_requests_revision(
     assert failure.payload['resulting_state'] == RunState.BEAKER_REVISING.value
 
 
+def test_matrix_revision_cap_fails_run_after_max_revisions(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # A deterministic matrix-preflight failure normally routes Beaker back to
+    # revising; without a cap the loop is unbounded (observed live: 10
+    # identical rejections). After maximum_matrix_revisions failures the run
+    # must fail instead of proposing yet again.
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Fail after matrix revision cap.')
+    )
+    protocol = _pending_action(store, run.run_id, 'approve_protocol')
+    engine.approve_action(
+        protocol.action_id,
+        reviewer='test-human',
+        reason='Protocol accepted.',
+    )
+
+    def fail_submission(_action):
+        raise ValueError('Deterministic matrix preflight failed: missing setting')
+
+    monkeypatch.setattr(engine, '_submit_matrix', fail_submission)
+    maximum = engine.settings.maximum_matrix_revisions
+
+    for _ in range(maximum):
+        matrix = _pending_action(store, run.run_id, 'submit_experiment_matrix')
+        with pytest.raises(ValueError, match='preflight'):
+            engine.approve_action(
+                matrix.action_id,
+                reviewer='test-human',
+                reason='Matrix accepted.',
+            )
+
+    assert store.get_run(run.run_id).state == RunState.FAILED
+    pending_matrices = [
+        action
+        for action in store.list_actions(run.run_id)
+        if action.type == 'submit_experiment_matrix'
+        and action.approval_status == ApprovalStatus.PENDING
+    ]
+    assert pending_matrices == []
+    failed = next(
+        event
+        for event in store.list_events(run.run_id)
+        if event.event_type == 'run.failed'
+    )
+    assert 'maximum matrix revisions exceeded' in str(failed.payload['error'])
+
+
 def test_restart_recovery_from_job_running(orchestrator_bundle) -> None:
     # Rebuilds the engine from the same SqliteStore file after jobs completed,
     # simulating a process restart; recover() must finish the run from durable

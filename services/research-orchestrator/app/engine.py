@@ -2762,6 +2762,27 @@ class ResearchOrchestrator:
         if current.state in TERMINAL_STATES or current.state == RunState.PAUSED:
             return
         if deterministic_matrix_failure:
+            rejected_matrices = [
+                action
+                for action in self.store.list_actions(action.run_id)
+                if action.type == 'submit_experiment_matrix'
+                and action.approval_status
+                in {
+                    ApprovalStatus.REJECTED,
+                    ApprovalStatus.EXECUTION_FAILED,
+                }
+            ]
+            if len(rejected_matrices) >= self.settings.maximum_matrix_revisions:
+                self._fail_run(
+                    action.run_id,
+                    WorkflowError(
+                        'maximum matrix revisions exceeded: '
+                        f'{len(rejected_matrices)} proposals failed '
+                        'deterministic preflight; the run cannot converge on '
+                        'a valid experiment matrix'
+                    ),
+                )
+                return
             self._transition(action.run_id, RunState.BEAKER_REVISING)
             self._beaker_revise(
                 action.run_id,

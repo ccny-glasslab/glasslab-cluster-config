@@ -216,6 +216,10 @@ class Settings(BaseSettings):
 
     maximum_turns: int = 20
     maximum_methodology_revisions: int = 2
+    # Hard cap on deterministic matrix-preflight failures before the run fails.
+    # Without it, Beaker can re-propose an invalid matrix in an unbounded
+    # revise loop, burning the turn budget (observed live: 10 rejections).
+    maximum_matrix_revisions: int = 3
     maximum_runtime_seconds: int = 86400
     maximum_cpu: float = 8.0
     maximum_memory_gib: float = 32.0
