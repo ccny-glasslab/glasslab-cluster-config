@@ -41,7 +41,11 @@ class JobWatcher:
                             run.run_id,
                         )
                     except Exception as exc:
-                        self.engine._event(
+                        # _event performs a blocking store write plus a Discord
+                        # publish, so keep it off the event loop just like the
+                        # reconcile work itself (issue #250).
+                        await asyncio.to_thread(
+                            self.engine._event,
                             run.run_id,
                             source='orchestrator',
                             event_type='job.cancellation_sweep_failed',
@@ -66,8 +70,11 @@ class JobWatcher:
                 except Exception as exc:
                     # Record the failure and keep polling: a transient cluster
                     # error must not kill the watcher, and the event log is the
-                    # authoritative record of what went wrong.
-                    self.engine._event(
+                    # authoritative record of what went wrong. The write is
+                    # blocking (store append + Discord publish), so offload it
+                    # off the event loop (issue #250).
+                    await asyncio.to_thread(
+                        self.engine._event,
                         run.run_id,
                         source='orchestrator',
                         event_type='job.reconciliation_failed',
