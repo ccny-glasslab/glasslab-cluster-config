@@ -47,12 +47,22 @@ ctx="$(ssh -o BatchMode=yes -o ConnectTimeout=8 "glasslab-${HOST##*.}" \
 
 # --- empirical KV cost (optional) ---
 if [ "$PROBE" = "1" ] && [ -n "${SERVER_PID:-}" ]; then
-  rss_before="$(ssh -o BatchMode=yes -o ConnectTimeout=8 "glasslab-${HOST##*.}" "ps -o rss= -p ${SERVER_PID}" 2>/dev/null | tr -d ' ')"
-  short_body='{"model":"unused","messages":[{"role":"user","content":"hi"}],"max_tokens":1}'
+  # Methodology: mmap'd weights make a single RSS delta meaningless (pages
+  # fault in/out during sampling). Warm the model with one request, then
+  # measure the RSS delta between TWO equal-length long requests: the weights
+  # are resident by then, so the residual delta approximates KV growth.
+  # Methodology: mmap'd weights make a single RSS delta meaningless (pages
+  # fault in/out during sampling). Warm the model with one request, then
+  # measure the RSS delta between TWO equal-length long requests: the weights
+  # are resident by then, so the residual delta approximates KV growth.
+  short_body='{"messages":[{"role":"user","content":"hi"}],"max_tokens":1}'
   long_prompt="$(python3 -c "print('word ' * 8000)")"
   long_body="$(python3 -c "import json,sys; print(json.dumps({'messages':[{'role':'user','content':sys.argv[1]}],'max_tokens':1}))" "$long_prompt")"
+  curl -fsS -m 300 -H 'Content-Type: application/json' -d "$short_body" \
+    "http://${HOST}:${PORT}/v1/chat/completions" >/dev/null 2>&1 || true
+  rss_before="$(ssh -o BatchMode=yes -o ConnectTimeout=8 "glasslab-${HOST##*.}" "ps -o rss= -p ${SERVER_PID}" 2>/dev/null | tr -d ' ')"
   t0=$(date +%s.%N)
-  curl -fsS -m 120 -H 'Content-Type: application/json' -d "$short_body" \
+  curl -fsS -m 300 -H 'Content-Type: application/json' -d "$long_body" \
     "http://${HOST}:${PORT}/v1/chat/completions" >/dev/null 2>&1 || true
   t1=$(date +%s.%N)
   curl -fsS -m 300 -H 'Content-Type: application/json' -d "$long_body" \
@@ -62,11 +72,10 @@ if [ "$PROBE" = "1" ] && [ -n "${SERVER_PID:-}" ]; then
   python3 - "$rss_before" "$rss_after" "$t0" "$t1" "$t2" <<'PY'
 import sys
 rb, ra = int(sys.argv[1]), int(sys.argv[2])
-dt = float(sys.argv[4]) - float(sys.argv[3])
 rss_delta_gb = (ra - rb) / 1024 / 1024
-print(f"probe: short-latency={float(sys.argv[4])-float(sys.argv[3]):.1f}s "
-      f"long(8k-tok)-latency={float(sys.argv[5])-float(sys.argv[4]):.1f}s "
-      f"rss_delta={rss_delta_gb:.2f} GB (8k tokens) "
+print(f"probe: warm-long-latency={float(sys.argv[4])-float(sys.argv[3]):.1f}s "
+      f"2nd-long-latency={float(sys.argv[5])-float(sys.argv[4]):.1f}s "
+      f"rss_delta={rss_delta_gb:.2f} GB (8k tokens, weights warm) "
       f"=> ~{rss_delta_gb*1024/8:.1f} MB per 1k tokens of context")
 PY
 fi
