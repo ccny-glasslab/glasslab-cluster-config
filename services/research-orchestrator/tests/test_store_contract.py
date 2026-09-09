@@ -172,6 +172,34 @@ def test_event_sequences_are_contiguous_and_cursorable(store) -> None:
     assert second.payload == {}
 
 
+def test_update_job_refuses_transition_out_of_cancelled(store) -> None:
+    # Issue #246: a CANCELLED job row is terminal. A blind update_job that
+    # would resurrect it (e.g. a submitter committing RUNNING after a cancel
+    # swept the row) must raise instead of leaking a permanently-running
+    # external cluster job.
+    run = store.create_run(_run(), one_active_run=False)
+    action = store.save_action(_action(run.run_id))
+    job = _job(run, action)
+    stored, created = store.create_job_if_absent(job)
+    assert created is True
+    cancelled = store.update_job(
+        stored.model_copy(update={'status': JobStatus.CANCELLED})
+    )
+    assert cancelled.status is JobStatus.CANCELLED
+    with pytest.raises(ConcurrencyConflict):
+        store.update_job(
+            cancelled.model_copy(update={'status': JobStatus.RUNNING})
+        )
+    # Same-status updates (e.g. recording exit_information) remain allowed.
+    refreshed = store.update_job(
+        cancelled.model_copy(
+            update={'exit_information': {'cancel_requested': True}}
+        )
+    )
+    assert refreshed.status is JobStatus.CANCELLED
+    assert store.get_job(job.job_id).status is JobStatus.CANCELLED
+
+
 def test_actions_jobs_and_approvals_are_idempotent(store) -> None:
     run = store.create_run(_run(), one_active_run=False)
     action_key = _id('same-action')

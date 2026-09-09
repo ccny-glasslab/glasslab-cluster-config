@@ -5601,61 +5601,68 @@ class ResearchOrchestrator:
         requested_by: str | None = None,
         reason: str | None = None,
     ) -> RunRecord:
-        # Like pause, cancellation must not wait for an active model turn.
+        # Like pause, cancellation must not wait for an active model turn, so
+        # the agent-turn abort stays outside the advancement lock. The job
+        # sweep and the terminal transition take the lock: a submission in
+        # flight holds the lock across cluster.submit -> update_job, so
+        # cancelling without it could blind-write a CANCELLED row that the
+        # submitter then overwrites with RUNNING, leaking a permanently
+        # running cluster job (issue #246).
         run = self.store.get_run(run_id)
         if run.state in TERMINAL_STATES:
             return run
         self._abort_agent_turns(run)
         cancellation_errors: list[str] = []
-        for job in self.store.list_jobs(
-            run_id,
-            statuses={
-                JobStatus.QUEUED,
-                JobStatus.SUBMITTING,
-                JobStatus.RUNNING,
-                JobStatus.UNKNOWN,
-            },
-        ):
-            if job.external_run_id:
-                try:
-                    self.cluster.cancel(job.external_run_id)
-                except Exception as exc:
-                    cancellation_errors.append(f'{job.job_id}: {exc}')
-                    continue
-            self.store.update_job(
-                job.model_copy(
-                    update={
-                        'status': JobStatus.CANCELLED,
-                        'exit_information': {
-                            **job.exit_information,
-                            'cancel_requested': True,
-                        },
-                    }
-                )
-            )
-        if cancellation_errors:
-            self._event(
+        with self._advance_lock:
+            for job in self.store.list_jobs(
                 run_id,
-                source='orchestrator',
-                event_type='run.cancellation_failed',
+                statuses={
+                    JobStatus.QUEUED,
+                    JobStatus.SUBMITTING,
+                    JobStatus.RUNNING,
+                    JobStatus.UNKNOWN,
+                },
+            ):
+                if job.external_run_id:
+                    try:
+                        self.cluster.cancel(job.external_run_id)
+                    except Exception as exc:
+                        cancellation_errors.append(f'{job.job_id}: {exc}')
+                        continue
+                self.store.update_job(
+                    job.model_copy(
+                        update={
+                            'status': JobStatus.CANCELLED,
+                            'exit_information': {
+                                **job.exit_information,
+                                'cancel_requested': True,
+                            },
+                        }
+                    )
+                )
+            if cancellation_errors:
+                self._event(
+                    run_id,
+                    source='orchestrator',
+                    event_type='run.cancellation_failed',
+                    payload={
+                        'cancellation_errors': cancellation_errors,
+                        'requested_by': requested_by,
+                        'reason': reason,
+                    },
+                )
+                raise WorkflowError(
+                    'cancellation could not be confirmed for every external job'
+                )
+            cancelled = self._transition(
+                run_id,
+                RunState.CANCELLED,
                 payload={
                     'cancellation_errors': cancellation_errors,
                     'requested_by': requested_by,
                     'reason': reason,
                 },
             )
-            raise WorkflowError(
-                'cancellation could not be confirmed for every external job'
-            )
-        cancelled = self._transition(
-            run_id,
-            RunState.CANCELLED,
-            payload={
-                'cancellation_errors': cancellation_errors,
-                'requested_by': requested_by,
-                'reason': reason,
-            },
-        )
         self._event(
             run_id,
             source='orchestrator',
@@ -5667,6 +5674,48 @@ class ResearchOrchestrator:
             },
         )
         return cancelled
+
+    def sweep_cancelled_run_jobs(self, run_id: str) -> None:
+        # Final watcher sweep for a cancelled run (issue #246): any job still
+        # in a non-terminal status under a CANCELLED run would otherwise keep
+        # consuming cluster resources with nothing alive to cancel it. The
+        # watcher calls this once per cancelled run per poll until no
+        # non-terminal job remains.
+        run = self.store.get_run(run_id)
+        if run.state != RunState.CANCELLED:
+            return
+        with self._advance_lock:
+            for job in self.store.list_jobs(
+                run_id,
+                statuses={
+                    JobStatus.QUEUED,
+                    JobStatus.SUBMITTING,
+                    JobStatus.RUNNING,
+                    JobStatus.UNKNOWN,
+                },
+            ):
+                if job.external_run_id:
+                    try:
+                        self.cluster.cancel(job.external_run_id)
+                    except Exception as exc:
+                        self._event(
+                            run_id,
+                            source='orchestrator',
+                            event_type='job.cancellation_failed',
+                            payload={'job_id': job.job_id, 'error': str(exc)},
+                        )
+                        continue
+                self.store.update_job(
+                    job.model_copy(
+                        update={
+                            'status': JobStatus.CANCELLED,
+                            'exit_information': {
+                                **job.exit_information,
+                                'cancel_requested': True,
+                            },
+                        }
+                    )
+                )
 
     def recover(self) -> list[str]:
         for run in self.store.list_runs():
