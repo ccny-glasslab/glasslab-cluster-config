@@ -42,9 +42,13 @@ spec:
               
               echo "Download complete, verifying checksum..."
               
-              # Verify file exists and has size > 0
-              if [ ! -f "${TMP_FILE}" ] || [ ! -s "${TMP_FILE}" ]; then
-                echo "ERROR: Downloaded file is missing or empty"
+              # Pinned sha256 of the official CIFAR-100 release
+              # (cs.toronto.edu/~kriz/cifar-100-python.tar.gz; md5
+              # eb9058c3a382ffc7106e4002c42a8d85 per torchvision, sha256
+              # pinned by keras-team/keras cifar100.py).
+              CIFAR_SHA256="85cd44d02ba6437773c5bbd22e183051d648de2e7d6b014e1ef29b855ba677a7"
+              if ! echo "${CIFAR_SHA256}  ${TMP_FILE}" | sha256sum -c - > /dev/null 2>&1; then
+                echo "ERROR: checksum mismatch for ${TMP_FILE}"
                 rm -f "${TMP_FILE}"
                 exit 1
               fi
@@ -84,6 +88,13 @@ spec:
               du -sh "${DATA_DIR}"
               echo ""
               echo "CIFAR-100 download and extraction completed successfully!"
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
       restartPolicy: Never
       volumes:
         - name: datasets

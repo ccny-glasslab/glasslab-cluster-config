@@ -50,7 +50,7 @@ spec:
               fi
               
               # Extract
-              tar -xzf "${TAR_FILE}" -C "${CIFAR_DIR}"
+              tar -xzf "${TAR_FILE}" -C "${CIFAR_DIR}" --no-same-owner
               
               echo "Extraction complete, verifying files..."
               
@@ -71,6 +71,13 @@ spec:
               du -sh "${DATA_DIR}"
               echo ""
               echo "CIFAR-100 extraction completed successfully!"
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
       restartPolicy: Never
       volumes:
         - name: datasets
