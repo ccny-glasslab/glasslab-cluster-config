@@ -111,6 +111,9 @@ def orchestrator_bundle(tmp_path):
         benchmark_dataset_catalog_path=str(tmp_path / 'datasets' / 'catalog.json'),
         one_active_run=False,
         maximum_parallel_jobs=2,
+        # The test harness is a trusted local process; the fail-closed default
+        # (require_operator_auth=True) applies to real deployments.
+        require_operator_auth=False,
     )
     store = SqliteStore(settings.database_path)
     cluster = FakeClusterExecutor()
