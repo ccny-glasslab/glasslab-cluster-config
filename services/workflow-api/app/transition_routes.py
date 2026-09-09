@@ -83,6 +83,7 @@ def build_intake_request_from_problem_candidate(
 from .source_documents import build_source_fetch_candidates
 from .stage_design import build_design_draft as build_design_draft_impl
 from .stage_inference import (
+    build_interpretation_record,
     call_intake_agent,
     build_intake_record_from_agent_draft as build_intake_record_from_agent_draft_impl,
     infer_intake_source_type,
@@ -193,9 +194,9 @@ def register_transitions_routes(
         if intake_record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='intake not found')
         
-        interpretation = call_interpretation_agent(intake_record, settings, registry)
+        interpretation = call_interpretation_agent(intake_record, settings, registry, store)
         if interpretation is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail='interpretation agent unavailable')
+            interpretation = build_interpretation_record(intake_record, store)
         
         store.save_interpretation(interpretation)
         touch_research_session(store, interpretation.session_id, latest_interpretation_id=interpretation.interpretation_id)
