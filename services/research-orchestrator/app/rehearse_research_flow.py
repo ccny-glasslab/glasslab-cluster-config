@@ -32,6 +32,7 @@ from app.opencode_runtime import OpenCodeProcessRuntime
 from app.policy import ActionPolicy
 from app.schemas import (
     ApprovalStatus,
+    JobStatus,
     RunCreateRequest,
     RunState,
     SourceType,
@@ -54,6 +55,10 @@ TASK_COMPILER_URL = 'http://192.168.1.17:52417/v1'
 
 def _create_repo(root: Path) -> Path:
     repo = root / 'approved-repo'
+    if repo.exists():
+        # Rehearsal resume: a prior attempt already initialized this
+        # repository; reuse it rather than failing on the existing dir.
+        return repo
     repo.mkdir()
     subprocess.run(['git', 'init', '-b', 'main'], cwd=repo, check=True)
     subprocess.run(
@@ -184,7 +189,114 @@ def _build_engine(root: Path):
     return settings, store, cluster, engine
 
 
+# Gate action type for each human-wait run state. A state outside this map is
+# either terminal (handled above), paused (handled above), or a transient
+# agent state that should never be observed between driver iterations.
+_GATE_FOR_STATE = {
+    RunState.AWAITING_PROTOCOL_APPROVAL: 'approve_protocol',
+    RunState.AWAITING_CONTRACT_PROMOTION: 'propose_evaluation_contract',
+    RunState.AWAITING_EXECUTION_APPROVAL: 'submit_experiment_matrix',
+    RunState.AWAITING_FINAL_ACCEPTANCE: 'accept_final_report',
+}
+
+# Agent states the engine can recover from with a fresh session; if an
+# exception leaves the run in one of these (rather than PAUSED), a relaunch
+# still resumes from the correct phase via engine.recover().
+_RESUMABLE_AGENT_STATES = frozenset(
+    {
+        RunState.HONEYDEW_DRAFTING_PROTOCOL,
+        RunState.BEAKER_DRAFTING_CONTRACT,
+        RunState.HONEYDEW_REVIEWING_CONTRACT,
+        RunState.BEAKER_PLANNING,
+        RunState.BEAKER_IMPLEMENTING,
+        RunState.BEAKER_FINALIZING,
+        RunState.HONEYDEW_REVIEWING,
+        RunState.BEAKER_REVISING,
+        RunState.BEAKER_ANALYZING,
+        RunState.HONEYDEW_VERIFYING,
+        RunState.HONEYDEW_WRITING_REPORT,
+    }
+)
+
+_TERMINAL_RUN_STATES = frozenset(
+    {RunState.FAILED, RunState.CANCELLED, RunState.TIMED_OUT}
+)
+
+
+def _load_checkpoint(stages: dict[str, object]) -> None:
+    checkpoint = REHEARSE_ROOT / 'checkpoint.json'
+    if not checkpoint.exists():
+        return
+    loaded = json.loads(checkpoint.read_text())
+    if isinstance(loaded, dict):
+        stages.update(loaded)
+
+
+def _record_failure(
+    stages: dict[str, object],
+    store: 'object',
+    run_id: str,
+    exc: Exception,
+) -> None:
+    """Capture the failure and the durable action state for the summary."""
+    try:
+        actions = store.list_actions(run_id)
+    except Exception:
+        actions = []
+    stages['last_failure'] = {
+        'error': str(exc),
+        'failure_class': str(getattr(exc, 'failure_class', '') or ''),
+    }
+    stages['state_at_failure'] = store.get_run(run_id).state.value
+    stages['actions_at_failure'] = [
+        f"{a.type}/{a.approval_status.value}" for a in actions
+    ]
+    rejection_reasons = [
+        str(a.reason)
+        for a in actions
+        if a.approval_status == ApprovalStatus.REJECTED
+        and a.type
+        in {
+            'propose_evaluation_contract',
+            'submit_experiment_matrix',
+        }
+    ]
+    if rejection_reasons:
+        stages['rejection_reasons'] = rejection_reasons
+
+
+def _complete_active_jobs(
+    cluster: object,
+    store: 'object',
+    run_id: str,
+) -> None:
+    """Mark every fake-cluster job terminal so reconcile can advance the run.
+
+    The fake executor never runs the workload; this injects the digest-carrying
+    metrics artifact the rest of the deterministic pipeline consumes. Already
+    terminal jobs are left untouched so retries are idempotent.
+    """
+    for job in store.list_jobs(run_id):
+        if job.status not in {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED}:
+            assert job.external_run_id is not None
+            cluster.complete(
+                job.external_run_id,
+                metrics={
+                    'score': 0.8 if job.variant_name == 'candidate' else 0.6
+                },
+            )
+
+
 def run_rehearsal() -> dict[str, object]:
+    """Drive one rehearsal run to COMPLETE, pausing cleanly on turn walls.
+
+    The run state is the source of truth, not the presence of a PENDING action:
+    after a crash the driver relaunches, engine.recover() re-advances any
+    already-approved gate, and a PAUSED run is resumed via engine.resume_run().
+    A wall-clock turn timeout pauses the run and returns result RESUMABLE with
+    exit code 0 (the durable checkpoint survives); a deterministic failure
+    returns result FAIL with exit code 1 so CI still fails loudly.
+    """
     global _stages
     stages: dict[str, object] = {}
     _stages = stages
@@ -193,12 +305,10 @@ def run_rehearsal() -> dict[str, object]:
     fresh = not (root / 'orchestrator.db').exists()
     settings, store, cluster, engine = _build_engine(root)
     if not fresh:
-        checkpoint = root / 'checkpoint.json'
-        if checkpoint.exists():
-            loaded = json.loads(checkpoint.read_text())
-            if isinstance(loaded, dict):
-                stages.update(loaded)
-                _stages = stages
+        _load_checkpoint(stages)
+        # Resumes already-APPROVED-but-interrupted gates and any run left in a
+        # resumable agent state by a previous driver crash. PAUSED runs are not
+        # active and are resumed explicitly below.
         engine.recover()
     else:
         engine.knowledge.ingest_source(
@@ -217,146 +327,126 @@ def run_rehearsal() -> dict[str, object]:
         )
         stages['run_created'] = run.state.value
         _stage_progress(stages)
-    runs = store.list_runs()
-    if not runs:
-        raise RuntimeError('rehearsal store has no run')
-    run = runs[-1]
-    run_id = run.run_id
 
-    # Stage 1: protocol draft on the structured model (Coder-Next .17).
-    if 'after_protocol' not in stages:
-        try:
-            protocol_action = next(
-                action
-                for action in store.list_actions(run.run_id)
-                if action.type == 'approve_protocol'
-                and action.approval_status == ApprovalStatus.PENDING
-            )
-            stages['protocol_draft'] = 'ok'
-            engine.approve_action(
-                protocol_action.action_id,
-                reviewer='rehearse-human',
-                reason='Rehearsal protocol approved.',
-            )
-        except Exception as exc:
-            stages['protocol_draft'] = f'FAILED: {exc}'
-            stages['state_at_failure'] = store.get_run(run.run_id).state.value
-            stages['rejection_reasons'] = [
-                str(a.reason)
-                for a in store.list_actions(run.run_id)
-                if a.type == 'propose_evaluation_contract'
-                and a.approval_status == ApprovalStatus.REJECTED
-            ]
-            raise
-        run = store.get_run(run.run_id)
-        stages['after_protocol'] = run.state.value
-        stages['proposed_evaluator_type'] = _proposal_evaluator_type(
-            store, run.run_id
-        )
-        _stage_progress(stages)
+    # Driver loop: every branch advances the run deterministically or blocks on
+    # a real-model turn inside the engine call. Approved gates are consumed in
+    # order; each engine call chains forward until the next human-wait state.
+    for _ in range(40):
+        runs = store.list_runs()
+        if not runs:
+            raise RuntimeError('rehearsal store has no run')
+        run_id = runs[-1].run_id
+        run = store.get_run(run_id)
+        state = run.state
 
-    # Stage 2: contract candidate on Beaker (Coder-Next .17), then
-    # promotion/bind. The evaluator_type must be task-specific, not a
-    # generic template id, or promotion fails scientific compatibility.
-    if 'after_contract' not in stages:
-        try:
-            contract_action = next(
-                action
-                for action in store.list_actions(run.run_id)
-                if action.type == 'propose_evaluation_contract'
-                and action.approval_status == ApprovalStatus.PENDING
-            )
-            stages['contract_draft'] = 'ok'
-            engine.approve_action(
-                contract_action.action_id,
-                reviewer='rehearse-human',
-                reason='Rehearsal contract approved.',
-            )
-        except Exception as exc:
-            stages['contract_draft'] = f'FAILED: {exc}'
-            raise
-        run = store.get_run(run.run_id)
-        stages['after_contract'] = run.state.value
-        stages['bound_contract_id'] = run.evaluation_contract_id
-        _stage_progress(stages)
-
-    # Stage 3: Beaker plan + implementation, then matrix approval.
-    if 'jobs_executed' not in stages:
-        try:
-            execution_action = next(
-                action
-                for action in store.list_actions(run.run_id)
-                if action.type == 'submit_experiment_matrix'
-                and action.approval_status == ApprovalStatus.PENDING
-            )
-            stages['implementation'] = 'ok'
+        if state is RunState.COMPLETE:
+            stages['final_state'] = state.value
+            try:
+                stages['context_packets'] = len(
+                    store.list_context_packets(run_id)
+                )
+            except Exception:
+                pass
+            stages['result'] = 'PASS'
             _stage_progress(stages)
-            engine.approve_action(
-                execution_action.action_id,
-                reviewer='rehearse-human',
-                reason='Rehearsal execution approved.',
-            )
-        except Exception as exc:
-            stages['implementation'] = f'FAILED: {exc}'
-            stages['state_at_failure'] = store.get_run(run.run_id).state.value
-            stages['actions_at_failure'] = [
-                f"{a.type}/{a.approval_status.value}"
-                for a in store.list_actions(run.run_id)
-            ]
-            stages['rejection_reasons'] = [
-                str(a.reason)
-                for a in store.list_actions(run.run_id)
-                if a.type == 'propose_evaluation_contract'
-                and a.approval_status == ApprovalStatus.REJECTED
-            ]
-            stages['matrix_rejection_reasons'] = [
-                str(a.reason)
-                for a in store.list_actions(run.run_id)
-                if a.type == 'submit_experiment_matrix'
-                and a.approval_status == ApprovalStatus.REJECTED
-            ]
-            raise
+            return stages
 
-        # Stage 4: fake cluster jobs complete.
-        for job in store.list_jobs(run.run_id):
-            assert job.external_run_id is not None
-            cluster.complete(
-                job.external_run_id,
-                metrics={
-                    'score': 0.8 if job.variant_name == 'candidate' else 0.6
-                },
-            )
-        engine.reconcile_run(run.run_id)
-        run = store.get_run(run.run_id)
-        stages['jobs_executed'] = run.state.value
-        _stage_progress(stages)
+        if state in _TERMINAL_RUN_STATES:
+            stages['final_state'] = state.value
+            stages['result'] = 'FAIL'
+            stages['reason'] = 'run reached terminal state without acceptance'
+            _stage_progress(stages)
+            return stages
 
-    # Stage 5: verification on the reasoning model (Thinking .18).
-    if 'final_state' not in stages:
         try:
-            report_action = next(
+            if state is RunState.PAUSED:
+                if run.resume_state is None:
+                    stages['result'] = 'FAIL'
+                    stages['reason'] = 'run is paused without a resumable phase'
+                    _stage_progress(stages)
+                    return stages
+                engine.resume_run(
+                    run_id,
+                    requested_by='rehearse-human',
+                    reason='Rehearsal resume after a paused model turn.',
+                )
+                continue
+
+            if state in {RunState.JOB_QUEUED, RunState.JOB_RUNNING}:
+                _complete_active_jobs(cluster, store, run_id)
+                # reconcile records artifacts, then advances to Beaker analysis
+                # (a real-model turn) once no job is active.
+                engine.reconcile_run(run_id)
+                continue
+
+            gate = _GATE_FOR_STATE.get(state)
+            if gate is None:
+                # A transient agent state that persisted across an engine call
+                # boundary means the previous call did not advance as expected.
+                stages['result'] = 'FAIL'
+                stages['reason'] = (
+                    f'unexpected run state {state.value}; expected an awaiting '
+                    'gate or a resumable phase'
+                )
+                stages['actions_at_failure'] = [
+                    f"{a.type}/{a.approval_status.value}"
+                    for a in store.list_actions(run_id)
+                ]
+                _stage_progress(stages)
+                return stages
+
+            pending = [
                 action
-                for action in store.list_actions(run.run_id)
-                if action.type == 'accept_final_report'
+                for action in store.list_actions(run_id)
+                if action.type == gate
                 and action.approval_status == ApprovalStatus.PENDING
-            )
-            stages['verification_report'] = 'ok'
+            ]
+            if not pending:
+                stages['result'] = 'FAIL'
+                stages['reason'] = (
+                    f'{gate} gate has no pending action while the run is in '
+                    f'{state.value}'
+                )
+                stages['actions_at_failure'] = [
+                    f"{a.type}/{a.approval_status.value}"
+                    for a in store.list_actions(run_id)
+                ]
+                _stage_progress(stages)
+                return stages
             engine.approve_action(
-                report_action.action_id,
+                pending[-1].action_id,
                 reviewer='rehearse-human',
-                reason='Rehearsal report accepted.',
+                reason=f'Rehearsal {gate} approved.',
             )
+            stages.setdefault('approved_gates', []).append(gate)
+            _stage_progress(stages)
         except Exception as exc:
-            stages['verification_report'] = f'FAILED: {exc}'
+            # A turn wall-clock timeout (or any transient agent failure) pauses
+            # the run inside the engine; that is a clean, resumable stop, not a
+            # rehearsal failure. Deterministic failures keep the old behavior:
+            # loud traceback + nonzero exit.
+            _record_failure(stages, store, run_id, exc)
+            after = store.get_run(run_id)
+            if (
+                after.state is RunState.PAUSED
+                or after.state in _RESUMABLE_AGENT_STATES
+            ):
+                stages['result'] = 'RESUMABLE'
+                stages['resume_state'] = (
+                    after.resume_state or after.state
+                ).value
+                stages['next_step'] = (
+                    'The run is paused or recoverable after an interrupted '
+                    'model turn. Relaunch this command to resume from the '
+                    'durable checkpoint.'
+                )
+                _stage_progress(stages)
+                return stages
             raise
-        run = store.get_run(run.run_id)
-        stages['final_state'] = run.state.value
 
-        packets = store.list_context_packets(run.run_id)
-        stages['context_packets'] = len(packets)
-
-        stages['result'] = 'PASS' if run.state is RunState.COMPLETE else 'FAIL'
-        _stage_progress(stages)
+    stages['result'] = 'FAIL'
+    stages['reason'] = 'rehearsal driver iteration budget exceeded'
+    _stage_progress(stages)
     return stages
 
 
@@ -374,8 +464,17 @@ if __name__ == '__main__':
         summary = run_rehearsal()
     except Exception:
         import traceback
+
         traceback.print_exc()
-        summary = _stages
-        print('STAGES_ON_FAILURE ' + json.dumps(summary, indent=2, sort_keys=True))
+        print('STAGES_ON_FAILURE ' + json.dumps(_stages, indent=2, sort_keys=True))
         raise
     print(json.dumps(summary, indent=2, sort_keys=True))
+    result = str(summary.get('result', ''))
+    if result == 'RESUMABLE':
+        print(
+            'REHEARSAL_RESUMABLE: relaunch this command to resume the paused '
+            'run from its durable checkpoint.',
+            flush=True,
+        )
+    if result == 'FAIL':
+        raise SystemExit(1)

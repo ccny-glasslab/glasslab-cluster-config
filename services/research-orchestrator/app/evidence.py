@@ -242,8 +242,10 @@ def build_evidence_snapshot(
     store: ResearchStore,
     run_id: str,
     phase: EvidencePhase = EvidencePhase.ANALYSIS,
+    max_bytes: int | None = None,
 ) -> dict[str, Any]:
     allowed = _PHASE_FILENAMES[phase]
+    budget = max_bytes or settings.evidence_snapshot_max_bytes
     jobs = [_project_job(job, phase) for job in store.list_jobs(run_id)]
     # The inventory is phase-scoped like the contents: metadata for artifacts
     # whose content the phase never receives is not phase-relevant evidence.
@@ -286,7 +288,7 @@ def build_evidence_snapshot(
         provisional = dict(snapshot)
         if dropped:
             provisional['truncation'] = _truncation_note(dropped)
-        if evidence_byte_size(provisional) <= settings.evidence_snapshot_max_bytes:
+        if evidence_byte_size(provisional) <= budget:
             break
         kind, key, identifier = candidates.pop(0)
         if kind == 'artifact_contents':
@@ -319,7 +321,7 @@ def build_evidence_snapshot(
         while (
             note['omitted_references']
             and evidence_byte_size(snapshot)
-            > settings.evidence_snapshot_max_bytes
+            > budget
         ):
             note['omitted_references'] = note['omitted_references'][: len(note['omitted_references']) // 2]
             if len(note['omitted_references']) < note['omitted_count']:

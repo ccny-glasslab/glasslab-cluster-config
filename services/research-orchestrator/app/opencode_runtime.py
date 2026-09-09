@@ -558,10 +558,16 @@ class OpenCodeProcessRuntime(AgentRuntime):
         )
 
     def _client(self, handle: _ProcessHandle) -> httpx.Client:
+        # The blocking turn request must outlive the watchdog deadline by a
+        # buffer so the watchdog (which records the abort reason and surfaces a
+        # classified turn_timeout failure) always wins the race at the wall
+        # clock. Without the buffer, the request's own read timeout can fire
+        # first and the raw httpx.ReadTimeout escapes unclassified, which the
+        # engine then treats as a generic retryable network error.
         return httpx.Client(
             base_url=handle.base_url,
             auth=('glasslab-orchestrator', handle.password),
-            timeout=self.settings.opencode_turn_timeout_seconds,
+            timeout=self.settings.opencode_turn_timeout_seconds + 30.0,
         )
 
     def ensure_session(

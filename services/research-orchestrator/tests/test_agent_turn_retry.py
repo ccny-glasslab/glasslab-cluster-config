@@ -71,7 +71,7 @@ def test_retryable_turn_failure_is_retried_with_fresh_session(
     settings, store, cluster, runtime, engine = orchestrator_bundle
     run = _make_run(engine, "Retry test objective for the agent-turn retry path.")
     engine.runtime = FlakyTurnRuntime(
-        runtime, fail_calls=1, failure_class="turn_timeout"
+        runtime, fail_calls=1, failure_class="network"
     )
     _, result = engine._run_agent_turn(
         run_id=run.run_id,
@@ -109,7 +109,7 @@ def test_retry_bound_is_respected(orchestrator_bundle) -> None:
     settings, store, cluster, runtime, engine = orchestrator_bundle
     run = _make_run(engine, "Bounded retry objective.")
     engine.runtime = FlakyTurnRuntime(
-        runtime, fail_calls=10, failure_class="turn_timeout"
+        runtime, fail_calls=10, failure_class="network"
     )
     with pytest.raises(OpenCodeRuntimeError):
         engine._run_agent_turn(
@@ -120,6 +120,47 @@ def test_retry_bound_is_respected(orchestrator_bundle) -> None:
             input_event={"objective": "retry test"},
         )
     assert engine.runtime.attempts == 1 + settings.agent_turn_max_retries
+
+
+def test_turn_timeout_failure_is_not_retried(orchestrator_bundle) -> None:
+    """A wall-clock abort pauses instead of burning retry budget.
+
+    A fresh session with the same prompt re-enters the same work and the same
+    wall; the run pauses and resumes with the worktree intact via resume_run()
+    (see engine._should_retry_turn classification).
+    """
+    settings, store, cluster, runtime, engine = orchestrator_bundle
+    run = _make_run(engine, "Turn timeout objective.")
+    engine.runtime = FlakyTurnRuntime(
+        runtime, fail_calls=10, failure_class="turn_timeout"
+    )
+    with pytest.raises(OpenCodeRuntimeError):
+        engine._run_agent_turn(
+            run_id=run.run_id,
+            agent=AgentName.HONEYDEW,
+            prompt=_draft_prompt(),
+            expected_kind=TurnKind.PROTOCOL_DRAFT,
+            input_event={"objective": "retry test"},
+        )
+    assert engine.runtime.attempts == 1
+
+
+def test_repeated_tool_loop_failure_is_not_retried(orchestrator_bundle) -> None:
+    """A stuck-tool-loop abort is deterministic, not transient."""
+    settings, store, cluster, runtime, engine = orchestrator_bundle
+    run = _make_run(engine, "Repeated tool loop objective.")
+    engine.runtime = FlakyTurnRuntime(
+        runtime, fail_calls=10, failure_class="repeated_tool_loop"
+    )
+    with pytest.raises(OpenCodeRuntimeError):
+        engine._run_agent_turn(
+            run_id=run.run_id,
+            agent=AgentName.HONEYDEW,
+            prompt=_draft_prompt(),
+            expected_kind=TurnKind.PROTOCOL_DRAFT,
+            input_event={"objective": "retry test"},
+        )
+    assert engine.runtime.attempts == 1
 
 
 def test_provider_failure_is_retryable(orchestrator_bundle) -> None:

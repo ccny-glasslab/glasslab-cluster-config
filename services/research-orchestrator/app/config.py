@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     # excerpt cap); the whole snapshot is bounded by the snapshot cap.
     evidence_verbatim_max_bytes: int = 64 * 1024
     evidence_snapshot_max_bytes: int = 512 * 1024
+    # On-disk evidence snapshot the agent reads with its file tool. It can be
+    # much larger than the inline budget because it never enters the prompt.
+    evidence_file_max_bytes: int = 4 * 1024 * 1024
     approved_repo_path: str = '/workspace/cluster-config'
     approved_repo_ref: str = 'main'
     evaluation_contract_root: str = str(SERVICE_ROOT / 'evaluation-contracts')
@@ -213,6 +216,10 @@ class Settings(BaseSettings):
 
     maximum_turns: int = 20
     maximum_methodology_revisions: int = 2
+    # Hard cap on deterministic matrix-preflight failures before the run fails.
+    # Without it, Beaker can re-propose an invalid matrix in an unbounded
+    # revise loop, burning the turn budget (observed live: 10 rejections).
+    maximum_matrix_revisions: int = 3
     maximum_runtime_seconds: int = 86400
     maximum_cpu: float = 8.0
     maximum_memory_gib: float = 32.0
