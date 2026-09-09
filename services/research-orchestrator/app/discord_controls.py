@@ -1670,22 +1670,59 @@ class DiscordControlGateway:
                 channel_id=str(interaction.channel_id),
                 run_id=run_id,
             )
-            cancelled = await asyncio.to_thread(
-                execute_discord_run_cancellation,
-                self.engine,
-                run_id=run.run_id,
-                actor=actor,
-                reason=reason,
-            )
             await self._respond(
                 interaction,
-                f'Run `{cancelled.run_id}` is now {cancelled.state.value}.',
+                (
+                    'Cancel request accepted for '
+                    f'`{run.run_id}`. The authoritative result will follow.'
+                ),
             )
+            task = asyncio.create_task(
+                self._execute_run_cancellation(
+                    interaction=interaction,
+                    run_id=run.run_id,
+                    actor=actor,
+                    reason=reason,
+                )
+            )
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
         except Exception as exc:
             await self._respond(
                 interaction,
                 f'Run cancellation failed: {exc}',
             )
+
+    async def _execute_run_cancellation(
+        self,
+        *,
+        interaction: discord.Interaction,
+        run_id: str,
+        actor: DiscordControlActor,
+        reason: str | None,
+    ) -> None:
+        try:
+            cancelled = await asyncio.to_thread(
+                execute_discord_run_cancellation,
+                self.engine,
+                run_id=run_id,
+                actor=actor,
+                reason=reason,
+            )
+            await interaction.followup.send(
+                f'Run `{cancelled.run_id}` is now {cancelled.state.value}.',
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as exc:
+            try:
+                await interaction.followup.send(
+                    f'Run cancellation failed: {exc}',
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                return
 
     async def _on_research_status(
         self,
