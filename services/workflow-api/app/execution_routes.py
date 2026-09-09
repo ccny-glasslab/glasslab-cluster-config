@@ -14,7 +14,7 @@ import json
 from typing import Any, Callable
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
 from pydantic import ValidationError
 
 from services.common.schemas import ArtifactIndexEntry, ArtifactsIndex, ExpectedArtifactsSpec, RunManifest, RunStatus
@@ -22,7 +22,7 @@ from services.common.schemas import ArtifactIndexEntry, ArtifactsIndex, Expected
 from .config import Settings
 from .execution_preflight import build_execution_preflight_result
 from .job_submission import JobSubmitter, LiveStatusUnavailableError, resolve_evaluation_contract
-from .persistence import RunStore
+from .persistence import IdempotencyConflict, RunStore
 from .registry import WorkflowRegistry
 from .run_artifacts import (
     MEDIA_TYPES,
@@ -103,7 +103,12 @@ def register_execution_routes(
         source_approval_id: str | None = None,
         source_execution_id: str | None = None,
         plan_sha256: str | None = None,
+        idempotency_key: str | None = None,
     ) -> RunRecord:
+        if idempotency_key:
+            existing = store.get_run_by_idempotency_key(idempotency_key)
+            if existing is not None:
+                return existing
         workflow = registry.get_workflow(request.workload_id)
         if workflow is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='workload definition not found')
@@ -280,10 +285,17 @@ def register_execution_routes(
             source_approval_id=source_approval_id,
             source_execution_id=source_execution_id,
             plan_sha256=plan_sha256,
+            idempotency_key=idempotency_key,
         )
         # Persist the durable 'accepted' record BEFORE submitting so a failure
         # between submit and save cannot orphan a running Job with no RunRecord.
-        store.save_run(record)
+        try:
+            store.save_run(record)
+        except IdempotencyConflict:
+            existing = store.get_run_by_idempotency_key(idempotency_key)
+            if existing is not None:
+                return existing
+            raise
         submission = submitter.submit_run(manifest)
         record = record.model_copy(
             update={'job_submission': submission, 'updated_at': datetime.now(timezone.utc)}
@@ -513,8 +525,9 @@ def register_execution_routes(
         return build_execution_preflight_result(workflow, settings)
 
     @app.post('/experiments/runs', response_model=RunRecord, status_code=status.HTTP_201_CREATED)
-    def create_generic_experiment_run(request: GenericExperimentRunRequest) -> RunRecord:
-        return build_generic_run_record(request)
+    def create_generic_experiment_run(request: GenericExperimentRunRequest, raw_request: Request) -> RunRecord:
+        idempotency_key = raw_request.headers.get('Idempotency-Key')
+        return build_generic_run_record(request, idempotency_key=idempotency_key)
 
     @app.post('/experiments/runs/{run_id}/results', response_model=RunRecord)
     def ingest_generic_experiment_results(run_id: str, request: GenericExperimentResultIngestRequest) -> RunRecord:

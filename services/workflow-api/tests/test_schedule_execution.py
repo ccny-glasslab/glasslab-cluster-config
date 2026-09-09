@@ -2,21 +2,56 @@
 
 Validates that schedule execution produces exactly one execution record
 per due tick (repeated invocations are no-ops), that schedule metadata is
-updated correctly, and that reruns clone the source run's contract.
+updated correctly, that reruns clone the source run's contract, and that
+mutating run-creation posts honor an idempotency key end-to-end so a crash
+between submit and record-save cannot duplicate a Job.
 """
 
+import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
+from fastapi.testclient import TestClient as FastAPITestClient
+
+for module_name in list(sys.modules):
+    if module_name == 'app' or module_name.startswith('app.'):
+        del sys.modules[module_name]
+
+from app.auth import CallerPolicy
 from app.config import Settings
 from app.digest_scheduling import build_digest_schedule, execute_due_digest_schedules
 from app.job_submission import NullJobSubmitter
-from app.main import create_run_record, execute_due_approved_rerun_schedules
-from app.persistence import InMemoryRunStore
+from app.main import create_app, create_run_record, execute_due_approved_rerun_schedules
+from app.persistence import InMemoryRunStore, JsonFileRunStore
 from app.registry import WorkflowRegistry
 from app.schemas import DigestScheduleCreateRequest, RunCreateRequest, RunRecord, ScheduledOperationRecord
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+class TestClient(FastAPITestClient):
+    """Exercise routes as an explicitly authorized caller."""
+
+    def __init__(self, app, **kwargs) -> None:
+        app.state.settings.caller_policies = (
+            CallerPolicy(
+                name='test-suite',
+                token='test-suite-token',
+                allowed_operations=frozenset(
+                    f'{method} {route.path_format}'
+                    for route in app.routes
+                    if hasattr(route, 'path_format') and hasattr(route, 'methods')
+                    for method in route.methods & {'GET', 'POST', 'PUT', 'PATCH', 'DELETE'}
+                ),
+            ),
+        )
+        headers = dict(kwargs.pop('headers', {}))
+        headers.setdefault('X-Glasslab-Caller', 'test-suite')
+        headers.setdefault('X-Glasslab-Workflow-Token', 'test-suite-token')
+        super().__init__(app, headers=headers, **kwargs)
 
 
 def build_settings() -> Settings:
@@ -219,3 +254,116 @@ def test_digest_scheduling_helpers_cover_cron_matching_and_default_fields() -> N
     assert schedule.owner == settings.default_submitted_by
     assert schedule.cron_expr == cron_expr_for(now)
     assert schedule.digest_kind == 'daily-run-summary'
+
+
+def _generic_experiment_payload() -> dict:
+    return {
+        'objective': 'Verify idempotent submission across a simulated crash.',
+        'experiment_type': 'gpu-training-job',
+        'workload_id': 'generic-tabular-benchmark',
+        'config_payload': {},
+        'dataset_bindings': {},
+        'budget': {'max_wallclock_minutes': 5},
+    }
+
+
+class CrashAfterSubmitSubmitter(NullJobSubmitter):
+    """Submits the Job, then raises to simulate a crash before the receipt save."""
+
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
+        self.submit_count = 0
+
+    def submit_run(self, manifest):
+        self.submit_count += 1
+        super().submit_run(manifest)
+        raise RuntimeError('simulated crash after Job creation')
+
+
+class CountingSubmitter(NullJobSubmitter):
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
+        self.submit_count = 0
+
+    def submit_run(self, manifest):
+        self.submit_count += 1
+        return super().submit_run(manifest)
+
+
+def test_crash_replay_submission_does_not_duplicate_job(tmp_path: Path) -> None:
+    settings = build_settings()
+    registry = build_registry()
+    state_path = tmp_path / 'state.json'
+    store = JsonFileRunStore(state_path)
+    submitter = CrashAfterSubmitSubmitter(namespace=settings.runner_namespace)
+    client = TestClient(
+        create_app(settings=settings, registry=registry, store=store, submitter=submitter)
+    )
+
+    with pytest.raises(RuntimeError, match='simulated crash'):
+        client.post(
+            '/experiments/runs',
+            json=_generic_experiment_payload(),
+            headers={'Idempotency-Key': 'crash-key-1'},
+        )
+    assert submitter.submit_count == 1
+
+    restarted_store = JsonFileRunStore(state_path)
+    restarted_submitter = CountingSubmitter(namespace=settings.runner_namespace)
+    restarted_client = TestClient(
+        create_app(
+            settings=settings,
+            registry=registry,
+            store=restarted_store,
+            submitter=restarted_submitter,
+        )
+    )
+
+    response = restarted_client.post(
+        '/experiments/runs',
+        json=_generic_experiment_payload(),
+        headers={'Idempotency-Key': 'crash-key-1'},
+    )
+    assert response.status_code == 201
+    assert len(restarted_store.list_runs()) == 1
+    assert restarted_submitter.submit_count == 0
+
+
+def test_mutating_posts_are_unique_under_concurrency() -> None:
+    settings = build_settings()
+    registry = build_registry()
+    store = InMemoryRunStore()
+    submitter = NullJobSubmitter(namespace=settings.runner_namespace)
+    client_a = TestClient(
+        create_app(settings=settings, registry=registry, store=store, submitter=submitter)
+    )
+    client_b = TestClient(
+        create_app(settings=settings, registry=registry, store=store, submitter=submitter)
+    )
+
+    results: list = []
+    barrier = threading.Barrier(2)
+
+    def post(client) -> None:
+        barrier.wait()
+        results.append(
+            client.post(
+                '/experiments/runs',
+                json=_generic_experiment_payload(),
+                headers={'Idempotency-Key': 'concurrent-key-1'},
+            )
+        )
+
+    threads = [
+        threading.Thread(target=post, args=(client_a,)),
+        threading.Thread(target=post, args=(client_b,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert all(response.status_code == 201 for response in results)
+    run_ids = {response.json()['run_id'] for response in results}
+    assert len(run_ids) == 1
+    assert len(store.list_runs()) == 1

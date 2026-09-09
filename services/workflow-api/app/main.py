@@ -45,7 +45,7 @@ from .paper_pipeline import (
     default_paper_pipeline_request_text as default_paper_pipeline_request_text_impl,
     resolve_replication_repository_url as resolve_replication_repository_url_impl,
 )
-from .persistence import RunStore, create_run_store
+from .persistence import IdempotencyConflict, RunStore, create_run_store
 from .registry import WorkflowRegistry
 from .schedule_routes import register_schedule_routes
 from .source_documents import ingest_source_document, register_source_document_routes
@@ -1012,6 +1012,10 @@ def execute_due_approved_rerun_schedules(
             source_intake_id=source_run.source_intake_id,
             run_purpose='approved-rerun',
             session_id=source_run.session_id,
+            idempotency_key=(
+                f'approved-rerun:{schedule.schedule_id}:'
+                f'{started_at.strftime("%Y%m%d%H%M")}'
+            ),
         )
         finished_at = datetime.now(timezone.utc)
         detail = f'Approved rerun submitted as {rerun_record.run_id}.'
@@ -1051,7 +1055,12 @@ def create_run_record(
     source_intake_id: str | None = None,
     run_purpose: str | None = None,
     session_id: str | None = None,
+    idempotency_key: str | None = None,
 ) -> RunRecord:
+    if idempotency_key:
+        existing = store.get_run_by_idempotency_key(idempotency_key)
+        if existing is not None:
+            return existing
     # Persistent failure: validation only blocks this request; unknown or
     # disallowed fields are rejected so the caller can fix their input.
     issues = validate_run_request(request, workflow)
@@ -1121,11 +1130,18 @@ def create_run_record(
         run_purpose=run_purpose,
         run_priority=request.run_priority,
         session_id=session_id,
+        idempotency_key=idempotency_key,
     )
     artifacts = build_artifact_index(run_id, workflow.expected_artifacts.required, workflow.expected_artifacts.optional)
     # Persist the durable 'accepted' record BEFORE submitting so a failure
     # between submit and save cannot orphan a running Job with no RunRecord.
-    store.save_run(record)
+    try:
+        store.save_run(record)
+    except IdempotencyConflict:
+        existing = store.get_run_by_idempotency_key(idempotency_key)
+        if existing is not None:
+            return existing
+        raise
     submission = submitter.submit_run(manifest)
     record = record.model_copy(
         update={'job_submission': submission, 'updated_at': datetime.now(timezone.utc)}

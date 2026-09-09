@@ -989,6 +989,9 @@ class RunRecord(BaseModel):
     source_execution_id: str | None = None
     plan_sha256: str | None = Field(default=None, min_length=64, max_length=64)
     artifact_bundle_verified: bool = False
+    # Caller-supplied idempotency key: the store enforces a unique constraint
+    # so a crash between submit and record-save cannot duplicate a Job.
+    idempotency_key: str | None = None
 
 
 class InvestigationHypothesisRecord(BaseModel):
