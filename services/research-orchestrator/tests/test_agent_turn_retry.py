@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import pytest
 
-from app.engine import ResearchOrchestrator
+from app.engine import ResearchOrchestrator, WorkflowError
 from app.mock_runtime import ScriptedMockRuntime
 from app.opencode_runtime import AgentRuntime, OpenCodeRuntimeError
-from app.schemas import AgentName, RunCreateRequest, TurnKind
+from app.schemas import AgentName, RunCreateRequest, RunState, TurnKind
 
 
 class FlakyTurnRuntime:
@@ -52,6 +52,41 @@ class FlakyTurnRuntime:
 
     def release(self, **kwargs):
         return self.inner.release(**kwargs)
+
+
+class PauseOrCancelBeforeRetryRuntime(ScriptedMockRuntime):
+    """Fails the first turn with a retryable error after pausing/cancelling.
+
+    Reproduces issue #239 Mechanism B: pause/cancel abort an in-flight turn,
+    the abort surfaces inside ``_run_agent_turn`` as a retryable provider
+    error, and the retry path must refuse to launch a fresh model turn on a
+    run that is no longer advanceable.
+    """
+
+    def __init__(
+        self,
+        *,
+        runner_image: str,
+        engine: ResearchOrchestrator,
+        transition: str,
+    ) -> None:
+        super().__init__(runner_image=runner_image)
+        self.engine = engine
+        self.transition = transition
+        self.attempts = 0
+
+    def run_turn(self, **kwargs):
+        self.attempts += 1
+        if self.attempts == 1:
+            if self.transition == 'pause':
+                self.engine.pause_run(kwargs['run_id'], requested_by='test')
+            else:
+                self.engine.cancel_run(kwargs['run_id'], requested_by='test')
+            raise OpenCodeRuntimeError(
+                "OpenCode turn exceeded the hard wall-clock limit of 1800 seconds",
+                failure_class="network",
+            )
+        return super().run_turn(**kwargs)
 
 
 def _make_run(engine: ResearchOrchestrator, objective: str):
@@ -195,3 +230,38 @@ def test_startup_failure_is_retryable(orchestrator_bundle) -> None:
     )
     assert result.kind == TurnKind.PROTOCOL_DRAFT
     assert engine.runtime.attempts == 2
+
+
+@pytest.mark.parametrize('transition', ['pause', 'cancel'])
+def test_retry_refused_after_pause_or_cancel(
+    orchestrator_bundle,
+    transition,
+) -> None:
+    """A retryable failure must not start a fresh turn on a paused/terminal run.
+
+    Pause/cancel abort an in-flight turn; the abort surfaces as a retryable
+    provider/network error. The retry path must re-read the run state and
+    refuse to launch a brand-new model turn on a run that is no longer
+    advanceable (issue #239).
+    """
+    settings, store, cluster, runtime, engine = orchestrator_bundle
+    run = _make_run(engine, "Retry refusal after pause/cancel objective.")
+    engine.runtime = PauseOrCancelBeforeRetryRuntime(
+        runner_image=runtime.runner_image,
+        engine=engine,
+        transition=transition,
+    )
+    with pytest.raises(WorkflowError, match='workflow advancement stopped'):
+        engine._run_agent_turn(
+            run_id=run.run_id,
+            agent=AgentName.HONEYDEW,
+            prompt=_draft_prompt(),
+            expected_kind=TurnKind.PROTOCOL_DRAFT,
+            input_event={"objective": "retry test"},
+        )
+    # Only the aborted attempt ran; the retry was refused.
+    assert engine.runtime.attempts == 1
+    final = store.get_run(run.run_id)
+    assert final.state == (
+        RunState.PAUSED if transition == 'pause' else RunState.CANCELLED
+    )
