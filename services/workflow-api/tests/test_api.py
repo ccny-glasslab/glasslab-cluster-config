@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient as FastAPITestClient
 
 # Prevent stale ``app.*`` module state from leaking between test modules.
@@ -28,8 +29,15 @@ from app.auth import CallerPolicy
 import app.autoresearch as autoresearch_module
 import app.main as main_module
 import app.source_documents as source_documents
+import app.transition_routes as transition_routes_module
 from app.job_submission import LiveStatusUnavailableError, NullJobSubmitter
-from app.schemas import AutoresearchDecisionRecord, AutoresearchIterationRecord, EvaluatorContract
+from app.schemas import (
+    AutoresearchDecisionRecord,
+    AutoresearchIterationRecord,
+    CreateInterpretationRequest,
+    EvaluatorContract,
+    IntakeRecord,
+)
 from app.stage_interpretation import build_interpretation_record_from_agent_draft, validate_interpretation_agent_draft
 from app.main import create_app
 from app.persistence import InMemoryRunStore
@@ -1862,6 +1870,71 @@ def test_create_interpretation_falls_back_when_agent_returns_none(monkeypatch) -
     assert payload['interpretation_source'] == 'deterministic'
     assert payload['interpretation_backend'] is None
     assert payload['interpretation_warnings'] == []
+
+
+def test_create_interpretation_passes_store_and_falls_back(monkeypatch) -> None:
+    """The /transitions/create-interpretation handler must pass ``store`` to the
+    interpretation agent and fall back to the deterministic record when the
+    agent returns None (mirroring main.create_interpretation_for_intake)."""
+    settings = Settings(
+        registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
+        interpretation_agent_enabled=True,
+    )
+    registry = WorkflowRegistry(settings.registry_dir)
+    store = InMemoryRunStore()
+
+    intake = IntakeRecord(
+        intake_id='intake-transition-1',
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        status='ready_for_design',
+        source_type='paper-link',
+        source_refs=['https://example.org/transition-paper'],
+        raw_request='Read this paper intake and determine whether the approved Titanic benchmark path is a good fit.',
+        normalized_summary='Transition route intake summary.',
+        workflow_family_candidates=['generic-tabular-benchmark'],
+        submitted_by='test-user',
+        session_id='session-transition-1',
+    )
+    store.save_intake(intake)
+
+    app = FastAPI()
+    transition_routes_module.register_transitions_routes(
+        app,
+        settings=settings,
+        registry=registry,
+        store=store,
+        create_run_record_impl=lambda *args, **kwargs: None,
+        build_research_problem_record_impl=lambda *args, **kwargs: None,
+    )
+    route = next(
+        route for route in app.routes
+        if getattr(route, 'path', None) == '/transitions/create-interpretation'
+    )
+    handler = route.endpoint
+
+    captured_store = {}
+
+    def fake_call_interpretation_agent(intake, settings, registry, store):
+        captured_store['store'] = store
+        return None
+
+    monkeypatch.setattr(
+        transition_routes_module,
+        'call_interpretation_agent',
+        fake_call_interpretation_agent,
+    )
+
+    response = handler(CreateInterpretationRequest(intake_id=intake.intake_id))
+
+    assert captured_store['store'] is store
+    assert response.interpretation_id
+    assert response.status == 'ready_for_assessment'
+    assert response.recommended_workflow_id == 'generic-tabular-benchmark'
+    saved = store.get_interpretation(response.interpretation_id)
+    assert saved is not None
+    assert saved.interpretation_source == 'deterministic'
+    assert saved.intake_id == intake.intake_id
 
 
 def test_create_interpretation_records_agent_backend_metadata(monkeypatch) -> None:
