@@ -4820,6 +4820,16 @@ class ResearchOrchestrator:
                         'seed': stored.seed,
                     },
                 )
+        # Pause deliberately bypasses the advancement lock (so it can abort a
+        # model turn), which means a pause can land mid-submission. Re-read
+        # fresh state before advancing so a run paused while recovery was
+        # submitting stays PAUSED instead of transitioning to JOB_QUEUED and
+        # submitting jobs after the human paused (issue #240).
+        current = self.store.get_run(run.run_id)
+        if current.state != RunState.AWAITING_EXECUTION_APPROVAL:
+            raise WorkflowError(
+                f'cannot submit matrix while run is {current.state.value}'
+            )
         self._transition(run.run_id, RunState.JOB_QUEUED)
         self._fill_job_capacity(run.run_id)
 
@@ -4846,6 +4856,10 @@ class ResearchOrchestrator:
             if job.status == JobStatus.QUEUED and not job.external_run_id
         ]
         for job in queued[:slots]:
+            # A pause can also land between the JOB_QUEUED transition and the
+            # submission loop; never submit jobs for a paused run.
+            if self.store.get_run(run_id).state == RunState.PAUSED:
+                break
             submitting = self.store.update_job(
                 job.model_copy(update={'status': JobStatus.SUBMITTING})
             )
@@ -5817,6 +5831,10 @@ class ResearchOrchestrator:
                     )
             try:
                 with self._run_lock(run.run_id):
+                    # A pod restart mid-run skips prepare(); re-seed the
+                    # authoritative tool roster so the resumed agent session
+                    # sees AGENTS.md (issue #199).
+                    self.workspaces.seed_agent_context(run.run_id)
                     self._recover_run(run.run_id)
             except Exception as exc:
                 current = self.store.get_run(run.run_id)

@@ -5,8 +5,12 @@ metadata:
   namespace: glasslab-v2
 spec:
   replicas: 1
+  # The orchestrator is a singleton over shared Postgres state and NFS
+  # worktrees; a RollingUpdate surge would run two replicas that both drive
+  # recover()/watcher against the same runs. Recreate guarantees the old pod
+  # is gone before the new one starts (issue #240).
   strategy:
-    type: RollingUpdate
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: glasslab-research-orchestrator
