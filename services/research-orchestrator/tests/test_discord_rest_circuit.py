@@ -290,6 +290,37 @@ class TestCircuitStateMachine:
         with pytest.raises(DiscordCircuitOpen):
             circuit.check()  # second caller while probe in flight fails fast
 
+    def test_half_open_probe_invalid_url_recovers_on_next_success(self) -> None:
+        # httpx.InvalidURL derives from Exception, not HTTPError; a half-open
+        # probe raising it must still record an outcome (classified as a
+        # network failure) so the breaker reopens with a fresh cooldown and
+        # recovers on the next successful probe instead of wedging half-open.
+        clock = FakeClock()
+        policy = DiscordRestPolicy(circuit_open_failures=1, cooldown_seconds=60.0, monotonic=clock)
+        circuit = DiscordRestCircuit(policy=policy)
+        circuit.record(DiscordRestOutcome(category=discord_rest.CATEGORY_CLOUDFLARE_1010, status_code=403))
+        clock.advance(61.0)
+
+        def attempt() -> httpx.Response:
+            raise httpx.InvalidURL("invalid webhook url")
+
+        # execute_guarded's own check() is the half-open probe here.
+        with pytest.raises(httpx.InvalidURL):
+            execute_guarded(circuit=circuit, policy=policy, attempt=attempt, raise_failure=_raise_failure)
+
+        # The non-httpx exception was classified as a network failure and
+        # recorded, so the failed probe reopened the circuit with a fresh
+        # cooldown instead of leaving the probe slot wedged in flight.
+        assert circuit.state == discord_rest.STATE_OPEN
+        assert circuit.snapshot()["last_outcome_category"] == discord_rest.CATEGORY_NETWORK
+
+        # After the fresh cooldown the next probe succeeds and closes the circuit.
+        clock.advance(61.0)
+        circuit.check()
+        assert circuit.state == discord_rest.STATE_HALF_OPEN
+        circuit.record(DiscordRestOutcome(category=discord_rest.CATEGORY_OK, status_code=200))
+        assert circuit.state == discord_rest.STATE_CLOSED
+
     def test_snapshot_is_sanitized_and_json_serializable(self) -> None:
         policy = DiscordRestPolicy(circuit_open_failures=1)
         circuit = DiscordRestCircuit(policy=policy)
