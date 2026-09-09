@@ -1,6 +1,6 @@
 # Glasslab Current Handoff
 
-Last updated: 2026-09-03
+Last updated: 2026-09-09
 
 This is the compact current-state checkpoint for switching human or coding
 agents. Read `AGENTS.md` first for stable rules, architecture, vocabulary,
@@ -27,6 +27,28 @@ Three distinct layers of truth, in decreasing authority:
   (`GLASSLAB_ORCHESTRATOR_STORE_BACKEND=postgres`). SQLite remains the local,
   test, and import-migration backend.
 
+## Model Serving (exo retired — verified 2026-09-09)
+
+The exo cluster is retired. Each Mac runs one full model locally, behind a
+serializing guard. **Both servers are launchd-managed** (`KeepAlive`) via
+`scripts/model-serve/install-model-serve.sh` (applied on `.18`; `.17`
+migration deferred until the active rehearsal pauses).
+
+| Host | Model | mlx port | guard port | cache |
+|---|---|---|---|---|
+| `192.168.1.17` | `mlx-community/Qwen3-Coder-Next-4bit` | 52416 | 52417 | `--prompt-cache-size 8` |
+| `192.168.1.18` | `mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit` | 52416 | 52417 | `--prompt-cache-size 8` |
+
+- `model_guard.py` on :52417 is a single-worker serializing proxy
+  (64 MB body cap, 503+retry-5s when busy). The orchestrator and rehearsal
+  harness talk only to the guard.
+- Servers run with `HF_HOME=/private/tmp/hf-cache`, `HF_HUB_OFFLINE=1` —
+  never re-download the 42 GB weights.
+- **Cold start is slow**: after a reload the first request can take ~2 min
+  (weights page in from SSD); warm requests are ~10s.
+- `.17` (64 GB RAM) is tight: ~48 GB wired to the Coder model, ~13 GB working
+  pool. `.18` is comfortable (~70% free).
+
 ## Live Infrastructure Facts
 
 The research orchestrator runs as a single pod on `node05`. Its per-run
@@ -37,14 +59,15 @@ NFS at:
 192.168.1.207:/volume1/backup/glasslab-v2/shared-artifacts
 ```
 
-Both agent runtimes point at the exo OpenAI-compatible service at
-`192.168.1.17:52415`. The cabled exo pair is `.17` and `.18`.
+## Deployed State (verified 2026-09-09)
 
-## Deployed State (last verified 2026-09-02)
+Both `glasslab-research-orchestrator` and `glasslab-workflow-api` are deployed
+at commit `97d0caa` (the run-through stack: resumable rehearsal driver,
+no-auto-retry turn bounds, evidence offload, matrix revision cap, matrix
+rejection feedback). #382's PostgreSQL store fix is merged to `testing` but
+**not yet deployed** (a rollout recreates the orchestrator pod and would kill
+the active rehearsal).
 
-The live orchestrator configmap selects `AGENT_RUNTIME_BACKEND=opencode`
-(verified 2026-09-02) with `STORE_BACKEND=postgres`. At the 2026-08-23 check
-the deployed research-orchestrator image was commit `c525861` (#169).
 Re-verify before relying on it:
 
 ```bash
@@ -54,111 +77,57 @@ sudo -n env KUBECONFIG=/home/glasslab/.kube/config \
   -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 ```
 
-## Committed State
+## Committed State (merged to `testing`/`main`, 2026-09-09)
 
-Merged to `main`:
+Run-through stack:
 
-- OpenCode selected as the agent runtime for Honeydew and Beaker; Hermes
-  retained as an explicit opt-in rollback backend (#127, #98).
-- PostgreSQL orchestrator store with a SQLite import tool (#130).
-- ccny GHCR image namespace cutover (#131, #132) and store migration tooling
-  (#133, #134, #135).
-- Hermes structured-output hardening (#142) and workflow-api live-status
-  degradation (#144).
+- #384 — rehearsal driver is state-driven and resumes cleanly across turn
+  timeouts (paused runs resume via `resume_run()`; `RESUMABLE` exit 0).
+- #385 — wall-clock/stuck-loop turn aborts are no longer auto-retried (they
+  paused cleanly instead); watchdog wins the race at the turn wall.
+- #386 — exo split/reload check + model context-budget measurement scripts.
+- #387 — evidence snapshots are written to the agent workspace; prompts carry
+  a content-free digest (context management).
+- #388 — deterministic matrix-preflight revision cap (`maximum_matrix_revisions
+  = 3`; the live loop burned 10 before the file was written).
+- #390 — matrix-rejection feedback names the missing base_config file and
+  enumerates per-requirement YAML shapes.
+- #392 — evidence-URI resolver accepts the URI shapes the engine actually
+  produces; `event://` resolution implemented; prompts stop inviting
+  unresolvable `git://`/`contract://`.
+- #393 — launchd automation for the standalone mlx servers + guards.
+- #382 — PostgreSQL JSONB decode fix (stale-paused store contract) + CI
+  restoration; the python CI lane is green again.
 
-Merged to `testing` (not yet promoted to `main`):
+## Run-Through Status (real-model rehearsal, 2026-09-09)
 
-- read-only turn inspection (#147)
-- research runtime storage retention and cache cleanup (#148)
-- docs consolidation (#152)
+A rehearsal drives the full research flow with real OpenCode + real models and
+a fake cluster (`app/rehearse_research_flow.py`, in the image). It has reached
+further than any prior run: protocol + contract drafted/promoted, Beaker
+implementation completed, matrix proposed (rejected 10× — the loop the cap
+bounds), verification has not yet run against real model output.
 
-The orchestrator test suite passes 175 tests. GitHub CI is green for the
-committed branch.
-
-## Historical Research Runs
-
-These are past runs preserved for context; they do not describe current live
-state.
-
-### Adult Income
-
-Run `cce710ceef97441685c777c8f19c767b` reached `COMPLETE`, including final
-acceptance. It was the first completed end-to-end compatibility example.
-
-### Wine Clustering
-
-Run `39101d9c9d3d4753bcd74e93e6106819` ended `TIMED_OUT` at turn 20.
-
-What happened:
-
-1. The initial matrix incorrectly expanded ten internal stability seeds into
-   ten outer cluster jobs.
-2. Workload calculations completed, but the evaluator rejected the results
-   because `plots/clusters.png` was absent.
-3. Honeydew identified the missing evidence.
-4. Beaker added a deterministic PCA cluster plot using Matplotlib's
-   noninteractive backend.
-5. Beaker proposed a corrected matrix with one outer job and seed `17`.
-6. Live deterministic preflight passed with no errors.
-7. The overall run deadline expired before Honeydew could review the final
-   proposal and expose execution approval.
-
-The preserved one-job Wine proposal is the intended first use of the
-terminal-checkpoint retry path (#92 / #145).
-
-### Fashion-MNIST
-
-The compatibility task was preflight-ready at the time but did not complete a
-live run (#101).
-
-## Inspect Live State
-
-From a contributor workstation:
-
-```bash
-ssh glasslab-provisioner
-sudo -n env KUBECONFIG=/home/glasslab/.kube/config \
-  kubectl -n glasslab-v2 get pods,jobs -o wide
-```
-
-For the internal orchestrator API, create a tunnel:
-
-```bash
-ssh -L 18080:127.0.0.1:18080 glasslab-provisioner \
-  'sudo -n env KUBECONFIG=/home/glasslab/.kube/config \
-   kubectl -n glasslab-v2 port-forward \
-   svc/glasslab-research-orchestrator 18080:8080'
-```
-
-Then:
-
-```bash
-RUN=<run-id>
-curl -fsS "http://127.0.0.1:18080/runs/$RUN" | jq
-curl -fsS "http://127.0.0.1:18080/runs/$RUN/events" | jq
-curl -fsS "http://127.0.0.1:18080/runs/$RUN/artifacts" | jq
-curl -fsS "http://127.0.0.1:18080/runs/$RUN/turns" | jq
-```
-
-Per-run files are available inside the orchestrator pod at:
-
-```text
-/mnt/artifacts/research-orchestrator/runs/<run-id>/
-```
+- A fresh rehearsal is running on `97d0caa` (started ~19:55 UTC) at the
+  protocol gate. Scratch state lives in the orchestrator pod `/tmp` — **it dies
+  with the pod**, so any rollout restarts the rehearsal from zero.
+- The next unproven gate is `HONEYDEW_VERIFYING`: the #392 evidence-URI fix is
+  merged but not yet deployed (same rollout constraint).
 
 ## Known Risks
 
-- One orchestrator replica remains a scaling limitation; PostgreSQL is the
-  production store but the single replica and Postgres availability are still
-  single points of the research path.
-- Agent turns can be slow against the shared exo model; large evidence bundles
-  amplify the problem.
-- Terminal checkpoint retry (#145) is merged to `testing` and deployed; a
-  terminal retry child is superseded by the next retry rather than reopened.
-- The Hermes rollback backend's runtime storage does not yet have the same
-  shared-cache treatment as OpenCode; only per-run cleanup applies (see
-  `services/research-orchestrator/scripts/cleanup-run-storage.py`).
-- A generic arbitrary-dataset run has not yet completed end to end (#98).
+- **One orchestrator replica**; the deployment is a single pod and `/tmp` is
+  ephemeral — a rollout kills any in-pod rehearsal.
+- **`.17` memory is the hard floor**: 64 GB with ~48 GB wired to Coder-Next
+  leaves ~13 GB working pool; context growth competes with page cache. Keep
+  evidence inlined out of prompts (#387) and loops bounded (#385/#388).
+- **Cold start after model reload** costs ~2 min; monitor `.17`/`.18` with
+  `scripts/check-exo-model-split.sh` (the `created` timestamp surfaces reloads).
+- **`.17` is still manually served** (launchd migration deferred); only `.18`
+  is reboot-survivable so far.
+- **CI python lane is green again** (#382) but the fix is not yet deployed to
+  the live orchestrator.
+- Agent turns remain slow (~60s/stream); evidence compaction (#93) is the open
+  lever for the verify/report stages.
 
 Update this file whenever the active deployment, current blocker, or next legal
 workflow step materially changes. Keep historical detail in dated docs or run
