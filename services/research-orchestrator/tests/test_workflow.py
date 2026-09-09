@@ -2079,6 +2079,66 @@ def test_methodology_resolution_appendix_ignores_unrelated_errors() -> None:
     assert appendix == ''
 
 
+def test_methodology_appendix_in_revision_requested_payload(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # A deterministic preflight failure must carry the methodology-resolution
+    # appendix into the durable methodology.revision_requested payload, not
+    # just into the in-memory rejection reason (issue #199).
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Compare two bounded methods.')
+    )
+    protocol = _pending_action(store, run.run_id, 'approve_protocol')
+    engine.approve_action(
+        protocol.action_id,
+        reviewer='test-human',
+        reason='Protocol accepted.',
+    )
+    assert store.get_run(run.run_id).state == RunState.AWAITING_EXECUTION_APPROVAL
+
+    # Rebind the run to the contract that declares methodology requirements,
+    # then re-run Honeydew review against the existing matrix whose
+    # base_config lacks every required setting.
+    contract = engine.contracts.resolve(
+        'ml-benchmark-adult-income-v1',
+        '1.1.0',
+    )
+    run = store.get_run(run.run_id)
+    store.replace_run(
+        run.model_copy(
+            update={
+                'evaluation_contract_id': 'ml-benchmark-adult-income-v1',
+                'evaluation_contract_version': '1.1.0',
+                'evaluation_contract_digest': contract.digest,
+            }
+        ),
+        expected_version=run.version,
+    )
+    # Stop the revision loop after the first rejection so the test asserts on
+    # the durable payload rather than the full revise cycle.
+    monkeypatch.setattr(engine, '_beaker_revise', lambda run_id, feedback: None)
+
+    engine._honeydew_review(run.run_id, implementation_turn_id='test')
+
+    revision = next(
+        event
+        for event in store.list_events(run.run_id)
+        if event.event_type == 'methodology.revision_requested'
+    )
+    assert 'must EXIST' in revision.payload['feedback']
+    assert 'config_path `experiment_dimensions.model`' in revision.payload['feedback']
+    rejected = [
+        action
+        for action in store.list_actions(run.run_id)
+        if action.type == 'submit_experiment_matrix'
+        and action.approval_status == ApprovalStatus.REJECTED
+    ]
+    assert rejected
+    assert 'must EXIST' in rejected[-1].reason
+
+
 def test_restart_recovery_from_job_running(orchestrator_bundle) -> None:
     # Rebuilds the engine from the same SqliteStore file after jobs completed,
     # simulating a process restart; recover() must finish the run from durable
@@ -2279,6 +2339,41 @@ def test_recover_holds_advance_lock_and_rechecks_state(
     assert recovered.state == RunState.PAUSED
     assert recovered.resume_state == RunState.AWAITING_EXECUTION_APPROVAL
     assert cluster.submissions == {}
+
+
+def test_recover_seeds_agent_context(orchestrator_bundle) -> None:
+    # A pod restart mid-implementation calls recover() without prepare();
+    # recover() must re-seed the authoritative tool roster into both agent
+    # worktrees so the resumed session sees AGENTS.md (issue #199).
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Recover with a seeded agent roster.')
+    )
+    protocol = _pending_action(store, run.run_id, 'approve_protocol')
+    engine.approve_action(
+        protocol.action_id,
+        reviewer='test-human',
+        reason='Protocol accepted.',
+    )
+    run = store.get_run(run.run_id)
+    assert run.state == RunState.AWAITING_EXECUTION_APPROVAL
+    # Simulate a restart mid-implementation: the run is parked in an agent
+    # phase and the roster files are gone from the shared worktrees.
+    run = store.replace_run(
+        run.model_copy(update={'state': RunState.BEAKER_IMPLEMENTING}),
+        expected_version=run.version,
+    )
+    beaker_md = Path(run.beaker_workspace) / 'AGENTS.md'
+    honeydew_md = Path(run.honeydew_workspace) / 'AGENTS.md'
+    beaker_md.unlink()
+    honeydew_md.unlink()
+
+    engine.recover()
+
+    assert beaker_md.is_file()
+    assert honeydew_md.is_file()
+    assert '## Available tools (authoritative)' in beaker_md.read_text()
+    assert '## Available tools (authoritative)' in honeydew_md.read_text()
 
 
 def test_transient_inspection_error_does_not_finish_run(

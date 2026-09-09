@@ -5831,6 +5831,10 @@ class ResearchOrchestrator:
                     )
             try:
                 with self._run_lock(run.run_id):
+                    # A pod restart mid-run skips prepare(); re-seed the
+                    # authoritative tool roster so the resumed agent session
+                    # sees AGENTS.md (issue #199).
+                    self.workspaces.seed_agent_context(run.run_id)
                     self._recover_run(run.run_id)
             except Exception as exc:
                 current = self.store.get_run(run.run_id)
