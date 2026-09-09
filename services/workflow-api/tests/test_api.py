@@ -30,7 +30,7 @@ import app.autoresearch as autoresearch_module
 import app.main as main_module
 import app.source_documents as source_documents
 import app.transition_routes as transition_routes_module
-from app.job_submission import LiveStatusUnavailableError, NullJobSubmitter
+from app.job_submission import JobSubmissionError, LiveStatusUnavailableError, NullJobSubmitter
 from app.schemas import (
     AutoresearchDecisionRecord,
     AutoresearchIterationRecord,
@@ -5885,3 +5885,56 @@ def test_submit_failure_leaves_adoptable_accepted_record(endpoint: str, payload:
     assert record is not None
     assert record.status.status == 'accepted'
     assert record.job_submission.status == 'pending'
+
+
+def test_experiment_submission_api_exception_returns_clean_json_error() -> None:
+    class RejectingSubmitter(NullJobSubmitter):
+        def submit_run(self, manifest):
+            raise JobSubmissionError(400, 'Kubernetes rejected the job submission: invalid spec')
+
+    client = build_legacy_compatibility_client(
+        submitter=RejectingSubmitter(namespace='default')
+    )
+    response = client.post(
+        '/experiments/runs',
+        json={
+            'objective': 'Surface a clean JSON error when Kubernetes rejects the job.',
+            'experiment_type': 'gpu-training-job',
+            'workload_id': 'metric-search-v0',
+            'config_payload': {'search_space_id': 'art-metric-baseline'},
+            'dataset_bindings': {'train_uri': 's3://datasets/art/train.parquet'},
+            'budget': {'max_epochs': 1, 'max_wallclock_minutes': 5},
+            'submitted_by': 'test-suite',
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()['detail'] == 'Kubernetes rejected the job submission: invalid spec'
+
+
+def test_run_submission_api_exception_returns_clean_json_error() -> None:
+    class RejectingSubmitter(NullJobSubmitter):
+        def submit_run(self, manifest):
+            raise JobSubmissionError(502, 'Kubernetes Job API failed during submission')
+
+    client = build_legacy_compatibility_client(
+        submitter=RejectingSubmitter(namespace='default')
+    )
+    response = client.post(
+        '/runs',
+        json={
+            'workflow_id': 'generic-tabular-benchmark',
+            'objective': 'Surface a clean JSON error when the Kubernetes API fails.',
+            'inputs': {
+                'dataset_name': 'titanic',
+                'train_uri': 's3://datasets/titanic/train.csv',
+                'test_uri': 's3://datasets/titanic/test.csv',
+                'target_column': 'Survived',
+            },
+            'models': ['logistic_regression'],
+            'resource_profile': 'cpu-small',
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()['detail'] == 'Kubernetes Job API failed during submission'

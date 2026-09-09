@@ -37,7 +37,7 @@ from .execution_routes import register_execution_routes
 from .execution_preflight import build_execution_preflight_result
 from .external_literature import search_external_literature
 from .investigation_routes import register_investigation_routes
-from .job_submission import JobSubmitter, create_job_submitter
+from .job_submission import JobSubmissionError, JobSubmitter, create_job_submitter
 from .literature_routes import register_literature_routes
 from .paper_pipeline import (
     auto_resolve_pipeline_design_inputs as auto_resolve_pipeline_design_inputs_impl,
@@ -1142,7 +1142,13 @@ def create_run_record(
         if existing is not None:
             return existing
         raise
-    submission = submitter.submit_run(manifest)
+    try:
+        submission = submitter.submit_run(manifest)
+    except JobSubmissionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+        ) from exc
     record = record.model_copy(
         update={'job_submission': submission, 'updated_at': datetime.now(timezone.utc)}
     )

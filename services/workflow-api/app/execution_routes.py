@@ -21,7 +21,7 @@ from services.common.schemas import ArtifactIndexEntry, ArtifactsIndex, Expected
 
 from .config import Settings
 from .execution_preflight import build_execution_preflight_result
-from .job_submission import JobSubmitter, LiveStatusUnavailableError, resolve_evaluation_contract
+from .job_submission import JobSubmissionError, JobSubmitter, LiveStatusUnavailableError, resolve_evaluation_contract
 from .persistence import IdempotencyConflict, RunStore
 from .registry import WorkflowRegistry
 from .run_artifacts import (
@@ -296,7 +296,13 @@ def register_execution_routes(
             if existing is not None:
                 return existing
             raise
-        submission = submitter.submit_run(manifest)
+        try:
+            submission = submitter.submit_run(manifest)
+        except JobSubmissionError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.detail,
+            ) from exc
         record = record.model_copy(
             update={'job_submission': submission, 'updated_at': datetime.now(timezone.utc)}
         )
