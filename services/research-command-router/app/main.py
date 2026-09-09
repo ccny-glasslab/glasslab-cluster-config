@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib import error as urllib_error
@@ -37,6 +38,13 @@ class Settings:
     )
 
 
+_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _valid_session_id(value: str | None) -> bool:
+    return value is not None and bool(_SESSION_ID_PATTERN.match(value))
+
+
 class DispatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -59,8 +67,15 @@ class DispatchRequest(BaseModel):
     def validate_session_id(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        cleaned = " ".join(value.split()).strip()
-        return cleaned or None
+        # Reject path-special characters outright: session_id is interpolated
+        # into workflow-api URL paths, so anything beyond a safe token would be
+        # authenticated path injection into the router's credentials (C-260).
+        if not _valid_session_id(value):
+            raise ValueError(
+                "session_id must be a URL-safe token (letters, digits, "
+                "hyphen, underscore)"
+            )
+        return value
 
 
 class DispatchResponse(BaseModel):
@@ -219,10 +234,10 @@ def _get_latest_session_id(
     endpoint, payload = requester(settings, path)
     session = payload.get("session") or {}
     session_id = str(session.get("session_id") or "").strip()
-    if not session_id:
+    if not _valid_session_id(session_id):
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="research session not found",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="research session has an invalid session_id",
         )
     return endpoint, payload, session_id
 
@@ -264,7 +279,9 @@ def _is_missing_campaign_error(exc: HTTPException) -> bool:
 
 
 def _scope_session_path(path: str, session_id: str | None) -> str:
-    if not session_id:
+    if not _valid_session_id(session_id):
+        # Never interpolate an unvalidated id into the backend path; leave the
+        # path unscoped so the backend's own "latest" handling applies.
         return path
     # Without a pinned session id, backend calls target the "latest" session;
     # a pinned id rewrites the /research-sessions/latest prefix to the concrete
