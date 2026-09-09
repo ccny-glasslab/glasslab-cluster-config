@@ -84,10 +84,21 @@ class WorkflowError(RuntimeError):
 
 
 NON_RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
-    {'validation', 'kind_mismatch', 'workflow'}
+    {
+        'validation',
+        'kind_mismatch',
+        'workflow',
+        # A wall-clock abort or a stuck-tool-loop abort is not transient: a
+        # fresh session with the same prompt re-enters the same work (and the
+        # same wall), so auto-retrying just burns the turn budget and hours of
+        # model time. The run pauses instead and resumes with the worktree
+        # intact via resume_run().
+        'turn_timeout',
+        'repeated_tool_loop',
+    }
 )
 _RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
-    {'startup', 'turn_timeout', 'repeated_tool_loop', 'provider', 'network'}
+    {'startup', 'provider', 'network'}
 )
 
 
