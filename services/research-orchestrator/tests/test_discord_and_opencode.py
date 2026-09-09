@@ -1776,6 +1776,67 @@ def _authorize(gateway: DiscordControlGateway) -> None:
     )
 
 
+def test_discord_cancel_acks_before_background_cancellation() -> None:
+    import threading
+
+    engine = Mock()
+    engine.store.get_run.return_value = SimpleNamespace(
+        run_id='run-1',
+        discord_thread_id='main-channel',
+    )
+    release = threading.Event()
+    cancelled = SimpleNamespace(
+        run_id='run-1',
+        state=SimpleNamespace(value='CANCELLED'),
+    )
+
+    def slow_cancel(*args, **kwargs):
+        release.wait(timeout=5)
+        return cancelled
+
+    engine.cancel_run.side_effect = slow_cancel
+    gateway = DiscordControlGateway(
+        engine=engine,
+        bot_token='bot-token',
+        guild_id='123456789',
+        channel_id='main-channel',
+        admin_role_id='role-1',
+        admin_user_ids=['doll-user'],
+        maximum_dataset_upload_bytes=1024,
+    )
+    _authorize(gateway)
+    interaction = _FakeInteraction()
+    interaction.response.send_message = AsyncMock()
+
+    async def scenario() -> None:
+        handler = asyncio.create_task(
+            gateway._on_research_cancel(interaction, run_id='run-1', reason=None)
+        )
+        # The ack must land while cancellation is still blocked, inside
+        # Discord's 3s response deadline.
+        for _ in range(100):
+            if interaction.response.send_message.called:
+                break
+            await asyncio.sleep(0.01)
+        assert interaction.response.send_message.called, (
+            'first interaction must be acked before cancellation completes'
+        )
+        ack = interaction.response.send_message.call_args.args[0]
+        assert 'request accepted' in ack
+        assert not engine.cancel_run.called or engine.cancel_run.call_count == 1
+        release.set()
+        await handler
+        while gateway._tasks:
+            tasks = list(gateway._tasks)
+            gateway._tasks.clear()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+    engine.cancel_run.assert_called_once()
+    assert interaction.followup_messages == ['Run `run-1` is now CANCELLED.']
+
+
 def test_task_start_without_archive_creates_objective_run() -> None:
     engine = Mock()
     engine.create_run.return_value = SimpleNamespace(
