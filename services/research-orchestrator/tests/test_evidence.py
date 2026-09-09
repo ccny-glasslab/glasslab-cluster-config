@@ -928,6 +928,138 @@ def test_evidence_uri_resolver_rejects_fabricated_knowledge_uri(
     assert 'not found' in result.error.lower()
 
 
+def test_evidence_uri_resolver_resolves_engine_stored_artifact_uri(
+    orchestrator_bundle,
+) -> None:
+    """The engine stores local artifacts as artifact://<run>/<path>; a claim
+    copying that stored URI must resolve."""
+    from app.evidence_resolver import EvidenceURIResolver
+
+    _, store, _, _, engine = orchestrator_bundle
+    resolver = EvidenceURIResolver(store)
+    run = engine.create_run(RunCreateRequest(objective='Stored-URI resolution.'))
+    content = b'report body'
+    stored_uri = f'artifact://{run.run_id}/reports/report.md'
+    store.save_artifact(
+        ArtifactRecord(
+            run_id=run.run_id,
+            type='report',
+            uri=stored_uri,
+            sha256=sha256(content).hexdigest(),
+        )
+    )
+
+    result = resolver.resolve(stored_uri)
+    assert result.resolved is True
+    assert result.resolved_to == 'artifact'
+
+
+def test_evidence_uri_resolver_resolves_cluster_artifact_cross_namespace(
+    orchestrator_bundle,
+) -> None:
+    """The fake cluster stores artifact://<external>/metrics.json; both the
+    raw copy and an orchestrator-run-prefixed claim must resolve."""
+    from app.evidence_resolver import EvidenceURIResolver
+
+    _, store, _, _, engine = orchestrator_bundle
+    resolver = EvidenceURIResolver(store)
+    run = engine.create_run(
+        RunCreateRequest(objective='Cross-namespace artifact resolution.')
+    )
+    content = b'{"score": 0.8}'
+    store.save_artifact(
+        ArtifactRecord(
+            run_id=run.run_id,
+            type='metrics',
+            uri='artifact://fake-abc/metrics.json',
+            sha256=sha256(content).hexdigest(),
+        )
+    )
+
+    assert resolver.resolve('artifact://fake-abc/metrics.json').resolved is True
+    assert (
+        resolver.resolve(f'artifact://{run.run_id}/metrics.json').resolved
+        is True
+    )
+
+
+def test_evidence_uri_resolver_resolves_doubled_scheme_uri(
+    orchestrator_bundle,
+) -> None:
+    """Evidence content entries are rendered as artifact:// + stored uri,
+    producing a doubled scheme; resolution must peel it."""
+    from app.evidence_resolver import EvidenceURIResolver
+
+    _, store, _, _, engine = orchestrator_bundle
+    resolver = EvidenceURIResolver(store)
+    run = engine.create_run(
+        RunCreateRequest(objective='Doubled-scheme resolution.')
+    )
+    stored_uri = f'artifact://{run.run_id}/reports/report.md'
+    store.save_artifact(
+        ArtifactRecord(
+            run_id=run.run_id,
+            type='report',
+            uri=stored_uri,
+            sha256=sha256(b'x').hexdigest(),
+        )
+    )
+
+    result = resolver.resolve(f'artifact://{stored_uri}')
+    assert result.resolved is True
+    assert result.resolved_to == 'artifact'
+
+
+def test_evidence_uri_resolver_rejects_fabricated_path_under_real_run(
+    orchestrator_bundle,
+) -> None:
+    from app.evidence_resolver import EvidenceURIResolver
+
+    _, store, _, _, engine = orchestrator_bundle
+    resolver = EvidenceURIResolver(store)
+    run = engine.create_run(
+        RunCreateRequest(objective='Reject fabricated path under a real run.')
+    )
+
+    result = resolver.resolve(
+        f'artifact://{run.run_id}/reports/nonexistent.md'
+    )
+    assert result.resolved is False
+    assert 'not found' in result.error.lower()
+
+
+def test_evidence_uri_resolver_resolves_existing_event(
+    orchestrator_bundle,
+) -> None:
+    from app.evidence_resolver import EvidenceURIResolver
+
+    _, store, _, _, engine = orchestrator_bundle
+    resolver = EvidenceURIResolver(store)
+    run = engine.create_run(RunCreateRequest(objective='Event resolution.'))
+    event = store.append_event(
+        run_id=run.run_id,
+        source='orchestrator',
+        event_type='run.created',
+    )
+
+    result = resolver.resolve(f'event://{event.event_id}')
+    assert result.resolved is True
+    assert result.resolved_to == 'event'
+
+
+def test_evidence_uri_resolver_rejects_fabricated_event(
+    orchestrator_bundle,
+) -> None:
+    from app.evidence_resolver import EvidenceURIResolver
+
+    _, store, _, _, _ = orchestrator_bundle
+    resolver = EvidenceURIResolver(store)
+
+    result = resolver.resolve('event://does-not-exist')
+    assert result.resolved is False
+    assert 'not found' in result.error.lower()
+
+
 def test_evidence_uri_resolver_resolves_existing_knowledge_source(
     orchestrator_bundle,
 ) -> None:

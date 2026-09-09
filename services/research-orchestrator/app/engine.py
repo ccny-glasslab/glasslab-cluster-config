@@ -4578,8 +4578,8 @@ class ResearchOrchestrator:
                 'created. Run dependency-free checks such as Python compilation, '
                 'record that the dependency-backed smoke check is deferred to '
                 'the approved runner, and complete the structured handoff. Any '
-                'claim evidence must use an allowed artifact://, git://, '
-                'event://, job://, or contract:// URI rather than a bare path.'
+                'claim evidence must use an allowed artifact://, job://, event://, '
+                'or knowledge:// URI rather than a bare path.'
             )
         preflight_focus = ''
         if feedback.startswith('Deterministic matrix preflight failed:'):
@@ -5196,7 +5196,7 @@ class ResearchOrchestrator:
                 'the claims and numbers against the retrieved corpus material; '
                 'flag any contradiction between the results and the corpus. Set '
                 'done=true only if the evidence supports a final report. Cite '
-                'artifact, job, event, Git, contract, or knowledge:// URIs.\n\n'
+                'artifact, job, event, or knowledge:// URIs.\n\n'
                 'EVIDENCE DIGEST (read the full snapshot at '
                 'evidence-snapshot.json in your workspace for artifact '
                 'contents):\n'
