@@ -10,7 +10,7 @@ spec:
     spec:
       containers:
         - name: metric-search
-          image: ghcr.io/ccny-glasslab/glasslab-metric-search:latest
+          image: ghcr.io/ccny-glasslab/glasslab-metric-search:03f7062935280c6fd7c6d6598a460d6fb885824b
           command: ["bash", "-c"]
           args:
             - |
