@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from hashlib import sha256
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -152,6 +153,7 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
         caller_name: str = '',
         token: str = '',
         timeout_seconds: float = 30.0,
+        submission_state_path: str | Path | None = None,
     ) -> None:
         self.base_url = base_url.rstrip('/')
         self.workload_id = workload_id
@@ -160,6 +162,51 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
         self.token = token
         self.timeout_seconds = timeout_seconds
         self._submitted: dict[str, ClusterSubmission] = {}
+        self._submission_state_path = (
+            Path(submission_state_path) if submission_state_path else None
+        )
+        self._load_submissions()
+
+    def _load_submissions(self) -> None:
+        # Durable replay of past submissions: a restart observes the same
+        # external_run_id for a given idempotency key without re-submitting,
+        # closing the crash window between submit and record-save.
+        if self._submission_state_path is None or not self._submission_state_path.exists():
+            return
+        try:
+            payload = json.loads(
+                self._submission_state_path.read_text(encoding='utf-8')
+            )
+        except (OSError, ValueError):
+            return
+        for key, item in payload.items():
+            try:
+                self._submitted[key] = ClusterSubmission(
+                    external_run_id=str(item['external_run_id']),
+                    job_name=item.get('job_name'),
+                    kubernetes_uid=item.get('kubernetes_uid'),
+                    status=JobStatus(item.get('status', 'unknown')),
+                )
+            except (KeyError, ValueError):
+                continue
+
+    def _persist_submissions(self) -> None:
+        if self._submission_state_path is None:
+            return
+        payload = {
+            key: {
+                'external_run_id': submission.external_run_id,
+                'job_name': submission.job_name,
+                'kubernetes_uid': submission.kubernetes_uid,
+                'status': submission.status.value,
+            }
+            for key, submission in self._submitted.items()
+        }
+        self._submission_state_path.parent.mkdir(parents=True, exist_ok=True)
+        self._submission_state_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True),
+            encoding='utf-8',
+        )
 
     def _client(self) -> httpx.Client:
         return httpx.Client(
@@ -244,11 +291,13 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
         }
         # Runner images are fixed by the workflow registry for every workload.
         # A persisted job spec may describe provenance, but cannot select code.
+        headers = self._auth_headers()
+        headers['Idempotency-Key'] = spec.idempotency_key
         with self._client() as client:
             response = client.post(
                 '/experiments/runs',
                 json=body,
-                headers=self._auth_headers(),
+                headers=headers,
             )
             if response.is_error:
                 try:
@@ -269,6 +318,7 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
             status=WORKFLOW_STATUS_MAP.get(raw_status, JobStatus.UNKNOWN),
         )
         self._submitted[spec.idempotency_key] = submission
+        self._persist_submissions()
         return submission
 
     def inspect(self, external_run_id: str) -> ClusterJobSnapshot:

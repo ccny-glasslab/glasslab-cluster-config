@@ -129,6 +129,7 @@ def build_engine(
                     if settings.workflow_api_token
                     else ''
                 ),
+                submission_state_path=settings.cluster_submission_state_path,
             )
         )
     if discord is None:
