@@ -19,6 +19,7 @@ from app.schemas import (
     ActionRecord,
     AgentName,
     ApprovalStatus,
+    ArtifactRecord,
     ContextPacket,
     EventRecord,
     ExperimentMatrix,
@@ -682,6 +683,72 @@ def test_catalog_dataset_round_trip_and_name_lookup(store) -> None:
     )
     assert store.get_catalog_dataset_by_name('missing') is None
     assert [r.name for r in store.list_catalog_datasets()] == ['titanic_train']
+
+
+def test_duplicate_artifact_ingest_keeps_first_write(store) -> None:
+    # Issue #238: artifacts are append-only and immutable. A re-delivered
+    # artifact id must keep the first write on every backend (SQLite
+    # INSERT OR IGNORE reference semantics).
+    run = store.create_run(_run(), one_active_run=False)
+    artifact_id = _id('artifact')
+    first = ArtifactRecord(
+        artifact_id=artifact_id,
+        run_id=run.run_id,
+        type='report',
+        uri='s3://artifacts/first/report.md',
+        sha256='a' * 64,
+        metadata={'delivery': 'first'},
+    )
+    second = first.model_copy(
+        update={
+            'uri': 's3://artifacts/second/report.md',
+            'sha256': 'b' * 64,
+            'metadata': {'delivery': 'second'},
+        }
+    )
+    store.save_artifact(first)
+    store.save_artifact(second)
+    stored = store.list_artifacts(run.run_id)
+    assert len(stored) == 1
+    assert stored[0].artifact_id == artifact_id
+    assert stored[0].sha256 == 'a' * 64
+    assert stored[0].uri == 's3://artifacts/first/report.md'
+    assert stored[0].metadata == {'delivery': 'first'}
+
+
+def test_duplicate_dataset_ingest_returns_canonical_first(store) -> None:
+    # Issue #238: a duplicate dataset ingest returns the canonical record
+    # (first write wins) on every backend, mirroring SQLite's re-read.
+    dataset_id = uuid4().hex + uuid4().hex
+    first = IngestedDatasetRecord(
+        dataset_id=dataset_id,
+        name='titanic_train',
+        filename='titanic.csv',
+        reference_uri=f'glasslab-dataset://{dataset_id}',
+        artifact_uri='s3://artifacts/dataset-uploads/abc/titanic.csv',
+        path='/tmp/titanic.csv',
+        sha256='e' * 64,
+        size_bytes=1024,
+        role='input',
+        contains_labels=False,
+    )
+    second = first.model_copy(
+        update={
+            'name': 'titanic_renamed',
+            'filename': 'renamed.csv',
+            'role': 'labels',
+            'sha256': 'f' * 64,
+        }
+    )
+    store.save_dataset(first)
+    duplicate = store.save_dataset(second)
+    assert duplicate.dataset_id == dataset_id
+    assert duplicate.name == 'titanic_train'
+    assert duplicate.filename == 'titanic.csv'
+    assert duplicate.role == 'input'
+    assert duplicate.sha256 == 'e' * 64
+    assert store.get_dataset(dataset_id).name == 'titanic_train'
+    assert store.get_dataset(dataset_id).sha256 == 'e' * 64
 
 
 def _create_in_active_slot(store, run, *, retry, cutoff=None):

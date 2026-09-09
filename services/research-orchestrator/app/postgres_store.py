@@ -356,18 +356,25 @@ class PostgresStore:
             self._append_event_conn(conn, run_id=run_id, source=source, event_type='run.state_changed', payload={'from': current.state.value, 'to': target.value, **(payload or {})})
         return updated
 
-    def _save_payload(self, table: str, id_column: str, record: Any, *, columns: dict[str, Any], conflict: str = 'update') -> Any:
+    def _save_payload(self, table: str, id_column: str, record: Any, *, columns: dict[str, Any], conflict: str = 'update', preserve: Sequence[str] = ()) -> Any:
         keys = [id_column, *columns.keys(), 'payload']; values = [getattr(record, id_column), *columns.values(), self._payload(record)]
-        assignments = ', '.join(f'{key}=EXCLUDED.{key}' for key in keys[1:])
         with self.transaction() as conn:
             if conflict == 'return_existing':
                 row = conn.execute(f'SELECT payload FROM {table} WHERE idempotency_key=%s', (columns['idempotency_key'],)).fetchone()
                 if row: return type(record).model_validate(row['payload'])
-            conn.execute(f'INSERT INTO {table} ({", ".join(keys)}) VALUES ({", ".join(["%s"] * len(keys))}) ON CONFLICT ({id_column}) DO UPDATE SET {assignments}', values)
+            if conflict == 'ignore':
+                # First-write-wins for immutable records, matching SQLite's
+                # INSERT OR IGNORE reference semantics (issue #238).
+                conn.execute(f'INSERT INTO {table} ({", ".join(keys)}) VALUES ({", ".join(["%s"] * len(keys))}) ON CONFLICT ({id_column}) DO NOTHING', values)
+            else:
+                assignments = ', '.join(f'{key}=EXCLUDED.{key}' for key in keys[1:] if key not in preserve)
+                conn.execute(f'INSERT INTO {table} ({", ".join(keys)}) VALUES ({", ".join(["%s"] * len(keys))}) ON CONFLICT ({id_column}) DO UPDATE SET {assignments}', values)
         return record
 
     def save_turn(self, record: TurnRecord) -> TurnRecord:
-        return self._save_payload('orchestrator_turns', 'turn_id', record, columns={'run_id': record.run_id, 'status': record.status, 'created_at': record.created_at, 'updated_at': record.updated_at})
+        # Idempotent upsert like SQLite: status/payload/updated_at may be
+        # rewritten by recovery, but created_at and run_id are preserved.
+        return self._save_payload('orchestrator_turns', 'turn_id', record, columns={'run_id': record.run_id, 'status': record.status, 'created_at': record.created_at, 'updated_at': record.updated_at}, preserve=('run_id', 'created_at'))
     def list_turns(self, run_id: str) -> list[TurnRecord]:
         with self._connect() as conn: return [TurnRecord.model_validate(r['payload']) for r in conn.execute('SELECT payload FROM orchestrator_turns WHERE run_id=%s ORDER BY created_at', (run_id,)).fetchall()]
     def mark_running_turns_interrupted(self, run_id: str) -> int:
@@ -441,11 +448,14 @@ class PostgresStore:
         with self._connect() as conn: return [JobRecord.model_validate(r['payload']) for r in conn.execute(query, params).fetchall()]
 
     def save_artifact(self, record: ArtifactRecord) -> ArtifactRecord:
-        return self._save_payload('orchestrator_artifacts', 'artifact_id', record, columns={'run_id': record.run_id, 'job_id': record.job_id, 'created_at': record.created_at})
+        return self._save_payload('orchestrator_artifacts', 'artifact_id', record, columns={'run_id': record.run_id, 'job_id': record.job_id, 'created_at': record.created_at}, conflict='ignore')
     def list_artifacts(self, run_id: str) -> list[ArtifactRecord]:
         with self._connect() as conn: return [ArtifactRecord.model_validate(r['payload']) for r in conn.execute('SELECT payload FROM orchestrator_artifacts WHERE run_id=%s ORDER BY created_at', (run_id,)).fetchall()]
     def save_dataset(self, record: IngestedDatasetRecord) -> IngestedDatasetRecord:
-        return self._save_payload('orchestrator_datasets', 'dataset_id', record, columns={'created_at': record.created_at})
+        self._save_payload('orchestrator_datasets', 'dataset_id', record, columns={'created_at': record.created_at}, conflict='ignore')
+        # Re-read the stored row so a duplicate ingest returns the canonical
+        # record (first write wins) rather than the caller's copy.
+        return self.get_dataset(record.dataset_id)
     def get_dataset(self, dataset_id: str) -> IngestedDatasetRecord:
         with self._connect() as conn: row = conn.execute('SELECT payload FROM orchestrator_datasets WHERE dataset_id=%s', (dataset_id,)).fetchone()
         if not row: raise RecordNotFound(dataset_id)
