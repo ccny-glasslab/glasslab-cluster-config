@@ -986,7 +986,12 @@ class JsonFileRunStore(InMemoryRunStore):
         self._flush()
 
     def save_autoresearch_iteration(self, record: AutoresearchIterationRecord) -> None:
-        super().save_autoresearch_iteration(record)
+        # model_copy(update=...) does not re-validate, so a caller can hand us
+        # a record whose status violates the schema Literal. Re-validate before
+        # flushing so contract violations fail at the mutation site instead of
+        # poisoning the store and crash-looping on reload.
+        validated = AutoresearchIterationRecord.model_validate(record.model_dump())
+        super().save_autoresearch_iteration(validated)
         self._flush()
 
     def save_autoresearch_decision(self, record: AutoresearchDecisionRecord) -> None:
@@ -1285,7 +1290,12 @@ class PostgresRunStore(InMemoryRunStore):
         self._flush()
 
     def save_autoresearch_iteration(self, record: AutoresearchIterationRecord) -> None:
-        super().save_autoresearch_iteration(record)
+        # model_copy(update=...) does not re-validate, so a caller can hand us
+        # a record whose status violates the schema Literal. Re-validate before
+        # flushing so contract violations fail at the mutation site instead of
+        # poisoning the store and crash-looping on reload.
+        validated = AutoresearchIterationRecord.model_validate(record.model_dump())
+        super().save_autoresearch_iteration(validated)
         self._flush()
 
     def save_autoresearch_decision(self, record: AutoresearchDecisionRecord) -> None:

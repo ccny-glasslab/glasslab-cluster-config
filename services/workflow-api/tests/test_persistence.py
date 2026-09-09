@@ -17,20 +17,28 @@ for module_name in list(sys.modules):
     if module_name == 'app' or module_name.startswith('app.'):
         del sys.modules[module_name]
 
+from app.autoresearch import summarize_campaign
 from app.config import Settings
+from app.job_submission import NullJobSubmitter
 import app.persistence as persistence_module
 from app.persistence import JsonFileRunStore, create_run_store
 from app.schemas import (
+    AutoresearchCampaignRecord,
+    AutoresearchIterationRecord,
     ComparisonRecord,
     InvestigationHypothesisRecord,
     InvestigationRecord,
+    JobSubmissionReceipt,
+    MethodologyDraftRecord,
     OperationRecord,
     PaperIntakeQueueRecord,
     ResearchProblemRecord,
     ResearchSessionRecord,
+    RunRecord,
     ScheduledExecutionRecord,
     SourceDocumentRecord,
 )
+from services.common.schemas import RunManifest, RunStatus
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -355,3 +363,109 @@ def test_postgres_store_round_trips_comparison_records(monkeypatch) -> None:
 
     assert reloaded.get_comparison('cmp-1') == comparison
     assert reloaded.get_latest_comparison() == comparison
+
+
+def test_failed_iteration_maps_to_needs_review_and_reloads_cleanly(tmp_path: Path) -> None:
+    """A failed run must map to the valid out-of-contract status 'needs_review'.
+
+    Regression for #256: refresh_campaign_iterations used to persist the
+    schema-forbidden status 'failed' (model_copy does not re-validate), which
+    made the store crash-loop on reload. The refreshed iteration must be
+    'needs_review' and a restarted store must parse cleanly.
+    """
+    state_path = tmp_path / 'run-store.json'
+    now = datetime(2026, 4, 22, 18, 0, tzinfo=timezone.utc)
+
+    store = JsonFileRunStore(state_path)
+
+    campaign = AutoresearchCampaignRecord(
+        campaign_id='campaign-1',
+        session_id='session-1',
+        created_at=now,
+        updated_at=now,
+        status='active',
+        objective='Find the best tabular model.',
+        evaluation_policy='primary-metric',
+        mutation_policy='single-axis',
+        latest_iteration_id='iteration-1',
+    )
+    draft = MethodologyDraftRecord(
+        methodology_draft_id='method-1',
+        campaign_id='campaign-1',
+        session_id='session-1',
+        created_at=now,
+        updated_at=now,
+        objective='Compare logistic regression baselines.',
+        hypothesis='A tuned baseline beats the default.',
+        method_family='tabular-benchmark',
+        bounded_experimentability='bounded',
+        status='launched',
+        workflow_id='generic-tabular-benchmark',
+        workflow_family='tabular-benchmark',
+        resource_profile='cpu-small',
+        approval_tier='tier-1-read-only',
+    )
+    iteration = AutoresearchIterationRecord(
+        iteration_id='iteration-1',
+        campaign_id='campaign-1',
+        child_methodology_draft_id='method-1',
+        run_id='run-1',
+        created_at=now,
+        updated_at=now,
+        status='launched',
+    )
+    manifest = RunManifest(
+        run_id='run-1',
+        workflow_id='generic-tabular-benchmark',
+        workflow_family='tabular-benchmark',
+        display_name='Tabular Benchmark',
+        objective='Test failed-run status mapping.',
+        submitted_by='tester',
+        submitted_at=now,
+        run_priority='user',
+        inputs={'dataset_name': 'titanic'},
+        requested_models=['logistic_regression'],
+        resource_profile='cpu-small',
+        resource_requests={},
+        resource_limits={},
+        node_selector={},
+        runner_image='busybox:latest',
+        runner_service_account_name='registry-runner',
+        evaluator_type='none',
+        approval_tier='tier-1-read-only',
+        expected_artifacts={'required': ['status.json'], 'optional': []},
+    )
+    run = RunRecord(
+        run_id='run-1',
+        workflow_id='generic-tabular-benchmark',
+        created_at=now,
+        updated_at=now,
+        manifest=manifest,
+        status=RunStatus(run_id='run-1', status='failed', updated_at=now, detail='boom'),
+        job_submission=JobSubmissionReceipt(
+            job_name='job',
+            namespace='glasslab-v2',
+            accepted_at=now,
+            status='accepted',
+            detail='ok',
+        ),
+    )
+
+    store.save_autoresearch_campaign(campaign)
+    store.save_methodology_draft(draft)
+    store.save_autoresearch_iteration(iteration)
+    store.save_run(run)
+
+    settings = Settings(
+        registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
+    )
+    submitter = NullJobSubmitter(namespace='glasslab-v2')
+
+    summary = summarize_campaign(store, campaign, settings=settings, submitter=submitter)
+    refreshed = summary.iterations[0]
+    assert refreshed.status == 'needs_review'
+
+    reloaded = create_run_store('json', state_path=state_path)
+    reloaded_iteration = reloaded.get_autoresearch_iteration('iteration-1')
+    assert reloaded_iteration is not None
+    assert reloaded_iteration.status == 'needs_review'
