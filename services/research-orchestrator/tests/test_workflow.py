@@ -2237,6 +2237,50 @@ def test_restart_recovers_submission_without_external_id(
     assert recovered.external_run_id is not None
 
 
+def test_recover_holds_advance_lock_and_rechecks_state(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # recover() drives runs under the per-run advancement lock, and
+    # _submit_matrix re-reads fresh state before advancing: a pause committed
+    # mid-submission must leave the run PAUSED instead of submitting jobs
+    # after the human paused (issue #240).
+    _, store, cluster, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Pause during recovery submission.')
+    )
+    protocol = _pending_action(store, run.run_id, 'approve_protocol')
+    engine.approve_action(
+        protocol.action_id,
+        reviewer='test-human',
+        reason='Protocol accepted.',
+    )
+    matrix = _pending_action(store, run.run_id, 'submit_experiment_matrix')
+    store.update_action(
+        matrix.action_id,
+        approval_status=ApprovalStatus.APPROVED,
+        reviewer='test-human',
+        reason='Approved for the recovery test.',
+    )
+    assert store.get_run(run.run_id).state == RunState.AWAITING_EXECUTION_APPROVAL
+
+    original_build = engine._build_objective_execution
+
+    def pause_mid_submission(run, matrix):
+        # The operator pauses while recovery is mid-submission, after
+        # _submit_matrix already read the run as AWAITING_EXECUTION_APPROVAL.
+        engine.pause_run(run.run_id, requested_by='test-mid-submit')
+        return original_build(run, matrix)
+
+    monkeypatch.setattr(engine, '_build_objective_execution', pause_mid_submission)
+    engine.recover()
+
+    recovered = store.get_run(run.run_id)
+    assert recovered.state == RunState.PAUSED
+    assert recovered.resume_state == RunState.AWAITING_EXECUTION_APPROVAL
+    assert cluster.submissions == {}
+
+
 def test_transient_inspection_error_does_not_finish_run(
     orchestrator_bundle,
 ) -> None:
