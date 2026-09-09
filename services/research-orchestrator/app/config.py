@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     # excerpt cap); the whole snapshot is bounded by the snapshot cap.
     evidence_verbatim_max_bytes: int = 64 * 1024
     evidence_snapshot_max_bytes: int = 512 * 1024
+    # On-disk evidence snapshot the agent reads with its file tool. It can be
+    # much larger than the inline budget because it never enters the prompt.
+    evidence_file_max_bytes: int = 4 * 1024 * 1024
     approved_repo_path: str = '/workspace/cluster-config'
     approved_repo_ref: str = 'main'
     evaluation_contract_root: str = str(SERVICE_ROOT / 'evaluation-contracts')
