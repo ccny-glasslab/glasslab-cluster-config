@@ -4129,7 +4129,10 @@ class ResearchOrchestrator:
             rejection_reason = (
                 'Deterministic matrix preflight failed: '
                 + joined
-                + self._methodology_resolution_appendix(joined)
+                + self._methodology_resolution_appendix(
+                    joined,
+                    self._contract_methodology_requirements(run_id),
+                )
             )
             self.store.update_action(
                 action.action_id,
@@ -4421,38 +4424,71 @@ class ResearchOrchestrator:
         if not report.errors:
             return None
         joined = '; '.join(report.errors)
-        return joined + self._methodology_resolution_appendix(joined)
+        return joined + self._methodology_resolution_appendix(
+            joined,
+            self._contract_methodology_requirements(run_id),
+        )
 
     @staticmethod
-    def _methodology_resolution_appendix(errors: str) -> str:
-        if 'methodology setting' not in errors:
+    def _methodology_resolution_appendix(
+        errors: str,
+        requirements: list[MethodologyRequirement],
+    ) -> str:
+        if not (
+            'methodology setting' in errors
+            or 'requires at least' in errors
+            or 'allows at most' in errors
+        ):
             return ''
-        # The resolution mechanics (dotted paths into the base_config
-        # document, list-of-distinct-values for comparisons) are not
-        # guessable from the bare error; without this appendix every
-        # revision burns out on the same gap (issue #98 run
-        # 5fbf145886c84255b7af2e06ebded295).
-        return (
-            '. Methodology requirements resolve against the YAML file '
-            'at matrix.base_config inside your worktree: the resolver '
-            'splits each requirement config_path ONLY on "." characters; '
-            'every other character, including "/", is a literal part of a '
-            'YAML key name. So config_path "src/train.py" means: split on '
-            'the dot -> first key is literally "src/train", then nested '
-            'key "py". A comparison requirement needs that final node to '
-            'be a list of at least minimum_distinct_values distinct '
-            'strings; decision requirements need at least one value. '
-            'Exact YAML for config_path "src/train.py" with three model '
-            'families:\n'
-            '"src/train":\n'
-            '  "py":\n'
-            '    - logistic_regression\n'
-            '    - random_forest\n'
-            '    - gradient_boosting\n'
-            '(quote the "src/train" key; it contains a slash, not a dot). '
-            'Edit the base_config file so every listed requirement '
-            'resolves, then re-propose the same matrix.'
+        lines = [
+            '. The YAML file named by matrix.base_config must EXIST in your '
+            'worktree and contain every required setting below; a proposal '
+            'that references a missing file or missing keys cannot pass '
+            'preflight. Create or edit that file now, then re-propose the '
+            'same matrix.',
+        ]
+        for requirement in requirements:
+            keys = requirement.config_path.split('.')
+            lines.append(
+                f'config_path `{requirement.config_path}` '
+                f'({requirement.mode}, >= '
+                f'{requirement.minimum_distinct_values} distinct value(s)):'
+            )
+            lines.append('expected YAML inside the base_config file:')
+            for index, key in enumerate(keys):
+                lines.append(f'{"  " * index}"{key}":')
+            lines.append(f'{"  " * len(keys)}- <one value per distinct entry>')
+        lines.append(
+            'Quote every key containing "/" or other non-dot characters. Read '
+            'the file back with your file tool to confirm every listed '
+            'requirement resolves, then re-propose the same matrix.'
         )
+        return '\n' + '\n'.join(lines)
+
+    def _contract_methodology_requirements(
+        self,
+        run_id: str,
+    ) -> list[MethodologyRequirement]:
+        run = self.store.get_run(run_id)
+        try:
+            contract = self.contracts.resolve(
+                run.evaluation_contract_id,
+                run.evaluation_contract_version,
+            )
+        except Exception:
+            return []
+        requirements: list[MethodologyRequirement] = []
+        for item in contract.descriptor.manifest.get(
+            'methodology_requirements',
+            [],
+        ):
+            try:
+                requirements.append(
+                    MethodologyRequirement.model_validate(item)
+                )
+            except (ValueError, TypeError):
+                continue
+        return requirements
 
     @staticmethod
     def _methodology_feedback(result: AgentTurnResult) -> str:
