@@ -231,7 +231,7 @@ class Settings(BaseSettings):
     # durable event the next time a new run is created.
     paused_run_staleness_days: int = 3
     job_poll_interval_seconds: float = 10.0
-    require_operator_auth: bool = False
+    require_operator_auth: bool = True
     operator_api_token: str | None = None
 
     discord_enabled: bool = False

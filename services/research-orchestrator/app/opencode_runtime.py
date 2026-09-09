@@ -362,6 +362,17 @@ class OpenCodeProcessRuntime(AgentRuntime):
             'git push*': 'deny',
             'gh pr create*': 'deny',
             '*secret*': 'deny',
+            # Network egress: a prompt-injected agent must not be able to
+            # exfiltrate the model-provider API keys present in its env.
+            'curl *': 'deny',
+            'curl.exe *': 'deny',
+            'wget *': 'deny',
+            'nc *': 'deny',
+            'ncat *': 'deny',
+            'fetch *': 'deny',
+            'telnet *': 'deny',
+            'ftp *': 'deny',
+            'socat *': 'deny',
         }
         if agent == AgentName.HONEYDEW:
             denied_shell.update(

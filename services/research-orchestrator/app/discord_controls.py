@@ -1769,7 +1769,13 @@ class DiscordControlGateway:
         if custom_id.startswith(f'{PACKET_PREFIX}:'):
             parts = custom_id[len(PACKET_PREFIX) + 1:].split(':', 2)
             packet_id = parts[0]
-            source_index = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+            source_index = (
+                int(parts[1])
+                if len(parts) > 1
+                and parts[1].isdigit()
+                and len(parts[1]) <= 12
+                else None
+            )
             excerpt_prefix = parts[2] if len(parts) > 2 else ''
             await self._on_packet_button(
                 interaction,

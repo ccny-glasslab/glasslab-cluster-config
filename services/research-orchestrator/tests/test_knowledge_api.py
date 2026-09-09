@@ -43,6 +43,7 @@ def _bundle(tmp_path: Path):
         approved_repo_path=str(repo),
         approved_repo_ref='main',
         evaluation_contract_root=str(SERVICE_ROOT / 'evaluation-contracts'),
+        require_operator_auth=False,
         permitted_job_images=[RUNNER_IMAGE],
         cluster_execution_mode='fake',
         promoted_contract_root=str(tmp_path / 'trusted-contracts'),
