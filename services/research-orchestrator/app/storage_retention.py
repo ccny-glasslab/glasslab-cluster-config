@@ -334,6 +334,22 @@ def run_cleanup(
                     continue
                 if now - current.updated_at < timedelta(days=conversation_retention_days):
                     continue
+            # Re-run the artifact-reference safety net immediately before
+            # deleting (issue #247): an artifact record written between
+            # planning and now whose path lands under this subdirectory must
+            # protect it, even though the plan-time snapshot did not see it.
+            referenced = _referenced_paths(store, plan.run_id)
+            resolved_candidate = item.path.resolve()
+            blocking = next(
+                (
+                    path
+                    for path in referenced
+                    if path.is_relative_to(resolved_candidate)
+                ),
+                None,
+            )
+            if blocking is not None:
+                continue
             shutil.rmtree(item.path, ignore_errors=False)
 
     usage_after = report_storage_usage(
