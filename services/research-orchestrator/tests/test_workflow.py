@@ -136,6 +136,48 @@ def test_run_serial_increments_per_investigation(orchestrator_bundle) -> None:
     assert ungrouped.run_serial is None
 
 
+def test_materialization_failure_fails_run_and_does_not_block_creation(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # Issue #237: a failure inside _materialize_objective_datasets (e.g. the
+    # checksum guard) must land the run in a terminal state. A run stranded
+    # in PREPARING would hold the one-active-run slot and reject every
+    # subsequent create_run until an operator intervenes.
+    _, store, _, _, engine = orchestrator_bundle
+    calls = {'count': 0}
+
+    def fail_materialization(_run_id: str) -> None:
+        calls['count'] += 1
+        if calls['count'] == 1:
+            raise WorkflowError(
+                'objective dataset failed checksum verification'
+            )
+
+    monkeypatch.setattr(
+        engine,
+        '_materialize_objective_datasets',
+        fail_materialization,
+    )
+
+    with pytest.raises(WorkflowError, match='checksum'):
+        engine.create_run(
+            RunCreateRequest(
+                objective='Run with a corrupted dataset upload.'
+            )
+        )
+
+    failed = store.list_runs()[0]
+    assert failed.state == RunState.FAILED
+
+    # The failed run is terminal, so a subsequent create_run must succeed
+    # instead of being blocked by a zombie run stuck in PREPARING.
+    second = engine.create_run(
+        RunCreateRequest(objective='A fresh run after the failed materialization.')
+    )
+    assert store.get_run(second.run_id).state == RunState.AWAITING_PROTOCOL_APPROVAL
+
+
 def test_failed_result_starts_a_fresh_methodology_revision_budget(
     orchestrator_bundle,
     monkeypatch,

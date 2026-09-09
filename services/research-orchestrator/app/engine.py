@@ -424,12 +424,17 @@ class ResearchOrchestrator:
             # straight on: if the process dies between these transitions,
             # recover() sees a run in PREPARING and resumes drafting, which is
             # the only signal that workspace setup finished.
-            self._transition(run_id, RunState.PREPARING)
-            self._materialize_objective_datasets(run_id)
-            self._transition(run_id, RunState.HONEYDEW_DRAFTING_PROTOCOL)
             try:
+                self._transition(run_id, RunState.PREPARING)
+                self._materialize_objective_datasets(run_id)
+                self._transition(run_id, RunState.HONEYDEW_DRAFTING_PROTOCOL)
                 self._draft_protocol(run_id)
             except Exception as exc:
+                # Any failure in the creation path (dataset materialization,
+                # checksum verification, drafting) must land the run in a
+                # terminal state: a run stranded in PREPARING would hold the
+                # one-active-run slot and block every later create_run
+                # (issue #237).
                 self._fail_run(run_id, exc)
                 raise
             return self.store.get_run(run_id)
