@@ -368,6 +368,18 @@ def _is_research_workspace_manifest(manifest: RunManifest) -> bool:
     }
 
 
+def _validate_relative_subpath(relative: str, uri: str) -> str:
+    path = PurePosixPath(relative)
+    if (
+        not relative
+        or path.as_posix() == '.'
+        or path.is_absolute()
+        or '..' in path.parts
+    ):
+        raise ValueError(f'asset URI has an invalid path: {uri}')
+    return path.as_posix()
+
+
 def _asset_volume_subpath(uri: str) -> tuple[str, str]:
     if uri.startswith(('s3://datasets/', 's3://glasslab-datasets/')):
         volume_name = 'dataset-volume'
@@ -383,15 +395,7 @@ def _asset_volume_subpath(uri: str) -> tuple[str, str]:
         raise ValueError(
             'research workspace assets must use an approved data or artifact URI'
         )
-    path = PurePosixPath(relative)
-    if (
-        not relative
-        or path.as_posix() == '.'
-        or path.is_absolute()
-        or '..' in path.parts
-    ):
-        raise ValueError(f'research workspace asset URI has an invalid path: {uri}')
-    return volume_name, path.as_posix()
+    return volume_name, _validate_relative_subpath(relative, uri)
 
 
 def _research_workspace_asset_locations(
@@ -454,14 +458,19 @@ def _research_workspace_volume_mount_specs(
 def resolve_dataset_uri(dataset_uri: str, settings: Settings) -> str:
     """Resolve dataset aliases that are backed by the mounted dataset plane."""
     if dataset_uri.startswith('s3://datasets/'):
-        path = dataset_uri.removeprefix('s3://datasets/')
-        return f'{settings.dataset_mount_path}/{path}'
+        relative = dataset_uri.removeprefix('s3://datasets/')
+        return f'{settings.dataset_mount_path}/{_validate_relative_subpath(relative, dataset_uri)}'
     if dataset_uri.startswith('s3://glasslab-datasets/'):
-        path = dataset_uri.removeprefix('s3://glasslab-datasets/')
-        return f'{settings.dataset_mount_path}/{path}'
+        relative = dataset_uri.removeprefix('s3://glasslab-datasets/')
+        return f'{settings.dataset_mount_path}/{_validate_relative_subpath(relative, dataset_uri)}'
     if dataset_uri.startswith('s3://artifacts/'):
-        path = dataset_uri.removeprefix('s3://artifacts/')
-        return f'{settings.artifacts_mount_path}/{path}'
+        relative = dataset_uri.removeprefix('s3://artifacts/')
+        return f'{settings.artifacts_mount_path}/{_validate_relative_subpath(relative, dataset_uri)}'
+    if dataset_uri.startswith('s3://'):
+        raise ValueError(
+            f'asset URI must use an approved data or artifact prefix: {dataset_uri}'
+        )
+    _validate_relative_subpath(dataset_uri, dataset_uri)
     return dataset_uri
 
 
@@ -479,7 +488,7 @@ def validate_workflow_submission_support(workflow: Any, settings: Settings) -> l
         input_type = getattr(input_spec, 'input_type', 'text')
         name = getattr(input_spec, 'name', 'input')
         if input_type in {'dataset', 'url'}:
-            placeholder_inputs[name] = f's3://placeholder/{name}'
+            placeholder_inputs[name] = f's3://datasets/placeholder/{name}'
         elif input_type == 'notes':
             placeholder_inputs[name] = f'placeholder {name} notes'
         elif input_type == 'parameter_set':

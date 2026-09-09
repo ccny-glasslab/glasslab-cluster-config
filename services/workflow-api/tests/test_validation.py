@@ -31,6 +31,7 @@ from app.job_submission import (
     _asset_volume_subpath,
     _research_workspace_asset_locations,
     _research_workspace_volume_mount_specs,
+    resolve_dataset_uri,
     resolve_evaluation_contract,
 )
 import app.job_submission as job_submission_module
@@ -677,6 +678,24 @@ def test_research_workspace_mounts_only_declared_asset_subpaths() -> None:
 def test_research_workspace_rejects_unapproved_mount_uri(uri: str) -> None:
     with pytest.raises(ValueError):
         _asset_volume_subpath(uri)
+
+
+# dataset_uri is agent/operator-supplied free text that is interpolated into
+# pod volume subpaths; parent traversal, absolute paths, and empty values must
+# be rejected before they can escape the dataset/artifact mount roots.
+@pytest.mark.parametrize(
+    'dataset_uri',
+    [
+        's3://datasets/../../x',
+        's3://datasets/../x',
+        's3:///abs',
+        '.',
+        '',
+    ],
+)
+def test_resolve_dataset_uri_rejects_traversal(dataset_uri: str) -> None:
+    with pytest.raises(ValueError):
+        resolve_dataset_uri(dataset_uri, Settings())
 
 
 def test_claim_evaluator_contract_requires_primary_metric_and_guardrails() -> None:
