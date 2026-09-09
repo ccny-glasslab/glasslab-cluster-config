@@ -49,34 +49,47 @@ done
 # Submit experiment
 printf '[run-contrastive-experiment] submitting experiment: %s\n' "${EXPERIMENT_ID}"
 
-curl -s -X POST "${RUNNER_ENDPOINT}/runs" \
+if [[ ! "${EXPERIMENT_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  printf '[run-contrastive-experiment] invalid experiment id: %s\n' "${EXPERIMENT_ID}" >&2
+  exit 1
+fi
+
+payload="$(jq -n \
+  --arg experiment_id "${EXPERIMENT_ID}" \
+  --arg config_path "${CONFIG_PATH}" \
+  '{experiment_id: $experiment_id, config_path: $config_path, runner_image: "glasslab/runner:gpu-v1"}')"
+
+curl -fsS -X POST "${RUNNER_ENDPOINT}/runs" \
   -H 'Content-Type: application/json' \
-  -d "{
-    \"experiment_id\": \"${EXPERIMENT_ID}\",
-    \"config_path\": \"${CONFIG_PATH}\",
-    \"runner_image\": \"glasslab/runner:gpu-v1\"
-  }" | tee "/tmp/${EXPERIMENT_ID}_response.json"
+  -d "$payload" | tee "/tmp/${EXPERIMENT_ID}_response.json"
 
 printf '\n[run-contrastive-experiment] experiment submitted. Checking status...\n'
 
 # Monitor
 RUN_STATUS="pending"
 while [[ "${RUN_STATUS}" == "pending" || "${RUN_STATUS}" == "running" ]]; do
-  STATUS_RESPONSE=$(curl -s "${RUNNER_ENDPOINT}/runs/${EXPERIMENT_ID}" 2>/dev/null || echo '{"status": "unknown"}')
-  RUN_STATUS=$(echo "${STATUS_RESPONSE}" | jq -r '.status // "unknown"' 2>/dev/null || echo "unknown")
-  
+  STATUS_RESPONSE="$(curl -fsS "${RUNNER_ENDPOINT}/runs/${EXPERIMENT_ID}" 2>/dev/null || echo '{"status": "unknown"}')"
+  RUN_STATUS="$(printf '%s' "${STATUS_RESPONSE}" | jq -r '.status // "unknown"' 2>/dev/null || echo "unknown")"
+
   printf '[run-contrastive-experiment] status: %s\n' "${RUN_STATUS}"
-  
-  if [[ "${RUN_STATUS}" == "completed" ]]; then
-    printf '[run-contrastive-experiment] experiment completed. Metrics:\n'
-    curl -s "${RUNNER_ENDPOINT}/runs/${EXPERIMENT_ID}/metrics" | jq .
-    break
-  elif [[ "${RUN_STATUS}" == "failed" ]]; then
-    printf '[run-contrastive-experiment] experiment failed!\n'
-    curl -s "${RUNNER_ENDPOINT}/runs/${EXPERIMENT_ID}/error" | jq .
-    break
-  fi
-  
+
+  case "${RUN_STATUS}" in
+    completed)
+      printf '[run-contrastive-experiment] experiment completed. Metrics:\n'
+      curl -fsS "${RUNNER_ENDPOINT}/runs/${EXPERIMENT_ID}/metrics" | jq .
+      break
+      ;;
+    failed)
+      printf '[run-contrastive-experiment] experiment failed!\n'
+      curl -fsS "${RUNNER_ENDPOINT}/runs/${EXPERIMENT_ID}/error" | jq .
+      break
+      ;;
+    unknown)
+      printf '[run-contrastive-experiment] error: could not determine run status\n' >&2
+      exit 1
+      ;;
+  esac
+
   sleep 10
 done
 
