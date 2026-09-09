@@ -84,15 +84,13 @@ run_docs() {
 
 run_shell() {
   printf '[check-before-push] checking shell syntax\n'
-  bash -n \
-    scripts/check-before-push.sh \
-    scripts/glasslab-opencode.sh \
-    scripts/macos/glasslab-exo-run.sh \
-    scripts/lab-security-agent \
-    scripts/research-session-cli.sh \
-    scripts/smoke-test-research-orchestrator.sh \
-    scripts/submit-learning-task.sh \
-    scripts/submit-sample-experiment.sh
+  # Enumerate tracked shell scripts from git so new scripts are covered
+  # automatically instead of requiring an edit to this list.
+  local -a shell_scripts
+  mapfile -t shell_scripts < <(git ls-files '*.sh')
+  # lab-security-agent is a bash script without a .sh extension.
+  shell_scripts+=(scripts/lab-security-agent)
+  bash -n "${shell_scripts[@]}"
 }
 
 run_python_syntax() {

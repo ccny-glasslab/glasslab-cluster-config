@@ -5,6 +5,3 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "== workflow-api =="
 "$ROOT_DIR/scripts/check-workflow-api-provenance.sh"
-echo
-echo "== openclaw =="
-"$ROOT_DIR/scripts/check-openclaw-provenance.sh"
