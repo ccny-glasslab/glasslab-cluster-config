@@ -292,6 +292,48 @@ def test_run_cleanup_apply_skips_run_that_left_terminal_state_mid_scan(
     assert runtime_file.is_file(), 'the guard must have refused the deletion'
 
 
+def test_run_cleanup_rechecks_references_before_each_deletion(tmp_path) -> None:
+    # Regression guard for issue #247: the per-subdirectory artifact-reference
+    # check is computed at plan time, but an artifact record written between
+    # planning and deletion must still protect its subdirectory. Simulate the
+    # late write by having list_artifacts return nothing during planning and
+    # the referenced artifact once the deletion loop starts.
+    now = utc_now()
+    run = _run_record('run-1', state=RunState.COMPLETE, updated_at=now - timedelta(days=30))
+    referenced_file = tmp_path / 'run-1' / 'runtime' / 'beaker' / 'late.txt'
+    _write(referenced_file, 10)
+    _write(tmp_path / 'run-1' / 'beaker-worktree' / 'scratch.txt', 20)
+
+    store = _FakeStore([run])
+    late_artifact = _artifact('run-1', path=str(referenced_file))
+    calls = {'n': 0}
+
+    def _list_artifacts(run_id):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            return []  # plan time: no artifact record yet
+        return [late_artifact]  # deletion loop: the artifact now exists
+
+    store.list_artifacts = _list_artifacts  # type: ignore[method-assign]
+
+    report = run_cleanup(
+        store=store,
+        workspace_root=tmp_path,
+        retention_days=14,
+        dry_run=False,
+        now=now,
+    )
+
+    # The plan-time snapshot still proposed both subdirectories...
+    assert len(report.plans) == 1
+    by_name = {item.name: item for item in report.plans[0].subdirectories}
+    assert by_name['runtime'].eligible is True, 'plan-time snapshot has no reference yet'
+    assert by_name['beaker-worktree'].eligible is True
+    # ...but the late reference must protect runtime/ from deletion.
+    assert referenced_file.is_file(), 'late-referenced subdirectory must survive'
+    assert not (tmp_path / 'run-1' / 'beaker-worktree').exists()
+
+
 def test_run_cleanup_apply_skips_run_removed_mid_scan(tmp_path) -> None:
     now = utc_now()
     terminal_snapshot = _run_record(
