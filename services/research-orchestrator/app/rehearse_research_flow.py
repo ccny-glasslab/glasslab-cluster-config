@@ -55,6 +55,10 @@ TASK_COMPILER_URL = 'http://192.168.1.17:52417/v1'
 
 def _create_repo(root: Path) -> Path:
     repo = root / 'approved-repo'
+    if repo.exists():
+        # Rehearsal resume: a prior attempt already initialized this
+        # repository; reuse it rather than failing on the existing dir.
+        return repo
     repo.mkdir()
     subprocess.run(['git', 'init', '-b', 'main'], cwd=repo, check=True)
     subprocess.run(
