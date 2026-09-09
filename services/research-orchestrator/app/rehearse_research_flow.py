@@ -82,6 +82,10 @@ def _create_repo(root: Path) -> Path:
 _stages: dict[str, object] = {}
 
 
+def _stage_progress(stages: dict[str, object]) -> None:
+    print('STAGE_PROGRESS ' + json.dumps(stages, sort_keys=True), flush=True)
+
+
 def run_rehearsal() -> dict[str, object]:
     global _stages
     stages: dict[str, object] = {}
@@ -219,6 +223,7 @@ def run_rehearsal() -> dict[str, object]:
         stages['proposed_evaluator_type'] = _proposal_evaluator_type(
             store, run.run_id
         )
+        _stage_progress(stages)
 
         # Stage 2: contract candidate on Beaker (Coder-Next .17), then
         # promotion/bind. The evaluator_type must be task-specific, not a
@@ -242,6 +247,7 @@ def run_rehearsal() -> dict[str, object]:
         run = store.get_run(run.run_id)
         stages['after_contract'] = run.state.value
         stages['bound_contract_id'] = run.evaluation_contract_id
+        _stage_progress(stages)
 
         # Stage 3: Beaker plan + implementation, then matrix approval.
         try:
@@ -252,6 +258,7 @@ def run_rehearsal() -> dict[str, object]:
                 and action.approval_status == ApprovalStatus.PENDING
             )
             stages['implementation'] = 'ok'
+            _stage_progress(stages)
             engine.approve_action(
                 execution_action.action_id,
                 reviewer='rehearse-human',
@@ -290,6 +297,7 @@ def run_rehearsal() -> dict[str, object]:
         engine.reconcile_run(run.run_id)
         run = store.get_run(run.run_id)
         stages['jobs_executed'] = run.state.value
+        _stage_progress(stages)
 
         # Stage 5: verification on the reasoning model (Thinking .18).
         try:
@@ -315,6 +323,7 @@ def run_rehearsal() -> dict[str, object]:
         stages['context_packets'] = len(packets)
 
         stages['result'] = 'PASS' if run.state is RunState.COMPLETE else 'FAIL'
+        _stage_progress(stages)
         return stages
 
 
