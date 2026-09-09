@@ -656,49 +656,100 @@ def test_catalog_dataset_round_trip_and_name_lookup(store) -> None:
     assert [r.name for r in store.list_catalog_datasets()] == ['titanic_train']
 
 
-def test_stale_paused_run_does_not_hold_active_slot(store) -> None:
-    from datetime import timedelta
-
-    stale = datetime.now(UTC) - timedelta(days=7)
-    store.create_run(
-        _run('run-paused-stale').model_copy(
-            update={'state': RunState.PAUSED, 'updated_at': stale}
-        ),
-        one_active_run=False,
-    )
-    created = store.create_run(
-        _run('run-new'),
-        one_active_run=True,
-        stale_paused_cutoff=datetime.now(UTC) - timedelta(days=3),
-    )
-    assert created.run_id == 'run-new'
-    cancelled = store.get_run('run-paused-stale')
-    assert cancelled.state is RunState.CANCELLED
-    events = store.list_events('run-paused-stale')
-    assert any(
-        event.event_type == 'run.stale_paused_cancelled' for event in events
-    )
-
-
-def test_fresh_paused_run_still_holds_active_slot(store) -> None:
-    from datetime import timedelta
-
-    fresh = datetime.now(UTC) - timedelta(hours=1)
-    store.create_run(
-        _run('run-paused-fresh').model_copy(
-            update={'state': RunState.PAUSED, 'updated_at': fresh}
-        ),
-        one_active_run=False,
-    )
-    with pytest.raises(ConcurrencyConflict):
-        store.create_run(
-            _run('run-blocked'),
-            one_active_run=True,
-            stale_paused_cutoff=datetime.now(UTC) - timedelta(days=3),
+def _create_in_active_slot(store, run, *, retry, cutoff=None):
+    if retry:
+        parent = store.create_run(
+            _run(state=RunState.FAILED).model_copy(
+                update={'investigation_id': run.investigation_id}
+            ),
+            one_active_run=False,
         )
+        created, _ = store.create_terminal_retry(
+            run,
+            parent_run_id=parent.run_id,
+            retry_key=_id('retry-key'),
+            checkpoint_digest='3' * 64,
+            one_active_run=True,
+            stale_paused_cutoff=cutoff,
+        )
+        return created
+    return store.create_run(
+        run, one_active_run=True, stale_paused_cutoff=cutoff,
+    )
 
 
-def test_active_run_without_cutoff_still_conflicts(store) -> None:
-    store.create_run(_run('run-active-nc'), one_active_run=False)
-    with pytest.raises(ConcurrencyConflict):
-        store.create_run(_run('run-blocked-nc'), one_active_run=True)
+@pytest.mark.parametrize('retry', [False, True], ids=['create', 'retry'])
+def test_stale_paused_run_does_not_hold_active_slot(store, retry) -> None:
+    from datetime import timedelta
+
+    investigation_id = _id('investigation')
+    stale = datetime.now(UTC) - timedelta(days=7)
+    paused = store.create_run(
+        _run(state=RunState.PAUSED).model_copy(
+            update={'updated_at': stale, 'investigation_id': investigation_id}
+        ),
+        one_active_run=False,
+    )
+    new = _run().model_copy(update={'investigation_id': investigation_id})
+    created = _create_in_active_slot(
+        store, new, retry=retry,
+        cutoff=datetime.now(UTC) - timedelta(days=3),
+    )
+    assert created.run_id == new.run_id
+    assert store.get_run(new.run_id).state is RunState.CREATED
+    cancelled = store.get_run(paused.run_id)
+    assert cancelled.state is RunState.CANCELLED
+    assert cancelled.version == paused.version + 1
+    assert cancelled.updated_at > paused.updated_at
+    events = store.list_events(paused.run_id)
+    assert sum(
+        event.event_type == 'run.stale_paused_cancelled' for event in events
+    ) == 1
+
+
+@pytest.mark.parametrize('retry', [False, True], ids=['create', 'retry'])
+@pytest.mark.parametrize('state,age_hours', [
+    (RunState.PAUSED, 1),
+    (RunState.CREATED, 168),
+])
+def test_non_stale_paused_run_still_holds_active_slot(store, retry, state, age_hours) -> None:
+    from datetime import timedelta
+
+    investigation_id = _id('investigation')
+    active = store.create_run(
+        _run(state=state).model_copy(update={
+            'updated_at': datetime.now(UTC) - timedelta(hours=age_hours),
+            'investigation_id': investigation_id,
+        }),
+        one_active_run=False,
+    )
+    with pytest.raises(ConcurrencyConflict, match=active.run_id):
+        _create_in_active_slot(
+            store, _run().model_copy(update={'investigation_id': investigation_id}),
+            retry=retry, cutoff=datetime.now(UTC) - timedelta(days=3),
+        )
+    assert store.get_run(active.run_id) == active
+    assert not any(
+        event.event_type == 'run.stale_paused_cancelled'
+        for event in store.list_events(active.run_id)
+    )
+
+
+@pytest.mark.parametrize('retry', [False, True], ids=['create', 'retry'])
+def test_active_run_without_cutoff_still_conflicts(store, retry) -> None:
+    from datetime import timedelta
+
+    investigation_id = _id('investigation')
+    active = store.create_run(
+        _run(state=RunState.PAUSED).model_copy(update={
+            'updated_at': datetime.now(UTC) - timedelta(days=7),
+            'investigation_id': investigation_id,
+        }),
+        one_active_run=False,
+    )
+    with pytest.raises(ConcurrencyConflict, match=active.run_id):
+        _create_in_active_slot(
+            store, _run().model_copy(update={'investigation_id': investigation_id}),
+            retry=retry,
+        )
+    assert store.get_run(active.run_id) == active

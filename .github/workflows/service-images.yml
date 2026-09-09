@@ -21,7 +21,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    uses: ./.github/workflows/ci-python.yml
+
   workflow-api:
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -51,6 +55,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=workflow-api
 
   research-orchestrator:
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
