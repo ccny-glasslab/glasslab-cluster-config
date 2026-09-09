@@ -27,6 +27,7 @@ from app.evidence import EvidencePhase
 from app.main import create_app
 from app.mock_runtime import ScriptedMockRuntime
 from app.policy import ActionPolicy
+from app.preflight import MethodologyRequirement
 from app.schemas import (
     AgentName,
     AgentTurnResult,
@@ -1816,6 +1817,47 @@ def test_matrix_revision_cap_fails_run_after_max_revisions(
         if event.event_type == 'run.failed'
     )
     assert 'maximum matrix revisions exceeded' in str(failed.payload['error'])
+
+
+def test_methodology_resolution_appendix_lists_each_requirement() -> None:
+    requirements = [
+        MethodologyRequirement(
+            requirement_id='cmp-1',
+            config_path='src/train.py',
+            mode='comparison',
+            minimum_distinct_values=3,
+            description='three bounded nearest-neighbor methods',
+        ),
+        MethodologyRequirement(
+            requirement_id='dec-1',
+            config_path='seed',
+            mode='decision',
+            minimum_distinct_values=1,
+            description='fixed seed decision',
+        ),
+    ]
+    appendix = ResearchOrchestrator._methodology_resolution_appendix(
+        'Deterministic matrix preflight failed: missing methodology setting '
+        '`src/train.py`',
+        requirements,
+    )
+    # The file-must-exist guidance is the primary instruction Beaker failed
+    # to act on across 10 live revisions.
+    assert 'must EXIST' in appendix
+    assert 'config_path `src/train.py`' in appendix
+    assert '"src/train":' in appendix
+    assert '"py":' in appendix
+    assert 'config_path `seed`' in appendix
+    assert '- <one value per distinct entry>' in appendix
+    assert 'read the file back' in appendix.lower()
+
+
+def test_methodology_resolution_appendix_ignores_unrelated_errors() -> None:
+    appendix = ResearchOrchestrator._methodology_resolution_appendix(
+        'Deterministic matrix preflight failed: base_config does not exist',
+        [],
+    )
+    assert appendix == ''
 
 
 def test_restart_recovery_from_job_running(orchestrator_bundle) -> None:
