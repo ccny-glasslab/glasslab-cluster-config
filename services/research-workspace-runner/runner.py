@@ -231,26 +231,49 @@ def _build_artifact_index(run_id: str, run_root: Path, required: set[str]) -> di
     # intentionally absent rather than self-referential entries.
     artifacts: list[dict[str, Any]] = []
     for path in sorted(run_root.rglob('*')):
-        if (
-            path.is_symlink()
-            or not _is_within(path, [run_root.resolve()])
-            or path.is_dir()
-            or not path.is_file()
-        ):
-            continue
         relative = path.relative_to(run_root).as_posix()
-        artifacts.append(
-            {
-                'name': relative,
-                'path': str(path),
-                'media_type': 'application/octet-stream',
-                'required': relative in required,
-                'size_bytes': path.stat().st_size,
-                'sha256': _file_sha256(path),
-                'description': 'Emitted by the frozen research workspace.',
-            }
-        )
+        entry: dict[str, Any] = {
+            'name': relative,
+            'path': str(path),
+            'media_type': 'application/octet-stream',
+            'required': relative in required,
+        }
+        try:
+            if (
+                path.is_symlink()
+                or not _is_within(path, [run_root.resolve()])
+                or path.is_dir()
+                or not path.is_file()
+            ):
+                continue
+            entry['size_bytes'] = path.stat().st_size
+            entry['sha256'] = _file_sha256(path)
+            entry['description'] = 'Emitted by the frozen research workspace.'
+        except (OSError, RuntimeError) as exc:
+            # A workload-controlled file must never abort the bundle: an
+            # unreadable, vanished, or looping path is recorded as an
+            # unhashable entry so the anomaly stays visible in the evidence
+            # trail instead of suppressing it.
+            entry['size_bytes'] = None
+            entry['sha256'] = None
+            entry['unhashable'] = True
+            entry['description'] = f'Unreadable or vanished at bundle time: {exc}'
+        artifacts.append(entry)
     return {'run_id': run_id, 'artifacts': artifacts}
+
+
+def _write_status(run_root: Path, run_id: str, terminal_status: str, detail: str) -> None:
+    status_payload: dict[str, Any] = {
+        'run_id': run_id,
+        'status': terminal_status,
+        'detail': detail,
+    }
+    status_path = run_root / 'status.json'
+    temporary_status_path = run_root / '.status.json.tmp'
+    # Temp-then-rename keeps status.json atomic; a reader never observes a
+    # partially written terminal status.
+    _write_json(temporary_status_path, status_payload)
+    temporary_status_path.replace(status_path)
 
 
 def _write_terminal_bundle(
@@ -261,7 +284,7 @@ def _write_terminal_bundle(
     config: dict[str, Any],
     terminal_status: str,
     detail: str,
-) -> list[str]:
+) -> tuple[list[str], str, str]:
     # The bundle is always written, even after a failed verification or run,
     # so a run id always has readable terminal state.
     _write_json(run_root / 'run_manifest.json', manifest)
@@ -285,18 +308,7 @@ def _write_terminal_bundle(
         run_root / 'artifacts_index.json',
         _build_artifact_index(run_id, run_root, required),
     )
-    status_payload: dict[str, Any] = {
-        'run_id': run_id,
-        'status': terminal_status,
-        'detail': detail,
-    }
-    status_path = run_root / 'status.json'
-    temporary_status_path = run_root / '.status.json.tmp'
-    # Temp-then-rename keeps status.json atomic; a reader never observes a
-    # partially written terminal status.
-    _write_json(temporary_status_path, status_payload)
-    temporary_status_path.replace(status_path)
-    return missing
+    return missing, terminal_status, detail
 
 
 def run_from_environment(env: Mapping[str, str] | None = None) -> int:
@@ -452,14 +464,21 @@ def run_from_environment(env: Mapping[str, str] | None = None) -> int:
 
     # Terminal records are written outside the try so even failures produce a
     # complete bundle; the exit code reflects the final terminal status.
-    missing = _write_terminal_bundle(
-        run_id=run_id,
-        run_root=run_root,
-        manifest=manifest,
-        config=config,
-        terminal_status=terminal_status,
-        detail=detail,
-    )
+    missing: list[str] = []
+    try:
+        missing, terminal_status, detail = _write_terminal_bundle(
+            run_id=run_id,
+            run_root=run_root,
+            manifest=manifest,
+            config=config,
+            terminal_status=terminal_status,
+            detail=detail,
+        )
+    finally:
+        # status.json is the one record every consumer requires; it is written
+        # unconditionally in a finally block so a bundle failure can never
+        # suppress the run's terminal state.
+        _write_status(run_root, run_id, terminal_status, detail)
     return 0 if terminal_status == 'succeeded' and not missing else 1
 
 

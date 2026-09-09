@@ -259,3 +259,39 @@ def test_fifo_cannot_satisfy_required_workspace_artifact(tmp_path: Path) -> None
     status = json.loads((run_root / 'status.json').read_text())
     assert status['status'] == 'failed'
     assert 'report.md' in status['detail']
+
+
+def test_unreadable_workload_file_still_yields_terminal_bundle(tmp_path: Path) -> None:
+    dataset_root = tmp_path / 'datasets'
+    dataset_root.mkdir(parents=True)
+    source_path = dataset_root / 'source.zip'
+    source_digest = _zip(
+        source_path,
+        {
+            'run.py': (
+                'import json, os\n'
+                'from pathlib import Path\n'
+                'out = Path(os.environ["GLASSLAB_OUTPUT_DIR"])\n'
+                '(out / "metrics.json").write_text('
+                'json.dumps({"rubric_score": 95}))\n'
+                '(out / "report.md").write_text("# Report\\n")\n'
+                'locked = out / "locked.bin"\n'
+                'locked.write_bytes(b"secret")\n'
+                'locked.chmod(0)\n'
+            )
+        },
+    )
+
+    result = run_from_environment(_environment(tmp_path, source_digest=source_digest))
+
+    run_root = tmp_path / 'artifacts' / 'run-1'
+    assert result == 0
+    assert json.loads((run_root / 'status.json').read_text())['status'] == (
+        'succeeded'
+    )
+    index = json.loads((run_root / 'artifacts_index.json').read_text())
+    locked = next(
+        item for item in index['artifacts'] if item['name'] == 'locked.bin'
+    )
+    assert locked['unhashable'] is True
+    assert locked['sha256'] is None
