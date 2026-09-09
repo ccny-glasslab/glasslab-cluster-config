@@ -1393,7 +1393,7 @@ def test_imported_task_revision_does_not_retry_missing_dependencies(
     assert 'Attempt each local command only once' in revision_prompt
     assert 'If a check fails with ModuleNotFoundError' in revision_prompt
     assert 'do not install packages, repeat the command' in revision_prompt
-    assert 'artifact://, git://, event://, job://, or contract://' in revision_prompt
+    assert 'artifact://, job://, event://, or knowledge://' in revision_prompt
 
 
 def test_contract_preflight_returns_beaker_to_revision(

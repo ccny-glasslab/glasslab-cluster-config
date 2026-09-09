@@ -37,18 +37,22 @@ class EvidenceURIResolver:
     unresolved status.
 
     Supported URI formats:
-    - artifact://<run_id>/artifacts/<path>  -> artifact record
+    - artifact://<run_id>/<path>               -> artifact record (tolerates
+      the engine's stored-URI, cluster, doubled-scheme, and legacy
+      artifact://<run_id>/artifacts/<path> shapes)
     - job://<job_id>                         -> job record
     - event://<event_id>                     -> event record
     - knowledge://<source_id>                -> knowledge source record
     - knowledge://context:<packet_id>        -> context packet record
-    - git://<path>                           -> not supported (placeholder)
-    - contract://<path>                      -> not supported (placeholder)
     """
 
-    # Pattern to extract run_id and path from artifact:// URIs
-    # Format: artifact://<run_id>/artifacts/<path>
-    _ARTIFACT_PATTERN = re.compile(r'^artifact://([^/]+)/artifacts/(.+)$')
+    # Pattern to extract run_id and path from artifact:// URIs.
+    # The engine and cluster adapters write several URI shapes (local
+    # artifacts are stored as artifact://<run>/reports/..., the fake cluster
+    # as artifact://<external>/metrics.json, evidence content entries double
+    # the scheme), so resolution tolerates them instead of enforcing the
+    # historical artifact://<run>/artifacts/<path> grammar.
+    _ARTIFACT_PATTERN = re.compile(r'^artifact://(.+)$')
 
     # Pattern for knowledge:// URIs
     # Format: knowledge://<source_id> or knowledge://context:<packet_id>
@@ -87,20 +91,43 @@ class EvidenceURIResolver:
         return ResolvedEvidence(uri=uri, resolved=False, error='unknown scheme')
 
     def _resolve_artifact(self, uri: str) -> ResolvedEvidence:
-        """Resolve artifact://<run_id>/artifacts/<path> to artifact record."""
-        match = self._ARTIFACT_PATTERN.match(uri)
-        if not match:
+        """Resolve an artifact:// URI to an artifact record.
+
+        Accepts every URI shape the engine and cluster adapters produce:
+        full stored URIs (artifact://<run>/reports/report.md), cluster
+        artifacts (artifact://<external>/metrics.json), doubled-scheme
+        content entries (artifact://artifact://<run>/...), and the legacy
+        artifact://<run>/artifacts/<path> grammar.
+        """
+        remainder = uri[len('artifact://'):]
+        if remainder.startswith('artifact://'):
+            remainder = remainder[len('artifact://'):]
+        if '/' not in remainder:
             return ResolvedEvidence(
                 uri=uri,
                 resolved=False,
-                error='artifact:// URI must follow format: artifact://<run_id>/artifacts/<path>',
+                error='artifact:// URI must include a path',
             )
-
-        run_id, path = match.groups()
-        # Find the artifact record by run_id and uri pattern
+        run_id, path = remainder.split('/', 1)
+        legacy_path = (
+            path[len('artifacts/'):] if path.startswith('artifacts/') else None
+        )
         artifacts = self.store.list_artifacts(run_id)
+        if not artifacts:
+            # A claim may carry a different namespace than the orchestrator
+            # run id (the fake cluster writes artifact://<external>/...);
+            # fall back to scanning every run's artifacts.
+            artifacts = [
+                artifact
+                for run in self.store.list_runs()
+                for artifact in self.store.list_artifacts(run.run_id)
+            ]
         for artifact in artifacts:
-            if f'artifacts/{artifact.uri}' == path or artifact.uri == path:
+            if self._artifact_uri_matches(
+                artifact.uri,
+                path,
+                legacy_path,
+            ):
                 return ResolvedEvidence(
                     uri=uri,
                     resolved=True,
@@ -108,11 +135,25 @@ class EvidenceURIResolver:
                     record_id=artifact.artifact_id,
                     record=artifact,
                 )
-
         return ResolvedEvidence(
             uri=uri,
             resolved=False,
             error=f'artifact not found for path: {path}',
+        )
+
+    @staticmethod
+    def _artifact_uri_matches(
+        artifact_uri: str,
+        path: str,
+        legacy_path: str | None,
+    ) -> bool:
+        normalized = (
+            re.sub(r'^artifact://[^/]+/', '', artifact_uri)
+            if artifact_uri.startswith('artifact://')
+            else artifact_uri
+        )
+        return normalized == path or (
+            legacy_path is not None and normalized == legacy_path
         )
 
     def _resolve_job(self, uri: str) -> ResolvedEvidence:
@@ -140,29 +181,27 @@ class EvidenceURIResolver:
             )
 
     def _resolve_event(self, uri: str) -> ResolvedEvidence:
-        """Resolve event://<event_id> to event record."""
+        """Resolve event://<event_id> to an event record."""
         if not uri.startswith('event://'):
             return ResolvedEvidence(
                 uri=uri, resolved=False, error='not an event:// URI'
             )
-
-        event_id = uri[8:]  # Remove 'event://' prefix
-        try:
-            # Event records don't have a get_event method, so search by id
-            # We need to use list_events and filter
-            # But we don't know the run_id - this is a limitation
-            # For now, mark as unresolved since we can't look it up directly
-            return ResolvedEvidence(
-                uri=uri,
-                resolved=False,
-                error='event:// URI resolution requires run_id (not yet supported)',
-            )
-        except Exception as e:
-            return ResolvedEvidence(
-                uri=uri,
-                resolved=False,
-                error=f'event not found: {event_id}, error: {e}',
-            )
+        event_id = uri[len('event://'):]
+        for run in self.store.list_runs():
+            for event in self.store.list_events(run.run_id):
+                if event.event_id == event_id:
+                    return ResolvedEvidence(
+                        uri=uri,
+                        resolved=True,
+                        resolved_to='event',
+                        record_id=event.event_id,
+                        record=event,
+                    )
+        return ResolvedEvidence(
+            uri=uri,
+            resolved=False,
+            error=f'event not found: {event_id}',
+        )
 
     def _resolve_knowledge(self, uri: str) -> ResolvedEvidence:
         """Resolve knowledge://<source_id> or knowledge://context:<packet_id>.
