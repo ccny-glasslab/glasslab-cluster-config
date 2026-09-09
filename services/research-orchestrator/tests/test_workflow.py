@@ -9,12 +9,14 @@ workflow safe to restart. Cluster execution runs against FakeClusterExecutor.
 
 from __future__ import annotations
 
+import io
 import json
 import time
 from datetime import timedelta
 from hashlib import sha256
 from pathlib import Path
 from threading import Event, Thread
+import zipfile
 
 from fastapi.testclient import TestClient
 import pytest
@@ -661,6 +663,27 @@ class PauseDuringImplementationRuntime(ScriptedMockRuntime):
         return result
 
 
+class BlockingPlanRuntime(ScriptedMockRuntime):
+    # Blocks the Beaker plan turn of one run until the test releases it, so a
+    # concurrent approval on another run can prove the advancement lock is
+    # keyed per run rather than global.
+    def __init__(self, *, runner_image: str, block_run_id: str) -> None:
+        super().__init__(runner_image=runner_image)
+        self.block_run_id = block_run_id
+        self.blocked = Event()
+        self.release_event = Event()
+
+    def run_turn(self, **kwargs):
+        if (
+            kwargs['agent'] == AgentName.BEAKER
+            and kwargs['run_id'] == self.block_run_id
+            and 'Write implementation-plan.md' in kwargs['prompt']
+        ):
+            self.blocked.set()
+            self.release_event.wait(timeout=10)
+        return super().run_turn(**kwargs)
+
+
 class NewContractRuntime(ScriptedMockRuntime):
     # Drives the full contract-candidate flow: Honeydew proposes a new
     # evaluator, Beaker drafts and seals the candidate (wrong phase kind once
@@ -793,6 +816,20 @@ def _pending_action(store, run_id: str, action_type: str):
         if action.type == action_type
         and action.approval_status == ApprovalStatus.PENDING
     )
+
+
+def _task_archive() -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, 'w') as handle:
+        handle.writestr(
+            'ML_Benchmark_Adult_Income/problem.md',
+            '# Adult task\n',
+        )
+        handle.writestr(
+            'ML_Benchmark_Adult_Income/eval_agent_prompt.md',
+            '# Rubric\n',
+        )
+    return output.getvalue()
 
 
 def _advance_to_jobs(engine, store):
@@ -1645,6 +1682,92 @@ def test_pause_between_save_and_replace_does_not_overwrite_completed_turn(
     assert plan_turns[0].structured_output is not None
     assert not any(turn.status == 'failed' for turn in turns)
     assert store.get_run(run.run_id).state == RunState.PAUSED
+
+
+def test_locks_are_per_run_not_global(orchestrator_bundle) -> None:
+    """Concurrent runs advance independently and compiles never block approvals.
+
+    The advancement lock is keyed per run, so one run's in-flight agent turn
+    must not serialize another run's approval; the task-compiler turn uses a
+    separate lock, so a compile must not block approvals either (issue #251).
+    """
+    _, store, _, _, engine = orchestrator_bundle
+    run_a = engine.create_run(
+        RunCreateRequest(objective='Run A concurrent advancement.')
+    )
+    run_b = engine.create_run(
+        RunCreateRequest(objective='Run B concurrent advancement.')
+    )
+    protocol_a = _pending_action(store, run_a.run_id, 'approve_protocol')
+    protocol_b = _pending_action(store, run_b.run_id, 'approve_protocol')
+
+    blocking = BlockingPlanRuntime(
+        runner_image=RUNNER_IMAGE,
+        block_run_id=run_a.run_id,
+    )
+    engine.runtime = blocking
+
+    errors: list[Exception] = []
+
+    def advance_run_a() -> None:
+        try:
+            engine.approve_action(
+                protocol_a.action_id,
+                reviewer='test-human',
+                reason='Protocol accepted.',
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    thread_a = Thread(target=advance_run_a)
+    thread_a.start()
+    assert blocking.blocked.wait(timeout=10), 'run A never blocked in its plan turn'
+
+    result_b: dict[str, object] = {}
+
+    def advance_run_b() -> None:
+        try:
+            engine.approve_action(
+                protocol_b.action_id,
+                reviewer='test-human',
+                reason='Protocol accepted.',
+            )
+            result_b['state'] = store.get_run(run_b.run_id).state
+        except Exception as exc:
+            result_b['error'] = exc
+
+    thread_b = Thread(target=advance_run_b)
+    thread_b.start()
+    thread_b.join(timeout=5)
+    assert not thread_b.is_alive(), 'run B approval blocked behind run A turn'
+    assert 'error' not in result_b
+    assert result_b['state'] == RunState.AWAITING_EXECUTION_APPROVAL
+
+    result_import: dict[str, object] = {}
+
+    def do_import() -> None:
+        try:
+            record = engine.import_task_bundle(
+                filename='concurrent-task.zip',
+                content=_task_archive(),
+            )
+            result_import['task_id'] = record.task_id
+        except Exception as exc:
+            result_import['error'] = exc
+
+    import_thread = Thread(target=do_import)
+    import_thread.start()
+    import_thread.join(timeout=5)
+    assert not import_thread.is_alive(), 'task compile blocked behind run A turn'
+    assert 'error' not in result_import
+    assert result_import['task_id'] == f'task-{sha256(_task_archive()).hexdigest()[:16]}'
+
+    blocking.release_event.set()
+    thread_a.join(timeout=10)
+    assert not thread_a.is_alive(), 'run A approval did not finish'
+    assert not errors
+    run_a_final = store.get_run(run_a.run_id)
+    assert run_a_final.state == RunState.AWAITING_EXECUTION_APPROVAL
 
 
 def test_honeydew_receives_read_only_beaker_review_snapshot(
