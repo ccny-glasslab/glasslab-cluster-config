@@ -968,7 +968,7 @@ def refresh_campaign_iterations(
             if run_status == 'succeeded':
                 next_status = 'completed'
             elif run_status in {'failed', 'rejected'}:
-                next_status = 'failed'
+                next_status = 'needs_review'
             elif run_status in {'running', 'accepted', 'queued'}:
                 next_status = 'launched'
         updated_iteration = iteration.model_copy(
@@ -989,7 +989,7 @@ def refresh_campaign_iterations(
             if campaign.latest_decision_id is None:
                 if latest_iteration.status == 'completed':
                     next_campaign_status = 'active'
-                elif latest_iteration.status == 'failed':
+                elif latest_iteration.status == 'needs_review':
                     next_campaign_status = 'needs_review'
             if next_campaign_status != campaign.status:
                 campaign = campaign.model_copy(update={'updated_at': _now(), 'status': next_campaign_status})
