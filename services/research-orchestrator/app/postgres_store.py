@@ -255,7 +255,7 @@ class PostgresStore:
                 active = conn.execute('SELECT run_id, payload, version FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE AND investigation_id IS NOT DISTINCT FROM %s LIMIT 1', (states, record.investigation_id)).fetchone()
                 if active:
                     if stale_paused_cutoff is not None and active['payload'] is not None:
-                        current = RunRecord.model_validate_json(active['payload'])
+                        current = self._run(active, str(active['run_id']))
                         if current.state is RunState.PAUSED and current.updated_at < stale_paused_cutoff:
                             now = utc_now()
                             cancelled = current.model_copy(update={'state': RunState.CANCELLED, 'version': int(active['version']) + 1, 'updated_at': now})
@@ -284,7 +284,7 @@ class PostgresStore:
                 active = conn.execute('SELECT run_id, payload, version FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE AND investigation_id IS NOT DISTINCT FROM %s LIMIT 1', ([state.value for state in TERMINAL_STATES], record.investigation_id)).fetchone()
                 if active:
                     if stale_paused_cutoff is not None and active['payload'] is not None:
-                        current = RunRecord.model_validate_json(active['payload'])
+                        current = self._run(active, str(active['run_id']))
                         if current.state is RunState.PAUSED and current.updated_at < stale_paused_cutoff:
                             now = utc_now()
                             cancelled = current.model_copy(update={'state': RunState.CANCELLED, 'version': int(active['version']) + 1, 'updated_at': now})
