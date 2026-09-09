@@ -23,6 +23,7 @@ from app.contract_candidates import ContractCandidateManager
 from app.config import SERVICE_ROOT
 from app.discord_adapter import DisabledDiscordAdapter
 from app.engine import ResearchOrchestrator, WorkflowError
+from app.evidence import EvidencePhase
 from app.main import create_app
 from app.mock_runtime import ScriptedMockRuntime
 from app.policy import ActionPolicy
@@ -290,6 +291,45 @@ def test_evidence_snapshot_rejects_mismatched_or_escaping_artifacts(
             'content_unavailable': 'artifact digest mismatch',
         }
     ]
+
+
+def test_evidence_offload_writes_snapshot_file_and_keeps_prompt_light(
+    orchestrator_bundle,
+) -> None:
+    settings, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Offload evidence to the agent workspace.')
+    )
+    Path(run.beaker_workspace).mkdir(parents=True, exist_ok=True)
+    metrics_path = Path(settings.shared_mount_root) / 'artifacts/job-1/metrics.json'
+    metrics_path.parent.mkdir(parents=True)
+    metrics_content = b'{"score": 0.8}'
+    metrics_path.write_bytes(metrics_content)
+    store.save_artifact(
+        ArtifactRecord(
+            run_id=run.run_id,
+            type='metrics',
+            uri='artifacts/job-1/metrics.json',
+            sha256=sha256(metrics_content).hexdigest(),
+        )
+    )
+
+    evidence = engine._evidence_snapshot(
+        run.run_id,
+        phase=EvidencePhase.ANALYSIS,
+        max_bytes=engine.settings.evidence_file_max_bytes,
+    )
+    path = engine._write_evidence_file(run.run_id, AgentName.BEAKER, evidence)
+    assert path == Path(run.beaker_workspace) / 'evidence-snapshot.json'
+
+    on_disk = json.loads(path.read_text())
+    assert on_disk['artifact_contents'][0]['content'] == {'score': 0.8}
+
+    digest = json.loads(engine._inline_evidence_digest(evidence))
+    assert digest['artifacts'][0]['uri'] == 'artifacts/job-1/metrics.json'
+    assert digest['artifact_contents'][0]['uri'].startswith('artifact://')
+    assert 'content' not in digest['artifact_contents'][0]
+    assert len(engine._inline_evidence_digest(evidence)) < path.stat().st_size
 
 
 class DeniedThenValidRuntime(ScriptedMockRuntime):

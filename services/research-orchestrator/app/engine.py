@@ -5015,16 +5015,60 @@ class ResearchOrchestrator:
         self,
         run_id: str,
         phase: EvidencePhase = EvidencePhase.ANALYSIS,
+        max_bytes: int | None = None,
     ) -> dict[str, Any]:
         """Bounded evidence summary for an agent turn, scoped by phase."""
         return build_evidence_snapshot(
-            self.settings, self.store, run_id, phase=phase
+            self.settings, self.store, run_id, phase=phase, max_bytes=max_bytes
         )
+
+    def _write_evidence_file(
+        self,
+        run_id: str,
+        agent: AgentName,
+        evidence: dict[str, Any],
+    ) -> Path:
+        """Persist the full evidence snapshot inside the agent's workspace.
+
+        The agent reads it with its file tool; only a content-free digest goes
+        into the prompt (see _inline_evidence_digest). The workspace is the
+        only location the agent's file tool may reach (external_directory is
+        denied in the runtime config).
+        """
+        run = self.store.get_run(run_id)
+        workspace = Path(
+            run.honeydew_workspace
+            if agent == AgentName.HONEYDEW
+            else run.beaker_workspace
+        )
+        destination = workspace / 'evidence-snapshot.json'
+        destination.write_text(serialize_evidence(evidence), encoding='utf-8')
+        return destination
+
+    @staticmethod
+    def _inline_evidence_digest(evidence: dict[str, Any]) -> str:
+        """Compact prompt copy of the snapshot: inventory only, no content.
+
+        The heavy artifact_contents (verbatim evaluation.json/metrics.json,
+        log/CSV excerpts) are dropped; the agent reads them from the
+        evidence-snapshot.json file written to its workspace.
+        """
+        digest = {
+            key: value for key, value in evidence.items() if key != 'artifact_contents'
+        }
+        digest['artifact_contents'] = [
+            {key: value for key, value in entry.items() if key != 'content'}
+            for entry in evidence.get('artifact_contents', [])
+        ]
+        return json.dumps(digest, indent=2, sort_keys=True, ensure_ascii=False)
 
     def _analyze_results(self, run_id: str) -> None:
         evidence = self._evidence_snapshot(
-            run_id, phase=EvidencePhase.ANALYSIS
+            run_id,
+            phase=EvidencePhase.ANALYSIS,
+            max_bytes=self.settings.evidence_file_max_bytes,
         )
+        self._write_evidence_file(run_id, AgentName.BEAKER, evidence)
         _, result = self._run_agent_turn(
             run_id=run_id,
             agent=AgentName.BEAKER,
@@ -5033,7 +5077,10 @@ class ResearchOrchestrator:
                 'failed job is an observation to explain, not proof that the '
                 'research run failed. Cite evidence URIs for every material '
                 'claim.\n\n'
-                + serialize_evidence(evidence)
+                'EVIDENCE DIGEST (read the full snapshot at '
+                'evidence-snapshot.json in your workspace for artifact '
+                'contents):\n'
+                + self._inline_evidence_digest(evidence)
             ),
             expected_kind=TurnKind.EXPERIMENT_ANALYSIS,
             input_event=evidence,
@@ -5078,8 +5125,11 @@ class ResearchOrchestrator:
 
     def _verify_results(self, run_id: str) -> None:
         evidence = self._evidence_snapshot(
-            run_id, phase=EvidencePhase.VERIFICATION
+            run_id,
+            phase=EvidencePhase.VERIFICATION,
+            max_bytes=self.settings.evidence_file_max_bytes,
         )
+        self._write_evidence_file(run_id, AgentName.HONEYDEW, evidence)
         _, result = self._run_agent_turn(
             run_id=run_id,
             agent=AgentName.HONEYDEW,
@@ -5090,7 +5140,10 @@ class ResearchOrchestrator:
                 'flag any contradiction between the results and the corpus. Set '
                 'done=true only if the evidence supports a final report. Cite '
                 'artifact, job, event, Git, contract, or knowledge:// URIs.\n\n'
-                + serialize_evidence(evidence)
+                'EVIDENCE DIGEST (read the full snapshot at '
+                'evidence-snapshot.json in your workspace for artifact '
+                'contents):\n'
+                + self._inline_evidence_digest(evidence)
             ),
             expected_kind=TurnKind.VERIFICATION,
             input_event=evidence,
@@ -5172,7 +5225,12 @@ class ResearchOrchestrator:
         return None
 
     def _write_report(self, run_id: str, feedback: str | None = None) -> None:
-        evidence = self._evidence_snapshot(run_id, phase=EvidencePhase.REPORT)
+        evidence = self._evidence_snapshot(
+            run_id,
+            phase=EvidencePhase.REPORT,
+            max_bytes=self.settings.evidence_file_max_bytes,
+        )
+        self._write_evidence_file(run_id, AgentName.HONEYDEW, evidence)
         prompt = (
             'Write report.md for the human. Separate observations from '
             'inferences, cite authoritative evidence URIs, include failed runs '
@@ -5184,7 +5242,10 @@ class ResearchOrchestrator:
             'a real file in your own workspace when the turn ends; do not '
             'reference job artifacts or files from other locations as your '
             'produced file.\n\n'
-            + serialize_evidence(evidence)
+            'EVIDENCE DIGEST (read the full snapshot at '
+            'evidence-snapshot.json in your workspace for artifact '
+            'contents):\n'
+            + self._inline_evidence_digest(evidence)
         )
         verdict = self._corpus_verification_verdict(run_id)
         if verdict is not None:
