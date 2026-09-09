@@ -45,6 +45,15 @@ from .schemas import (
 ModelT = TypeVar('ModelT')
 
 
+class IdempotencyConflict(RuntimeError):
+    """A run with the same idempotency key already exists in the store.
+
+    Raised by save_run when a caller tries to persist a second run under a
+    key that is already bound to a different run_id. Callers catch this and
+    return the existing run instead of creating a duplicate Job.
+    """
+
+
 def _import_psycopg() -> ModuleType:
     import psycopg
 
@@ -291,6 +300,10 @@ class RunStore(ABC):
 
     @abstractmethod
     def get_run(self, run_id: str) -> RunRecord | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_run_by_idempotency_key(self, idempotency_key: str) -> RunRecord | None:
         raise NotImplementedError
 
     @abstractmethod
@@ -658,6 +671,15 @@ class InMemoryRunStore(RunStore):
 
     def save_run(self, record: RunRecord) -> None:
         with self._lock:
+            if record.idempotency_key:
+                for existing in self._runs.values():
+                    if (
+                        existing.run_id != record.run_id
+                        and existing.idempotency_key == record.idempotency_key
+                    ):
+                        raise IdempotencyConflict(
+                            f'idempotency key already used: {record.idempotency_key}'
+                        )
             self._runs[record.run_id] = record
             self._latest_run_id = record.run_id
 
@@ -719,6 +741,13 @@ class InMemoryRunStore(RunStore):
     def get_run(self, run_id: str) -> RunRecord | None:
         with self._lock:
             return self._runs.get(run_id)
+
+    def get_run_by_idempotency_key(self, idempotency_key: str) -> RunRecord | None:
+        with self._lock:
+            for record in self._runs.values():
+                if record.idempotency_key == idempotency_key:
+                    return record
+            return None
 
     def get_latest_run(self) -> RunRecord | None:
         with self._lock:

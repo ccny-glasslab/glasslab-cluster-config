@@ -194,6 +194,11 @@ class Settings(BaseSettings):
     cluster_execution_mode: str = 'workflow-api'
     cluster_execution_workload_id: str = 'workspace-cpu-ml-v1'
     cluster_execution_experiment_type: str = 'research-workspace-job'
+    # Durable record of idempotency_key -> external_run_id submissions so a
+    # restart observes the same external run without re-submitting (see #255).
+    cluster_submission_state_path: str = (
+        '/tmp/glasslab-research-orchestrator/cluster-submissions.json'
+    )
     workflow_api_caller_name: str = Field(
         default='',
         validation_alias=AliasChoices(
