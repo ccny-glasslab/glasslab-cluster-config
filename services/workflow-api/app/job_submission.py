@@ -546,10 +546,10 @@ class KubernetesJobSubmitter(JobSubmitter):
         if manifest.workload_id:
             labels['glasslab.io/workload-id'] = _sanitize_label(manifest.workload_id)
         workspace_config = manifest.config_payload.get('workspace')
+        network_policy = 'none'
         if isinstance(workspace_config, dict):
-            network_policy = str(workspace_config.get('network_policy', '')).strip()
-            if network_policy:
-                labels['glasslab.io/network-policy'] = _sanitize_label(network_policy)
+            network_policy = str(workspace_config.get('network_policy', '')).strip() or 'none'
+        labels['glasslab.io/network-policy'] = _sanitize_label(network_policy)
 
         priority_class_name = ''
         if manifest.run_priority == 'autonomous':
