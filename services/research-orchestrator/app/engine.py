@@ -1351,6 +1351,14 @@ class ResearchOrchestrator:
         # The failed attempt already consumed a turn number; roll it back so
         # the bounded retry does not double-count against the turn budget.
         current = self.store.get_run(run_id)
+        if current.state == RunState.PAUSED or current.state in TERMINAL_STATES:
+            # Pause/cancel may have committed while the failed turn was being
+            # torn down. A fresh model turn must never start on a paused or
+            # terminal run (issue #239).
+            raise WorkflowError(
+                'workflow advancement stopped after agent turn because run is '
+                f'{current.state.value}'
+            )
         self.store.replace_run(
             current.model_copy(
                 update={'turn_number': max(0, current.turn_number - 1)}
@@ -1455,6 +1463,7 @@ class ResearchOrchestrator:
                 'kind': expected_kind.value,
             },
         )
+        completed_saved = False
         try:
             # Per-turn knowledge retrieval (see KnowledgeManager). The query is
             # derived from the turn's prompt and objective; the result is scoped
@@ -1540,6 +1549,15 @@ class ResearchOrchestrator:
             # recovery context. Runtime schemas allow many valid kinds, but the
             # state machine has already chosen the one valid for this turn.
             prompt += self._required_turn_kind_instruction(expected_kind)
+            current = self.store.get_run(run_id)
+            if current.state == RunState.PAUSED or current.state in TERMINAL_STATES:
+                # Pause/cancel bypass the advancement lock, so the run may have
+                # left this phase while the turn was being prepared. Never start
+                # a fresh model turn on a paused or terminal run (issue #239).
+                raise WorkflowError(
+                    'workflow advancement stopped after agent turn because run is '
+                    f'{current.state.value}'
+                )
             result, message_id = self.runtime.run_turn(
                 run_id=run_id,
                 agent=agent,
@@ -1594,7 +1612,16 @@ class ResearchOrchestrator:
                 }
             )
             self.store.save_turn(completed)
+            completed_saved = True
             current = self.store.get_run(run_id)
+            if current.state == RunState.PAUSED or current.state in TERMINAL_STATES:
+                # Pause/cancel committed between the completed-turn save and the
+                # run-state replace. The completed turn is durable and
+                # authoritative; refuse to advance or overwrite it (issue #239).
+                raise WorkflowError(
+                    'workflow advancement stopped after agent turn because run is '
+                    f'{current.state.value}'
+                )
             self.store.replace_run(
                 current.model_copy(update={'current_agent': None}),
                 expected_version=current.version,
@@ -1616,6 +1643,12 @@ class ResearchOrchestrator:
                 },
             )
         except Exception as exc:
+            if completed_saved:
+                # The completed turn is already durable. Any failure after the
+                # completed-turn save is a pause/cancel race at the save/replace
+                # boundary (ConcurrencyConflict) or the guard above; never
+                # overwrite the completed turn with a failure (issue #239).
+                raise
             failed = turn.model_copy(
                 update={
                     'status': 'failed',

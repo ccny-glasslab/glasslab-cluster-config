@@ -52,7 +52,7 @@ from app.schemas import (
     VerificationVerdict,
     utc_now,
 )
-from app.storage import SqliteStore
+from app.storage import ConcurrencyConflict, SqliteStore
 from app.workspaces import WorkspaceManager
 
 from conftest import RUNNER_IMAGE
@@ -1592,6 +1592,59 @@ def test_pause_during_agent_turn_stops_workflow_advancement(
         for action in store.list_actions(run.run_id)
     )
     assert runtime.turn_counts[AgentName.HONEYDEW] == 1
+
+
+def test_pause_between_save_and_replace_does_not_overwrite_completed_turn(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    """A completed turn survives a pause that commits at the save/replace boundary.
+
+    If pause's transition commits between ``save_turn(completed)`` and the
+    ``replace_run(current_agent=None)`` that closes the turn, the boundary
+    replace raises ConcurrencyConflict. The failure bookkeeping must not
+    rewrite the just-saved completed turn as failed (issue #239).
+    """
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(
+            objective='Pause between completed-turn save and run-state replace.'
+        )
+    )
+    protocol = _pending_action(store, run.run_id, 'approve_protocol')
+
+    original_replace_run = store.replace_run
+    injected = False
+
+    def racing_replace_run(record, *, expected_version):
+        nonlocal injected
+        if record.current_agent is None and not injected:
+            injected = True
+            store.transition_run(
+                record.run_id,
+                RunState.PAUSED,
+                updates={'resume_state': RunState.BEAKER_PLANNING},
+            )
+        return original_replace_run(record, expected_version=expected_version)
+
+    monkeypatch.setattr(store, 'replace_run', racing_replace_run)
+
+    with pytest.raises(ConcurrencyConflict):
+        engine.approve_action(
+            protocol.action_id,
+            reviewer='test-human',
+            reason='Protocol accepted.',
+        )
+
+    turns = store.list_turns(run.run_id)
+    plan_turns = [
+        turn for turn in turns if turn.agent == AgentName.BEAKER
+    ]
+    assert len(plan_turns) == 1
+    assert plan_turns[0].status == 'completed'
+    assert plan_turns[0].structured_output is not None
+    assert not any(turn.status == 'failed' for turn in turns)
+    assert store.get_run(run.run_id).state == RunState.PAUSED
 
 
 def test_honeydew_receives_read_only_beaker_review_snapshot(
