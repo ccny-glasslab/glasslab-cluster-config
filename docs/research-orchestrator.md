@@ -178,16 +178,22 @@ in the database and reconstructed after an orchestrator restart. Active turns
 have an explicit abort path. Runtime event names are normalized before they are
 persisted.
 
-The current deployment configuration points both runtimes at:
+The current deployment configuration uses split model serving:
 
 ```text
-http://192.168.1.17:52415/v1
+Honeydew reasoning: http://192.168.1.18:52417/v1
+Beaker / structured / task compiler: http://192.168.1.17:52417/v1
+mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit
 mlx-community/Qwen3-Coder-Next-4bit
 ```
 
-That is the model identifier exposed by the checked repository configuration.
-The service does not assume that the label `qwen3-coder-next-70b` is accepted by
-the endpoint. Confirm the served model list before changing this value.
+Honeydew's bounded reasoning turns use the Thinking model on `.18`; the
+structured-output-critical turns and Beaker run on the Coder-Next model on
+`.17`. Both exo instances listen on port `52417`; the retired single endpoint
+on port `52415` is no longer served. Those are the model identifiers exposed by
+the checked repository configuration. The service does not assume that the
+label `qwen3-coder-next-70b` is accepted by the endpoint. Confirm the served
+model list before changing these values.
 
 ## Structured Turns
 
