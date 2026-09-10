@@ -269,3 +269,14 @@ def test_opencode_ensure_session_rotates_only_on_404(
 
     assert session.session_id == 'session-new'
     assert [request.method for request in requests] == ['GET', 'POST']
+
+
+def test_opencode_runtime_port_is_reserved_until_handle_registered(
+    tmp_path,
+) -> None:
+    runtime = OpenCodeProcessRuntime(
+        Settings(opencode_shared_cache_root=str(tmp_path / 'shared-cache'))
+    )
+    first = runtime._runtime_port()
+    second = runtime._runtime_port()
+    assert first != second
