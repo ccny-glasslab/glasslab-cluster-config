@@ -23,7 +23,7 @@ spec:
           effect: NoSchedule
       priorityClassName: system-node-critical
       containers:
-        - image: nvcr.io/nvidia/k8s-device-plugin:v0.18.2
+        - image: nvcr.io/nvidia/k8s-device-plugin:v0.18.2@sha256:1bf77cd554470ecd0789de3ebc213afbb5f3cce004b2313b4b6cb41f5782afe3
           name: nvidia-device-plugin-ctr
           args:
             - --fail-on-init-error=false

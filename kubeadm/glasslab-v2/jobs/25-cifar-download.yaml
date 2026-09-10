@@ -10,7 +10,7 @@ spec:
     spec:
       containers:
         - name: cifar-download
-          image: alpine:3.18
+          image: alpine:3.18@sha256:fd032399cd767f310a1d1274e81cab9f0fd8a49b3589eba2c3420228cd45b6a7
           command: ["/bin/sh", "-c"]
           args:
             - |
