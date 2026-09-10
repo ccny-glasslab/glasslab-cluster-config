@@ -547,6 +547,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
         # path so the failure is diagnosable without guessing.
         while time.monotonic() < deadline:
             if process.poll() is not None:
+                self._stop_handle(handle)
                 raise OpenCodeRuntimeError(
                     f'OpenCode process exited during startup; see {log_path}',
                     failure_class='startup',

@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.config import Settings
 from app.hermes_runtime import HermesProcessRuntime
 from app.main import build_agent_runtime
-from app.opencode_runtime import OpenCodeProcessRuntime
+from app.opencode_runtime import OpenCodeProcessRuntime, OpenCodeRuntimeError
 from app.schemas import AgentName
 
 
@@ -141,3 +143,53 @@ def test_opencode_runtime_config_sets_max_output_tokens(tmp_path: Path) -> None:
     provider = config['provider']['exo']
     model_cfg = next(iter(provider['models'].values()))
     assert model_cfg['options']['maxOutputTokens'] == 8192
+
+
+class _ExitedProcess:
+    """A process that has already exited when startup first polls it."""
+
+    returncode = 1
+
+    def poll(self) -> int:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.returncode = 0
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+
+def test_opencode_crashed_startup_stops_the_leaked_handle(
+    tmp_path, monkeypatch,
+) -> None:
+    runtime = OpenCodeProcessRuntime(
+        Settings(opencode_shared_cache_root=str(tmp_path / 'shared-cache'))
+    )
+    workspace = tmp_path / 'run-1' / 'honeydew-worktree'
+    workspace.mkdir(parents=True)
+    stopped: list[object] = []
+    real_stop = runtime._stop_handle
+
+    def record_stop(handle):
+        stopped.append(handle)
+        real_stop(handle)
+
+    monkeypatch.setattr(runtime, '_stop_handle', record_stop)
+    monkeypatch.setattr(
+        'app.opencode_runtime.subprocess.Popen',
+        lambda *args, **kwargs: _ExitedProcess(),
+    )
+
+    with pytest.raises(OpenCodeRuntimeError, match='exited during startup'):
+        runtime._start_process(
+            run_id='run-1',
+            agent=AgentName.HONEYDEW,
+            workspace=workspace,
+        )
+
+    assert len(stopped) == 1
+    assert stopped[0].log_handle.closed is True
