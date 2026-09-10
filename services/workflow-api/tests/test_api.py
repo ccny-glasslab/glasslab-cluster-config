@@ -5938,3 +5938,119 @@ def test_run_submission_api_exception_returns_clean_json_error() -> None:
 
     assert response.status_code == 502
     assert response.json()['detail'] == 'Kubernetes Job API failed during submission'
+
+
+def test_wait_for_terminal_run_state_is_async_and_polls_with_asyncio_sleep(monkeypatch) -> None:
+    import asyncio
+
+    from app.main import wait_for_terminal_run_state
+    from app.schemas import JobSubmissionReceipt, RunRecord
+    from services.common.schemas import RunManifest, RunStatus
+
+    assert asyncio.iscoroutinefunction(wait_for_terminal_run_state)
+
+    now = datetime.now(timezone.utc)
+    manifest = RunManifest(
+        run_id='run-wait-async',
+        workflow_id='generic-tabular-benchmark',
+        workflow_family='tabular-benchmark',
+        display_name='Async Wait',
+        objective='Verify the terminal-state wait polls asynchronously.',
+        submitted_by='test-suite',
+        submitted_at=now,
+        inputs={'dataset_name': 'titanic'},
+        requested_models=['logistic_regression'],
+        resource_profile='cpu-small',
+        resource_requests={},
+        resource_limits={},
+        node_selector={},
+        runner_image='busybox:latest',
+        runner_service_account_name='registry-runner',
+        evaluator_type='none',
+        approval_tier='tier-1-read-only',
+        expected_artifacts={'required': ['status.json'], 'optional': []},
+    )
+    run = RunRecord(
+        run_id='run-wait-async',
+        workflow_id='generic-tabular-benchmark',
+        created_at=now,
+        updated_at=now,
+        manifest=manifest,
+        status=RunStatus(run_id='run-wait-async', status='accepted', updated_at=now),
+        job_submission=JobSubmissionReceipt(
+            job_name='job',
+            namespace='default',
+            accepted_at=now,
+            status='accepted',
+            detail='ok',
+        ),
+    )
+
+    class TerminalSubmitter(NullJobSubmitter):
+        def __init__(self) -> None:
+            super().__init__(namespace='default')
+            self.calls = 0
+
+        def get_live_status(self, record):
+            self.calls += 1
+            if self.calls == 1:
+                return RunStatus(run_id=record.run_id, status='running', updated_at=now)
+            return RunStatus(run_id=record.run_id, status='succeeded', updated_at=now)
+
+    submitter = TerminalSubmitter()
+    settings = Settings(
+        registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
+    )
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(main_module.asyncio, 'sleep', fake_sleep)
+
+    result = asyncio.run(
+        wait_for_terminal_run_state(
+            run,
+            settings,
+            submitter,
+            timeout_seconds=5.0,
+            poll_interval_seconds=0.01,
+        )
+    )
+
+    assert result.status.status == 'succeeded'
+    assert sleeps, 'the wait loop must yield via asyncio.sleep, not block a worker thread'
+
+
+def test_fresh_paper_pipeline_wait_for_terminal_state_returns_terminal_run() -> None:
+    from services.common.schemas import RunStatus
+
+    class TerminalSubmitter(NullJobSubmitter):
+        def get_live_status(self, record):
+            return RunStatus(
+                run_id=record.run_id,
+                status='succeeded',
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    client = build_legacy_compatibility_client(
+        submitter=TerminalSubmitter(namespace='default')
+    )
+    response = client.post(
+        '/paper-pipelines/fresh-paper',
+        json={
+            'paper_ref': 'https://example.org/papers/bounded-method.pdf',
+            'raw_request': 'Ingest this paper and derive a bounded literature experiment from the linked method notes.',
+            'notes': ['The paper discusses a bounded validation path for a literature-derived experiment.'],
+            'dataset_uri': 's3://datasets/paper-derived/train.csv',
+            'wait_for_terminal_state': True,
+            'wait_timeout_seconds': 5.0,
+            'poll_interval_seconds': 0.5,
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload['run']['status']['status'] == 'succeeded'
+    assert payload['report_state']['terminal'] is True
