@@ -175,6 +175,47 @@ def test_healthz_remains_available_without_caller_credentials(client: TestClient
     assert response.status_code == 200
 
 
+def test_non_ascii_token_header_returns_401_not_500() -> None:
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from app.auth import authenticate_request
+
+    app = build_app()
+    scope = {
+        'type': 'http',
+        'http_version': '1.1',
+        'method': 'GET',
+        'scheme': 'http',
+        'path': '/runs/any-run',
+        'raw_path': b'/runs/any-run',
+        'query_string': b'',
+        'root_path': '',
+        'headers': [
+            (b'x-glasslab-caller', b'authorized-caller'),
+            (b'x-glasslab-workflow-token', 'tökén'.encode('latin-1')),
+        ],
+        'client': ('testclient', 50000),
+        'server': ('testserver', 80),
+        'app': app,
+    }
+    settings = Settings(
+        registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
+        caller_policies=[
+            {
+                'name': 'authorized-caller',
+                'token': 'authorized-token',
+                'allowed_operations': ['GET /runs/{run_id}'],
+            }
+        ],
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        authenticate_request(Request(scope), settings)
+
+    assert excinfo.value.status_code == 401
+
+
 def test_caller_policy_rejects_whitespace_token() -> None:
     with pytest.raises(ValueError, match='token must not be empty'):
         Settings(caller_policies=[{'name': 'caller', 'token': '   ', 'allowed_operations': []}])
