@@ -30,7 +30,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       initContainers:
         - name: approved-repository
-          image: alpine/git:2.47.2
+          image: alpine/git:2.47.2@sha256:0d9a3a551058dba37ea77757955d3e834442ccf8540783671cc25c0d97957894
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh

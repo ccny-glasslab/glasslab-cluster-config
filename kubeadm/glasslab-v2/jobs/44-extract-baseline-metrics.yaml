@@ -6,7 +6,7 @@ metadata:
 spec:
   containers:
     - name: extract
-      image: ubuntu:22.04
+      image: ubuntu:22.04@sha256:281c5745f657873d78e5531fc5ba8575f46ab7769b94550ac99543f122679986
       command: ["sleep", "3600"]
       volumeMounts:
         - name: artifacts
