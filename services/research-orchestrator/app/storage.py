@@ -1460,6 +1460,38 @@ class SqliteStore:
             return None
         return ConversationSourceBinding.model_validate(json.loads(row['payload']))
 
+    def get_conversation_binding_by_thread_id(
+        self,
+        thread_id: str,
+    ) -> ConversationSourceBinding | None:
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT payload FROM conversation_bindings'
+            ).fetchall()
+        for row in rows:
+            binding = ConversationSourceBinding.model_validate(
+                json.loads(row['payload'])
+            )
+            if binding.discord_thread_id == thread_id:
+                return binding
+        return None
+
+    def bind_conversation_thread(
+        self,
+        conversation_id: str,
+        thread_id: str,
+    ) -> ConversationSourceBinding:
+        existing = self.get_conversation_binding(conversation_id)
+        binding = ConversationSourceBinding(
+            conversation_id=conversation_id,
+            source_ids=existing.source_ids if existing else [],
+            discord_thread_id=thread_id,
+            created_by=existing.created_by if existing else 'operator',
+            created_at=existing.created_at if existing else utc_now(),
+            updated_at=utc_now(),
+        )
+        return self.save_conversation_binding(binding)
+
     def bind_conversation_sources(
         self,
         conversation_id: str,

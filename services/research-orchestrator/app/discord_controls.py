@@ -898,16 +898,15 @@ class DiscordControlGateway:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
-    @staticmethod
-    def _thread_conversation_id(thread: discord.Thread | discord.abc.GuildChannel) -> str:
+    def _thread_conversation_id(self, thread: discord.Thread | discord.abc.GuildChannel) -> str:
         if isinstance(thread, discord.Thread):
-            name = getattr(thread, 'name', '')
-            # Thread name format: "research:<conversation_id> <question>"
-            # Extract conversation_id by removing "research:" prefix
-            if name and name.startswith('research:'):
-                conv_id = name[len('research:'):].split(' ', 1)[0]
-                if conv_id and (conv_id.startswith('discord-') or conv_id.startswith('discord-thread-')):
-                    return conv_id
+            # Resolve identity from the persisted thread->conversation binding,
+            # never from the user-renamable thread name (CWE-345/CWE-441).
+            binding = self.engine.store.get_conversation_binding_by_thread_id(
+                str(thread.id)
+            )
+            if binding is not None:
+                return binding.conversation_id
         # Fall back to channel-based id for legacy threads
         return f'discord-thread-{thread.id}'
 
@@ -1400,6 +1399,11 @@ class DiscordControlGateway:
                     name=f'research:{conversation_id} {question[:80]}',
                     type=discord.ChannelType.public_thread,
                     auto_archive_duration=1440,
+                )
+                # Persist the thread->conversation binding so follow-ups resolve
+                # identity from the store, not the user-renamable thread name.
+                self.engine.store.bind_conversation_thread(
+                    conversation_id, str(thread.id)
                 )
                 placeholder = await thread.send(
                     'Working on it… (retrieving sources + drafting the answer)',
