@@ -57,14 +57,28 @@ data:
   # instead of a copy per run (see issue #99); session/auth/log state stays
   # per-run regardless of this setting.
   GLASSLAB_ORCHESTRATOR_OPENCODE_SHARED_CACHE_ROOT: /mnt/artifacts/research-orchestrator/opencode-cache
-  # OpenCode is the selected runtime; the model is served by the local exo
-  # endpoint (Hermes, when opted in, connects to the same endpoint).
+  # OpenCode is the selected runtime; the models are served by the split exo
+  # instances at 192.168.1.18 (Honeydew reasoning) and 192.168.1.17 (Beaker,
+  # structured turns, task compiler), both listening on port 52417.
   GLASSLAB_ORCHESTRATOR_AGENT_MODEL_PROVIDER_ID: exo
-  # Qwen3-Coder-Next-4bit is the only model with an active exo instance
-  # (reconciler-approved placement); alternates 404 with "No instance found".
+  # Shared fallback for any agent without a per-agent override. The live split
+  # serving listens on 52417; the retired 52415 endpoint is no longer served.
   GLASSLAB_ORCHESTRATOR_AGENT_MODEL_NAME: mlx-community/Qwen3-Coder-Next-4bit
+  GLASSLAB_ORCHESTRATOR_AGENT_BASE_URL_HONEYDEW: http://192.168.1.18:52417/v1
+  GLASSLAB_ORCHESTRATOR_AGENT_BASE_URL_BEAKER: http://192.168.1.17:52417/v1
+  GLASSLAB_ORCHESTRATOR_AGENT_MODEL_HONEYDEW: mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit
+  GLASSLAB_ORCHESTRATOR_AGENT_MODEL_BEAKER: mlx-community/Qwen3-Coder-Next-4bit
+  # Honeydew's bounded reasoning turns (verification) run on the Thinking model
+  # at .18; the long-context structured-output turns stay on Coder-Next at .17
+  # to avoid KV-cache exhaustion (see config.py honeydew_*_agent_base_url).
+  GLASSLAB_ORCHESTRATOR_HONEYDEW_REASONING_AGENT_BASE_URL: http://192.168.1.18:52417/v1
+  GLASSLAB_ORCHESTRATOR_HONEYDEW_REASONING_AGENT_MODEL: mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit
+  GLASSLAB_ORCHESTRATOR_HONEYDEW_STRUCTURED_AGENT_BASE_URL: http://192.168.1.17:52417/v1
+  GLASSLAB_ORCHESTRATOR_HONEYDEW_STRUCTURED_AGENT_MODEL: mlx-community/Qwen3-Coder-Next-4bit
+  GLASSLAB_ORCHESTRATOR_TASK_COMPILER_AGENT_BASE_URL: http://192.168.1.17:52417/v1
+  GLASSLAB_ORCHESTRATOR_TASK_COMPILER_AGENT_MODEL: mlx-community/Qwen3-Coder-Next-4bit
   # Hermes connects directly to this OpenAI-compatible Exo endpoint.
-  GLASSLAB_ORCHESTRATOR_QWEN_BASE_URL: http://192.168.1.17:52415/v1
+  GLASSLAB_ORCHESTRATOR_QWEN_BASE_URL: http://192.168.1.17:52417/v1
   GLASSLAB_ORCHESTRATOR_QWEN_MODEL_NAME: mlx-community/Qwen3-Coder-Next-4bit
   GLASSLAB_ORCHESTRATOR_CLUSTER_EXECUTION_MODE: workflow-api
   GLASSLAB_ORCHESTRATOR_CLUSTER_EXECUTION_API_URL: http://glasslab-workflow-api.glasslab-v2.svc.cluster.local:8080
