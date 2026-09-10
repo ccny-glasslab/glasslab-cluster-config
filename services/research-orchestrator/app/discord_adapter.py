@@ -661,11 +661,23 @@ class DiscordHttpAdapter(DiscordAdapter):
                     json=payload,
                 )
 
-        response = execute_guarded(
-            circuit=self.circuit,
-            policy=self._policy,
-            attempt=attempt,
-        )
+        try:
+            response = execute_guarded(
+                circuit=self.circuit,
+                policy=self._policy,
+                attempt=attempt,
+            )
+        except httpx.HTTPStatusError as exc:
+            if (
+                message.is_status
+                and status_message_id
+                and exc.response.status_code == 404
+            ):
+                # The pinned status message was deleted out-of-band. Drop the
+                # stale id so the next status event posts a fresh message
+                # instead of silently 404-ing forever.
+                return None
+            raise
         if message.is_status and not status_message_id:
             return str(response.json()['id'])
         return status_message_id

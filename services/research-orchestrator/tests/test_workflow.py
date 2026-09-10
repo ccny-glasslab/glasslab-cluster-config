@@ -41,6 +41,7 @@ from app.schemas import (
     Claim,
     ContextPacket,
     ExperimentMatrix,
+    EventRecord,
     IngestedDatasetRecord,
     JobStatus,
     RequestedAction,
@@ -939,6 +940,43 @@ def test_rejecting_an_already_consumed_rejection_is_a_noop(
         event.event_type == 'action.rejection_resumed'
         for event in store.list_events(run.run_id)
     )
+
+
+def test_publish_event_clears_stale_status_message_id(
+    orchestrator_bundle, monkeypatch,
+) -> None:
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Clear a stale status message id.')
+    )
+    current = store.get_run(run.run_id)
+    store.replace_run(
+        current.model_copy(
+            update={
+                'discord_thread_id': 'thread-1',
+                'discord_status_message_id': 'status-1',
+            }
+        ),
+        expected_version=current.version,
+    )
+    monkeypatch.setattr(
+        engine.discord,
+        'publish',
+        lambda *, thread_id, status_message_id, event: None,
+    )
+
+    engine._publish_event(
+        run.run_id,
+        EventRecord(
+            sequence_number=1,
+            run_id=run.run_id,
+            source='orchestrator',
+            event_type='run.state_changed',
+            payload={'from': 'CREATED', 'to': 'AWAITING_PROTOCOL_APPROVAL'},
+        ),
+    )
+
+    assert store.get_run(run.run_id).discord_status_message_id is None
 
 
 def test_new_contract_is_reviewed_promoted_and_bound(

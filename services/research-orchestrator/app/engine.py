@@ -227,8 +227,7 @@ class ResearchOrchestrator:
                 event=event,
             )
             if (
-                status_message_id
-                and status_message_id != run.discord_status_message_id
+                status_message_id != run.discord_status_message_id
             ):
                 current = self.store.get_run(run_id)
                 self.store.replace_run(
