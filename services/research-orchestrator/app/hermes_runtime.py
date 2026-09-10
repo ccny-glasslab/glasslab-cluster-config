@@ -7,6 +7,7 @@ import re
 import secrets
 import socket
 import subprocess
+import threading
 import time
 from typing import Any
 from uuid import uuid4
@@ -142,6 +143,11 @@ class HermesProcessRuntime(AgentRuntime):
         self._transport = transport
         self._handles: dict[tuple[str, AgentName], _HermesHandle] = {}
         self._active_runs: dict[tuple[str, AgentName], str] = {}
+        # Port allocation is serialized and each picked port is reserved until
+        # the child process is registered in _handles, so concurrent starts
+        # (recover racing an approval-driven start) cannot pick the same port.
+        self._port_lock = threading.Lock()
+        self._reserved_ports: set[int] = set()
         prompt_root = Path(__file__).resolve().parents[1] / 'prompts'
         self._system_prompts = {
             AgentName.HONEYDEW: (prompt_root / 'honeydew.md').read_text(),
@@ -149,24 +155,33 @@ class HermesProcessRuntime(AgentRuntime):
         }
 
     def _runtime_port(self) -> int:
-        used = {
-            int(handle.base_url.rsplit(':', 1)[1])
-            for handle in self._handles.values()
-            if handle.process.poll() is None
-        }
-        for port in range(
-            self.settings.hermes_start_port,
-            self.settings.hermes_start_port + 100,
-        ):
-            if port in used:
-                continue
-            with socket.socket() as probe:
-                try:
-                    probe.bind((self.settings.hermes_server_host, port))
-                except OSError:
+        with self._port_lock:
+            used = {
+                int(handle.base_url.rsplit(':', 1)[1])
+                for handle in self._handles.values()
+                if handle.process.poll() is None
+            }
+            used.update(self._reserved_ports)
+            for port in range(
+                self.settings.hermes_start_port,
+                self.settings.hermes_start_port + 100,
+            ):
+                if port in used:
                     continue
-            return port
+                with socket.socket() as probe:
+                    try:
+                        probe.bind((self.settings.hermes_server_host, port))
+                    except OSError:
+                        continue
+                    # Reserve while the probe socket still holds the port so a
+                    # concurrent allocator cannot observe it as free.
+                    self._reserved_ports.add(port)
+                    return port
         raise HermesRuntimeError('no Hermes runtime port is available')
+
+    def _release_reserved_port(self, port: int) -> None:
+        with self._port_lock:
+            self._reserved_ports.discard(port)
 
     def _write_runtime_config(
         self,
@@ -284,36 +299,42 @@ class HermesProcessRuntime(AgentRuntime):
         if existing is not None and existing.process.poll() is None:
             return existing
         port = self._runtime_port()
-        api_key = secrets.token_urlsafe(32)
-        hermes_home = self._write_runtime_config(
-            agent=agent,
-            workspace=workspace,
-            port=port,
-        )
-        log_path = hermes_home / 'gateway.log'
-        log_handle = log_path.open('a', encoding='utf-8')
-        environment = build_agent_environment(
-            runtime_vars={
-                'HERMES_HOME': str(hermes_home),
-                'HERMES_WRITE_SAFE_ROOT': str(workspace),
-                'HERMES_MAX_ITERATIONS': str(self.settings.hermes_max_iterations),
-                'API_SERVER_ENABLED': 'true',
-                'API_SERVER_HOST': self.settings.hermes_server_host,
-                'API_SERVER_PORT': str(port),
-                'API_SERVER_KEY': api_key,
-            },
-        )
         try:
-            process = subprocess.Popen(
-                [self.settings.hermes_executable, 'gateway'],
-                cwd=workspace,
-                env=environment,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                text=True,
+            api_key = secrets.token_urlsafe(32)
+            hermes_home = self._write_runtime_config(
+                agent=agent,
+                workspace=workspace,
+                port=port,
             )
+            log_path = hermes_home / 'gateway.log'
+            log_handle = log_path.open('a', encoding='utf-8')
+            environment = build_agent_environment(
+                runtime_vars={
+                    'HERMES_HOME': str(hermes_home),
+                    'HERMES_WRITE_SAFE_ROOT': str(workspace),
+                    'HERMES_MAX_ITERATIONS': str(
+                        self.settings.hermes_max_iterations
+                    ),
+                    'API_SERVER_ENABLED': 'true',
+                    'API_SERVER_HOST': self.settings.hermes_server_host,
+                    'API_SERVER_PORT': str(port),
+                    'API_SERVER_KEY': api_key,
+                },
+            )
+            try:
+                process = subprocess.Popen(
+                    [self.settings.hermes_executable, 'gateway'],
+                    cwd=workspace,
+                    env=environment,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+            except Exception:
+                log_handle.close()
+                raise
         except Exception:
-            log_handle.close()
+            self._release_reserved_port(port)
             raise
         handle = _HermesHandle(
             runtime_id=f'hermes-{agent.value}-{uuid4().hex[:12]}',
@@ -326,6 +347,7 @@ class HermesProcessRuntime(AgentRuntime):
             log_handle=log_handle,
         )
         self._handles[key] = handle
+        self._release_reserved_port(port)
         deadline = time.monotonic() + self.settings.hermes_start_timeout_seconds
         while time.monotonic() < deadline:
             if process.poll() is not None:
@@ -530,3 +552,5 @@ class HermesProcessRuntime(AgentRuntime):
             self._stop_handle(handle)
         self._handles.clear()
         self._active_runs.clear()
+        with self._port_lock:
+            self._reserved_ports.clear()

@@ -136,6 +136,28 @@ class TestAdapterCircuitIntegration:
             adapter.publish(thread_id="thread-1", status_message_id=None, event=_run_created_event())
         assert len(calls) == 2
 
+    def test_publish_clears_stale_status_message_id_on_404(self) -> None:
+        transport, calls = _sequence_transport([_response(404)])
+        adapter, circuit = _adapter_with_circuit(transport)
+        event = EventRecord(
+            sequence_number=2,
+            run_id="run-1",
+            source="orchestrator",
+            event_type="run.state_changed",
+            payload={
+                "from": "AWAITING_PROTOCOL_APPROVAL",
+                "to": "BEAKER_PLANNING",
+            },
+        )
+        result = adapter.publish(
+            thread_id="thread-1",
+            status_message_id="status-1",
+            event=event,
+        )
+        assert result is None
+        assert len(calls) == 1
+        assert calls[0].method == "PATCH"
+
     def test_early_return_paths_bypass_circuit(self) -> None:
         transport, calls = _sequence_transport([])
         adapter, circuit = _adapter_with_circuit(transport)

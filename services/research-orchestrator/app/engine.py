@@ -227,8 +227,7 @@ class ResearchOrchestrator:
                 event=event,
             )
             if (
-                status_message_id
-                and status_message_id != run.discord_status_message_id
+                status_message_id != run.discord_status_message_id
             ):
                 current = self.store.get_run(run_id)
                 self.store.replace_run(
@@ -2884,6 +2883,14 @@ class ResearchOrchestrator:
                 payload={'accepted_by': action.reviewer},
             )
 
+    def _is_latest_action_of_type(self, action: ActionRecord) -> bool:
+        same_type = [
+            candidate
+            for candidate in self.store.list_actions(action.run_id)
+            if candidate.type == action.type
+        ]
+        return bool(same_type) and same_type[-1].action_id == action.action_id
+
     def reject_action(
         self,
         action_id: str,
@@ -2895,6 +2902,12 @@ class ResearchOrchestrator:
         with self._run_lock(run_id):
             existing = self.store.get_action(action_id)
             if existing.approval_status == ApprovalStatus.REJECTED:
+                if not self._is_latest_action_of_type(existing):
+                    # The rejection was already consumed: a later action of
+                    # the same type exists, so the revision workflow already
+                    # ran. A stale duplicate click must not restart it from a
+                    # later phase.
+                    return self.store.get_action(action_id)
                 self._event(
                     existing.run_id,
                     source='orchestrator',

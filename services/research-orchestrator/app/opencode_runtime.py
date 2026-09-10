@@ -318,6 +318,11 @@ class OpenCodeProcessRuntime(AgentRuntime):
         # Keyed by (run_id, agent): sessions of two agents never share a
         # process, and different runs never share agent context.
         self._handles: dict[tuple[str, AgentName], _ProcessHandle] = {}
+        # Port allocation is serialized and each picked port is reserved until
+        # the child process is registered in _handles, so concurrent starts
+        # (recover racing an approval-driven start) cannot pick the same port.
+        self._port_lock = threading.Lock()
+        self._reserved_ports: set[int] = set()
         prompt_root = Path(__file__).resolve().parents[1] / 'prompts'
         self._system_prompts = {
             AgentName.HONEYDEW: (prompt_root / 'honeydew.md').read_text(),
@@ -325,27 +330,36 @@ class OpenCodeProcessRuntime(AgentRuntime):
         }
 
     def _runtime_port(self) -> int:
-        used = {
-            int(handle.base_url.rsplit(':', 1)[1])
-            for handle in self._handles.values()
-            if handle.process.poll() is None
-        }
-        for port in range(
-            self.settings.opencode_start_port,
-            self.settings.opencode_start_port + 100,
-        ):
-            if port in used:
-                continue
-            with socket.socket() as probe:
-                try:
-                    probe.bind((self.settings.opencode_server_host, port))
-                except OSError:
+        with self._port_lock:
+            used = {
+                int(handle.base_url.rsplit(':', 1)[1])
+                for handle in self._handles.values()
+                if handle.process.poll() is None
+            }
+            used.update(self._reserved_ports)
+            for port in range(
+                self.settings.opencode_start_port,
+                self.settings.opencode_start_port + 100,
+            ):
+                if port in used:
                     continue
-            return port
+                with socket.socket() as probe:
+                    try:
+                        probe.bind((self.settings.opencode_server_host, port))
+                    except OSError:
+                        continue
+                    # Reserve while the probe socket still holds the port so a
+                    # concurrent allocator cannot observe it as free.
+                    self._reserved_ports.add(port)
+                    return port
         raise OpenCodeRuntimeError(
             'no OpenCode runtime port is available',
             failure_class='startup',
         )
+
+    def _release_reserved_port(self, port: int) -> None:
+        with self._port_lock:
+            self._reserved_ports.discard(port)
 
     def _permissions(self, agent: AgentName) -> dict[str, Any]:
         # Deny-list for the agent's bash tool. Cluster mutation, network
@@ -481,55 +495,63 @@ class OpenCodeProcessRuntime(AgentRuntime):
         if existing is not None and existing.process.poll() is None:
             return existing
         port = self._runtime_port()
-        (
-            config_root,
-            data_root,
-            cache_root,
-            state_root,
-            home_root,
-        ) = self._write_runtime_config(
-            run_id=run_id,
-            agent=agent,
-            workspace=workspace,
-            model_override=model_override,
-            base_url_override=base_url_override,
-        )
-        runtime_root = config_root.parent
-        log_path = runtime_root / 'opencode.log'
-        log_handle = log_path.open('a', encoding='utf-8')
-        password = secrets.token_urlsafe(32)
-        # XDG roots are isolated per run and agent under the workspace parent,
-        # so no conversation state leaks between runs. The random server
-        # password is held only in this in-memory handle and is never written
-        # to disk or the log. The child environment is an explicit allowlist
-        # (see app/runtime_env.py): orchestrator control-plane secrets never
-        # reach the agent shell.
-        environment = build_agent_environment(
-            runtime_vars={
-                'XDG_CONFIG_HOME': str(config_root),
-                'XDG_DATA_HOME': str(data_root),
-                'XDG_CACHE_HOME': str(cache_root),
-                'XDG_STATE_HOME': str(state_root),
-                'HOME': str(home_root),
-                'OPENCODE_SERVER_USERNAME': 'glasslab-orchestrator',
-                'OPENCODE_SERVER_PASSWORD': password,
-            },
-        )
-        process = subprocess.Popen(
-            [
-                self.settings.opencode_executable,
-                'serve',
-                '--hostname',
-                self.settings.opencode_server_host,
-                '--port',
-                str(port),
-            ],
-            cwd=workspace,
-            env=environment,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
+        try:
+            (
+                config_root,
+                data_root,
+                cache_root,
+                state_root,
+                home_root,
+            ) = self._write_runtime_config(
+                run_id=run_id,
+                agent=agent,
+                workspace=workspace,
+                model_override=model_override,
+                base_url_override=base_url_override,
+            )
+            runtime_root = config_root.parent
+            log_path = runtime_root / 'opencode.log'
+            log_handle = log_path.open('a', encoding='utf-8')
+            password = secrets.token_urlsafe(32)
+            # XDG roots are isolated per run and agent under the workspace parent,
+            # so no conversation state leaks between runs. The random server
+            # password is held only in this in-memory handle and is never written
+            # to disk or the log. The child environment is an explicit allowlist
+            # (see app/runtime_env.py): orchestrator control-plane secrets never
+            # reach the agent shell.
+            environment = build_agent_environment(
+                runtime_vars={
+                    'XDG_CONFIG_HOME': str(config_root),
+                    'XDG_DATA_HOME': str(data_root),
+                    'XDG_CACHE_HOME': str(cache_root),
+                    'XDG_STATE_HOME': str(state_root),
+                    'HOME': str(home_root),
+                    'OPENCODE_SERVER_USERNAME': 'glasslab-orchestrator',
+                    'OPENCODE_SERVER_PASSWORD': password,
+                },
+            )
+            try:
+                process = subprocess.Popen(
+                    [
+                        self.settings.opencode_executable,
+                        'serve',
+                        '--hostname',
+                        self.settings.opencode_server_host,
+                        '--port',
+                        str(port),
+                    ],
+                    cwd=workspace,
+                    env=environment,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+            except Exception:
+                log_handle.close()
+                raise
+        except Exception:
+            self._release_reserved_port(port)
+            raise
         handle = _ProcessHandle(
             runtime_id=f'opencode-{agent.value}-{uuid4().hex[:12]}',
             run_id=run_id,
@@ -541,12 +563,14 @@ class OpenCodeProcessRuntime(AgentRuntime):
             log_handle=log_handle,
         )
         self._handles[key] = handle
+        self._release_reserved_port(port)
         deadline = time.monotonic() + self.settings.opencode_start_timeout_seconds
         # Poll the authenticated health endpoint until the server accepts
         # requests; a process that dies during startup is surfaced with the log
         # path so the failure is diagnosable without guessing.
         while time.monotonic() < deadline:
             if process.poll() is not None:
+                self._stop_handle(handle)
                 raise OpenCodeRuntimeError(
                     f'OpenCode process exited during startup; see {log_path}',
                     failure_class='startup',
@@ -603,15 +627,22 @@ class OpenCodeProcessRuntime(AgentRuntime):
             if existing_session_id:
                 # Recovery across process restarts: the persisted session id is
                 # re-validated against the live server so a re-attached run
-                # continues the same conversation. A fresh process without the
-                # persisted id (or a deleted session) falls through to a new
-                # session instead.
+                # continues the same conversation. Only a 404 (deleted or never
+                # created session) rotates to a fresh session; any other
+                # non-200 status is a transient server failure and must not
+                # silently discard conversation continuity.
                 response = client.get(
                     f'/session/{existing_session_id}',
                     params=params,
                 )
                 if response.status_code == 200:
                     return RuntimeSession(handle.runtime_id, existing_session_id)
+                if response.status_code != 404:
+                    raise OpenCodeRuntimeError(
+                        'OpenCode session validation failed with HTTP '
+                        f'{response.status_code}',
+                        failure_class='network',
+                    )
             response = client.post(
                 '/session',
                 params=params,
@@ -965,6 +996,8 @@ class OpenCodeProcessRuntime(AgentRuntime):
         for handle in list(self._handles.values()):
             self._stop_handle(handle)
         self._handles.clear()
+        with self._port_lock:
+            self._reserved_ports.clear()
 
     def release(self, *, run_id: str, agent: AgentName) -> None:
         # Used for short-lived compiler sessions; terminating the process also
