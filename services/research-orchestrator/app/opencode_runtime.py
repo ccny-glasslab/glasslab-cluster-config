@@ -604,15 +604,22 @@ class OpenCodeProcessRuntime(AgentRuntime):
             if existing_session_id:
                 # Recovery across process restarts: the persisted session id is
                 # re-validated against the live server so a re-attached run
-                # continues the same conversation. A fresh process without the
-                # persisted id (or a deleted session) falls through to a new
-                # session instead.
+                # continues the same conversation. Only a 404 (deleted or never
+                # created session) rotates to a fresh session; any other
+                # non-200 status is a transient server failure and must not
+                # silently discard conversation continuity.
                 response = client.get(
                     f'/session/{existing_session_id}',
                     params=params,
                 )
                 if response.status_code == 200:
                     return RuntimeSession(handle.runtime_id, existing_session_id)
+                if response.status_code != 404:
+                    raise OpenCodeRuntimeError(
+                        'OpenCode session validation failed with HTTP '
+                        f'{response.status_code}',
+                        failure_class='network',
+                    )
             response = client.post(
                 '/session',
                 params=params,

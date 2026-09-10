@@ -9,7 +9,9 @@ silently regress.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from app.config import Settings
@@ -193,3 +195,77 @@ def test_opencode_crashed_startup_stops_the_leaked_handle(
 
     assert len(stopped) == 1
     assert stopped[0].log_handle.closed is True
+
+
+def test_opencode_ensure_session_raises_on_validation_5xx(
+    tmp_path, monkeypatch,
+) -> None:
+    def respond(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    runtime = OpenCodeProcessRuntime(Settings())
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    handle = SimpleNamespace(
+        base_url='http://opencode.test',
+        password='password',
+        runtime_id='runtime-1',
+    )
+    monkeypatch.setattr(runtime, '_start_process', lambda **_: handle)
+    monkeypatch.setattr(
+        runtime,
+        '_client',
+        lambda _: httpx.Client(
+            base_url=handle.base_url,
+            transport=httpx.MockTransport(respond),
+        ),
+    )
+
+    with pytest.raises(OpenCodeRuntimeError) as excinfo:
+        runtime.ensure_session(
+            run_id='run-1',
+            agent=AgentName.HONEYDEW,
+            workspace=workspace,
+            existing_session_id='session-1',
+        )
+    assert excinfo.value.failure_class == 'network'
+
+
+def test_opencode_ensure_session_rotates_only_on_404(
+    tmp_path, monkeypatch,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == 'GET':
+            return httpx.Response(404)
+        return httpx.Response(200, json={'id': 'session-new'})
+
+    runtime = OpenCodeProcessRuntime(Settings())
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    handle = SimpleNamespace(
+        base_url='http://opencode.test',
+        password='password',
+        runtime_id='runtime-1',
+    )
+    monkeypatch.setattr(runtime, '_start_process', lambda **_: handle)
+    monkeypatch.setattr(
+        runtime,
+        '_client',
+        lambda _: httpx.Client(
+            base_url=handle.base_url,
+            transport=httpx.MockTransport(respond),
+        ),
+    )
+
+    session = runtime.ensure_session(
+        run_id='run-1',
+        agent=AgentName.HONEYDEW,
+        workspace=workspace,
+        existing_session_id='session-1',
+    )
+
+    assert session.session_id == 'session-new'
+    assert [request.method for request in requests] == ['GET', 'POST']
