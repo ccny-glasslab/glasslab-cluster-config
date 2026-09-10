@@ -102,6 +102,29 @@ _RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
 )
 
 
+METHODOLOGY_REQUIREMENTS_GUIDANCE = (
+    'When the binding task requires explicit methodological choices or '
+    'comparisons, encode them as manifest.methodology_requirements entries '
+    'with requirement_id, config_path, mode (`decision` or `comparison`), '
+    'minimum_distinct_values, optional maximum_distinct_values, and '
+    'description. config_path is a DOTTED KEY PATH into the '
+    'matrix.base_config YAML that Beaker writes later, never a filesystem '
+    'path: "experiment_dimensions.model" addresses the `model` key nested '
+    'under the top-level `experiment_dimensions` key, while "src/train.py" '
+    'is a file path and is rejected at seal time. A `comparison` requirement '
+    'declares that the config key must hold a list of distinct values (one '
+    'per compared method) with at least minimum_distinct_values entries; a '
+    '`decision` requirement declares a single chosen value. Worked example: '
+    'to compare three model families, declare {"requirement_id": '
+    '"model_families", "config_path": "experiment_dimensions.model", '
+    '"mode": "comparison", "minimum_distinct_values": 3, "description": '
+    '"Compare at least one linear and one non-linear model family."}; Beaker '
+    'must then write experiment_dimensions: {model: [logistic-regression, '
+    'random-forest, gradient-boosting]} into the base_config YAML. Do not '
+    'turn a required choice into a comparison. '
+)
+
+
 def _is_retryable_turn_failure(exc: Exception) -> bool:
     """Transient runtime failures are retryable; deterministic ones are not."""
     if isinstance(exc, (httpx.HTTPError, TimeoutError)):
@@ -3073,14 +3096,9 @@ class ResearchOrchestrator:
             'strings), resource_constraints (object with numeric cpu, '
             'memory_gib, gpus, wallclock_minutes), container_image_digest '
             '(set to null). The descriptor must not contain kind, '
-            'candidate_path, rationale, or any other keys. When the binding '
-            'task '
-            'requires explicit methodological choices or comparisons, encode '
-            'them as manifest.methodology_requirements entries with '
-            'requirement_id, config_path, mode (`decision` or `comparison`), '
-            'minimum_distinct_values, optional maximum_distinct_values, and '
-            'description. Do not turn a required choice into a comparison. '
-            'execution_wrapper and '
+            'candidate_path, rationale, or any other keys. '
+            + METHODOLOGY_REQUIREMENTS_GUIDANCE
+            + 'execution_wrapper and '
             'evaluation_entry_point must each be a relative path to a real '
             'Python file inside the candidate directory, not a command or '
             'module reference. Do not write '
