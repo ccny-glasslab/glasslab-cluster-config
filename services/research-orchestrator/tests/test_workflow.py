@@ -901,6 +901,46 @@ def test_protocol_rejection_redrafts_with_feedback(
     assert replacement.action_id != original.action_id
 
 
+def test_rejecting_an_already_consumed_rejection_is_a_noop(
+    orchestrator_bundle,
+) -> None:
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Compare two bounded methods.')
+    )
+    original = _pending_action(store, run.run_id, 'approve_protocol')
+
+    engine.reject_action(
+        original.action_id,
+        reviewer='test-human',
+        reason='Use the fixed 80/20 split.',
+    )
+
+    revised = store.get_run(run.run_id)
+    assert revised.state == RunState.AWAITING_PROTOCOL_APPROVAL
+    assert revised.protocol_version == 2
+    replacement = _pending_action(store, run.run_id, 'approve_protocol')
+    assert replacement.action_id != original.action_id
+
+    engine.reject_action(
+        original.action_id,
+        reviewer='test-human',
+        reason='Stale duplicate click on the consumed rejection.',
+    )
+
+    after = store.get_run(run.run_id)
+    assert after.state == RunState.AWAITING_PROTOCOL_APPROVAL
+    assert after.protocol_version == 2
+    assert (
+        _pending_action(store, run.run_id, 'approve_protocol').action_id
+        == replacement.action_id
+    )
+    assert not any(
+        event.event_type == 'action.rejection_resumed'
+        for event in store.list_events(run.run_id)
+    )
+
+
 def test_new_contract_is_reviewed_promoted_and_bound(
     orchestrator_bundle,
 ) -> None:
