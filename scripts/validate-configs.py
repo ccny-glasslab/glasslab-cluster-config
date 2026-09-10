@@ -160,7 +160,12 @@ def check_yaml_pinning(path: Path, docs: list) -> list[str]:
 
 
 def check_dockerfile(path: Path) -> list[str]:
-    """Every ``FROM`` base in a service Dockerfile must be digest-pinned."""
+    """Every ``FROM`` base in a service Dockerfile must be digest-pinned.
+
+    The base must carry a well-formed ``@sha256:<64 hex>`` digest; a bare
+    tag, a short digest, or a non-hex digest all fail. ``scratch`` and
+    ``--platform=`` options are handled.
+    """
     errors: list[str] = []
     for line in path.read_text().splitlines():
         stripped = line.strip()
@@ -170,7 +175,8 @@ def check_dockerfile(path: Path) -> list[str]:
         base = next((p for p in parts[1:] if not p.startswith('--')), None)
         if base is None or base == 'scratch':
             continue
-        if '@sha256:' not in base:
+        digest = base.split('@', 1)[1] if '@' in base else ''
+        if not DIGEST_RE.match(digest):
             errors.append(f'{path}: unpinned FROM base: {base}')
     return errors
 
