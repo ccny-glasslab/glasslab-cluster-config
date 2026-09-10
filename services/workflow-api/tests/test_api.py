@@ -6054,3 +6054,95 @@ def test_fresh_paper_pipeline_wait_for_terminal_state_returns_terminal_run() -> 
     payload = response.json()
     assert payload['run']['status']['status'] == 'succeeded'
     assert payload['report_state']['terminal'] is True
+
+
+def test_cancel_run_re_resolves_live_status_before_delete() -> None:
+    from services.common.schemas import RunStatus
+
+    class TerminalSubmitter(NullJobSubmitter):
+        def __init__(self) -> None:
+            super().__init__(namespace='default')
+            self.cancelled = []
+
+        def get_live_status(self, record):
+            return RunStatus(
+                run_id=record.run_id,
+                status='succeeded',
+                updated_at=datetime.now(timezone.utc),
+            )
+
+        def cancel_run(self, record):
+            self.cancelled.append(record.run_id)
+
+    submitter = TerminalSubmitter()
+    client = build_legacy_compatibility_client(submitter=submitter)
+    created = client.post(
+        '/experiments/runs',
+        json={
+            'objective': 'A finished job must not be durably marked cancelled.',
+            'experiment_type': 'gpu-training-job',
+            'workload_id': 'metric-search-v0',
+            'config_payload': {'search_space_id': 'art-metric-baseline'},
+            'dataset_bindings': {'train_uri': 's3://datasets/art/train.parquet'},
+            'budget': {'max_epochs': 1, 'max_wallclock_minutes': 5},
+            'submitted_by': 'test-suite',
+        },
+    )
+    run_id = created.json()['run_id']
+
+    cancelled = client.post(f'/runs/{run_id}/cancel')
+
+    assert cancelled.status_code == 409
+    assert submitter.cancelled == []
+    assert client.get(f'/runs/{run_id}').json()['status']['status'] != 'cancelled'
+
+
+def test_concurrent_cancels_are_idempotent() -> None:
+    import threading
+
+    class BlockingSubmitter(NullJobSubmitter):
+        def __init__(self) -> None:
+            super().__init__(namespace='default')
+            self.cancelled = []
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def cancel_run(self, record):
+            self.cancelled.append(record.run_id)
+            self.entered.set()
+            self.release.wait(5)
+
+    submitter = BlockingSubmitter()
+    client = build_legacy_compatibility_client(submitter=submitter)
+    created = client.post(
+        '/experiments/runs',
+        json={
+            'objective': 'Concurrent cancels must both succeed without corrupting state.',
+            'experiment_type': 'gpu-training-job',
+            'workload_id': 'metric-search-v0',
+            'config_payload': {'search_space_id': 'art-metric-baseline'},
+            'dataset_bindings': {'train_uri': 's3://datasets/art/train.parquet'},
+            'budget': {'max_epochs': 1, 'max_wallclock_minutes': 5},
+            'submitted_by': 'test-suite',
+        },
+    )
+    run_id = created.json()['run_id']
+
+    results: list = []
+
+    def cancel() -> None:
+        results.append(client.post(f'/runs/{run_id}/cancel'))
+
+    first = threading.Thread(target=cancel)
+    second = threading.Thread(target=cancel)
+    first.start()
+    second.start()
+    assert submitter.entered.wait(5)
+    submitter.release.set()
+    first.join(10)
+    second.join(10)
+
+    assert len(results) == 2
+    assert all(response.status_code == 200 for response in results)
+    assert all(response.json()['status']['status'] == 'cancelled' for response in results)
+    assert client.get(f'/runs/{run_id}').json()['status']['status'] == 'cancelled'

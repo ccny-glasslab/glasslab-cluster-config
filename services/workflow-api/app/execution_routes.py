@@ -729,6 +729,17 @@ def register_execution_routes(
             return record
         if record.status.status in {'succeeded', 'failed', 'rejected'}:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='terminal run cannot be cancelled')
+        # Re-resolve the live status so a job that finished between the last
+        # status check and this delete is not durably marked cancelled.
+        try:
+            live_status = submitter.get_live_status(record)
+        except (LiveStatusUnavailableError, NotImplementedError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail='workload status could not be confirmed before cancellation',
+            ) from exc
+        if live_status is not None and live_status.status in {'succeeded', 'failed', 'rejected'}:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='terminal run cannot be cancelled')
         try:
             submitter.cancel_run(record)
         except (LiveStatusUnavailableError, NotImplementedError) as exc:
@@ -737,18 +748,18 @@ def register_execution_routes(
                 detail='workload cancellation could not be confirmed',
             ) from exc
         now = datetime.now(timezone.utc)
-        updated = record.model_copy(
-            update={
-                'updated_at': now,
-                'status': RunStatus(
-                    run_id=run_id,
-                    status='cancelled',
-                    updated_at=now,
-                    detail='Workload cancellation confirmed.',
-                ),
-            }
+        updated = store.transition_run_status(
+            run_id,
+            from_statuses=frozenset({'accepted', 'queued', 'running'}),
+            to_status=RunStatus(
+                run_id=run_id,
+                status='cancelled',
+                updated_at=now,
+                detail='Workload cancellation confirmed.',
+            ),
         )
-        store.save_run(updated)
+        if updated is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='run not found')
         return updated
 
     @app.get('/runs/{run_id}/artifacts', response_model=RunArtifactsResponse)
