@@ -1,6 +1,6 @@
 # Glasslab Current Handoff
 
-Last updated: 2026-09-09
+Last updated: 2026-09-10
 
 This is the compact current-state checkpoint for switching human or coding
 agents. Read `AGENTS.md` first for stable rules, architecture, vocabulary,
@@ -77,7 +77,19 @@ sudo -n env KUBECONFIG=/home/glasslab/.kube/config \
   -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 ```
 
-## Committed State (merged to `testing`/`main`, 2026-09-09)
+## Committed State (`testing`, 2026-09-10)
+
+`testing` is the shared integration branch and is **~70 commits ahead of
+`main`**. `main` (production/releasable) is at `97d0caa`, which is also the
+deployed image (see "Deployed State" below). The Sept-2026 hardening wave is
+merged to `testing`: security backlog (#368, #372, #373, #377), supply-chain
+pinning (#264), pod/network hardening (#263, #265, #266), shell defects (#267),
+and the orchestrator recovery/lock/idempotency batch (#237, #238, #240, #246,
+#247, #249, #250, #251, #252, #253, #255, #257, #258, #259), plus the
+probe-methodology follow-up (#394). The OpenCode runtime and the PostgreSQL
+store remain the selected backend (`GLASSLAB_ORCHESTRATOR_AGENT_RUNTIME_BACKEND:
+opencode`, `GLASSLAB_ORCHESTRATOR_STORE_BACKEND: postgres`); exo is retired
+(per-Mac mlx at `.17`/`.18:52417`).
 
 Run-through stack:
 
