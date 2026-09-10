@@ -25,7 +25,11 @@ from app.contracts import EvaluationContractResolver
 from app.contract_candidates import ContractCandidateManager
 from app.config import SERVICE_ROOT
 from app.discord_adapter import DisabledDiscordAdapter
-from app.engine import ResearchOrchestrator, WorkflowError
+from app.engine import (
+    METHODOLOGY_REQUIREMENTS_GUIDANCE,
+    ResearchOrchestrator,
+    WorkflowError,
+)
 from app.evidence import EvidencePhase
 from app.main import create_app
 from app.mock_runtime import ScriptedMockRuntime
@@ -701,6 +705,7 @@ class NewContractRuntime(ScriptedMockRuntime):
             result.evaluation_contract_proposal.evaluator_type = 'candidate-v1'
             return result, message_id
         if agent == 'beaker' and 'Draft an immutable evaluation-contract' in prompt:
+            self.prompts.append((kwargs['agent'], prompt))
             if not self.returned_wrong_contract_kind:
                 self.returned_wrong_contract_kind = True
                 return (
@@ -905,10 +910,11 @@ def test_new_contract_is_reviewed_promoted_and_bound(
     orchestrator_bundle,
 ) -> None:
     settings, store, cluster, _, original = orchestrator_bundle
+    runtime = NewContractRuntime(runner_image=RUNNER_IMAGE)
     engine = ResearchOrchestrator(
         settings=settings,
         store=store,
-        runtime=NewContractRuntime(runner_image=RUNNER_IMAGE),
+        runtime=runtime,
         workspaces=original.workspaces,
         contracts=original.contracts,
         contract_candidates=original.contract_candidates,
@@ -948,6 +954,17 @@ def test_new_contract_is_reviewed_promoted_and_bound(
         event.event_type == 'agent.output_rejected'
         for event in store.list_events(run.run_id)
     )
+    contract_prompts = [
+        prompt
+        for agent, prompt in runtime.prompts
+        if agent == AgentName.BEAKER
+        and 'Draft an immutable evaluation-contract' in prompt
+    ]
+    assert contract_prompts, 'contract-draft prompt was not recorded'
+    assert METHODOLOGY_REQUIREMENTS_GUIDANCE in contract_prompts[0]
+    assert 'DOTTED KEY PATH' in contract_prompts[0]
+    assert 'src/train.py' in contract_prompts[0]
+    assert 'list of distinct values' in contract_prompts[0]
 
 
 def test_invalid_contract_candidate_is_rejected_and_retried(
@@ -2077,6 +2094,18 @@ def test_methodology_resolution_appendix_ignores_unrelated_errors() -> None:
         [],
     )
     assert appendix == ''
+
+
+def test_contract_candidate_prompt_documents_config_path_semantics() -> None:
+    # Issue #198: the contract-candidate prompt must teach config_path as a
+    # dotted key path into matrix.base_config with a worked example, so the
+    # model stops emitting filesystem paths like "src/train.py" that preflight
+    # then misreads as nested keys.
+    assert 'DOTTED KEY PATH' in METHODOLOGY_REQUIREMENTS_GUIDANCE
+    assert 'experiment_dimensions.model' in METHODOLOGY_REQUIREMENTS_GUIDANCE
+    assert 'src/train.py' in METHODOLOGY_REQUIREMENTS_GUIDANCE
+    assert 'list of distinct values' in METHODOLOGY_REQUIREMENTS_GUIDANCE
+    assert 'minimum_distinct_values' in METHODOLOGY_REQUIREMENTS_GUIDANCE
 
 
 def test_methodology_appendix_in_revision_requested_payload(
