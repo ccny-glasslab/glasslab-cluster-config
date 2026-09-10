@@ -9,12 +9,30 @@ internal pipeline records (intake, interpretation, assessment, design, run).
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from services.common.schemas import ArtifactsIndex, ExpectedArtifactsSpec, RunManifest, RunStatus
+
+# Serialized size caps for payloads embedded verbatim into Kubernetes env vars
+# (GLASSLAB_RUNNER_MANIFEST_JSON / GLASSLAB_GENERIC_CONFIG_JSON). The Kubernetes
+# API rejects pod specs above ~1 MiB, so uncapped payloads die at the cluster
+# boundary as an unhandled ApiException; capping here turns that into a 422.
+MAX_CONFIG_PAYLOAD_BYTES = 256 * 1024
+MAX_INPUTS_BYTES = 64 * 1024
+
+
+def _validate_serialized_size(value: dict[str, Any], *, field_name: str, cap_bytes: int) -> dict[str, Any]:
+    try:
+        serialized = json.dumps(value, sort_keys=True)
+    except TypeError as exc:
+        raise ValueError(f'{field_name} must be JSON-serializable') from exc
+    if len(serialized.encode('utf-8')) > cap_bytes:
+        raise ValueError(f'{field_name} exceeds the {cap_bytes}-byte size cap')
+    return value
 
 
 class RunCreateRequest(BaseModel):
@@ -36,6 +54,11 @@ class RunCreateRequest(BaseModel):
         if len(deduped) != len(value):
             raise ValueError('models must be unique')
         return value
+
+    @field_validator('inputs')
+    @classmethod
+    def validate_inputs_size(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _validate_serialized_size(value, field_name='inputs', cap_bytes=MAX_INPUTS_BYTES)
 
 
 class IntakeCreateRequest(BaseModel):
@@ -294,6 +317,15 @@ class GenericExperimentRunRequest(BaseModel):
             if normalized_key and normalized_value:
                 cleaned[normalized_key] = normalized_value
         return cleaned
+
+    @field_validator('config_payload')
+    @classmethod
+    def validate_config_payload_size(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _validate_serialized_size(
+            value,
+            field_name='config_payload',
+            cap_bytes=MAX_CONFIG_PAYLOAD_BYTES,
+        )
 
 
 class GenericExperimentResultIngestRequest(BaseModel):
