@@ -28,8 +28,8 @@ from app.registry import WorkflowRegistry
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PROTECTED_METHODS = frozenset({'GET', 'POST', 'PUT', 'PATCH', 'DELETE'})
 ANONYMOUS_OPERATIONS = frozenset({'GET /healthz'})
-def build_app():
-    settings = Settings(
+def build_app(settings: Settings | None = None):
+    settings = settings or Settings(
         registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
     )
     return create_app(
@@ -175,6 +175,47 @@ def test_healthz_remains_available_without_caller_credentials(client: TestClient
     assert response.status_code == 200
 
 
+def test_non_ascii_token_header_returns_401_not_500() -> None:
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from app.auth import authenticate_request
+
+    app = build_app()
+    scope = {
+        'type': 'http',
+        'http_version': '1.1',
+        'method': 'GET',
+        'scheme': 'http',
+        'path': '/runs/any-run',
+        'raw_path': b'/runs/any-run',
+        'query_string': b'',
+        'root_path': '',
+        'headers': [
+            (b'x-glasslab-caller', b'authorized-caller'),
+            (b'x-glasslab-workflow-token', 'tökén'.encode('latin-1')),
+        ],
+        'client': ('testclient', 50000),
+        'server': ('testserver', 80),
+        'app': app,
+    }
+    settings = Settings(
+        registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
+        caller_policies=[
+            {
+                'name': 'authorized-caller',
+                'token': 'authorized-token',
+                'allowed_operations': ['GET /runs/{run_id}'],
+            }
+        ],
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        authenticate_request(Request(scope), settings)
+
+    assert excinfo.value.status_code == 401
+
+
 def test_caller_policy_rejects_whitespace_token() -> None:
     with pytest.raises(ValueError, match='token must not be empty'):
         Settings(caller_policies=[{'name': 'caller', 'token': '   ', 'allowed_operations': []}])
@@ -209,3 +250,55 @@ def test_dedicated_tokens_must_be_configured_as_a_complete_distinct_set(monkeypa
             schedule_worker_token='shared-token',
             research_orchestrator_token='shared-token',
         )
+
+
+def test_research_orchestrator_default_allowlist_covers_implemented_routes() -> None:
+    from app.config import DEFAULT_CALLER_OPERATIONS
+
+    required_operations = {
+        'POST /experiments/runs',
+        'POST /experiments/runs/{run_id}/results',
+        'POST /experiments/compare',
+        'GET /runs/{run_id}',
+        'GET /runs/{run_id}/artifacts',
+        'POST /runs/{run_id}/artifacts/ingest',
+        'GET /runs/{run_id}/logs',
+        'POST /runs/{run_id}/cancel',
+        'POST /investigations',
+        'GET /investigations',
+        'GET /investigations/latest',
+        'GET /investigations/{investigation_id}',
+        'GET /investigations/{investigation_id}/context',
+        'POST /investigations/{investigation_id}/hypotheses',
+        'POST /investigations/{investigation_id}/plans',
+        'POST /investigations/{investigation_id}/plan-approvals',
+        'POST /investigations/{investigation_id}/runs',
+        'POST /investigations/{investigation_id}/claims',
+    }
+
+    assert required_operations <= DEFAULT_CALLER_OPERATIONS['research-orchestrator']
+
+
+def test_dedicated_token_deployment_reaches_results_ingest(monkeypatch) -> None:
+    monkeypatch.delenv('GLASSLAB_WORKFLOW_API_CALLER_POLICIES', raising=False)
+    settings = Settings(
+        registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
+        schedule_worker_token='schedule-token',
+        research_orchestrator_token='orchestrator-token',
+    )
+    with TestClient(build_app(settings=settings)) as client:
+        response = client.post(
+            '/experiments/runs/any-run/results',
+            headers={
+                'X-Glasslab-Caller': 'research-orchestrator',
+                'X-Glasslab-Workflow-Token': 'orchestrator-token',
+            },
+            json={
+                'terminal_status': 'succeeded',
+                'metrics': {},
+                'artifact_refs': {},
+                'runtime': {},
+            },
+        )
+
+        assert response.status_code != 403

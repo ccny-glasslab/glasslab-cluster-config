@@ -39,6 +39,22 @@ class LiveStatusUnavailableError(Exception):
     """
 
 
+class JobSubmissionError(Exception):
+    """The Kubernetes Job API rejected or failed a job submission.
+
+    Carries the upstream HTTP status so route handlers can surface a clean
+    JSON error instead of letting the raw ApiException escape as an
+    unhandled 500. Client-side 4xx statuses pass through unchanged; upstream
+    5xx statuses are mapped to 502 Bad Gateway because the failure is in the
+    cluster control plane, not the caller's request.
+    """
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
 # Transport exceptions the Kubernetes Python client raises for expected
 # infrastructure outages, kept distinct from ApiException and from unrelated
 # programming errors. urllib3.MaxRetryError is the umbrella for DNS,
@@ -805,7 +821,19 @@ class KubernetesJobSubmitter(JobSubmitter):
             ),
         )
 
-        self.batch_api.create_namespaced_job(namespace=self.settings.runner_namespace, body=job)
+        try:
+            self.batch_api.create_namespaced_job(namespace=self.settings.runner_namespace, body=job)
+        except self.api_exception as exc:
+            upstream_status = getattr(exc, 'status', None)
+            if isinstance(upstream_status, int) and 400 <= upstream_status < 500:
+                raise JobSubmissionError(
+                    upstream_status,
+                    f'Kubernetes rejected the job submission: {exc.reason or exc.body or exc}',
+                ) from exc
+            raise JobSubmissionError(
+                502,
+                'Kubernetes Job API failed during submission',
+            ) from exc
         return JobSubmissionReceipt(
             job_name=job_name,
             namespace=self.settings.runner_namespace,

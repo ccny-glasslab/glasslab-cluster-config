@@ -30,7 +30,7 @@ import app.autoresearch as autoresearch_module
 import app.main as main_module
 import app.source_documents as source_documents
 import app.transition_routes as transition_routes_module
-from app.job_submission import LiveStatusUnavailableError, NullJobSubmitter
+from app.job_submission import JobSubmissionError, LiveStatusUnavailableError, NullJobSubmitter
 from app.schemas import (
     AutoresearchDecisionRecord,
     AutoresearchIterationRecord,
@@ -5885,3 +5885,264 @@ def test_submit_failure_leaves_adoptable_accepted_record(endpoint: str, payload:
     assert record is not None
     assert record.status.status == 'accepted'
     assert record.job_submission.status == 'pending'
+
+
+def test_experiment_submission_api_exception_returns_clean_json_error() -> None:
+    class RejectingSubmitter(NullJobSubmitter):
+        def submit_run(self, manifest):
+            raise JobSubmissionError(400, 'Kubernetes rejected the job submission: invalid spec')
+
+    client = build_legacy_compatibility_client(
+        submitter=RejectingSubmitter(namespace='default')
+    )
+    response = client.post(
+        '/experiments/runs',
+        json={
+            'objective': 'Surface a clean JSON error when Kubernetes rejects the job.',
+            'experiment_type': 'gpu-training-job',
+            'workload_id': 'metric-search-v0',
+            'config_payload': {'search_space_id': 'art-metric-baseline'},
+            'dataset_bindings': {'train_uri': 's3://datasets/art/train.parquet'},
+            'budget': {'max_epochs': 1, 'max_wallclock_minutes': 5},
+            'submitted_by': 'test-suite',
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()['detail'] == 'Kubernetes rejected the job submission: invalid spec'
+
+
+def test_run_submission_api_exception_returns_clean_json_error() -> None:
+    class RejectingSubmitter(NullJobSubmitter):
+        def submit_run(self, manifest):
+            raise JobSubmissionError(502, 'Kubernetes Job API failed during submission')
+
+    client = build_legacy_compatibility_client(
+        submitter=RejectingSubmitter(namespace='default')
+    )
+    response = client.post(
+        '/runs',
+        json={
+            'workflow_id': 'generic-tabular-benchmark',
+            'objective': 'Surface a clean JSON error when the Kubernetes API fails.',
+            'inputs': {
+                'dataset_name': 'titanic',
+                'train_uri': 's3://datasets/titanic/train.csv',
+                'test_uri': 's3://datasets/titanic/test.csv',
+                'target_column': 'Survived',
+            },
+            'models': ['logistic_regression'],
+            'resource_profile': 'cpu-small',
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()['detail'] == 'Kubernetes Job API failed during submission'
+
+
+def test_wait_for_terminal_run_state_is_async_and_polls_with_asyncio_sleep(monkeypatch) -> None:
+    import asyncio
+
+    from app.main import wait_for_terminal_run_state
+    from app.schemas import JobSubmissionReceipt, RunRecord
+    from services.common.schemas import RunManifest, RunStatus
+
+    assert asyncio.iscoroutinefunction(wait_for_terminal_run_state)
+
+    now = datetime.now(timezone.utc)
+    manifest = RunManifest(
+        run_id='run-wait-async',
+        workflow_id='generic-tabular-benchmark',
+        workflow_family='tabular-benchmark',
+        display_name='Async Wait',
+        objective='Verify the terminal-state wait polls asynchronously.',
+        submitted_by='test-suite',
+        submitted_at=now,
+        inputs={'dataset_name': 'titanic'},
+        requested_models=['logistic_regression'],
+        resource_profile='cpu-small',
+        resource_requests={},
+        resource_limits={},
+        node_selector={},
+        runner_image='busybox:latest',
+        runner_service_account_name='registry-runner',
+        evaluator_type='none',
+        approval_tier='tier-1-read-only',
+        expected_artifacts={'required': ['status.json'], 'optional': []},
+    )
+    run = RunRecord(
+        run_id='run-wait-async',
+        workflow_id='generic-tabular-benchmark',
+        created_at=now,
+        updated_at=now,
+        manifest=manifest,
+        status=RunStatus(run_id='run-wait-async', status='accepted', updated_at=now),
+        job_submission=JobSubmissionReceipt(
+            job_name='job',
+            namespace='default',
+            accepted_at=now,
+            status='accepted',
+            detail='ok',
+        ),
+    )
+
+    class TerminalSubmitter(NullJobSubmitter):
+        def __init__(self) -> None:
+            super().__init__(namespace='default')
+            self.calls = 0
+
+        def get_live_status(self, record):
+            self.calls += 1
+            if self.calls == 1:
+                return RunStatus(run_id=record.run_id, status='running', updated_at=now)
+            return RunStatus(run_id=record.run_id, status='succeeded', updated_at=now)
+
+    submitter = TerminalSubmitter()
+    settings = Settings(
+        registry_dir=str(REPO_ROOT / 'services' / 'workflow-registry' / 'definitions'),
+    )
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(main_module.asyncio, 'sleep', fake_sleep)
+
+    result = asyncio.run(
+        wait_for_terminal_run_state(
+            run,
+            settings,
+            submitter,
+            timeout_seconds=5.0,
+            poll_interval_seconds=0.01,
+        )
+    )
+
+    assert result.status.status == 'succeeded'
+    assert sleeps, 'the wait loop must yield via asyncio.sleep, not block a worker thread'
+
+
+def test_fresh_paper_pipeline_wait_for_terminal_state_returns_terminal_run() -> None:
+    from services.common.schemas import RunStatus
+
+    class TerminalSubmitter(NullJobSubmitter):
+        def get_live_status(self, record):
+            return RunStatus(
+                run_id=record.run_id,
+                status='succeeded',
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    client = build_legacy_compatibility_client(
+        submitter=TerminalSubmitter(namespace='default')
+    )
+    response = client.post(
+        '/paper-pipelines/fresh-paper',
+        json={
+            'paper_ref': 'https://example.org/papers/bounded-method.pdf',
+            'raw_request': 'Ingest this paper and derive a bounded literature experiment from the linked method notes.',
+            'notes': ['The paper discusses a bounded validation path for a literature-derived experiment.'],
+            'dataset_uri': 's3://datasets/paper-derived/train.csv',
+            'wait_for_terminal_state': True,
+            'wait_timeout_seconds': 5.0,
+            'poll_interval_seconds': 0.5,
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload['run']['status']['status'] == 'succeeded'
+    assert payload['report_state']['terminal'] is True
+
+
+def test_cancel_run_re_resolves_live_status_before_delete() -> None:
+    from services.common.schemas import RunStatus
+
+    class TerminalSubmitter(NullJobSubmitter):
+        def __init__(self) -> None:
+            super().__init__(namespace='default')
+            self.cancelled = []
+
+        def get_live_status(self, record):
+            return RunStatus(
+                run_id=record.run_id,
+                status='succeeded',
+                updated_at=datetime.now(timezone.utc),
+            )
+
+        def cancel_run(self, record):
+            self.cancelled.append(record.run_id)
+
+    submitter = TerminalSubmitter()
+    client = build_legacy_compatibility_client(submitter=submitter)
+    created = client.post(
+        '/experiments/runs',
+        json={
+            'objective': 'A finished job must not be durably marked cancelled.',
+            'experiment_type': 'gpu-training-job',
+            'workload_id': 'metric-search-v0',
+            'config_payload': {'search_space_id': 'art-metric-baseline'},
+            'dataset_bindings': {'train_uri': 's3://datasets/art/train.parquet'},
+            'budget': {'max_epochs': 1, 'max_wallclock_minutes': 5},
+            'submitted_by': 'test-suite',
+        },
+    )
+    run_id = created.json()['run_id']
+
+    cancelled = client.post(f'/runs/{run_id}/cancel')
+
+    assert cancelled.status_code == 409
+    assert submitter.cancelled == []
+    assert client.get(f'/runs/{run_id}').json()['status']['status'] != 'cancelled'
+
+
+def test_concurrent_cancels_are_idempotent() -> None:
+    import threading
+
+    class BlockingSubmitter(NullJobSubmitter):
+        def __init__(self) -> None:
+            super().__init__(namespace='default')
+            self.cancelled = []
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def cancel_run(self, record):
+            self.cancelled.append(record.run_id)
+            self.entered.set()
+            self.release.wait(5)
+
+    submitter = BlockingSubmitter()
+    client = build_legacy_compatibility_client(submitter=submitter)
+    created = client.post(
+        '/experiments/runs',
+        json={
+            'objective': 'Concurrent cancels must both succeed without corrupting state.',
+            'experiment_type': 'gpu-training-job',
+            'workload_id': 'metric-search-v0',
+            'config_payload': {'search_space_id': 'art-metric-baseline'},
+            'dataset_bindings': {'train_uri': 's3://datasets/art/train.parquet'},
+            'budget': {'max_epochs': 1, 'max_wallclock_minutes': 5},
+            'submitted_by': 'test-suite',
+        },
+    )
+    run_id = created.json()['run_id']
+
+    results: list = []
+
+    def cancel() -> None:
+        results.append(client.post(f'/runs/{run_id}/cancel'))
+
+    first = threading.Thread(target=cancel)
+    second = threading.Thread(target=cancel)
+    first.start()
+    second.start()
+    assert submitter.entered.wait(5)
+    submitter.release.set()
+    first.join(10)
+    second.join(10)
+
+    assert len(results) == 2
+    assert all(response.status_code == 200 for response in results)
+    assert all(response.json()['status']['status'] == 'cancelled' for response in results)
+    assert client.get(f'/runs/{run_id}').json()['status']['status'] == 'cancelled'

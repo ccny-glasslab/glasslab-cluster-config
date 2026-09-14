@@ -11,12 +11,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import json
+import os
 from pathlib import Path
 from types import ModuleType
 from threading import Lock
 from typing import Any, TypeVar
 
-from services.common.schemas import ArtifactsIndex
+from services.common.schemas import ArtifactsIndex, RunStatus
 
 from .schemas import (
     AutoresearchCampaignRecord,
@@ -252,6 +253,20 @@ class RunStore(ABC):
 
     @abstractmethod
     def save_run(self, record: RunRecord) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def transition_run_status(
+        self,
+        run_id: str,
+        *,
+        from_statuses: frozenset[str],
+        to_status: RunStatus,
+    ) -> RunRecord | None:
+        """Atomically transition a run's status when it is currently in one of
+        ``from_statuses``. Returns the updated record, the existing record when
+        the transition is not allowed, or None when the run does not exist.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -683,6 +698,29 @@ class InMemoryRunStore(RunStore):
             self._runs[record.run_id] = record
             self._latest_run_id = record.run_id
 
+    def transition_run_status(
+        self,
+        run_id: str,
+        *,
+        from_statuses: frozenset[str],
+        to_status: RunStatus,
+    ) -> RunRecord | None:
+        with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return None
+            if record.status.status not in from_statuses:
+                return record
+            updated = record.model_copy(
+                update={
+                    'updated_at': to_status.updated_at,
+                    'status': to_status,
+                }
+            )
+            self._runs[run_id] = updated
+            self._latest_run_id = run_id
+            return updated
+
     def save_research_problem(self, record: ResearchProblemRecord) -> None:
         with self._lock:
             self._research_problems[record.problem_id] = record
@@ -963,7 +1001,12 @@ class JsonFileRunStore(InMemoryRunStore):
                 'latest_operation_id': self._latest_operation_id,
             }
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        self._state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding='utf-8')
+        tmp_path = self._state_path.with_name(self._state_path.name + '.tmp')
+        with tmp_path.open('w', encoding='utf-8') as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=True))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, self._state_path)
 
     def save_research_session(self, record: ResearchSessionRecord) -> None:
         super().save_research_session(record)
@@ -1025,6 +1068,22 @@ class JsonFileRunStore(InMemoryRunStore):
     def save_run(self, record: RunRecord) -> None:
         super().save_run(record)
         self._flush()
+
+    def transition_run_status(
+        self,
+        run_id: str,
+        *,
+        from_statuses: frozenset[str],
+        to_status: RunStatus,
+    ) -> RunRecord | None:
+        updated = super().transition_run_status(
+            run_id,
+            from_statuses=from_statuses,
+            to_status=to_status,
+        )
+        if updated is not None and updated.status.status == to_status.status:
+            self._flush()
+        return updated
 
     def save_research_problem(self, record: ResearchProblemRecord) -> None:
         super().save_research_problem(record)
@@ -1329,6 +1388,22 @@ class PostgresRunStore(InMemoryRunStore):
     def save_run(self, record: RunRecord) -> None:
         super().save_run(record)
         self._flush()
+
+    def transition_run_status(
+        self,
+        run_id: str,
+        *,
+        from_statuses: frozenset[str],
+        to_status: RunStatus,
+    ) -> RunRecord | None:
+        updated = super().transition_run_status(
+            run_id,
+            from_statuses=from_statuses,
+            to_status=to_status,
+        )
+        if updated is not None and updated.status.status == to_status.status:
+            self._flush()
+        return updated
 
     def save_research_problem(self, record: ResearchProblemRecord) -> None:
         super().save_research_problem(record)
