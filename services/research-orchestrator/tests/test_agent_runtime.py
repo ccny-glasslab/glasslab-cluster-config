@@ -9,11 +9,15 @@ silently regress.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+
+import httpx
+import pytest
 
 from app.config import Settings
 from app.hermes_runtime import HermesProcessRuntime
 from app.main import build_agent_runtime
-from app.opencode_runtime import OpenCodeProcessRuntime
+from app.opencode_runtime import OpenCodeProcessRuntime, OpenCodeRuntimeError
 from app.schemas import AgentName
 
 
@@ -141,3 +145,138 @@ def test_opencode_runtime_config_sets_max_output_tokens(tmp_path: Path) -> None:
     provider = config['provider']['exo']
     model_cfg = next(iter(provider['models'].values()))
     assert model_cfg['options']['maxOutputTokens'] == 8192
+
+
+class _ExitedProcess:
+    """A process that has already exited when startup first polls it."""
+
+    returncode = 1
+
+    def poll(self) -> int:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.returncode = 0
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+
+def test_opencode_crashed_startup_stops_the_leaked_handle(
+    tmp_path, monkeypatch,
+) -> None:
+    runtime = OpenCodeProcessRuntime(
+        Settings(opencode_shared_cache_root=str(tmp_path / 'shared-cache'))
+    )
+    workspace = tmp_path / 'run-1' / 'honeydew-worktree'
+    workspace.mkdir(parents=True)
+    stopped: list[object] = []
+    real_stop = runtime._stop_handle
+
+    def record_stop(handle):
+        stopped.append(handle)
+        real_stop(handle)
+
+    monkeypatch.setattr(runtime, '_stop_handle', record_stop)
+    monkeypatch.setattr(
+        'app.opencode_runtime.subprocess.Popen',
+        lambda *args, **kwargs: _ExitedProcess(),
+    )
+
+    with pytest.raises(OpenCodeRuntimeError, match='exited during startup'):
+        runtime._start_process(
+            run_id='run-1',
+            agent=AgentName.HONEYDEW,
+            workspace=workspace,
+        )
+
+    assert len(stopped) == 1
+    assert stopped[0].log_handle.closed is True
+
+
+def test_opencode_ensure_session_raises_on_validation_5xx(
+    tmp_path, monkeypatch,
+) -> None:
+    def respond(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    runtime = OpenCodeProcessRuntime(Settings())
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    handle = SimpleNamespace(
+        base_url='http://opencode.test',
+        password='password',
+        runtime_id='runtime-1',
+    )
+    monkeypatch.setattr(runtime, '_start_process', lambda **_: handle)
+    monkeypatch.setattr(
+        runtime,
+        '_client',
+        lambda _: httpx.Client(
+            base_url=handle.base_url,
+            transport=httpx.MockTransport(respond),
+        ),
+    )
+
+    with pytest.raises(OpenCodeRuntimeError) as excinfo:
+        runtime.ensure_session(
+            run_id='run-1',
+            agent=AgentName.HONEYDEW,
+            workspace=workspace,
+            existing_session_id='session-1',
+        )
+    assert excinfo.value.failure_class == 'network'
+
+
+def test_opencode_ensure_session_rotates_only_on_404(
+    tmp_path, monkeypatch,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == 'GET':
+            return httpx.Response(404)
+        return httpx.Response(200, json={'id': 'session-new'})
+
+    runtime = OpenCodeProcessRuntime(Settings())
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    handle = SimpleNamespace(
+        base_url='http://opencode.test',
+        password='password',
+        runtime_id='runtime-1',
+    )
+    monkeypatch.setattr(runtime, '_start_process', lambda **_: handle)
+    monkeypatch.setattr(
+        runtime,
+        '_client',
+        lambda _: httpx.Client(
+            base_url=handle.base_url,
+            transport=httpx.MockTransport(respond),
+        ),
+    )
+
+    session = runtime.ensure_session(
+        run_id='run-1',
+        agent=AgentName.HONEYDEW,
+        workspace=workspace,
+        existing_session_id='session-1',
+    )
+
+    assert session.session_id == 'session-new'
+    assert [request.method for request in requests] == ['GET', 'POST']
+
+
+def test_opencode_runtime_port_is_reserved_until_handle_registered(
+    tmp_path,
+) -> None:
+    runtime = OpenCodeProcessRuntime(
+        Settings(opencode_shared_cache_root=str(tmp_path / 'shared-cache'))
+    )
+    first = runtime._runtime_port()
+    second = runtime._runtime_port()
+    assert first != second

@@ -117,7 +117,13 @@ class ActionPolicy:
                 'only Honeydew may draft or update program.md'
             )
         if action.type == 'submit_validation_job':
-            return PolicyClassification.HONEYDEW_APPROVAL, None
+            # No executor branch exists for this type in
+            # _resume_approved_action, so an approval would be recorded in the
+            # authoritative log while nothing ran. Deny until one exists.
+            return PolicyClassification.DENY, (
+                'submit_validation_job has no executor and is denied until '
+                'one exists'
+            )
         if action.type == 'submit_experiment_matrix':
             try:
                 matrix = ExperimentMatrix.model_validate(action.arguments)

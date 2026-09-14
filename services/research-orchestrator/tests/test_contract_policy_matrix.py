@@ -107,6 +107,42 @@ def test_action_policy_decisions() -> None:
     assert RUNNER_IMAGE in denied.reason
 
 
+def test_submit_validation_job_is_denied_until_an_executor_exists() -> None:
+    # The action could previously be proposed and approved, but
+    # _resume_approved_action has no branch that runs it, so an approval was
+    # recorded while nothing executed. The type is denied outright until an
+    # executor exists.
+    policy = ActionPolicy(
+        permitted_images=[RUNNER_IMAGE],
+        maximum_cpu=4,
+        maximum_memory_gib=8,
+        maximum_gpus=1,
+        maximum_parallel_jobs=2,
+    )
+    classification, reason = policy.evaluate(
+        proposed_by=AgentName.HONEYDEW,
+        action=RequestedAction(
+            type='submit_validation_job',
+            arguments={},
+            reason='Run the validation job.',
+        ),
+    )
+    assert classification == PolicyClassification.DENY
+    assert reason is not None
+    assert 'submit_validation_job' in reason
+    record = policy.build_record(
+        run_id='run-validation-job',
+        proposed_by=AgentName.HONEYDEW,
+        action=RequestedAction(
+            type='submit_validation_job',
+            arguments={},
+            reason='Run the validation job.',
+        ),
+        ordinal=1,
+    )
+    assert record.approval_status.value == 'denied'
+
+
 def test_evaluation_contract_modification_is_rejected(tmp_path, orchestrator_bundle) -> None:
     settings = orchestrator_bundle[0]
     copied = tmp_path / 'contracts'

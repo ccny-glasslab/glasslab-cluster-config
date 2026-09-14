@@ -41,6 +41,7 @@ from app.schemas import (
     Claim,
     ContextPacket,
     ExperimentMatrix,
+    EventRecord,
     IngestedDatasetRecord,
     JobStatus,
     RequestedAction,
@@ -899,6 +900,83 @@ def test_protocol_rejection_redrafts_with_feedback(
         'approve_protocol',
     )
     assert replacement.action_id != original.action_id
+
+
+def test_rejecting_an_already_consumed_rejection_is_a_noop(
+    orchestrator_bundle,
+) -> None:
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Compare two bounded methods.')
+    )
+    original = _pending_action(store, run.run_id, 'approve_protocol')
+
+    engine.reject_action(
+        original.action_id,
+        reviewer='test-human',
+        reason='Use the fixed 80/20 split.',
+    )
+
+    revised = store.get_run(run.run_id)
+    assert revised.state == RunState.AWAITING_PROTOCOL_APPROVAL
+    assert revised.protocol_version == 2
+    replacement = _pending_action(store, run.run_id, 'approve_protocol')
+    assert replacement.action_id != original.action_id
+
+    engine.reject_action(
+        original.action_id,
+        reviewer='test-human',
+        reason='Stale duplicate click on the consumed rejection.',
+    )
+
+    after = store.get_run(run.run_id)
+    assert after.state == RunState.AWAITING_PROTOCOL_APPROVAL
+    assert after.protocol_version == 2
+    assert (
+        _pending_action(store, run.run_id, 'approve_protocol').action_id
+        == replacement.action_id
+    )
+    assert not any(
+        event.event_type == 'action.rejection_resumed'
+        for event in store.list_events(run.run_id)
+    )
+
+
+def test_publish_event_clears_stale_status_message_id(
+    orchestrator_bundle, monkeypatch,
+) -> None:
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Clear a stale status message id.')
+    )
+    current = store.get_run(run.run_id)
+    store.replace_run(
+        current.model_copy(
+            update={
+                'discord_thread_id': 'thread-1',
+                'discord_status_message_id': 'status-1',
+            }
+        ),
+        expected_version=current.version,
+    )
+    monkeypatch.setattr(
+        engine.discord,
+        'publish',
+        lambda *, thread_id, status_message_id, event: None,
+    )
+
+    engine._publish_event(
+        run.run_id,
+        EventRecord(
+            sequence_number=1,
+            run_id=run.run_id,
+            source='orchestrator',
+            event_type='run.state_changed',
+            payload={'from': 'CREATED', 'to': 'AWAITING_PROTOCOL_APPROVAL'},
+        ),
+    )
+
+    assert store.get_run(run.run_id).discord_status_message_id is None
 
 
 def test_new_contract_is_reviewed_promoted_and_bound(
