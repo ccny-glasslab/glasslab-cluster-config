@@ -432,10 +432,22 @@ class PostgresStore:
             conn.execute('INSERT INTO orchestrator_jobs (job_id, run_id, action_id, status, idempotency_key, payload, created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)', (record.job_id, record.run_id, record.action_id, record.status.value, record.idempotency_key, self._payload(record), record.created_at, record.updated_at))
         return record, True
     def update_job(self, record: JobRecord) -> JobRecord:
+        # Blind write keyed on job_id only (no version guard): the job watcher
+        # is the sole writer and re-reads before every update, so the rowcount
+        # check is purely a not-found signal. CANCELLED is terminal: a blind
+        # update that would resurrect the row (e.g. a submitter committing
+        # RUNNING after a cancel swept it) raises instead of leaking a
+        # permanently-running external cluster job (issue #246).
+        updated = record.model_copy(update={'updated_at': utc_now()})
         with self.transaction() as conn:
-            result = conn.execute('UPDATE orchestrator_jobs SET status=%s, payload=%s, updated_at=%s WHERE job_id=%s', (record.status.value, self._payload(record), record.updated_at, record.job_id))
+            row = conn.execute('SELECT payload FROM orchestrator_jobs WHERE job_id=%s', (record.job_id,)).fetchone()
+            if row is None: raise RecordNotFound(record.job_id)
+            current_status = JobRecord.model_validate(row['payload']).status
+            if current_status == JobStatus.CANCELLED and updated.status != JobStatus.CANCELLED:
+                raise ConcurrencyConflict(f'job {record.job_id} is CANCELLED and cannot transition to {updated.status.value}')
+            result = conn.execute('UPDATE orchestrator_jobs SET status=%s, payload=%s, updated_at=%s WHERE job_id=%s', (updated.status.value, self._payload(updated), updated.updated_at, updated.job_id))
             if result.rowcount != 1: raise RecordNotFound(record.job_id)
-        return record
+        return updated
     def get_job(self, job_id: str) -> JobRecord:
         with self._connect() as conn: row = conn.execute('SELECT payload FROM orchestrator_jobs WHERE job_id=%s', (job_id,)).fetchone()
         if not row: raise RecordNotFound(job_id)
