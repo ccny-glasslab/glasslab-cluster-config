@@ -20,7 +20,7 @@ spec:
         kubernetes.io/hostname: node02
       containers:
         - name: vllm
-          image: vllm/vllm-openai:v0.8.5
+          image: vllm/vllm-openai:v0.8.5@sha256:6cf9808ca8810fc6c3fd0451c2e7784fb224590d81f7db338e7eaf3c02a33d33
           imagePullPolicy: IfNotPresent
           command:
             - sh

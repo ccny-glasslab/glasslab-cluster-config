@@ -15,7 +15,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: stage
-          image: python:3.11-slim
+          image: python:3.11-slim@sha256:d1053354624536b044162aaab1e418bd000ea35184fb1ae098ab3166b1072e72
           imagePullPolicy: IfNotPresent
           command:
             - python3

@@ -13,7 +13,7 @@ spec:
       effect: NoSchedule
   containers:
     - name: nvidia-smi
-      image: nvidia/cuda:12.4.1-base-ubuntu22.04
+      image: nvidia/cuda:12.4.1-base-ubuntu22.04@sha256:8767a245ed2c481eb245d8f6c625accc3788e1fb8612403d6b4cd4645a4f09c7
       imagePullPolicy: IfNotPresent
       command: ["nvidia-smi", "-L"]
       resources:
