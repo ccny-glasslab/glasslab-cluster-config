@@ -125,6 +125,41 @@ kubectl -n glasslab-v2 describe pod -l app.kubernetes.io/name=glasslab-workflow-
 
 12. Keep all bounded-agent feature flags disabled in `workflow-api` until each service has been deployed and tested one stage at a time.
 
+## Rehearsal resume (shared PVC)
+
+The real-model rehearsal driver (`app.rehearse_research_flow`, in the
+orchestrator image) keeps its checkpoint (`checkpoint.json`) and SQLite store
+under `REHEARSE_ROOT`. The deployment pins that path to the shared artifacts
+PVC:
+
+```text
+REHEARSE_ROOT=/mnt/artifacts/research-orchestrator/rehearsal
+```
+
+Because this is on `glasslab-shared-artifacts` rather than the pod's
+`emptyDir` `/tmp`, a `Recreate` rollout no longer destroys rehearsal state.
+The running process is still killed by a rollout; relaunch it to resume from
+the durable checkpoint.
+
+The driver has no `--resume` flag and needs none: it is state-driven. On a
+relaunch it reloads `checkpoint.json`, calls `engine.recover()` for any
+already-approved gate, and resumes a paused run via `engine.resume_run()`.
+To continue a rehearsal, exec the driver again:
+
+```bash
+kubectl -n glasslab-v2 exec deploy/glasslab-research-orchestrator -- \
+  python3 -m app.rehearse_research_flow
+```
+
+A `RESUMABLE` result exits 0 and is a clean stop (wall-clock turn timeout);
+relaunch the same command to continue. A `FAIL` result exits 1. Inspect the
+durable state directly with:
+
+```bash
+kubectl -n glasslab-v2 exec deploy/glasslab-research-orchestrator -- \
+  ls -la /mnt/artifacts/research-orchestrator/rehearsal
+```
+
 Reference:
 
 - `runbooks/deploy-bounded-agents.md`

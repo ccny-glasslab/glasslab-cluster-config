@@ -83,6 +83,12 @@ spec:
             # cache at the persistent shared volume next to opencode-cache.
             - name: HF_HOME
               value: /mnt/artifacts/research-orchestrator/hf-cache
+            # The real-model rehearsal driver keeps its checkpoint and SQLite
+            # store under REHEARSE_ROOT. Pin it to the shared artifacts PVC so
+            # a Recreate rollout does not destroy an in-progress rehearsal
+            # (issue #426).
+            - name: REHEARSE_ROOT
+              value: /mnt/artifacts/research-orchestrator/rehearsal
           ports:
             - containerPort: 8080
               name: http

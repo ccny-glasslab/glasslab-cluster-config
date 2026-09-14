@@ -108,8 +108,13 @@ implementation completed, matrix proposed (rejected 10× — the loop the cap
 bounds), verification has not yet run against real model output.
 
 - A fresh rehearsal is running on `97d0caa` (started ~19:55 UTC) at the
-  protocol gate. Scratch state lives in the orchestrator pod `/tmp` — **it dies
-  with the pod**, so any rollout restarts the rehearsal from zero.
+  protocol gate. Rehearsal state is now pinned to the shared PVC: #426 adds
+  `REHEARSE_ROOT=/mnt/artifacts/research-orchestrator/rehearsal` to the
+  orchestrator deployment, so the checkpoint and SQLite store live on
+  `glasslab-shared-artifacts` and **survive a rollout** (a Recreate still kills
+  the running process, but relaunching the driver resumes from the durable
+  checkpoint). Until that manifest is rolled out, the live pod still writes to
+  the ephemeral `/tmp` default.
 - The next unproven gate is `HONEYDEW_VERIFYING`: the #392 evidence-URI fix is
   merged but not yet deployed (same rollout constraint).
 
