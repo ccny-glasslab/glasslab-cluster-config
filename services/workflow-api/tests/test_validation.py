@@ -26,15 +26,24 @@ from app.registry import WorkflowRegistry
 from app.config import Settings
 from app.investigation_routes import evaluator_contract_issues
 from app.job_submission import (
+    JobSubmissionError,
     KubernetesJobSubmitter,
     _active_deadline_seconds,
     _asset_volume_subpath,
     _research_workspace_asset_locations,
     _research_workspace_volume_mount_specs,
+    resolve_dataset_uri,
     resolve_evaluation_contract,
 )
 import app.job_submission as job_submission_module
-from app.schemas import InvestigationPlanCreateRequest, InvestigationWorkspaceSpec, RunCreateRequest
+from app.schemas import (
+    GenericExperimentRunRequest,
+    InvestigationPlanCreateRequest,
+    InvestigationWorkspaceSpec,
+    RunCreateRequest,
+    MAX_CONFIG_PAYLOAD_BYTES,
+    MAX_INPUTS_BYTES,
+)
 from app.validation import validate_run_request
 from services.common.schemas import RunManifest
 from services.common.schemas import WorkflowRegistryEntry
@@ -679,6 +688,24 @@ def test_research_workspace_rejects_unapproved_mount_uri(uri: str) -> None:
         _asset_volume_subpath(uri)
 
 
+# dataset_uri is agent/operator-supplied free text that is interpolated into
+# pod volume subpaths; parent traversal, absolute paths, and empty values must
+# be rejected before they can escape the dataset/artifact mount roots.
+@pytest.mark.parametrize(
+    'dataset_uri',
+    [
+        's3://datasets/../../x',
+        's3://datasets/../x',
+        's3:///abs',
+        '.',
+        '',
+    ],
+)
+def test_resolve_dataset_uri_rejects_traversal(dataset_uri: str) -> None:
+    with pytest.raises(ValueError):
+        resolve_dataset_uri(dataset_uri, Settings())
+
+
 def test_claim_evaluator_contract_requires_primary_metric_and_guardrails() -> None:
     execution_payload = build_workspace_execution('evaluate')
     execution_payload['evaluator_contract'] = {
@@ -824,3 +851,233 @@ def test_submitted_job_pod_uses_sa_and_deadline(monkeypatch) -> None:
     assert pod.service_account_name == 'glasslab-research-workload'
     assert pod.automount_service_account_token is False
     assert job.spec.active_deadline_seconds == 45 * 60
+
+
+def test_legacy_generic_job_carries_network_policy_none_label(monkeypatch) -> None:
+    manifest = RunManifest(
+        run_id='run-netpol-legacy',
+        workflow_id='generic-tabular-benchmark',
+        workflow_family='tabular',
+        display_name='Legacy NetPol Label',
+        objective='Verify legacy generic jobs carry the egress network-policy label.',
+        submitted_by='test-suite',
+        submitted_at=datetime.now(timezone.utc),
+        inputs={},
+        requested_models=['logistic_regression'],
+        resource_profile='cpu-small',
+        resource_requests={'cpu': '1'},
+        resource_limits={'cpu': '1'},
+        runner_image='ghcr.io/example/runner:test',
+        runner_service_account_name='glasslab-research-workload',
+        maximum_wallclock_minutes=45,
+        budget={'max_wallclock_minutes': 45},
+        evaluator_type='none',
+        approval_tier='tier-2-approved-execution',
+        expected_artifacts={'required': ['metrics.json'], 'optional': []},
+        experiment_type='gpu-training-job',
+        workload_id='generic-tabular-benchmark',
+        entrypoint=['python3', 'run.py'],
+        config_payload={},
+    )
+
+    class Record(SimpleNamespace):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    class BatchApi:
+        submitted = None
+
+        def create_namespaced_job(self, *, namespace, body):
+            self.submitted = (namespace, body)
+
+    batch = BatchApi()
+    client = SimpleNamespace(
+        BatchV1Api=lambda: batch,
+        CoreV1Api=lambda: Record(),
+        **{
+            name: Record
+            for name in (
+                'V1Capabilities',
+                'V1Container',
+                'V1EmptyDirVolumeSource',
+                'V1EnvVar',
+                'V1Job',
+                'V1JobSpec',
+                'V1LocalObjectReference',
+                'V1ObjectMeta',
+                'V1PersistentVolumeClaimVolumeSource',
+                'V1PodSecurityContext',
+                'V1PodSpec',
+                'V1PodTemplateSpec',
+                'V1ResourceRequirements',
+                'V1SeccompProfile',
+                'V1SecurityContext',
+                'V1Volume',
+                'V1VolumeMount',
+            )
+        },
+    )
+    kube_config = SimpleNamespace(load_incluster_config=lambda: None)
+    monkeypatch.setattr(
+        job_submission_module,
+        '_load_kube_modules',
+        lambda: (client, kube_config, RuntimeError, RuntimeError),
+    )
+    submitter = KubernetesJobSubmitter(
+        Settings(runner_service_account_name='glasslab-research-workload')
+    )
+    submitter.submit_run(manifest)
+
+    _, job = batch.submitted
+    assert job.metadata.labels['glasslab.io/network-policy'] == 'none'
+
+
+def _build_submission_manifest() -> RunManifest:
+    return RunManifest(
+        run_id='run-api-exception',
+        workflow_id='generic-tabular-benchmark',
+        workflow_family='tabular',
+        display_name='ApiException Wrapping',
+        objective='Verify Kubernetes ApiException becomes a clean typed error.',
+        submitted_by='test-suite',
+        submitted_at=datetime.now(timezone.utc),
+        inputs={},
+        requested_models=['logistic_regression'],
+        resource_profile='cpu-small',
+        resource_requests={'cpu': '1'},
+        resource_limits={'cpu': '1'},
+        runner_image='ghcr.io/example/runner:test',
+        runner_service_account_name='glasslab-research-workload',
+        maximum_wallclock_minutes=45,
+        budget={'max_wallclock_minutes': 45},
+        evaluator_type='none',
+        approval_tier='tier-2-approved-execution',
+        expected_artifacts={'required': ['metrics.json'], 'optional': []},
+        experiment_type='gpu-training-job',
+        workload_id='generic-tabular-benchmark',
+        entrypoint=['python3', 'run.py'],
+        config_payload={},
+    )
+
+
+class FakeApiException(Exception):
+    def __init__(self, status=None, reason=None, body=None) -> None:
+        super().__init__(reason or body or '')
+        self.status = status
+        self.reason = reason
+        self.body = body
+
+
+def _build_failing_submitter(monkeypatch, api_exception: Exception) -> KubernetesJobSubmitter:
+    class Record(SimpleNamespace):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    class BatchApi:
+        def create_namespaced_job(self, *, namespace, body):
+            raise api_exception
+
+    batch = BatchApi()
+    client = SimpleNamespace(
+        BatchV1Api=lambda: batch,
+        CoreV1Api=lambda: Record(),
+        **{
+            name: Record
+            for name in (
+                'V1Capabilities',
+                'V1Container',
+                'V1EmptyDirVolumeSource',
+                'V1EnvVar',
+                'V1Job',
+                'V1JobSpec',
+                'V1LocalObjectReference',
+                'V1ObjectMeta',
+                'V1PersistentVolumeClaimVolumeSource',
+                'V1PodSecurityContext',
+                'V1PodSpec',
+                'V1PodTemplateSpec',
+                'V1ResourceRequirements',
+                'V1SeccompProfile',
+                'V1SecurityContext',
+                'V1Volume',
+                'V1VolumeMount',
+            )
+        },
+    )
+    kube_config = SimpleNamespace(load_incluster_config=lambda: None)
+    monkeypatch.setattr(
+        job_submission_module,
+        '_load_kube_modules',
+        lambda: (client, kube_config, RuntimeError, FakeApiException),
+    )
+    return KubernetesJobSubmitter(
+        Settings(runner_service_account_name='glasslab-research-workload')
+    )
+
+
+def test_submit_run_converts_upstream_4xx_api_exception_to_typed_error(monkeypatch) -> None:
+    submitter = _build_failing_submitter(
+        monkeypatch,
+        FakeApiException(status=400, reason='Bad Request', body='job spec is invalid'),
+    )
+
+    with pytest.raises(JobSubmissionError) as excinfo:
+        submitter.submit_run(_build_submission_manifest())
+
+    assert excinfo.value.status_code == 400
+    assert 'Kubernetes' in excinfo.value.detail
+
+
+def test_submit_run_maps_upstream_5xx_api_exception_to_bad_gateway(monkeypatch) -> None:
+    submitter = _build_failing_submitter(
+        monkeypatch,
+        FakeApiException(status=500, reason='Internal Server Error', body='etcd unavailable'),
+    )
+
+    with pytest.raises(JobSubmissionError) as excinfo:
+        submitter.submit_run(_build_submission_manifest())
+
+    assert excinfo.value.status_code == 502
+    assert 'Kubernetes' in excinfo.value.detail
+
+
+def test_generic_experiment_run_request_rejects_oversized_config_payload() -> None:
+    with pytest.raises(ValidationError, match='size cap'):
+        GenericExperimentRunRequest(
+            objective='Reject an oversized config payload before it reaches the cluster.',
+            experiment_type='gpu-training-job',
+            workload_id='metric-search-v0',
+            config_payload={'blob': 'x' * (MAX_CONFIG_PAYLOAD_BYTES + 1)},
+        )
+
+
+def test_generic_experiment_run_request_accepts_bounded_config_payload() -> None:
+    request = GenericExperimentRunRequest(
+        objective='Accept a bounded config payload.',
+        experiment_type='gpu-training-job',
+        workload_id='metric-search-v0',
+        config_payload={'search_space_id': 'art-metric-baseline'},
+    )
+
+    assert request.config_payload == {'search_space_id': 'art-metric-baseline'}
+
+
+def test_run_create_request_rejects_oversized_inputs() -> None:
+    with pytest.raises(ValidationError, match='size cap'):
+        RunCreateRequest(
+            workflow_id='generic-tabular-benchmark',
+            objective='Reject oversized inputs before they reach the cluster.',
+            inputs={'blob': 'x' * (MAX_INPUTS_BYTES + 1)},
+            models=['logistic_regression'],
+        )
+
+
+def test_run_create_request_accepts_bounded_inputs() -> None:
+    request = RunCreateRequest(
+        workflow_id='generic-tabular-benchmark',
+        objective='Accept bounded inputs.',
+        inputs={'dataset_name': 'titanic'},
+        models=['logistic_regression'],
+    )
+
+    assert request.inputs == {'dataset_name': 'titanic'}

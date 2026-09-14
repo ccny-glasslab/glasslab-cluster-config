@@ -79,7 +79,7 @@ def register_literature_routes(
         return re.sub(r'\s+', ' ', value).strip().casefold()
 
     @app.post('/paper-pipelines/from-research-problem', response_model=ResearchProblemPipelineResponse, status_code=status.HTTP_201_CREATED)
-    def create_pipeline_from_research_problem(request: ResearchProblemPipelineRequest) -> ResearchProblemPipelineResponse:
+    async def create_pipeline_from_research_problem(request: ResearchProblemPipelineRequest) -> ResearchProblemPipelineResponse:
         try:
             plan_payload = call_problem_harvester_plan(request, settings)
         except (urllib_error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
@@ -124,7 +124,7 @@ def register_literature_routes(
 
         chosen_paper = selected_papers[0]
         fresh_request = build_fresh_paper_request_from_problem(request, chosen_paper, selected_track_ids)
-        pipeline = create_fresh_paper_pipeline(fresh_request)
+        pipeline = await create_fresh_paper_pipeline(fresh_request)
         return ResearchProblemPipelineResponse(
             problem_statement=request.problem_statement,
             selected_tracks=selected_track_ids,
@@ -490,12 +490,12 @@ def register_literature_routes(
         return record
 
     @app.post('/paper-pipelines/from-latest-research-problem', response_model=ResearchProblemPipelineResponse, status_code=status.HTTP_201_CREATED)
-    def create_pipeline_from_latest_research_problem() -> ResearchProblemPipelineResponse:
+    async def create_pipeline_from_latest_research_problem() -> ResearchProblemPipelineResponse:
         record = store.get_latest_research_problem()
         if record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='no research problem has been staged yet')
         request = build_research_problem_request_from_record(record, settings)
-        return create_pipeline_from_research_problem(request)
+        return await create_pipeline_from_research_problem(request)
 
     @app.post('/research-sessions/{session_id}/paper-intake-queues/from-latest-problem', response_model=PaperIntakeQueueRecord, status_code=status.HTTP_201_CREATED)
     def create_paper_intake_queue_from_session_latest_problem(session_id: str) -> PaperIntakeQueueRecord:

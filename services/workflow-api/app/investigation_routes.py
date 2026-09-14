@@ -561,13 +561,21 @@ def register_investigation_routes(
             source_approval_id=approval.approval_id,
             source_execution_id=execution.execution_id,
             plan_sha256=approval.plan_sha256,
+            idempotency_key=(
+                f'investigation:{approval.approval_id}:{execution.execution_id}'
+            ),
         )
         now = datetime.now(timezone.utc)
+        run_ids = (
+            [*investigation.run_ids, run.run_id]
+            if run.run_id not in investigation.run_ids
+            else list(investigation.run_ids)
+        )
         updated = investigation.model_copy(
             update={
                 'updated_at': now,
                 'status': 'running',
-                'run_ids': [*investigation.run_ids, run.run_id],
+                'run_ids': run_ids,
             }
         )
         store.save_investigation(updated)

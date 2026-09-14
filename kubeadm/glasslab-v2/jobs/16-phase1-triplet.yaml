@@ -8,14 +8,14 @@ spec:
     spec:
       containers:
         - name: metric-search
-          image: ghcr.io/ccny-glasslab/glasslab-metric-search:phase1-triplet-81a0266
+          image: ghcr.io/ccny-glasslab/glasslab-metric-search:phase1-triplet-81a02667108d5924e000d89d3e2e63dccd789755
           env:
             - name: GLASSLAB_RUNNER_EXPERIMENT_ID
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
             - name: GLASSLAB_IMAGE_COMMIT
-              value: "phase1-triplet-81a0266"
+              value: "phase1-triplet-81a02667108d5924e000d89d3e2e63dccd789755"
           command: ["bash", "-c"]
           args:
             - |

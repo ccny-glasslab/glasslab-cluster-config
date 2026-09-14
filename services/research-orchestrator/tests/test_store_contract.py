@@ -19,6 +19,7 @@ from app.schemas import (
     ActionRecord,
     AgentName,
     ApprovalStatus,
+    ArtifactRecord,
     ContextPacket,
     EventRecord,
     ExperimentMatrix,
@@ -170,6 +171,34 @@ def test_event_sequences_are_contiguous_and_cursorable(store) -> None:
     assert [event.sequence_number for event in store.list_events(run.run_id)] == [1, 2, 3]
     assert [event.event_type for event in store.list_events(run.run_id, after_sequence=first.sequence_number)] == ['two']
     assert second.payload == {}
+
+
+def test_update_job_refuses_transition_out_of_cancelled(store) -> None:
+    # Issue #246: a CANCELLED job row is terminal. A blind update_job that
+    # would resurrect it (e.g. a submitter committing RUNNING after a cancel
+    # swept the row) must raise instead of leaking a permanently-running
+    # external cluster job.
+    run = store.create_run(_run(), one_active_run=False)
+    action = store.save_action(_action(run.run_id))
+    job = _job(run, action)
+    stored, created = store.create_job_if_absent(job)
+    assert created is True
+    cancelled = store.update_job(
+        stored.model_copy(update={'status': JobStatus.CANCELLED})
+    )
+    assert cancelled.status is JobStatus.CANCELLED
+    with pytest.raises(ConcurrencyConflict):
+        store.update_job(
+            cancelled.model_copy(update={'status': JobStatus.RUNNING})
+        )
+    # Same-status updates (e.g. recording exit_information) remain allowed.
+    refreshed = store.update_job(
+        cancelled.model_copy(
+            update={'exit_information': {'cancel_requested': True}}
+        )
+    )
+    assert refreshed.status is JobStatus.CANCELLED
+    assert store.get_job(job.job_id).status is JobStatus.CANCELLED
 
 
 def test_actions_jobs_and_approvals_are_idempotent(store) -> None:
@@ -656,49 +685,166 @@ def test_catalog_dataset_round_trip_and_name_lookup(store) -> None:
     assert [r.name for r in store.list_catalog_datasets()] == ['titanic_train']
 
 
-def test_stale_paused_run_does_not_hold_active_slot(store) -> None:
-    from datetime import timedelta
-
-    stale = datetime.now(UTC) - timedelta(days=7)
-    store.create_run(
-        _run('run-paused-stale').model_copy(
-            update={'state': RunState.PAUSED, 'updated_at': stale}
-        ),
-        one_active_run=False,
+def test_duplicate_artifact_ingest_keeps_first_write(store) -> None:
+    # Issue #238: artifacts are append-only and immutable. A re-delivered
+    # artifact id must keep the first write on every backend (SQLite
+    # INSERT OR IGNORE reference semantics).
+    run = store.create_run(_run(), one_active_run=False)
+    artifact_id = _id('artifact')
+    first = ArtifactRecord(
+        artifact_id=artifact_id,
+        run_id=run.run_id,
+        type='report',
+        uri='s3://artifacts/first/report.md',
+        sha256='a' * 64,
+        metadata={'delivery': 'first'},
     )
-    created = store.create_run(
-        _run('run-new'),
-        one_active_run=True,
-        stale_paused_cutoff=datetime.now(UTC) - timedelta(days=3),
+    second = first.model_copy(
+        update={
+            'uri': 's3://artifacts/second/report.md',
+            'sha256': 'b' * 64,
+            'metadata': {'delivery': 'second'},
+        }
     )
-    assert created.run_id == 'run-new'
-    cancelled = store.get_run('run-paused-stale')
-    assert cancelled.state is RunState.CANCELLED
-    events = store.list_events('run-paused-stale')
-    assert any(
-        event.event_type == 'run.stale_paused_cancelled' for event in events
-    )
+    store.save_artifact(first)
+    store.save_artifact(second)
+    stored = store.list_artifacts(run.run_id)
+    assert len(stored) == 1
+    assert stored[0].artifact_id == artifact_id
+    assert stored[0].sha256 == 'a' * 64
+    assert stored[0].uri == 's3://artifacts/first/report.md'
+    assert stored[0].metadata == {'delivery': 'first'}
 
 
-def test_fresh_paused_run_still_holds_active_slot(store) -> None:
-    from datetime import timedelta
-
-    fresh = datetime.now(UTC) - timedelta(hours=1)
-    store.create_run(
-        _run('run-paused-fresh').model_copy(
-            update={'state': RunState.PAUSED, 'updated_at': fresh}
-        ),
-        one_active_run=False,
+def test_duplicate_dataset_ingest_returns_canonical_first(store) -> None:
+    # Issue #238: a duplicate dataset ingest returns the canonical record
+    # (first write wins) on every backend, mirroring SQLite's re-read.
+    dataset_id = uuid4().hex + uuid4().hex
+    first = IngestedDatasetRecord(
+        dataset_id=dataset_id,
+        name='titanic_train',
+        filename='titanic.csv',
+        reference_uri=f'glasslab-dataset://{dataset_id}',
+        artifact_uri='s3://artifacts/dataset-uploads/abc/titanic.csv',
+        path='/tmp/titanic.csv',
+        sha256='e' * 64,
+        size_bytes=1024,
+        role='input',
+        contains_labels=False,
     )
-    with pytest.raises(ConcurrencyConflict):
-        store.create_run(
-            _run('run-blocked'),
-            one_active_run=True,
-            stale_paused_cutoff=datetime.now(UTC) - timedelta(days=3),
+    second = first.model_copy(
+        update={
+            'name': 'titanic_renamed',
+            'filename': 'renamed.csv',
+            'role': 'labels',
+            'sha256': 'f' * 64,
+        }
+    )
+    store.save_dataset(first)
+    duplicate = store.save_dataset(second)
+    assert duplicate.dataset_id == dataset_id
+    assert duplicate.name == 'titanic_train'
+    assert duplicate.filename == 'titanic.csv'
+    assert duplicate.role == 'input'
+    assert duplicate.sha256 == 'e' * 64
+    assert store.get_dataset(dataset_id).name == 'titanic_train'
+    assert store.get_dataset(dataset_id).sha256 == 'e' * 64
+
+
+def _create_in_active_slot(store, run, *, retry, cutoff=None):
+    if retry:
+        parent = store.create_run(
+            _run(state=RunState.FAILED).model_copy(
+                update={'investigation_id': run.investigation_id}
+            ),
+            one_active_run=False,
         )
+        created, _ = store.create_terminal_retry(
+            run,
+            parent_run_id=parent.run_id,
+            retry_key=_id('retry-key'),
+            checkpoint_digest='3' * 64,
+            one_active_run=True,
+            stale_paused_cutoff=cutoff,
+        )
+        return created
+    return store.create_run(
+        run, one_active_run=True, stale_paused_cutoff=cutoff,
+    )
 
 
-def test_active_run_without_cutoff_still_conflicts(store) -> None:
-    store.create_run(_run('run-active-nc'), one_active_run=False)
-    with pytest.raises(ConcurrencyConflict):
-        store.create_run(_run('run-blocked-nc'), one_active_run=True)
+@pytest.mark.parametrize('retry', [False, True], ids=['create', 'retry'])
+def test_stale_paused_run_does_not_hold_active_slot(store, retry) -> None:
+    from datetime import timedelta
+
+    investigation_id = _id('investigation')
+    stale = datetime.now(UTC) - timedelta(days=7)
+    paused = store.create_run(
+        _run(state=RunState.PAUSED).model_copy(
+            update={'updated_at': stale, 'investigation_id': investigation_id}
+        ),
+        one_active_run=False,
+    )
+    new = _run().model_copy(update={'investigation_id': investigation_id})
+    created = _create_in_active_slot(
+        store, new, retry=retry,
+        cutoff=datetime.now(UTC) - timedelta(days=3),
+    )
+    assert created.run_id == new.run_id
+    assert store.get_run(new.run_id).state is RunState.CREATED
+    cancelled = store.get_run(paused.run_id)
+    assert cancelled.state is RunState.CANCELLED
+    assert cancelled.version == paused.version + 1
+    assert cancelled.updated_at > paused.updated_at
+    events = store.list_events(paused.run_id)
+    assert sum(
+        event.event_type == 'run.stale_paused_cancelled' for event in events
+    ) == 1
+
+
+@pytest.mark.parametrize('retry', [False, True], ids=['create', 'retry'])
+@pytest.mark.parametrize('state,age_hours', [
+    (RunState.PAUSED, 1),
+    (RunState.CREATED, 168),
+])
+def test_non_stale_paused_run_still_holds_active_slot(store, retry, state, age_hours) -> None:
+    from datetime import timedelta
+
+    investigation_id = _id('investigation')
+    active = store.create_run(
+        _run(state=state).model_copy(update={
+            'updated_at': datetime.now(UTC) - timedelta(hours=age_hours),
+            'investigation_id': investigation_id,
+        }),
+        one_active_run=False,
+    )
+    with pytest.raises(ConcurrencyConflict, match=active.run_id):
+        _create_in_active_slot(
+            store, _run().model_copy(update={'investigation_id': investigation_id}),
+            retry=retry, cutoff=datetime.now(UTC) - timedelta(days=3),
+        )
+    assert store.get_run(active.run_id) == active
+    assert not any(
+        event.event_type == 'run.stale_paused_cancelled'
+        for event in store.list_events(active.run_id)
+    )
+
+
+@pytest.mark.parametrize('retry', [False, True], ids=['create', 'retry'])
+def test_active_run_without_cutoff_still_conflicts(store, retry) -> None:
+    from datetime import timedelta
+
+    investigation_id = _id('investigation')
+    active = store.create_run(
+        _run(state=RunState.PAUSED).model_copy(update={
+            'updated_at': datetime.now(UTC) - timedelta(days=7),
+            'investigation_id': investigation_id,
+        }),
+        one_active_run=False,
+    )
+    with pytest.raises(ConcurrencyConflict, match=active.run_id):
+        _create_in_active_slot(
+            store, _run().model_copy(update={'investigation_id': investigation_id}),
+            retry=retry,
+        )
+    assert store.get_run(active.run_id) == active

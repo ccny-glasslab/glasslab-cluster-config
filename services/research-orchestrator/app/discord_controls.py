@@ -898,16 +898,15 @@ class DiscordControlGateway:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
-    @staticmethod
-    def _thread_conversation_id(thread: discord.Thread | discord.abc.GuildChannel) -> str:
+    def _thread_conversation_id(self, thread: discord.Thread | discord.abc.GuildChannel) -> str:
         if isinstance(thread, discord.Thread):
-            name = getattr(thread, 'name', '')
-            # Thread name format: "research:<conversation_id> <question>"
-            # Extract conversation_id by removing "research:" prefix
-            if name and name.startswith('research:'):
-                conv_id = name[len('research:'):].split(' ', 1)[0]
-                if conv_id and (conv_id.startswith('discord-') or conv_id.startswith('discord-thread-')):
-                    return conv_id
+            # Resolve identity from the persisted thread->conversation binding,
+            # never from the user-renamable thread name (CWE-345/CWE-441).
+            binding = self.engine.store.get_conversation_binding_by_thread_id(
+                str(thread.id)
+            )
+            if binding is not None:
+                return binding.conversation_id
         # Fall back to channel-based id for legacy threads
         return f'discord-thread-{thread.id}'
 
@@ -1401,6 +1400,11 @@ class DiscordControlGateway:
                     type=discord.ChannelType.public_thread,
                     auto_archive_duration=1440,
                 )
+                # Persist the thread->conversation binding so follow-ups resolve
+                # identity from the store, not the user-renamable thread name.
+                self.engine.store.bind_conversation_thread(
+                    conversation_id, str(thread.id)
+                )
                 placeholder = await thread.send(
                     'Working on it… (retrieving sources + drafting the answer)',
                     allowed_mentions=discord.AllowedMentions.none(),
@@ -1670,22 +1674,59 @@ class DiscordControlGateway:
                 channel_id=str(interaction.channel_id),
                 run_id=run_id,
             )
-            cancelled = await asyncio.to_thread(
-                execute_discord_run_cancellation,
-                self.engine,
-                run_id=run.run_id,
-                actor=actor,
-                reason=reason,
-            )
             await self._respond(
                 interaction,
-                f'Run `{cancelled.run_id}` is now {cancelled.state.value}.',
+                (
+                    'Cancel request accepted for '
+                    f'`{run.run_id}`. The authoritative result will follow.'
+                ),
             )
+            task = asyncio.create_task(
+                self._execute_run_cancellation(
+                    interaction=interaction,
+                    run_id=run.run_id,
+                    actor=actor,
+                    reason=reason,
+                )
+            )
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
         except Exception as exc:
             await self._respond(
                 interaction,
                 f'Run cancellation failed: {exc}',
             )
+
+    async def _execute_run_cancellation(
+        self,
+        *,
+        interaction: discord.Interaction,
+        run_id: str,
+        actor: DiscordControlActor,
+        reason: str | None,
+    ) -> None:
+        try:
+            cancelled = await asyncio.to_thread(
+                execute_discord_run_cancellation,
+                self.engine,
+                run_id=run_id,
+                actor=actor,
+                reason=reason,
+            )
+            await interaction.followup.send(
+                f'Run `{cancelled.run_id}` is now {cancelled.state.value}.',
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as exc:
+            try:
+                await interaction.followup.send(
+                    f'Run cancellation failed: {exc}',
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                return
 
     async def _on_research_status(
         self,
@@ -1769,7 +1810,13 @@ class DiscordControlGateway:
         if custom_id.startswith(f'{PACKET_PREFIX}:'):
             parts = custom_id[len(PACKET_PREFIX) + 1:].split(':', 2)
             packet_id = parts[0]
-            source_index = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+            source_index = (
+                int(parts[1])
+                if len(parts) > 1
+                and parts[1].isdigit()
+                and len(parts[1]) <= 12
+                else None
+            )
             excerpt_prefix = parts[2] if len(parts) > 2 else ''
             await self._on_packet_button(
                 interaction,

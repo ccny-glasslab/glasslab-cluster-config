@@ -100,6 +100,12 @@ class ResearchStore(Protocol):
     def get_conversation_binding(
         self, conversation_id: str
     ) -> ConversationSourceBinding | None: ...
+    def get_conversation_binding_by_thread_id(
+        self, thread_id: str
+    ) -> ConversationSourceBinding | None: ...
+    def bind_conversation_thread(
+        self, conversation_id: str, thread_id: str
+    ) -> ConversationSourceBinding: ...
     def bind_conversation_sources(
         self, conversation_id: str, source_ids: list[str],
         *, created_by: str = 'operator',

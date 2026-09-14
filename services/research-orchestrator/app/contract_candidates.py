@@ -29,6 +29,43 @@ class ContractCandidateError(ValueError):
     pass
 
 
+def _looks_like_filesystem_path(config_path: str) -> bool:
+    # config_path is a dotted key path into the matrix.base_config YAML, so a
+    # value containing a directory separator and a file extension is a
+    # filesystem path, not a key path (issue #198).
+    return '/' in config_path and Path(config_path).suffix != ''
+
+
+def _validate_methodology_requirements(
+    descriptor: EvaluationContractDescriptor,
+) -> None:
+    # config_path semantics are validated at seal and promotion time, before a
+    # contract can bind a run, so a filesystem-looking value cannot survive to
+    # preflight where it is resolved as a nonsensical nested key (issue #198).
+    raw_requirements = descriptor.manifest.get(
+        'methodology_requirements',
+        [],
+    )
+    try:
+        requirements = [
+            MethodologyRequirement.model_validate(item)
+            for item in raw_requirements
+        ]
+    except ValueError as exc:
+        raise ContractCandidateError(
+            f'methodology_requirements are invalid: {exc}'
+        ) from exc
+    for requirement in requirements:
+        if _looks_like_filesystem_path(requirement.config_path):
+            raise ContractCandidateError(
+                f'methodology_requirements config_path '
+                f'{requirement.config_path!r} looks like a filesystem path; '
+                'config_path must be a dotted key path into the '
+                'matrix.base_config YAML (for example '
+                '"experiment_dimensions.model"), not a file path'
+            )
+
+
 @dataclass(frozen=True)
 class SealedContractCandidate:
     contract_id: str
@@ -136,17 +173,7 @@ class ContractCandidateManager:
             raise ContractCandidateError(
                 'manifest requires primary_metric and a valid direction'
             )
-        raw_requirements = descriptor.manifest.get(
-            'methodology_requirements',
-            [],
-        )
-        try:
-            for item in raw_requirements:
-                MethodologyRequirement.model_validate(item)
-        except ValueError as exc:
-            raise ContractCandidateError(
-                f'methodology_requirements are invalid: {exc}'
-            ) from exc
+        _validate_methodology_requirements(descriptor)
         try:
             for field in (
                 descriptor.execution_wrapper,
@@ -262,6 +289,7 @@ class ContractCandidateManager:
             sealed_path=sealed_path,
             expected_digest=expected_digest,
         )
+        _validate_methodology_requirements(descriptor)
         destination = (
             self.promoted_root / descriptor.contract_id / descriptor.version
         )

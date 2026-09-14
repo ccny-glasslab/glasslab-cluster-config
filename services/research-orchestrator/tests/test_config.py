@@ -373,3 +373,9 @@ def test_honeydew_structured_base_url_override() -> None:
     assert settings.honeydew_structured_base_url() == (
         'http://192.168.1.17:52416/v1'
     )
+
+
+def test_operator_auth_fails_closed_by_default() -> None:
+    # Security C3: any deployment that omits the env var must reject
+    # unauthenticated state-changing requests, not allow them through.
+    assert Settings().require_operator_auth is True

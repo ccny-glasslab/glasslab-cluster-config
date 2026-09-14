@@ -243,3 +243,43 @@ def test_next_routes_to_single_advance_endpoint() -> None:
     assert calls == [
         ("/research-sessions/latest/transitions/advance-autoresearch", "POST", None)
     ]
+
+
+def test_dispatch_rejects_path_traversal_session_id() -> None:
+    client = _client(lambda *args, **kwargs: ("", {}))
+    response = client.post(
+        "/dispatch",
+        json={
+            "message": "!new artist similarity",
+            "session_id": "../../runs/xyz/cancel",
+        },
+    )
+    assert response.status_code == 422
+    assert "session_id" in response.text
+
+
+def test_dispatch_scopes_pinned_session_path() -> None:
+    calls: list[str] = []
+
+    def fake_requester(settings, path, method="GET", body=None):
+        calls.append(path)
+        if "context" in path:
+            return f"{settings.workflow_api_url}{path}", {
+                "session": {
+                    "session_id": "ses_abc123",
+                    "title": "Artist Similarity",
+                }
+            }
+        return f"{settings.workflow_api_url}{path}", {
+            "campaign": {"status": "active"},
+            "iterations": [],
+        }
+
+    client = _client(fake_requester)
+    response = client.post(
+        "/dispatch",
+        json={"message": "!state", "session_id": "ses_abc123"},
+    )
+    assert response.status_code == 200
+    assert any(path == "/research-sessions/ses_abc123/context" for path in calls)
+    assert all(".." not in path for path in calls)

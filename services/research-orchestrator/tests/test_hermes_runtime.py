@@ -309,3 +309,10 @@ def test_hermes_repair_carries_rejected_output_and_required_kind(
     assert '"const": "implementation_plan"' in submitted_inputs[0]
     assert '"const": "implementation_plan"' in submitted_inputs[1]
     assert _required_turn_kind(submitted_inputs[0]) == TurnKind.IMPLEMENTATION_PLAN
+
+
+def test_hermes_runtime_port_is_reserved_until_handle_registered() -> None:
+    runtime = HermesProcessRuntime(Settings())
+    first = runtime._runtime_port()
+    second = runtime._runtime_port()
+    assert first != second

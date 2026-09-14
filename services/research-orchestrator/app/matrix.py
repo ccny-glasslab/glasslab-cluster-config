@@ -79,6 +79,8 @@ def expand_experiment_matrix(
             # but deliberately excludes resources and image: re-expanding the
             # same approved matrix must reproduce the same jobs, while any
             # change to the matrix produces a new key and therefore new jobs.
+            # The key is transmitted to workflow-api (Idempotency-Key header)
+            # so server-side dedupe survives an orchestrator restart.
             idempotency_key = sha256(canonical_json(identity).encode()).hexdigest()
             expanded.append(
                 ExpandedJobSpec(

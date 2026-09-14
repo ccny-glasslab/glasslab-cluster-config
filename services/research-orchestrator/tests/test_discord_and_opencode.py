@@ -57,6 +57,7 @@ from app.schemas import (
     AgentName,
     AgentTurnResult,
     Citation,
+    ConversationSourceBinding,
     EventRecord,
     ResearchAnswer,
     RunRecord,
@@ -1776,6 +1777,67 @@ def _authorize(gateway: DiscordControlGateway) -> None:
     )
 
 
+def test_discord_cancel_acks_before_background_cancellation() -> None:
+    import threading
+
+    engine = Mock()
+    engine.store.get_run.return_value = SimpleNamespace(
+        run_id='run-1',
+        discord_thread_id='main-channel',
+    )
+    release = threading.Event()
+    cancelled = SimpleNamespace(
+        run_id='run-1',
+        state=SimpleNamespace(value='CANCELLED'),
+    )
+
+    def slow_cancel(*args, **kwargs):
+        release.wait(timeout=5)
+        return cancelled
+
+    engine.cancel_run.side_effect = slow_cancel
+    gateway = DiscordControlGateway(
+        engine=engine,
+        bot_token='bot-token',
+        guild_id='123456789',
+        channel_id='main-channel',
+        admin_role_id='role-1',
+        admin_user_ids=['doll-user'],
+        maximum_dataset_upload_bytes=1024,
+    )
+    _authorize(gateway)
+    interaction = _FakeInteraction()
+    interaction.response.send_message = AsyncMock()
+
+    async def scenario() -> None:
+        handler = asyncio.create_task(
+            gateway._on_research_cancel(interaction, run_id='run-1', reason=None)
+        )
+        # The ack must land while cancellation is still blocked, inside
+        # Discord's 3s response deadline.
+        for _ in range(100):
+            if interaction.response.send_message.called:
+                break
+            await asyncio.sleep(0.01)
+        assert interaction.response.send_message.called, (
+            'first interaction must be acked before cancellation completes'
+        )
+        ack = interaction.response.send_message.call_args.args[0]
+        assert 'request accepted' in ack
+        assert not engine.cancel_run.called or engine.cancel_run.call_count == 1
+        release.set()
+        await handler
+        while gateway._tasks:
+            tasks = list(gateway._tasks)
+            gateway._tasks.clear()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+    engine.cancel_run.assert_called_once()
+    assert interaction.followup_messages == ['Run `run-1` is now CANCELLED.']
+
+
 def test_task_start_without_archive_creates_objective_run() -> None:
     engine = Mock()
     engine.create_run.return_value = SimpleNamespace(
@@ -2083,6 +2145,7 @@ def test_research_promote_in_thread_creates_run() -> None:
             state=SimpleNamespace(value='AWAITING_PROTOCOL_APPROVAL'),
         )
     )
+    gateway.engine.store.get_conversation_binding_by_thread_id.return_value = None
     interaction = _FakeInteraction(channel_id='987654321')
     thread = discord.Thread.__new__(discord.Thread)
     thread.id = 987654321
@@ -2132,6 +2195,11 @@ def test_research_question_then_promote_creates_answer_driven_run() -> None:
             state=SimpleNamespace(value='AWAITING_PROTOCOL_APPROVAL'),
         )
     )
+    binding = ConversationSourceBinding(
+        conversation_id='discord-abc1234567890',
+        discord_thread_id='987654321',
+    )
+    gateway.engine.store.get_conversation_binding_by_thread_id.return_value = binding
     interaction = _FakeInteraction(channel_id='987654321')
     thread = discord.Thread.__new__(discord.Thread)
     thread.id = 987654321
@@ -2252,36 +2320,47 @@ def test_format_research_answer_never_emits_empty_messages() -> None:
 
 
 def test_thread_conversation_id_extract_from_main_channel_thread_name() -> None:
-    """Main-channel questions embed the durable conversation id in thread name."""
+    """Main-channel questions resolve via the persisted thread->conversation binding."""
     gateway = _build_test_gateway()
-    # Main-channel question creates thread with name: "research:discord-abcdef1234567890 question"
+    # Main-channel question creates thread and persists a binding for it.
     thread = discord.Thread.__new__(discord.Thread)
     thread.id = 987654321
     thread.name = 'research:discord-abcdef1234567890 what is conformal prediction'
-    
+    binding = ConversationSourceBinding(
+        conversation_id='discord-abcdef1234567890',
+        discord_thread_id='987654321',
+    )
+    gateway.engine.store.get_conversation_binding_by_thread_id.return_value = binding
+
     assert gateway._thread_conversation_id(thread) == 'discord-abcdef1234567890'
 
 
 def test_thread_conversation_id_reuses_id_in_follow_up_thread() -> None:
-    """In-thread follow-ups reuse the same conversation id from thread name."""
+    """In-thread follow-ups reuse the same conversation id from the stored binding."""
     gateway = _build_test_gateway()
     # Follow-up question in a thread created by main-channel question
     thread = discord.Thread.__new__(discord.Thread)
     thread.id = 987654321
     thread.name = 'research:discord-abcdef1234567890 follow-up question'
-    
+    binding = ConversationSourceBinding(
+        conversation_id='discord-abcdef1234567890',
+        discord_thread_id='987654321',
+    )
+    gateway.engine.store.get_conversation_binding_by_thread_id.return_value = binding
+
     # The conversation id should be the same as the original main-channel question
     assert gateway._thread_conversation_id(thread) == 'discord-abcdef1234567890'
 
 
 def test_thread_conversation_id_falls_back_to_legacy_for_plain_thread() -> None:
-    """Legacy threads without conversation id metadata use channel_id fallback."""
+    """Legacy threads without a stored binding use the actual thread id fallback."""
     gateway = _build_test_gateway()
-    # Legacy thread (no conversation id embedded in name)
+    # Legacy thread (no conversation id binding persisted)
     thread = discord.Thread.__new__(discord.Thread)
     thread.id = 987654321
     thread.name = 'research-abc123456'  # Legacy naming
-    
+    gateway.engine.store.get_conversation_binding_by_thread_id.return_value = None
+
     # Falls back to discord-thread-{thread_id}
     assert gateway._thread_conversation_id(thread) == 'discord-thread-987654321'
 
@@ -2291,17 +2370,53 @@ def test_thread_conversation_id_with_guild_channel_fallback() -> None:
     gateway = _build_test_gateway()
     # When interaction.channel is not a Thread (shouldn't happen normally)
     channel = SimpleNamespace(id=111111111)
-    
+
     assert gateway._thread_conversation_id(channel) == 'discord-thread-111111111'
 
 
 def test_thread_conversation_id_handles_name_without_space() -> None:
-    """Thread name might not have space after id (edge case)."""
+    """Thread name without a space still resolves via the stored binding."""
     gateway = _build_test_gateway()
     thread = discord.Thread.__new__(discord.Thread)
     thread.id = 987654321
     thread.name = 'research:discord-abcdef1234567890'  # No question after id
-    
+    binding = ConversationSourceBinding(
+        conversation_id='discord-abcdef1234567890',
+        discord_thread_id='987654321',
+    )
+    gateway.engine.store.get_conversation_binding_by_thread_id.return_value = binding
+
+    assert gateway._thread_conversation_id(thread) == 'discord-abcdef1234567890'
+
+
+def test_thread_conversation_id_never_trusts_renamed_thread_name() -> None:
+    """CWE-345/CWE-441: a user-renamable thread name must not drive identity.
+
+    A thread renamed to `research:discord-thread-<other-id> ...` must resolve
+    to the actual thread id (or the stored binding), never the name-derived id.
+    """
+    gateway = _build_test_gateway()
+    thread = discord.Thread.__new__(discord.Thread)
+    thread.id = 987654321
+    thread.name = 'research:discord-thread-111111111 attacker-chosen-name'
+    # No stored binding for this thread -> fall back to the actual thread id.
+    gateway.engine.store.get_conversation_binding_by_thread_id.return_value = None
+
+    assert gateway._thread_conversation_id(thread) == 'discord-thread-987654321'
+
+
+def test_thread_conversation_id_resolves_via_stored_binding() -> None:
+    """When the bot persisted a thread->conversation binding, resolve via it."""
+    gateway = _build_test_gateway()
+    thread = discord.Thread.__new__(discord.Thread)
+    thread.id = 987654321
+    thread.name = 'research:discord-thread-111111111 attacker-chosen-name'
+    binding = ConversationSourceBinding(
+        conversation_id='discord-abcdef1234567890',
+        discord_thread_id='987654321',
+    )
+    gateway.engine.store.get_conversation_binding_by_thread_id.return_value = binding
+
     assert gateway._thread_conversation_id(thread) == 'discord-abcdef1234567890'
 
 

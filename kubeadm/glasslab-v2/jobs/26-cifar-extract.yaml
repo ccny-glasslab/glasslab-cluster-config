@@ -10,7 +10,7 @@ spec:
     spec:
       containers:
         - name: cifar-extract
-          image: alpine:3.18
+          image: alpine:3.18@sha256:fd032399cd767f310a1d1274e81cab9f0fd8a49b3589eba2c3420228cd45b6a7
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -50,7 +50,7 @@ spec:
               fi
               
               # Extract
-              tar -xzf "${TAR_FILE}" -C "${CIFAR_DIR}"
+              tar -xzf "${TAR_FILE}" -C "${CIFAR_DIR}" --no-same-owner
               
               echo "Extraction complete, verifying files..."
               
@@ -71,6 +71,13 @@ spec:
               du -sh "${DATA_DIR}"
               echo ""
               echo "CIFAR-100 extraction completed successfully!"
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
       restartPolicy: Never
       volumes:
         - name: datasets

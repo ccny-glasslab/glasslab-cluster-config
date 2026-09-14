@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: pgvector/pgvector:pg16
+          image: pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
           imagePullPolicy: IfNotPresent
           env:
             - name: POSTGRES_DB
@@ -55,6 +55,13 @@ spec:
                 - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
             initialDelaySeconds: 20
             periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data

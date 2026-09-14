@@ -1215,9 +1215,29 @@ class SqliteStore:
     def update_job(self, record: JobRecord) -> JobRecord:
         # Blind write keyed on job_id only (no version guard): the job watcher
         # is the sole writer and re-reads before every update, so the rowcount
-        # check is purely a not-found signal.
+        # check is purely a not-found signal. CANCELLED is terminal: a blind
+        # update that would resurrect the row (e.g. a submitter committing
+        # RUNNING after a cancel swept it) raises instead of leaking a
+        # permanently-running external cluster job (issue #246).
         updated = record.model_copy(update={'updated_at': utc_now()})
         with self.transaction() as connection:
+            current = connection.execute(
+                'SELECT payload FROM jobs WHERE job_id = ?',
+                (record.job_id,),
+            ).fetchone()
+            if current is None:
+                raise RecordNotFound(record.job_id)
+            current_status = JobRecord.model_validate_json(
+                current['payload']
+            ).status
+            if (
+                current_status == JobStatus.CANCELLED
+                and updated.status != JobStatus.CANCELLED
+            ):
+                raise ConcurrencyConflict(
+                    f'job {record.job_id} is CANCELLED and cannot transition '
+                    f'to {updated.status.value}'
+                )
             cursor = connection.execute(
                 '''
                 UPDATE jobs
@@ -1439,6 +1459,38 @@ class SqliteStore:
         if row is None:
             return None
         return ConversationSourceBinding.model_validate(json.loads(row['payload']))
+
+    def get_conversation_binding_by_thread_id(
+        self,
+        thread_id: str,
+    ) -> ConversationSourceBinding | None:
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT payload FROM conversation_bindings'
+            ).fetchall()
+        for row in rows:
+            binding = ConversationSourceBinding.model_validate(
+                json.loads(row['payload'])
+            )
+            if binding.discord_thread_id == thread_id:
+                return binding
+        return None
+
+    def bind_conversation_thread(
+        self,
+        conversation_id: str,
+        thread_id: str,
+    ) -> ConversationSourceBinding:
+        existing = self.get_conversation_binding(conversation_id)
+        binding = ConversationSourceBinding(
+            conversation_id=conversation_id,
+            source_ids=existing.source_ids if existing else [],
+            discord_thread_id=thread_id,
+            created_by=existing.created_by if existing else 'operator',
+            created_at=existing.created_at if existing else utc_now(),
+            updated_at=utc_now(),
+        )
+        return self.save_conversation_binding(binding)
 
     def bind_conversation_sources(
         self,

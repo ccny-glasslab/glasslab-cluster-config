@@ -53,13 +53,14 @@ def _spec(*, workspace: bool) -> ExpandedJobSpec:
     )
 
 
-def _executor(handler, *, caller_name='research-orchestrator', token='orchestrator-secret') -> WorkflowApiClusterExecutor:
+def _executor(handler, *, caller_name='research-orchestrator', token='orchestrator-secret', submission_state_path=None) -> WorkflowApiClusterExecutor:
     executor = WorkflowApiClusterExecutor(
         base_url='http://workflow-api.test',
         workload_id='gpu-experiment',
         experiment_type='gpu-training-job',
         caller_name=caller_name,
         token=token,
+        submission_state_path=submission_state_path,
     )
     # Swap the real HTTP client for an in-memory MockTransport so the tests
     # exercise the exact payload and error mapping without a live workflow-api.
@@ -82,6 +83,42 @@ def test_mutations_send_caller_identity() -> None:
 
     assert captured['x-glasslab-caller'] == 'research-orchestrator'
     assert captured['x-glasslab-workflow-token'] == 'orchestrator-secret'
+
+
+def test_submit_transmits_idempotency_key() -> None:
+    # The orchestrator's deterministic per-job idempotency key must reach
+    # workflow-api so a crash between submit and record-save cannot duplicate
+    # a Job on replay: workflow-api dedupes on this key server-side.
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(request.headers)
+        return httpx.Response(201, json={'run_id': 'external-1', 'status': {'status': 'accepted'}})
+
+    _executor(handler).submit(_spec(workspace=False))
+
+    assert captured['idempotency-key'] == 'key-1'
+
+
+def test_submission_persists_across_restart(tmp_path) -> None:
+    # A crash between cluster.submit() succeeding and the orchestrator's
+    # update_job committing must not lose the external_run_id: a restarted
+    # executor observes the same submission without re-submitting.
+    state_path = tmp_path / 'submissions.json'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201, json={'run_id': 'external-1', 'status': {'status': 'accepted'}})
+
+    first = _executor(handler, submission_state_path=state_path).submit(_spec(workspace=False))
+    assert first.external_run_id == 'external-1'
+
+    restarted = _executor(
+        lambda _: pytest.fail('restarted executor must not re-submit'),
+        submission_state_path=state_path,
+    )
+    replay = restarted.submit(_spec(workspace=False))
+
+    assert replay == first
 
 
 def test_mutation_fails_closed_without_token() -> None:

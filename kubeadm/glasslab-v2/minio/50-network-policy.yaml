@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: glasslab-minio-ingress
+  namespace: glasslab-v2
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: glasslab-minio
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: glasslab-workflow-api
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: glasslab-gpu-runner
+      ports:
+        - protocol: TCP
+          port: 9000
+        - protocol: TCP
+          port: 9001

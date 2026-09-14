@@ -25,8 +25,19 @@ DEFAULT_CALLER_OPERATIONS = {
         'POST /digest-schedules/run-due', 'POST /approved-rerun-schedules/run-due',
     }),
     'research-orchestrator': frozenset({
-        'POST /experiments/runs', 'GET /runs/{run_id}',
-        'GET /runs/{run_id}/artifacts', 'POST /runs/{run_id}/cancel',
+        'POST /experiments/runs', 'POST /experiments/runs/{run_id}/results',
+        'POST /experiments/compare',
+        'GET /runs/{run_id}', 'GET /runs/{run_id}/artifacts',
+        'GET /runs/{run_id}/logs', 'POST /runs/{run_id}/artifacts/ingest',
+        'POST /runs/{run_id}/cancel',
+        'POST /investigations', 'GET /investigations',
+        'GET /investigations/latest', 'GET /investigations/{investigation_id}',
+        'GET /investigations/{investigation_id}/context',
+        'POST /investigations/{investigation_id}/hypotheses',
+        'POST /investigations/{investigation_id}/plans',
+        'POST /investigations/{investigation_id}/plan-approvals',
+        'POST /investigations/{investigation_id}/runs',
+        'POST /investigations/{investigation_id}/claims',
     }),
 }
 

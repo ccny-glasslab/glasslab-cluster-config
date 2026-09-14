@@ -16,7 +16,11 @@ from app.contract_candidates import (
     ContractCandidateError,
     ContractCandidateManager,
 )
-from app.contracts import ContractIntegrityError, EvaluationContractResolver
+from app.contracts import (
+    ContractIntegrityError,
+    EvaluationContractResolver,
+    compute_contract_digest,
+)
 
 
 def _write_candidate(root: Path) -> None:
@@ -217,6 +221,85 @@ def test_candidate_methodology_requirements_missing_config_path_is_rejected(
         )
 
 
+def test_candidate_methodology_requirements_filesystem_config_path_is_rejected(
+    tmp_path: Path,
+) -> None:
+    # Issue #198: config_path is a dotted key path into the matrix.base_config
+    # YAML, never a filesystem path. A value like "src/train.py" previously
+    # sealed cleanly and then demanded a nonsensical nested key
+    # src: {train: {py: [...]}} at preflight, burning six revision cycles.
+    source = tmp_path / 'source'
+    _write_candidate(source)
+    descriptor_path = source / 'contract.json'
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor['manifest']['methodology_requirements'] = [
+        {
+            'requirement_id': 'baseline-comparison',
+            'config_path': 'src/train.py',
+            'mode': 'comparison',
+            'minimum_distinct_values': 2,
+            'description': 'compare baseline with non-linear ensembles',
+        }
+    ]
+    descriptor_path.write_text(json.dumps(descriptor))
+    manager = ContractCandidateManager(
+        sealed_root=str(tmp_path / 'sealed'),
+        promoted_root=str(tmp_path / 'shared' / 'bundles'),
+        catalog_path=str(tmp_path / 'shared' / 'catalog.json'),
+        shared_mount_root=str(tmp_path),
+    )
+    with pytest.raises(ContractCandidateError, match='dotted key path'):
+        manager.seal(
+            source=source,
+            contract_id='candidate-v1',
+            version='1.0.0',
+        )
+
+
+def test_promotion_rejects_filesystem_config_path_in_sealed_descriptor(
+    tmp_path: Path,
+) -> None:
+    # A sealed bundle is re-validated at promotion, so a contract sealed before
+    # this check existed cannot slip a filesystem-looking config_path into the
+    # trusted catalog (issue #198).
+    source = tmp_path / 'source'
+    _write_candidate(source)
+    manager = ContractCandidateManager(
+        sealed_root=str(tmp_path / 'sealed'),
+        promoted_root=str(tmp_path / 'shared' / 'bundles'),
+        catalog_path=str(tmp_path / 'shared' / 'catalog.json'),
+        shared_mount_root=str(tmp_path),
+    )
+    sealed = manager.seal(
+        source=source,
+        contract_id='candidate-v1',
+        version='1.0.0',
+    )
+    descriptor_path = sealed.sealed_path / 'contract.json'
+    checksum_path = sealed.sealed_path / 'contract.sha256'
+    descriptor_path.chmod(0o644)
+    checksum_path.chmod(0o644)
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor['manifest']['methodology_requirements'] = [
+        {
+            'requirement_id': 'baseline-comparison',
+            'config_path': 'configs/train.yaml',
+            'mode': 'comparison',
+            'minimum_distinct_values': 2,
+            'description': 'compare baseline with non-linear ensembles',
+        }
+    ]
+    descriptor_path.write_text(json.dumps(descriptor))
+    digest = compute_contract_digest(sealed.sealed_path)
+    checksum_path.write_text(digest + '\n')
+
+    with pytest.raises(ContractCandidateError, match='dotted key path'):
+        manager.promote(
+            sealed_path=sealed.sealed_path,
+            expected_digest=digest,
+        )
+
+
 def test_candidate_valid_methodology_requirements_seal_cleanly(
     tmp_path: Path,
 ) -> None:
@@ -227,7 +310,7 @@ def test_candidate_valid_methodology_requirements_seal_cleanly(
     descriptor['manifest']['methodology_requirements'] = [
         {
             'requirement_id': 'calibration-metric-threshold',
-            'config_path': 'configs/candidate.yaml',
+            'config_path': 'experiment_dimensions.model',
             'mode': 'decision',
             'description': 'accuracy is the primary metric',
         }

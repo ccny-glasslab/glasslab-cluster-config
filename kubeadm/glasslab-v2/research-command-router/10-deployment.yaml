@@ -23,7 +23,7 @@ spec:
         - name: glasslab-ghcr-pull
       containers:
         - name: research-command-router
-          image: ghcr.io/ccny-glasslab/glasslab-research-command-router:0.1.11-local
+          image: ghcr.io/ccny-glasslab/glasslab-research-command-router:0231d7bd07c94b01d3c285f8ff5ffde63a61df7d
           imagePullPolicy: IfNotPresent
           env:
             - name: GLASSLAB_WORKFLOW_API_CALLER_NAME

@@ -75,7 +75,7 @@ spec:
         kubernetes.io/hostname: node02
       containers:
         - name: runner
-          image: glasslab/runner:gpu-v1
+          image: glasslab/runner:459a7754e63d9875985f6a9c08b27b835114a12f
           imagePullPolicy: IfNotPresent
           command:
             - python3

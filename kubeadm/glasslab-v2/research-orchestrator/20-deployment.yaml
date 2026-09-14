@@ -5,8 +5,12 @@ metadata:
   namespace: glasslab-v2
 spec:
   replicas: 1
+  # The orchestrator is a singleton over shared Postgres state and NFS
+  # worktrees; a RollingUpdate surge would run two replicas that both drive
+  # recover()/watcher against the same runs. Recreate guarantees the old pod
+  # is gone before the new one starts (issue #240).
   strategy:
-    type: RollingUpdate
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: glasslab-research-orchestrator
@@ -26,7 +30,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       initContainers:
         - name: approved-repository
-          image: alpine/git:2.47.2
+          image: alpine/git:2.47.2@sha256:0d9a3a551058dba37ea77757955d3e834442ccf8540783671cc25c0d97957894
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
@@ -79,6 +83,12 @@ spec:
             # cache at the persistent shared volume next to opencode-cache.
             - name: HF_HOME
               value: /mnt/artifacts/research-orchestrator/hf-cache
+            # The real-model rehearsal driver keeps its checkpoint and SQLite
+            # store under REHEARSE_ROOT. Pin it to the shared artifacts PVC so
+            # a Recreate rollout does not destroy an in-progress rehearsal
+            # (issue #426).
+            - name: REHEARSE_ROOT
+              value: /mnt/artifacts/research-orchestrator/rehearsal
           ports:
             - containerPort: 8080
               name: http

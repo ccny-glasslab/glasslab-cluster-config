@@ -9,6 +9,13 @@ IMAGE_TAG=""
 SYNC=false
 SKIP_SMOKE=false
 SKIP_IMAGE_PRUNE=false
+WAIT_FOR_IMAGE=true
+IMAGE_PROBE="${IMAGE_PROBE:-crane}"
+IMAGE_POLL_ATTEMPTS="${IMAGE_POLL_ATTEMPTS:-30}"
+IMAGE_POLL_INTERVAL="${IMAGE_POLL_INTERVAL:-10}"
+ROLLOUT_STARTED=false
+PRIOR_ORCHESTRATOR_IMAGE=""
+PRIOR_WORKFLOW_API_IMAGE=""
 
 usage() {
   cat <<'USAGE'
@@ -23,9 +30,17 @@ Options:
                     rabbitmq rolls out only the task-fabric broker. Default: all
   --tag <tag>       GHCR image tag. Default: full SHA of the checked-out commit
   --sync            Fast-forward the canonical checkout to origin/main first
+  --wait-for-image  Poll GHCR until the image tag exists before rolling out.
+                    Default: enabled
+  --no-wait-for-image  Skip the GHCR existence preflight (escape hatch)
   --skip-smoke      Skip post-rollout service health checks
   --skip-image-prune  Do not apply the local control-service tag retention policy
   -h, --help        Show this help
+
+Environment:
+  IMAGE_PROBE          Command used to probe GHCR manifests (default: crane)
+  IMAGE_POLL_ATTEMPTS  Max preflight probe attempts (default: 30)
+  IMAGE_POLL_INTERVAL  Seconds between probe attempts (default: 10)
 USAGE
 }
 
@@ -51,6 +66,83 @@ require_object() {
     exit 1
   fi
 }
+
+probe_image_exists() {
+  local image="$1"
+  "$IMAGE_PROBE" manifest "$image" >/dev/null 2>&1
+}
+
+wait_for_image() {
+  local image="$1"
+  local attempt
+  for ((attempt = 1; attempt <= IMAGE_POLL_ATTEMPTS; attempt++)); do
+    if probe_image_exists "$image"; then
+      printf '[rollout-research-services] image %s found on GHCR\n' "$image"
+      return 0
+    fi
+    if (( attempt < IMAGE_POLL_ATTEMPTS )); then
+      printf '[rollout-research-services] image %s not found yet (attempt %d/%d); CI may still be building\n' \
+        "$image" "$attempt" "$IMAGE_POLL_ATTEMPTS" >&2
+      sleep "$IMAGE_POLL_INTERVAL"
+    fi
+  done
+  printf '[rollout-research-services] ERROR: image %s not found on GHCR after %d attempts\n' \
+    "$image" "$IMAGE_POLL_ATTEMPTS" >&2
+  printf '[rollout-research-services] CI is likely still building this tag; re-run once the build finishes.\n' >&2
+  return 1
+}
+
+service_images() {
+  case "$SERVICE" in
+    all|workflow-api)
+      printf '%s\n' \
+        "ghcr.io/ccny-glasslab/glasslab-research-orchestrator:${IMAGE_TAG}" \
+        "ghcr.io/ccny-glasslab/glasslab-workflow-api:${IMAGE_TAG}"
+      ;;
+    research-orchestrator)
+      printf '%s\n' "ghcr.io/ccny-glasslab/glasslab-research-orchestrator:${IMAGE_TAG}"
+      ;;
+  esac
+}
+
+preflight_images() {
+  local image
+  local -a images
+  mapfile -t images < <(service_images)
+  for image in "${images[@]}"; do
+    wait_for_image "$image"
+  done
+}
+
+capture_prior_images() {
+  PRIOR_ORCHESTRATOR_IMAGE="$("$KUBECTL" -n "$NAMESPACE" get deployment glasslab-research-orchestrator \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+  PRIOR_WORKFLOW_API_IMAGE="$("$KUBECTL" -n "$NAMESPACE" get deployment glasslab-workflow-api \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+}
+
+print_rollback_guidance() {
+  printf '[rollout-research-services] ROLLBACK GUIDANCE: rollout failed partway through; the bundle may be mixed-version.\n' >&2
+  printf '[rollout-research-services] Roll back each already-updated component to its previous image:\n' >&2
+  if [[ -n "$PRIOR_ORCHESTRATOR_IMAGE" ]]; then
+    printf '[rollout-research-services]   kubectl -n %s set image deployment/glasslab-research-orchestrator orchestrator=%s\n' \
+      "$NAMESPACE" "$PRIOR_ORCHESTRATOR_IMAGE" >&2
+  fi
+  if [[ -n "$PRIOR_WORKFLOW_API_IMAGE" ]]; then
+    printf '[rollout-research-services]   kubectl -n %s set image deployment/glasslab-workflow-api workflow-api=%s\n' \
+      "$NAMESPACE" "$PRIOR_WORKFLOW_API_IMAGE" >&2
+  fi
+}
+
+rollback_guidance_on_error() {
+  local status=$?
+  if [[ "$ROLLOUT_STARTED" == true ]]; then
+    print_rollback_guidance
+  fi
+  exit "$status"
+}
+
+trap rollback_guidance_on_error EXIT
 
 rollout_workflow_api() {
   local image="ghcr.io/ccny-glasslab/glasslab-workflow-api:${IMAGE_TAG}"
@@ -157,6 +249,14 @@ while [[ $# -gt 0 ]]; do
       SYNC=true
       shift
       ;;
+    --wait-for-image)
+      WAIT_FOR_IMAGE=true
+      shift
+      ;;
+    --no-wait-for-image)
+      WAIT_FOR_IMAGE=false
+      shift
+      ;;
     --skip-smoke)
       SKIP_SMOKE=true
       shift
@@ -213,6 +313,16 @@ if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
 fi
 
 require_object secret glasslab-ghcr-pull
+
+if [[ "$WAIT_FOR_IMAGE" == true && "$SERVICE" != "rabbitmq" ]]; then
+  need_cmd "$IMAGE_PROBE"
+  preflight_images
+fi
+
+if [[ "$SERVICE" != "rabbitmq" ]]; then
+  capture_prior_images
+  ROLLOUT_STARTED=true
+fi
 
 case "$SERVICE" in
   all)

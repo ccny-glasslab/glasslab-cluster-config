@@ -62,7 +62,7 @@ q_port="$(quote "$LOCAL_PORT")"
 image_ref="$(run_shell "kubectl -n $q_namespace get deploy $q_deployment -o jsonpath='{.spec.template.spec.containers[0].image}'")"
 pod_name="$(run_shell "kubectl -n $q_namespace get pods -l app.kubernetes.io/name=$q_deployment -o jsonpath='{.items[0].metadata.name}'")"
 
-healthz_json="$(run_shell "kubectl -n $q_namespace port-forward svc/$q_deployment $q_port:8080 >/tmp/workflow-api-provenance-pf.log 2>&1 & PF=\$!; sleep 2; curl -s http://127.0.0.1:$q_port/healthz; RC=\$?; kill \$PF >/dev/null 2>&1 || true; exit \$RC")"
+healthz_json="$(run_shell "LOG=\$(mktemp); kubectl -n $q_namespace port-forward svc/$q_deployment $q_port:8080 >\$LOG 2>&1 & PF=\$!; sleep 2; curl -fsS http://127.0.0.1:$q_port/healthz; RC=\$?; kill \$PF >/dev/null 2>&1 || true; rm -f \$LOG; exit \$RC")"
 
 printf 'deployment_image=%s\n' "$image_ref"
 printf 'pod=%s\n' "$pod_name"

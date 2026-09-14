@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import zipfile
-from threading import RLock
+from threading import Lock, RLock
 from typing import Any
 from uuid import uuid4, uuid5, NAMESPACE_URL
 
@@ -99,6 +99,29 @@ NON_RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
 )
 _RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
     {'startup', 'provider', 'network'}
+)
+
+
+METHODOLOGY_REQUIREMENTS_GUIDANCE = (
+    'When the binding task requires explicit methodological choices or '
+    'comparisons, encode them as manifest.methodology_requirements entries '
+    'with requirement_id, config_path, mode (`decision` or `comparison`), '
+    'minimum_distinct_values, optional maximum_distinct_values, and '
+    'description. config_path is a DOTTED KEY PATH into the '
+    'matrix.base_config YAML that Beaker writes later, never a filesystem '
+    'path: "experiment_dimensions.model" addresses the `model` key nested '
+    'under the top-level `experiment_dimensions` key, while "src/train.py" '
+    'is a file path and is rejected at seal time. A `comparison` requirement '
+    'declares that the config key must hold a list of distinct values (one '
+    'per compared method) with at least minimum_distinct_values entries; a '
+    '`decision` requirement declares a single chosen value. Worked example: '
+    'to compare three model families, declare {"requirement_id": '
+    '"model_families", "config_path": "experiment_dimensions.model", '
+    '"mode": "comparison", "minimum_distinct_values": 3, "description": '
+    '"Compare at least one linear and one non-linear model family."}; Beaker '
+    'must then write experiment_dimensions: {model: [logistic-regression, '
+    'random-forest, gradient-boosting]} into the base_config YAML. Do not '
+    'turn a required choice into a comparison. '
 )
 
 
@@ -194,10 +217,23 @@ class ResearchOrchestrator:
         self.policy = policy
         self.cluster = cluster
         self.discord = discord
-        # Serializes all run-advancing mutations in this process. Pause and
-        # cancel deliberately do NOT take this lock so they can abort a model
-        # turn that currently holds it (see pause_run).
-        self._advance_lock = RLock()
+        # Advancement is serialized per run (keyed by run id) so one run's
+        # multi-minute agent turn never blocks another run's approvals or
+        # reconciliation (issue #251). Pause and cancel deliberately do NOT
+        # take the run lock so they can abort a model turn that currently
+        # holds it (see pause_run). The task-compiler turn uses its own lock:
+        # a compile touches no run records and must not block approvals.
+        self._run_locks: dict[str, RLock] = {}
+        self._run_locks_guard = Lock()
+        self._compiler_lock = RLock()
+
+    def _run_lock(self, run_id: str) -> RLock:
+        with self._run_locks_guard:
+            lock = self._run_locks.get(run_id)
+            if lock is None:
+                lock = RLock()
+                self._run_locks[run_id] = lock
+            return lock
 
     def _publish_latest(self, run_id: str) -> None:
         events = self.store.list_events(run_id)
@@ -214,8 +250,7 @@ class ResearchOrchestrator:
                 event=event,
             )
             if (
-                status_message_id
-                and status_message_id != run.discord_status_message_id
+                status_message_id != run.discord_status_message_id
             ):
                 current = self.store.get_run(run_id)
                 self.store.replace_run(
@@ -304,7 +339,8 @@ class ResearchOrchestrator:
         )
 
     def create_run(self, request: RunCreateRequest) -> RunRecord:
-        with self._advance_lock:
+        run_id = uuid4().hex
+        with self._run_lock(run_id):
             task = (
                 self.task_bundles.get(
                     request.task_id,
@@ -331,7 +367,6 @@ class ResearchOrchestrator:
                         'task preflight failed: '
                         + '; '.join(preflight.blocking_issues)
                     )
-            run_id = uuid4().hex
             run_serial = None
             if request.investigation_id:
                 run_serial = (
@@ -424,12 +459,17 @@ class ResearchOrchestrator:
             # straight on: if the process dies between these transitions,
             # recover() sees a run in PREPARING and resumes drafting, which is
             # the only signal that workspace setup finished.
-            self._transition(run_id, RunState.PREPARING)
-            self._materialize_objective_datasets(run_id)
-            self._transition(run_id, RunState.HONEYDEW_DRAFTING_PROTOCOL)
             try:
+                self._transition(run_id, RunState.PREPARING)
+                self._materialize_objective_datasets(run_id)
+                self._transition(run_id, RunState.HONEYDEW_DRAFTING_PROTOCOL)
                 self._draft_protocol(run_id)
             except Exception as exc:
+                # Any failure in the creation path (dataset materialization,
+                # checksum verification, drafting) must land the run in a
+                # terminal state: a run stranded in PREPARING would hold the
+                # one-active-run slot and block every later create_run
+                # (issue #237).
                 self._fail_run(run_id, exc)
                 raise
             return self.store.get_run(run_id)
@@ -498,7 +538,7 @@ class ResearchOrchestrator:
         filename: str,
         content: bytes,
     ) -> TaskBundleRecord:
-        with self._advance_lock:
+        with self._compiler_lock:
             return self._compile_task_bundle(
                 filename=filename,
                 content=content,
@@ -1346,6 +1386,14 @@ class ResearchOrchestrator:
         # The failed attempt already consumed a turn number; roll it back so
         # the bounded retry does not double-count against the turn budget.
         current = self.store.get_run(run_id)
+        if current.state == RunState.PAUSED or current.state in TERMINAL_STATES:
+            # Pause/cancel may have committed while the failed turn was being
+            # torn down. A fresh model turn must never start on a paused or
+            # terminal run (issue #239).
+            raise WorkflowError(
+                'workflow advancement stopped after agent turn because run is '
+                f'{current.state.value}'
+            )
         self.store.replace_run(
             current.model_copy(
                 update={'turn_number': max(0, current.turn_number - 1)}
@@ -1450,6 +1498,7 @@ class ResearchOrchestrator:
                 'kind': expected_kind.value,
             },
         )
+        completed_saved = False
         try:
             # Per-turn knowledge retrieval (see KnowledgeManager). The query is
             # derived from the turn's prompt and objective; the result is scoped
@@ -1535,6 +1584,15 @@ class ResearchOrchestrator:
             # recovery context. Runtime schemas allow many valid kinds, but the
             # state machine has already chosen the one valid for this turn.
             prompt += self._required_turn_kind_instruction(expected_kind)
+            current = self.store.get_run(run_id)
+            if current.state == RunState.PAUSED or current.state in TERMINAL_STATES:
+                # Pause/cancel bypass the advancement lock, so the run may have
+                # left this phase while the turn was being prepared. Never start
+                # a fresh model turn on a paused or terminal run (issue #239).
+                raise WorkflowError(
+                    'workflow advancement stopped after agent turn because run is '
+                    f'{current.state.value}'
+                )
             result, message_id = self.runtime.run_turn(
                 run_id=run_id,
                 agent=agent,
@@ -1589,7 +1647,16 @@ class ResearchOrchestrator:
                 }
             )
             self.store.save_turn(completed)
+            completed_saved = True
             current = self.store.get_run(run_id)
+            if current.state == RunState.PAUSED or current.state in TERMINAL_STATES:
+                # Pause/cancel committed between the completed-turn save and the
+                # run-state replace. The completed turn is durable and
+                # authoritative; refuse to advance or overwrite it (issue #239).
+                raise WorkflowError(
+                    'workflow advancement stopped after agent turn because run is '
+                    f'{current.state.value}'
+                )
             self.store.replace_run(
                 current.model_copy(update={'current_agent': None}),
                 expected_version=current.version,
@@ -1611,6 +1678,12 @@ class ResearchOrchestrator:
                 },
             )
         except Exception as exc:
+            if completed_saved:
+                # The completed turn is already durable. Any failure after the
+                # completed-turn save is a pause/cancel race at the save/replace
+                # boundary (ConcurrencyConflict) or the guard above; never
+                # overwrite the completed turn with a failure (issue #239).
+                raise
             failed = turn.model_copy(
                 update={
                     'status': 'failed',
@@ -1866,7 +1939,7 @@ class ResearchOrchestrator:
         self, parent_run_id: str, request: TerminalRetryRequest,
     ) -> RunRecord:
         """Create one fresh child from a sealed terminal protocol checkpoint."""
-        with self._advance_lock:
+        with self._run_lock(parent_run_id):
             parent = self.store.get_run(parent_run_id)
             if parent.state not in {RunState.FAILED, RunState.TIMED_OUT}:
                 raise WorkflowError('only FAILED or TIMED_OUT runs can be retried')
@@ -2660,7 +2733,8 @@ class ResearchOrchestrator:
         reviewer: str,
         reason: str,
     ) -> ActionRecord:
-        with self._advance_lock:
+        run_id = self.store.get_action(action_id).run_id
+        with self._run_lock(run_id):
             action = self.store.get_action(action_id)
             if action.approval_status == ApprovalStatus.APPROVED:
                 # Re-approval is the crash-recovery retry: the first approval may
@@ -2832,6 +2906,14 @@ class ResearchOrchestrator:
                 payload={'accepted_by': action.reviewer},
             )
 
+    def _is_latest_action_of_type(self, action: ActionRecord) -> bool:
+        same_type = [
+            candidate
+            for candidate in self.store.list_actions(action.run_id)
+            if candidate.type == action.type
+        ]
+        return bool(same_type) and same_type[-1].action_id == action.action_id
+
     def reject_action(
         self,
         action_id: str,
@@ -2839,9 +2921,16 @@ class ResearchOrchestrator:
         reviewer: str,
         reason: str,
     ) -> ActionRecord:
-        with self._advance_lock:
+        run_id = self.store.get_action(action_id).run_id
+        with self._run_lock(run_id):
             existing = self.store.get_action(action_id)
             if existing.approval_status == ApprovalStatus.REJECTED:
+                if not self._is_latest_action_of_type(existing):
+                    # The rejection was already consumed: a later action of
+                    # the same type exists, so the revision workflow already
+                    # ran. A stale duplicate click must not restart it from a
+                    # later phase.
+                    return self.store.get_action(action_id)
                 self._event(
                     existing.run_id,
                     source='orchestrator',
@@ -3020,14 +3109,9 @@ class ResearchOrchestrator:
             'strings), resource_constraints (object with numeric cpu, '
             'memory_gib, gpus, wallclock_minutes), container_image_digest '
             '(set to null). The descriptor must not contain kind, '
-            'candidate_path, rationale, or any other keys. When the binding '
-            'task '
-            'requires explicit methodological choices or comparisons, encode '
-            'them as manifest.methodology_requirements entries with '
-            'requirement_id, config_path, mode (`decision` or `comparison`), '
-            'minimum_distinct_values, optional maximum_distinct_values, and '
-            'description. Do not turn a required choice into a comparison. '
-            'execution_wrapper and '
+            'candidate_path, rationale, or any other keys. '
+            + METHODOLOGY_REQUIREMENTS_GUIDANCE
+            + 'execution_wrapper and '
             'evaluation_entry_point must each be a relative path to a real '
             'Python file inside the candidate directory, not a command or '
             'module reference. Do not write '
@@ -4578,8 +4662,8 @@ class ResearchOrchestrator:
                 'created. Run dependency-free checks such as Python compilation, '
                 'record that the dependency-backed smoke check is deferred to '
                 'the approved runner, and complete the structured handoff. Any '
-                'claim evidence must use an allowed artifact://, git://, '
-                'event://, job://, or contract:// URI rather than a bare path.'
+                'claim evidence must use an allowed artifact://, job://, event://, '
+                'or knowledge:// URI rather than a bare path.'
             )
         preflight_focus = ''
         if feedback.startswith('Deterministic matrix preflight failed:'):
@@ -4767,6 +4851,16 @@ class ResearchOrchestrator:
                         'seed': stored.seed,
                     },
                 )
+        # Pause deliberately bypasses the advancement lock (so it can abort a
+        # model turn), which means a pause can land mid-submission. Re-read
+        # fresh state before advancing so a run paused while recovery was
+        # submitting stays PAUSED instead of transitioning to JOB_QUEUED and
+        # submitting jobs after the human paused (issue #240).
+        current = self.store.get_run(run.run_id)
+        if current.state != RunState.AWAITING_EXECUTION_APPROVAL:
+            raise WorkflowError(
+                f'cannot submit matrix while run is {current.state.value}'
+            )
         self._transition(run.run_id, RunState.JOB_QUEUED)
         self._fill_job_capacity(run.run_id)
 
@@ -4793,6 +4887,10 @@ class ResearchOrchestrator:
             if job.status == JobStatus.QUEUED and not job.external_run_id
         ]
         for job in queued[:slots]:
+            # A pause can also land between the JOB_QUEUED transition and the
+            # submission loop; never submit jobs for a paused run.
+            if self.store.get_run(run_id).state == RunState.PAUSED:
+                break
             submitting = self.store.update_job(
                 job.model_copy(update={'status': JobStatus.SUBMITTING})
             )
@@ -4863,7 +4961,7 @@ class ResearchOrchestrator:
             self._analyze_results(run_id)
 
     def reconcile_run(self, run_id: str) -> RunRecord:
-        with self._advance_lock:
+        with self._run_lock(run_id):
             run = self.store.get_run(run_id)
             if run.state not in {RunState.JOB_QUEUED, RunState.JOB_RUNNING}:
                 return run
@@ -5196,7 +5294,7 @@ class ResearchOrchestrator:
                 'the claims and numbers against the retrieved corpus material; '
                 'flag any contradiction between the results and the corpus. Set '
                 'done=true only if the evidence supports a final report. Cite '
-                'artifact, job, event, Git, contract, or knowledge:// URIs.\n\n'
+                'artifact, job, event, or knowledge:// URIs.\n\n'
                 'EVIDENCE DIGEST (read the full snapshot at '
                 'evidence-snapshot.json in your workspace for artifact '
                 'contents):\n'
@@ -5462,7 +5560,7 @@ class ResearchOrchestrator:
         requested_by: str | None = None,
         reason: str | None = None,
     ) -> RunRecord:
-        with self._advance_lock:
+        with self._run_lock(run_id):
             run = self.store.get_run(run_id)
             if run.state != RunState.PAUSED or run.resume_state is None:
                 raise WorkflowError('run is not resumable')
@@ -5596,61 +5694,68 @@ class ResearchOrchestrator:
         requested_by: str | None = None,
         reason: str | None = None,
     ) -> RunRecord:
-        # Like pause, cancellation must not wait for an active model turn.
+        # Like pause, cancellation must not wait for an active model turn, so
+        # the agent-turn abort stays outside the advancement lock. The job
+        # sweep and the terminal transition take the lock: a submission in
+        # flight holds the lock across cluster.submit -> update_job, so
+        # cancelling without it could blind-write a CANCELLED row that the
+        # submitter then overwrites with RUNNING, leaking a permanently
+        # running cluster job (issue #246).
         run = self.store.get_run(run_id)
         if run.state in TERMINAL_STATES:
             return run
         self._abort_agent_turns(run)
         cancellation_errors: list[str] = []
-        for job in self.store.list_jobs(
-            run_id,
-            statuses={
-                JobStatus.QUEUED,
-                JobStatus.SUBMITTING,
-                JobStatus.RUNNING,
-                JobStatus.UNKNOWN,
-            },
-        ):
-            if job.external_run_id:
-                try:
-                    self.cluster.cancel(job.external_run_id)
-                except Exception as exc:
-                    cancellation_errors.append(f'{job.job_id}: {exc}')
-                    continue
-            self.store.update_job(
-                job.model_copy(
-                    update={
-                        'status': JobStatus.CANCELLED,
-                        'exit_information': {
-                            **job.exit_information,
-                            'cancel_requested': True,
-                        },
-                    }
-                )
-            )
-        if cancellation_errors:
-            self._event(
+        with self._run_lock(run_id):
+            for job in self.store.list_jobs(
                 run_id,
-                source='orchestrator',
-                event_type='run.cancellation_failed',
+                statuses={
+                    JobStatus.QUEUED,
+                    JobStatus.SUBMITTING,
+                    JobStatus.RUNNING,
+                    JobStatus.UNKNOWN,
+                },
+            ):
+                if job.external_run_id:
+                    try:
+                        self.cluster.cancel(job.external_run_id)
+                    except Exception as exc:
+                        cancellation_errors.append(f'{job.job_id}: {exc}')
+                        continue
+                self.store.update_job(
+                    job.model_copy(
+                        update={
+                            'status': JobStatus.CANCELLED,
+                            'exit_information': {
+                                **job.exit_information,
+                                'cancel_requested': True,
+                            },
+                        }
+                    )
+                )
+            if cancellation_errors:
+                self._event(
+                    run_id,
+                    source='orchestrator',
+                    event_type='run.cancellation_failed',
+                    payload={
+                        'cancellation_errors': cancellation_errors,
+                        'requested_by': requested_by,
+                        'reason': reason,
+                    },
+                )
+                raise WorkflowError(
+                    'cancellation could not be confirmed for every external job'
+                )
+            cancelled = self._transition(
+                run_id,
+                RunState.CANCELLED,
                 payload={
                     'cancellation_errors': cancellation_errors,
                     'requested_by': requested_by,
                     'reason': reason,
                 },
             )
-            raise WorkflowError(
-                'cancellation could not be confirmed for every external job'
-            )
-        cancelled = self._transition(
-            run_id,
-            RunState.CANCELLED,
-            payload={
-                'cancellation_errors': cancellation_errors,
-                'requested_by': requested_by,
-                'reason': reason,
-            },
-        )
         self._event(
             run_id,
             source='orchestrator',
@@ -5662,6 +5767,48 @@ class ResearchOrchestrator:
             },
         )
         return cancelled
+
+    def sweep_cancelled_run_jobs(self, run_id: str) -> None:
+        # Final watcher sweep for a cancelled run (issue #246): any job still
+        # in a non-terminal status under a CANCELLED run would otherwise keep
+        # consuming cluster resources with nothing alive to cancel it. The
+        # watcher calls this once per cancelled run per poll until no
+        # non-terminal job remains.
+        run = self.store.get_run(run_id)
+        if run.state != RunState.CANCELLED:
+            return
+        with self._run_lock(run_id):
+            for job in self.store.list_jobs(
+                run_id,
+                statuses={
+                    JobStatus.QUEUED,
+                    JobStatus.SUBMITTING,
+                    JobStatus.RUNNING,
+                    JobStatus.UNKNOWN,
+                },
+            ):
+                if job.external_run_id:
+                    try:
+                        self.cluster.cancel(job.external_run_id)
+                    except Exception as exc:
+                        self._event(
+                            run_id,
+                            source='orchestrator',
+                            event_type='job.cancellation_failed',
+                            payload={'job_id': job.job_id, 'error': str(exc)},
+                        )
+                        continue
+                self.store.update_job(
+                    job.model_copy(
+                        update={
+                            'status': JobStatus.CANCELLED,
+                            'exit_information': {
+                                **job.exit_information,
+                                'cancel_requested': True,
+                            },
+                        }
+                    )
+                )
 
     def recover(self) -> list[str]:
         for run in self.store.list_runs():
@@ -5714,7 +5861,12 @@ class ResearchOrchestrator:
                         ),
                     )
             try:
-                self._recover_run(run.run_id)
+                with self._run_lock(run.run_id):
+                    # A pod restart mid-run skips prepare(); re-seed the
+                    # authoritative tool roster so the resumed agent session
+                    # sees AGENTS.md (issue #199).
+                    self.workspaces.seed_agent_context(run.run_id)
+                    self._recover_run(run.run_id)
             except Exception as exc:
                 current = self.store.get_run(run.run_id)
                 resumable_agent_states = {

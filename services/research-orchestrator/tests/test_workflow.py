@@ -9,11 +9,14 @@ workflow safe to restart. Cluster execution runs against FakeClusterExecutor.
 
 from __future__ import annotations
 
+import io
 import json
+import time
 from datetime import timedelta
 from hashlib import sha256
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
+import zipfile
 
 from fastapi.testclient import TestClient
 import pytest
@@ -22,7 +25,11 @@ from app.contracts import EvaluationContractResolver
 from app.contract_candidates import ContractCandidateManager
 from app.config import SERVICE_ROOT
 from app.discord_adapter import DisabledDiscordAdapter
-from app.engine import ResearchOrchestrator, WorkflowError
+from app.engine import (
+    METHODOLOGY_REQUIREMENTS_GUIDANCE,
+    ResearchOrchestrator,
+    WorkflowError,
+)
 from app.evidence import EvidencePhase
 from app.main import create_app
 from app.mock_runtime import ScriptedMockRuntime
@@ -38,6 +45,7 @@ from app.schemas import (
     Claim,
     ContextPacket,
     ExperimentMatrix,
+    EventRecord,
     IngestedDatasetRecord,
     JobStatus,
     RequestedAction,
@@ -51,7 +59,7 @@ from app.schemas import (
     VerificationVerdict,
     utc_now,
 )
-from app.storage import SqliteStore
+from app.storage import ConcurrencyConflict, SqliteStore
 from app.workspaces import WorkspaceManager
 
 from conftest import RUNNER_IMAGE
@@ -134,6 +142,48 @@ def test_run_serial_increments_per_investigation(orchestrator_bundle) -> None:
     assert third.run_serial == 3
     assert other.run_serial == 1
     assert ungrouped.run_serial is None
+
+
+def test_materialization_failure_fails_run_and_does_not_block_creation(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # Issue #237: a failure inside _materialize_objective_datasets (e.g. the
+    # checksum guard) must land the run in a terminal state. A run stranded
+    # in PREPARING would hold the one-active-run slot and reject every
+    # subsequent create_run until an operator intervenes.
+    _, store, _, _, engine = orchestrator_bundle
+    calls = {'count': 0}
+
+    def fail_materialization(_run_id: str) -> None:
+        calls['count'] += 1
+        if calls['count'] == 1:
+            raise WorkflowError(
+                'objective dataset failed checksum verification'
+            )
+
+    monkeypatch.setattr(
+        engine,
+        '_materialize_objective_datasets',
+        fail_materialization,
+    )
+
+    with pytest.raises(WorkflowError, match='checksum'):
+        engine.create_run(
+            RunCreateRequest(
+                objective='Run with a corrupted dataset upload.'
+            )
+        )
+
+    failed = store.list_runs()[0]
+    assert failed.state == RunState.FAILED
+
+    # The failed run is terminal, so a subsequent create_run must succeed
+    # instead of being blocked by a zombie run stuck in PREPARING.
+    second = engine.create_run(
+        RunCreateRequest(objective='A fresh run after the failed materialization.')
+    )
+    assert store.get_run(second.run_id).state == RunState.AWAITING_PROTOCOL_APPROVAL
 
 
 def test_failed_result_starts_a_fresh_methodology_revision_budget(
@@ -618,6 +668,27 @@ class PauseDuringImplementationRuntime(ScriptedMockRuntime):
         return result
 
 
+class BlockingPlanRuntime(ScriptedMockRuntime):
+    # Blocks the Beaker plan turn of one run until the test releases it, so a
+    # concurrent approval on another run can prove the advancement lock is
+    # keyed per run rather than global.
+    def __init__(self, *, runner_image: str, block_run_id: str) -> None:
+        super().__init__(runner_image=runner_image)
+        self.block_run_id = block_run_id
+        self.blocked = Event()
+        self.release_event = Event()
+
+    def run_turn(self, **kwargs):
+        if (
+            kwargs['agent'] == AgentName.BEAKER
+            and kwargs['run_id'] == self.block_run_id
+            and 'Write implementation-plan.md' in kwargs['prompt']
+        ):
+            self.blocked.set()
+            self.release_event.wait(timeout=10)
+        return super().run_turn(**kwargs)
+
+
 class NewContractRuntime(ScriptedMockRuntime):
     # Drives the full contract-candidate flow: Honeydew proposes a new
     # evaluator, Beaker drafts and seals the candidate (wrong phase kind once
@@ -635,6 +706,7 @@ class NewContractRuntime(ScriptedMockRuntime):
             result.evaluation_contract_proposal.evaluator_type = 'candidate-v1'
             return result, message_id
         if agent == 'beaker' and 'Draft an immutable evaluation-contract' in prompt:
+            self.prompts.append((kwargs['agent'], prompt))
             if not self.returned_wrong_contract_kind:
                 self.returned_wrong_contract_kind = True
                 return (
@@ -752,6 +824,20 @@ def _pending_action(store, run_id: str, action_type: str):
     )
 
 
+def _task_archive() -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, 'w') as handle:
+        handle.writestr(
+            'ML_Benchmark_Adult_Income/problem.md',
+            '# Adult task\n',
+        )
+        handle.writestr(
+            'ML_Benchmark_Adult_Income/eval_agent_prompt.md',
+            '# Rubric\n',
+        )
+    return output.getvalue()
+
+
 def _advance_to_jobs(engine, store):
     # Drives a fresh run through protocol approval and matrix approval to the
     # JOB_RUNNING state, the shared entry point for the job-phase tests.
@@ -821,14 +907,92 @@ def test_protocol_rejection_redrafts_with_feedback(
     assert replacement.action_id != original.action_id
 
 
+def test_rejecting_an_already_consumed_rejection_is_a_noop(
+    orchestrator_bundle,
+) -> None:
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Compare two bounded methods.')
+    )
+    original = _pending_action(store, run.run_id, 'approve_protocol')
+
+    engine.reject_action(
+        original.action_id,
+        reviewer='test-human',
+        reason='Use the fixed 80/20 split.',
+    )
+
+    revised = store.get_run(run.run_id)
+    assert revised.state == RunState.AWAITING_PROTOCOL_APPROVAL
+    assert revised.protocol_version == 2
+    replacement = _pending_action(store, run.run_id, 'approve_protocol')
+    assert replacement.action_id != original.action_id
+
+    engine.reject_action(
+        original.action_id,
+        reviewer='test-human',
+        reason='Stale duplicate click on the consumed rejection.',
+    )
+
+    after = store.get_run(run.run_id)
+    assert after.state == RunState.AWAITING_PROTOCOL_APPROVAL
+    assert after.protocol_version == 2
+    assert (
+        _pending_action(store, run.run_id, 'approve_protocol').action_id
+        == replacement.action_id
+    )
+    assert not any(
+        event.event_type == 'action.rejection_resumed'
+        for event in store.list_events(run.run_id)
+    )
+
+
+def test_publish_event_clears_stale_status_message_id(
+    orchestrator_bundle, monkeypatch,
+) -> None:
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Clear a stale status message id.')
+    )
+    current = store.get_run(run.run_id)
+    store.replace_run(
+        current.model_copy(
+            update={
+                'discord_thread_id': 'thread-1',
+                'discord_status_message_id': 'status-1',
+            }
+        ),
+        expected_version=current.version,
+    )
+    monkeypatch.setattr(
+        engine.discord,
+        'publish',
+        lambda *, thread_id, status_message_id, event: None,
+    )
+
+    engine._publish_event(
+        run.run_id,
+        EventRecord(
+            sequence_number=1,
+            run_id=run.run_id,
+            source='orchestrator',
+            event_type='run.state_changed',
+            payload={'from': 'CREATED', 'to': 'AWAITING_PROTOCOL_APPROVAL'},
+        ),
+    )
+
+    assert store.get_run(run.run_id).discord_status_message_id is None
+
+
 def test_new_contract_is_reviewed_promoted_and_bound(
     orchestrator_bundle,
 ) -> None:
     settings, store, cluster, _, original = orchestrator_bundle
+    runtime = NewContractRuntime(runner_image=RUNNER_IMAGE)
     engine = ResearchOrchestrator(
         settings=settings,
         store=store,
-        runtime=NewContractRuntime(runner_image=RUNNER_IMAGE),
+        runtime=runtime,
         workspaces=original.workspaces,
         contracts=original.contracts,
         contract_candidates=original.contract_candidates,
@@ -868,6 +1032,17 @@ def test_new_contract_is_reviewed_promoted_and_bound(
         event.event_type == 'agent.output_rejected'
         for event in store.list_events(run.run_id)
     )
+    contract_prompts = [
+        prompt
+        for agent, prompt in runtime.prompts
+        if agent == AgentName.BEAKER
+        and 'Draft an immutable evaluation-contract' in prompt
+    ]
+    assert contract_prompts, 'contract-draft prompt was not recorded'
+    assert METHODOLOGY_REQUIREMENTS_GUIDANCE in contract_prompts[0]
+    assert 'DOTTED KEY PATH' in contract_prompts[0]
+    assert 'src/train.py' in contract_prompts[0]
+    assert 'list of distinct values' in contract_prompts[0]
 
 
 def test_invalid_contract_candidate_is_rejected_and_retried(
@@ -1393,7 +1568,7 @@ def test_imported_task_revision_does_not_retry_missing_dependencies(
     assert 'Attempt each local command only once' in revision_prompt
     assert 'If a check fails with ModuleNotFoundError' in revision_prompt
     assert 'do not install packages, repeat the command' in revision_prompt
-    assert 'artifact://, git://, event://, job://, or contract://' in revision_prompt
+    assert 'artifact://, job://, event://, or knowledge://' in revision_prompt
 
 
 def test_contract_preflight_returns_beaker_to_revision(
@@ -1549,6 +1724,145 @@ def test_pause_during_agent_turn_stops_workflow_advancement(
         for action in store.list_actions(run.run_id)
     )
     assert runtime.turn_counts[AgentName.HONEYDEW] == 1
+
+
+def test_pause_between_save_and_replace_does_not_overwrite_completed_turn(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    """A completed turn survives a pause that commits at the save/replace boundary.
+
+    If pause's transition commits between ``save_turn(completed)`` and the
+    ``replace_run(current_agent=None)`` that closes the turn, the boundary
+    replace raises ConcurrencyConflict. The failure bookkeeping must not
+    rewrite the just-saved completed turn as failed (issue #239).
+    """
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(
+            objective='Pause between completed-turn save and run-state replace.'
+        )
+    )
+    protocol = _pending_action(store, run.run_id, 'approve_protocol')
+
+    original_replace_run = store.replace_run
+    injected = False
+
+    def racing_replace_run(record, *, expected_version):
+        nonlocal injected
+        if record.current_agent is None and not injected:
+            injected = True
+            store.transition_run(
+                record.run_id,
+                RunState.PAUSED,
+                updates={'resume_state': RunState.BEAKER_PLANNING},
+            )
+        return original_replace_run(record, expected_version=expected_version)
+
+    monkeypatch.setattr(store, 'replace_run', racing_replace_run)
+
+    with pytest.raises(ConcurrencyConflict):
+        engine.approve_action(
+            protocol.action_id,
+            reviewer='test-human',
+            reason='Protocol accepted.',
+        )
+
+    turns = store.list_turns(run.run_id)
+    plan_turns = [
+        turn for turn in turns if turn.agent == AgentName.BEAKER
+    ]
+    assert len(plan_turns) == 1
+    assert plan_turns[0].status == 'completed'
+    assert plan_turns[0].structured_output is not None
+    assert not any(turn.status == 'failed' for turn in turns)
+    assert store.get_run(run.run_id).state == RunState.PAUSED
+
+
+def test_locks_are_per_run_not_global(orchestrator_bundle) -> None:
+    """Concurrent runs advance independently and compiles never block approvals.
+
+    The advancement lock is keyed per run, so one run's in-flight agent turn
+    must not serialize another run's approval; the task-compiler turn uses a
+    separate lock, so a compile must not block approvals either (issue #251).
+    """
+    _, store, _, _, engine = orchestrator_bundle
+    run_a = engine.create_run(
+        RunCreateRequest(objective='Run A concurrent advancement.')
+    )
+    run_b = engine.create_run(
+        RunCreateRequest(objective='Run B concurrent advancement.')
+    )
+    protocol_a = _pending_action(store, run_a.run_id, 'approve_protocol')
+    protocol_b = _pending_action(store, run_b.run_id, 'approve_protocol')
+
+    blocking = BlockingPlanRuntime(
+        runner_image=RUNNER_IMAGE,
+        block_run_id=run_a.run_id,
+    )
+    engine.runtime = blocking
+
+    errors: list[Exception] = []
+
+    def advance_run_a() -> None:
+        try:
+            engine.approve_action(
+                protocol_a.action_id,
+                reviewer='test-human',
+                reason='Protocol accepted.',
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    thread_a = Thread(target=advance_run_a)
+    thread_a.start()
+    assert blocking.blocked.wait(timeout=10), 'run A never blocked in its plan turn'
+
+    result_b: dict[str, object] = {}
+
+    def advance_run_b() -> None:
+        try:
+            engine.approve_action(
+                protocol_b.action_id,
+                reviewer='test-human',
+                reason='Protocol accepted.',
+            )
+            result_b['state'] = store.get_run(run_b.run_id).state
+        except Exception as exc:
+            result_b['error'] = exc
+
+    thread_b = Thread(target=advance_run_b)
+    thread_b.start()
+    thread_b.join(timeout=5)
+    assert not thread_b.is_alive(), 'run B approval blocked behind run A turn'
+    assert 'error' not in result_b
+    assert result_b['state'] == RunState.AWAITING_EXECUTION_APPROVAL
+
+    result_import: dict[str, object] = {}
+
+    def do_import() -> None:
+        try:
+            record = engine.import_task_bundle(
+                filename='concurrent-task.zip',
+                content=_task_archive(),
+            )
+            result_import['task_id'] = record.task_id
+        except Exception as exc:
+            result_import['error'] = exc
+
+    import_thread = Thread(target=do_import)
+    import_thread.start()
+    import_thread.join(timeout=5)
+    assert not import_thread.is_alive(), 'task compile blocked behind run A turn'
+    assert 'error' not in result_import
+    assert result_import['task_id'] == f'task-{sha256(_task_archive()).hexdigest()[:16]}'
+
+    blocking.release_event.set()
+    thread_a.join(timeout=10)
+    assert not thread_a.is_alive(), 'run A approval did not finish'
+    assert not errors
+    run_a_final = store.get_run(run_a.run_id)
+    assert run_a_final.state == RunState.AWAITING_EXECUTION_APPROVAL
 
 
 def test_honeydew_receives_read_only_beaker_review_snapshot(
@@ -1860,6 +2174,78 @@ def test_methodology_resolution_appendix_ignores_unrelated_errors() -> None:
     assert appendix == ''
 
 
+def test_contract_candidate_prompt_documents_config_path_semantics() -> None:
+    # Issue #198: the contract-candidate prompt must teach config_path as a
+    # dotted key path into matrix.base_config with a worked example, so the
+    # model stops emitting filesystem paths like "src/train.py" that preflight
+    # then misreads as nested keys.
+    assert 'DOTTED KEY PATH' in METHODOLOGY_REQUIREMENTS_GUIDANCE
+    assert 'experiment_dimensions.model' in METHODOLOGY_REQUIREMENTS_GUIDANCE
+    assert 'src/train.py' in METHODOLOGY_REQUIREMENTS_GUIDANCE
+    assert 'list of distinct values' in METHODOLOGY_REQUIREMENTS_GUIDANCE
+    assert 'minimum_distinct_values' in METHODOLOGY_REQUIREMENTS_GUIDANCE
+
+
+def test_methodology_appendix_in_revision_requested_payload(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # A deterministic preflight failure must carry the methodology-resolution
+    # appendix into the durable methodology.revision_requested payload, not
+    # just into the in-memory rejection reason (issue #199).
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Compare two bounded methods.')
+    )
+    protocol = _pending_action(store, run.run_id, 'approve_protocol')
+    engine.approve_action(
+        protocol.action_id,
+        reviewer='test-human',
+        reason='Protocol accepted.',
+    )
+    assert store.get_run(run.run_id).state == RunState.AWAITING_EXECUTION_APPROVAL
+
+    # Rebind the run to the contract that declares methodology requirements,
+    # then re-run Honeydew review against the existing matrix whose
+    # base_config lacks every required setting.
+    contract = engine.contracts.resolve(
+        'ml-benchmark-adult-income-v1',
+        '1.1.0',
+    )
+    run = store.get_run(run.run_id)
+    store.replace_run(
+        run.model_copy(
+            update={
+                'evaluation_contract_id': 'ml-benchmark-adult-income-v1',
+                'evaluation_contract_version': '1.1.0',
+                'evaluation_contract_digest': contract.digest,
+            }
+        ),
+        expected_version=run.version,
+    )
+    # Stop the revision loop after the first rejection so the test asserts on
+    # the durable payload rather than the full revise cycle.
+    monkeypatch.setattr(engine, '_beaker_revise', lambda run_id, feedback: None)
+
+    engine._honeydew_review(run.run_id, implementation_turn_id='test')
+
+    revision = next(
+        event
+        for event in store.list_events(run.run_id)
+        if event.event_type == 'methodology.revision_requested'
+    )
+    assert 'must EXIST' in revision.payload['feedback']
+    assert 'config_path `experiment_dimensions.model`' in revision.payload['feedback']
+    rejected = [
+        action
+        for action in store.list_actions(run.run_id)
+        if action.type == 'submit_experiment_matrix'
+        and action.approval_status == ApprovalStatus.REJECTED
+    ]
+    assert rejected
+    assert 'must EXIST' in rejected[-1].reason
+
+
 def test_restart_recovery_from_job_running(orchestrator_bundle) -> None:
     # Rebuilds the engine from the same SqliteStore file after jobs completed,
     # simulating a process restart; recover() must finish the run from durable
@@ -2018,6 +2404,85 @@ def test_restart_recovers_submission_without_external_id(
     assert recovered.external_run_id is not None
 
 
+def test_recover_holds_advance_lock_and_rechecks_state(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # recover() drives runs under the per-run advancement lock, and
+    # _submit_matrix re-reads fresh state before advancing: a pause committed
+    # mid-submission must leave the run PAUSED instead of submitting jobs
+    # after the human paused (issue #240).
+    _, store, cluster, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Pause during recovery submission.')
+    )
+    protocol = _pending_action(store, run.run_id, 'approve_protocol')
+    engine.approve_action(
+        protocol.action_id,
+        reviewer='test-human',
+        reason='Protocol accepted.',
+    )
+    matrix = _pending_action(store, run.run_id, 'submit_experiment_matrix')
+    store.update_action(
+        matrix.action_id,
+        approval_status=ApprovalStatus.APPROVED,
+        reviewer='test-human',
+        reason='Approved for the recovery test.',
+    )
+    assert store.get_run(run.run_id).state == RunState.AWAITING_EXECUTION_APPROVAL
+
+    original_build = engine._build_objective_execution
+
+    def pause_mid_submission(run, matrix):
+        # The operator pauses while recovery is mid-submission, after
+        # _submit_matrix already read the run as AWAITING_EXECUTION_APPROVAL.
+        engine.pause_run(run.run_id, requested_by='test-mid-submit')
+        return original_build(run, matrix)
+
+    monkeypatch.setattr(engine, '_build_objective_execution', pause_mid_submission)
+    engine.recover()
+
+    recovered = store.get_run(run.run_id)
+    assert recovered.state == RunState.PAUSED
+    assert recovered.resume_state == RunState.AWAITING_EXECUTION_APPROVAL
+    assert cluster.submissions == {}
+
+
+def test_recover_seeds_agent_context(orchestrator_bundle) -> None:
+    # A pod restart mid-implementation calls recover() without prepare();
+    # recover() must re-seed the authoritative tool roster into both agent
+    # worktrees so the resumed session sees AGENTS.md (issue #199).
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Recover with a seeded agent roster.')
+    )
+    protocol = _pending_action(store, run.run_id, 'approve_protocol')
+    engine.approve_action(
+        protocol.action_id,
+        reviewer='test-human',
+        reason='Protocol accepted.',
+    )
+    run = store.get_run(run.run_id)
+    assert run.state == RunState.AWAITING_EXECUTION_APPROVAL
+    # Simulate a restart mid-implementation: the run is parked in an agent
+    # phase and the roster files are gone from the shared worktrees.
+    run = store.replace_run(
+        run.model_copy(update={'state': RunState.BEAKER_IMPLEMENTING}),
+        expected_version=run.version,
+    )
+    beaker_md = Path(run.beaker_workspace) / 'AGENTS.md'
+    honeydew_md = Path(run.honeydew_workspace) / 'AGENTS.md'
+    beaker_md.unlink()
+    honeydew_md.unlink()
+
+    engine.recover()
+
+    assert beaker_md.is_file()
+    assert honeydew_md.is_file()
+    assert '## Available tools (authoritative)' in beaker_md.read_text()
+    assert '## Available tools (authoritative)' in honeydew_md.read_text()
+
+
 def test_transient_inspection_error_does_not_finish_run(
     orchestrator_bundle,
 ) -> None:
@@ -2087,6 +2552,88 @@ def test_cancellation_discards_paused_run_without_resuming(orchestrator_bundle) 
     assert store.get_run(run.run_id).state == RunState.CANCELLED
     assert runtime.aborted
     assert store.list_events(run.run_id)[-1].event_type == 'run.cancelled'
+
+
+def test_cancel_blocks_inflight_submission_leak(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # Issue #246: cancelling while a submission is in flight (cluster.submit
+    # returned but update_job not yet committed) must not leave the external
+    # cluster job running forever. cancel_run takes the advancement lock, so
+    # it waits for the submitter to commit the RUNNING row, then cancels the
+    # real external job; the watcher's final sweep then guarantees no RUNNING
+    # job remains under the cancelled run.
+    _, store, cluster, _, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    job = store.list_jobs(run.run_id)[0]
+    # Reset the committed submission so the job is waiting to be submitted
+    # again, recreating the submit -> update_job window under test.
+    store.update_job(
+        job.model_copy(
+            update={
+                'status': JobStatus.QUEUED,
+                'external_run_id': None,
+                'job_name': None,
+                'kubernetes_uid': None,
+            }
+        )
+    )
+    job = store.get_job(job.job_id)
+    assert job.status == JobStatus.QUEUED
+    assert job.external_run_id is None
+
+    submitted = Event()
+    release = Event()
+    real_submit = cluster.submit
+
+    def paused_submit(spec):
+        submission = real_submit(spec)
+        submitted.set()
+        assert release.wait(timeout=10)
+        return submission
+
+    monkeypatch.setattr(cluster, 'submit', paused_submit)
+
+    submitter = Thread(
+        target=engine.reconcile_run,
+        args=(run.run_id,),
+        daemon=True,
+    )
+    submitter.start()
+    assert submitted.wait(timeout=10)
+
+    cancel_thread = Thread(
+        target=engine.cancel_run,
+        args=(run.run_id,),
+        daemon=True,
+    )
+    cancel_thread.start()
+    deadline = time.monotonic() + 2.0
+    while cancel_thread.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert cancel_thread.is_alive()
+
+    release.set()
+    submitter.join(timeout=10)
+    cancel_thread.join(timeout=10)
+    assert not submitter.is_alive()
+    assert not cancel_thread.is_alive()
+
+    assert store.get_run(run.run_id).state == RunState.CANCELLED
+    cancelled_job = store.get_job(job.job_id)
+    assert cancelled_job.status == JobStatus.CANCELLED
+    assert cancelled_job.external_run_id is not None
+    assert (
+        cluster.inspect(cancelled_job.external_run_id).status
+        == JobStatus.CANCELLED
+    )
+
+    engine.sweep_cancelled_run_jobs(run.run_id)
+    assert all(
+        stored.status == JobStatus.CANCELLED
+        for stored in store.list_jobs(run.run_id)
+    )
 
 
 def test_event_sequence_is_append_only_and_ordered(orchestrator_bundle) -> None:

@@ -14,15 +14,15 @@ import json
 from typing import Any, Callable
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
 from pydantic import ValidationError
 
 from services.common.schemas import ArtifactIndexEntry, ArtifactsIndex, ExpectedArtifactsSpec, RunManifest, RunStatus
 
 from .config import Settings
 from .execution_preflight import build_execution_preflight_result
-from .job_submission import JobSubmitter, LiveStatusUnavailableError, resolve_evaluation_contract
-from .persistence import RunStore
+from .job_submission import JobSubmissionError, JobSubmitter, LiveStatusUnavailableError, resolve_evaluation_contract
+from .persistence import IdempotencyConflict, RunStore
 from .registry import WorkflowRegistry
 from .run_artifacts import (
     MEDIA_TYPES,
@@ -38,6 +38,7 @@ from .schemas import (
     GenericExperimentResultIngestRequest,
     GenericExperimentRunRequest,
     InvestigationWorkspaceSpec,
+    JobSubmissionReceipt,
     LogEntry,
     RunArtifactsResponse,
     RunCreateRequest,
@@ -102,7 +103,12 @@ def register_execution_routes(
         source_approval_id: str | None = None,
         source_execution_id: str | None = None,
         plan_sha256: str | None = None,
+        idempotency_key: str | None = None,
     ) -> RunRecord:
+        if idempotency_key:
+            existing = store.get_run_by_idempotency_key(idempotency_key)
+            if existing is not None:
+                return existing
         workflow = registry.get_workflow(request.workload_id)
         if workflow is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='workload definition not found')
@@ -256,7 +262,13 @@ def register_execution_routes(
             updated_at=now,
             detail='Generic experiment accepted by workflow-api.',
         )
-        submission = submitter.submit_run(manifest)
+        pending_receipt = JobSubmissionReceipt(
+            job_name='',
+            namespace='',
+            accepted_at=now,
+            status='pending',
+            detail='Run accepted; submission not yet attempted.',
+        )
         record = RunRecord(
             run_id=run_id,
             workflow_id=workflow.workflow_id,
@@ -264,7 +276,7 @@ def register_execution_routes(
             updated_at=now,
             manifest=manifest,
             status=status_payload,
-            job_submission=submission,
+            job_submission=pending_receipt,
             run_purpose='generic-experiment',
             run_priority=request.run_priority,
             session_id=request.session_id,
@@ -273,6 +285,26 @@ def register_execution_routes(
             source_approval_id=source_approval_id,
             source_execution_id=source_execution_id,
             plan_sha256=plan_sha256,
+            idempotency_key=idempotency_key,
+        )
+        # Persist the durable 'accepted' record BEFORE submitting so a failure
+        # between submit and save cannot orphan a running Job with no RunRecord.
+        try:
+            store.save_run(record)
+        except IdempotencyConflict:
+            existing = store.get_run_by_idempotency_key(idempotency_key)
+            if existing is not None:
+                return existing
+            raise
+        try:
+            submission = submitter.submit_run(manifest)
+        except JobSubmissionError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.detail,
+            ) from exc
+        record = record.model_copy(
+            update={'job_submission': submission, 'updated_at': datetime.now(timezone.utc)}
         )
         store.save_run(record)
         store.save_artifacts(run_id, build_artifact_index(run_id, expected_artifacts))
@@ -499,8 +531,9 @@ def register_execution_routes(
         return build_execution_preflight_result(workflow, settings)
 
     @app.post('/experiments/runs', response_model=RunRecord, status_code=status.HTTP_201_CREATED)
-    def create_generic_experiment_run(request: GenericExperimentRunRequest) -> RunRecord:
-        return build_generic_run_record(request)
+    def create_generic_experiment_run(request: GenericExperimentRunRequest, raw_request: Request) -> RunRecord:
+        idempotency_key = raw_request.headers.get('Idempotency-Key')
+        return build_generic_run_record(request, idempotency_key=idempotency_key)
 
     @app.post('/experiments/runs/{run_id}/results', response_model=RunRecord)
     def ingest_generic_experiment_results(run_id: str, request: GenericExperimentResultIngestRequest) -> RunRecord:
@@ -696,6 +729,17 @@ def register_execution_routes(
             return record
         if record.status.status in {'succeeded', 'failed', 'rejected'}:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='terminal run cannot be cancelled')
+        # Re-resolve the live status so a job that finished between the last
+        # status check and this delete is not durably marked cancelled.
+        try:
+            live_status = submitter.get_live_status(record)
+        except (LiveStatusUnavailableError, NotImplementedError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail='workload status could not be confirmed before cancellation',
+            ) from exc
+        if live_status is not None and live_status.status in {'succeeded', 'failed', 'rejected'}:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='terminal run cannot be cancelled')
         try:
             submitter.cancel_run(record)
         except (LiveStatusUnavailableError, NotImplementedError) as exc:
@@ -704,18 +748,18 @@ def register_execution_routes(
                 detail='workload cancellation could not be confirmed',
             ) from exc
         now = datetime.now(timezone.utc)
-        updated = record.model_copy(
-            update={
-                'updated_at': now,
-                'status': RunStatus(
-                    run_id=run_id,
-                    status='cancelled',
-                    updated_at=now,
-                    detail='Workload cancellation confirmed.',
-                ),
-            }
+        updated = store.transition_run_status(
+            run_id,
+            from_statuses=frozenset({'accepted', 'queued', 'running'}),
+            to_status=RunStatus(
+                run_id=run_id,
+                status='cancelled',
+                updated_at=now,
+                detail='Workload cancellation confirmed.',
+            ),
         )
-        store.save_run(updated)
+        if updated is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='run not found')
         return updated
 
     @app.get('/runs/{run_id}/artifacts', response_model=RunArtifactsResponse)

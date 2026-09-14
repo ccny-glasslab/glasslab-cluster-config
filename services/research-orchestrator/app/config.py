@@ -101,6 +101,9 @@ class Settings(BaseSettings):
     task_bundle_root: str = '/tmp/glasslab-research-orchestrator/task-bundles'
     task_asset_root: str = '/tmp/glasslab-research-orchestrator/task-assets'
     maximum_task_asset_bytes: int = 2 * 1024 * 1024 * 1024
+    task_asset_download_timeout_seconds: float = 300.0
+    task_asset_download_connect_timeout_seconds: float = 15.0
+    task_asset_download_max_retries: int = 2
     dataset_upload_root: str = (
         '/tmp/glasslab-research-orchestrator/dataset-uploads'
     )
@@ -194,6 +197,11 @@ class Settings(BaseSettings):
     cluster_execution_mode: str = 'workflow-api'
     cluster_execution_workload_id: str = 'workspace-cpu-ml-v1'
     cluster_execution_experiment_type: str = 'research-workspace-job'
+    # Durable record of idempotency_key -> external_run_id submissions so a
+    # restart observes the same external run without re-submitting (see #255).
+    cluster_submission_state_path: str = (
+        '/tmp/glasslab-research-orchestrator/cluster-submissions.json'
+    )
     workflow_api_caller_name: str = Field(
         default='',
         validation_alias=AliasChoices(
@@ -231,7 +239,7 @@ class Settings(BaseSettings):
     # durable event the next time a new run is created.
     paused_run_staleness_days: int = 3
     job_poll_interval_seconds: float = 10.0
-    require_operator_auth: bool = False
+    require_operator_auth: bool = True
     operator_api_token: str | None = None
 
     discord_enabled: bool = False

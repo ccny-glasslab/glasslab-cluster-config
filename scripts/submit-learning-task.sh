@@ -71,6 +71,7 @@ build_payload() {
   python3 - "$@" <<'PY'
 import json
 import os
+import shlex
 import sys
 
 objective = sys.argv[1]
@@ -100,7 +101,7 @@ payload = {
         '-lc',
         (
             'python3 scripts/run_experiment.py '
-            f'--config {config_path} '
+            f'--config {shlex.quote(config_path)} '
             '--output-dir /mnt/artifacts/$GLASSLAB_RUNNER_EXPERIMENT_ID'
         ),
     ],

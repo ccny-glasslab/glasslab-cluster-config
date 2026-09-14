@@ -10,12 +10,12 @@ spec:
     spec:
       containers:
         - name: prepull
-          image: busybox:1.36
+          image: busybox:1.36@sha256:b7f3d86d6e84fc17718c48bcde1450807faa2d56704205c697b4bd5df7b9e29f
           command: ["sh", "-c"]
           args:
              - |
-               echo "Pre-pulling ghcr.io/ccny-glasslab/glasslab-metric-search:latest..."
-               docker pull ghcr.io/ccny-glasslab/glasslab-metric-search:latest || true
+               echo "Pre-pulling ghcr.io/ccny-glasslab/glasslab-metric-search:03f7062935280c6fd7c6d6598a460d6fb885824b..."
+               docker pull ghcr.io/ccny-glasslab/glasslab-metric-search:03f7062935280c6fd7c6d6598a460d6fb885824b || true
                echo "Pre-pulling ghcr.io/ccny-glasslab/glasslab-metric-search:baseline-v1..."
                docker pull ghcr.io/ccny-glasslab/glasslab-metric-search:baseline-v1 || true
                echo "Pre-pulling ghcr.io/ccny-glasslab/glasslab-metric-search:baseline-v8..."

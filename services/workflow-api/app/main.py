@@ -14,6 +14,7 @@ entry point used by the uvicorn server.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import json
 import logging
@@ -23,6 +24,7 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib import request as urllib_request
 from uuid import uuid4
 
+import anyio
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
@@ -37,7 +39,7 @@ from .execution_routes import register_execution_routes
 from .execution_preflight import build_execution_preflight_result
 from .external_literature import search_external_literature
 from .investigation_routes import register_investigation_routes
-from .job_submission import JobSubmitter, create_job_submitter
+from .job_submission import JobSubmissionError, JobSubmitter, create_job_submitter
 from .literature_routes import register_literature_routes
 from .paper_pipeline import (
     auto_resolve_pipeline_design_inputs as auto_resolve_pipeline_design_inputs_impl,
@@ -45,7 +47,7 @@ from .paper_pipeline import (
     default_paper_pipeline_request_text as default_paper_pipeline_request_text_impl,
     resolve_replication_repository_url as resolve_replication_repository_url_impl,
 )
-from .persistence import RunStore, create_run_store
+from .persistence import IdempotencyConflict, RunStore, create_run_store
 from .registry import WorkflowRegistry
 from .schedule_routes import register_schedule_routes
 from .source_documents import ingest_source_document, register_source_document_routes
@@ -122,6 +124,7 @@ from .schemas import (
     IntakeCreateRequest,
     IntakeRecord,
     InterpretationRecord,
+    JobSubmissionReceipt,
     LogEntry,
     OperationRecord,
     PaperIntakeCandidateRecord,
@@ -321,7 +324,7 @@ def auto_resolve_pipeline_design_inputs(
     return auto_resolve_pipeline_design_inputs_impl(design, intake, interpretation, request, settings)
 
 
-def wait_for_terminal_run_state(
+async def wait_for_terminal_run_state(
     run: RunRecord,
     settings: Settings,
     submitter: JobSubmitter,
@@ -331,13 +334,15 @@ def wait_for_terminal_run_state(
     deadline = time.monotonic() + timeout_seconds
     current = run
     while True:
-        resolved_status = resolve_run_status(current, settings, submitter)
+        resolved_status = await anyio.to_thread.run_sync(
+            resolve_run_status, current, settings, submitter
+        )
         current = current.model_copy(update={'status': resolved_status, 'updated_at': resolved_status.updated_at})
         if resolved_status.status in {'succeeded', 'failed', 'rejected'}:
             return current
         if time.monotonic() >= deadline:
             return current
-        time.sleep(poll_interval_seconds)
+        await asyncio.sleep(poll_interval_seconds)
 
 
 def build_paper_pipeline_report_state(
@@ -1011,6 +1016,10 @@ def execute_due_approved_rerun_schedules(
             source_intake_id=source_run.source_intake_id,
             run_purpose='approved-rerun',
             session_id=source_run.session_id,
+            idempotency_key=(
+                f'approved-rerun:{schedule.schedule_id}:'
+                f'{started_at.strftime("%Y%m%d%H%M")}'
+            ),
         )
         finished_at = datetime.now(timezone.utc)
         detail = f'Approved rerun submitted as {rerun_record.run_id}.'
@@ -1050,7 +1059,12 @@ def create_run_record(
     source_intake_id: str | None = None,
     run_purpose: str | None = None,
     session_id: str | None = None,
+    idempotency_key: str | None = None,
 ) -> RunRecord:
+    if idempotency_key:
+        existing = store.get_run_by_idempotency_key(idempotency_key)
+        if existing is not None:
+            return existing
     # Persistent failure: validation only blocks this request; unknown or
     # disallowed fields are rejected so the caller can fix their input.
     issues = validate_run_request(request, workflow)
@@ -1100,7 +1114,13 @@ def create_run_record(
         expected_artifacts=workflow.expected_artifacts.model_dump(mode='json'),
     )
     status_payload = RunStatus(run_id=run_id, status='accepted', updated_at=now, detail='Run accepted by workflow-api.')
-    submission = submitter.submit_run(manifest)
+    pending_receipt = JobSubmissionReceipt(
+        job_name='',
+        namespace='',
+        accepted_at=now,
+        status='pending',
+        detail='Run accepted; submission not yet attempted.',
+    )
     record = RunRecord(
         run_id=run_id,
         workflow_id=workflow.workflow_id,
@@ -1108,18 +1128,38 @@ def create_run_record(
         updated_at=now,
         manifest=manifest,
         status=status_payload,
-        job_submission=submission,
+        job_submission=pending_receipt,
         source_design_id=source_design_id,
         source_intake_id=source_intake_id,
         run_purpose=run_purpose,
         run_priority=request.run_priority,
         session_id=session_id,
+        idempotency_key=idempotency_key,
     )
     artifacts = build_artifact_index(run_id, workflow.expected_artifacts.required, workflow.expected_artifacts.optional)
+    # Persist the durable 'accepted' record BEFORE submitting so a failure
+    # between submit and save cannot orphan a running Job with no RunRecord.
+    try:
+        store.save_run(record)
+    except IdempotencyConflict:
+        existing = store.get_run_by_idempotency_key(idempotency_key)
+        if existing is not None:
+            return existing
+        raise
+    try:
+        submission = submitter.submit_run(manifest)
+    except JobSubmissionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+        ) from exc
+    record = record.model_copy(
+        update={'job_submission': submission, 'updated_at': datetime.now(timezone.utc)}
+    )
+    store.save_run(record)
     # Touch the session AFTER the run is stored so a crash before submission
     # doesn't leave a dangling latest_run_id pointer to a run that was never
     # actually submitted.
-    store.save_run(record)
     touch_research_session(store, session_id, latest_run_id=run_id)
     store.save_artifacts(run_id, artifacts)
     store.append_log(
@@ -1904,7 +1944,7 @@ def create_app(
         return updated
 
     @app.post('/paper-pipelines/fresh-paper', response_model=FreshPaperPipelineResponse, status_code=status.HTTP_201_CREATED)
-    def create_fresh_paper_pipeline(request: FreshPaperPipelineRequest) -> FreshPaperPipelineResponse:
+    async def create_fresh_paper_pipeline(request: FreshPaperPipelineRequest) -> FreshPaperPipelineResponse:
         warnings: list[str] = []
 
         intake_request = build_fresh_paper_intake_request(request, settings)
@@ -2051,7 +2091,7 @@ def create_app(
             session_id=design.session_id,
         )
         if request.wait_for_terminal_state:
-            run = wait_for_terminal_run_state(
+            run = await wait_for_terminal_run_state(
                 run,
                 settings,
                 submitter,

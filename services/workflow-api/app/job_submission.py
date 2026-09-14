@@ -39,6 +39,22 @@ class LiveStatusUnavailableError(Exception):
     """
 
 
+class JobSubmissionError(Exception):
+    """The Kubernetes Job API rejected or failed a job submission.
+
+    Carries the upstream HTTP status so route handlers can surface a clean
+    JSON error instead of letting the raw ApiException escape as an
+    unhandled 500. Client-side 4xx statuses pass through unchanged; upstream
+    5xx statuses are mapped to 502 Bad Gateway because the failure is in the
+    cluster control plane, not the caller's request.
+    """
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
 # Transport exceptions the Kubernetes Python client raises for expected
 # infrastructure outages, kept distinct from ApiException and from unrelated
 # programming errors. urllib3.MaxRetryError is the umbrella for DNS,
@@ -368,6 +384,18 @@ def _is_research_workspace_manifest(manifest: RunManifest) -> bool:
     }
 
 
+def _validate_relative_subpath(relative: str, uri: str) -> str:
+    path = PurePosixPath(relative)
+    if (
+        not relative
+        or path.as_posix() == '.'
+        or path.is_absolute()
+        or '..' in path.parts
+    ):
+        raise ValueError(f'asset URI has an invalid path: {uri}')
+    return path.as_posix()
+
+
 def _asset_volume_subpath(uri: str) -> tuple[str, str]:
     if uri.startswith(('s3://datasets/', 's3://glasslab-datasets/')):
         volume_name = 'dataset-volume'
@@ -383,15 +411,7 @@ def _asset_volume_subpath(uri: str) -> tuple[str, str]:
         raise ValueError(
             'research workspace assets must use an approved data or artifact URI'
         )
-    path = PurePosixPath(relative)
-    if (
-        not relative
-        or path.as_posix() == '.'
-        or path.is_absolute()
-        or '..' in path.parts
-    ):
-        raise ValueError(f'research workspace asset URI has an invalid path: {uri}')
-    return volume_name, path.as_posix()
+    return volume_name, _validate_relative_subpath(relative, uri)
 
 
 def _research_workspace_asset_locations(
@@ -454,14 +474,19 @@ def _research_workspace_volume_mount_specs(
 def resolve_dataset_uri(dataset_uri: str, settings: Settings) -> str:
     """Resolve dataset aliases that are backed by the mounted dataset plane."""
     if dataset_uri.startswith('s3://datasets/'):
-        path = dataset_uri.removeprefix('s3://datasets/')
-        return f'{settings.dataset_mount_path}/{path}'
+        relative = dataset_uri.removeprefix('s3://datasets/')
+        return f'{settings.dataset_mount_path}/{_validate_relative_subpath(relative, dataset_uri)}'
     if dataset_uri.startswith('s3://glasslab-datasets/'):
-        path = dataset_uri.removeprefix('s3://glasslab-datasets/')
-        return f'{settings.dataset_mount_path}/{path}'
+        relative = dataset_uri.removeprefix('s3://glasslab-datasets/')
+        return f'{settings.dataset_mount_path}/{_validate_relative_subpath(relative, dataset_uri)}'
     if dataset_uri.startswith('s3://artifacts/'):
-        path = dataset_uri.removeprefix('s3://artifacts/')
-        return f'{settings.artifacts_mount_path}/{path}'
+        relative = dataset_uri.removeprefix('s3://artifacts/')
+        return f'{settings.artifacts_mount_path}/{_validate_relative_subpath(relative, dataset_uri)}'
+    if dataset_uri.startswith('s3://'):
+        raise ValueError(
+            f'asset URI must use an approved data or artifact prefix: {dataset_uri}'
+        )
+    _validate_relative_subpath(dataset_uri, dataset_uri)
     return dataset_uri
 
 
@@ -479,7 +504,7 @@ def validate_workflow_submission_support(workflow: Any, settings: Settings) -> l
         input_type = getattr(input_spec, 'input_type', 'text')
         name = getattr(input_spec, 'name', 'input')
         if input_type in {'dataset', 'url'}:
-            placeholder_inputs[name] = f's3://placeholder/{name}'
+            placeholder_inputs[name] = f's3://datasets/placeholder/{name}'
         elif input_type == 'notes':
             placeholder_inputs[name] = f'placeholder {name} notes'
         elif input_type == 'parameter_set':
@@ -537,10 +562,10 @@ class KubernetesJobSubmitter(JobSubmitter):
         if manifest.workload_id:
             labels['glasslab.io/workload-id'] = _sanitize_label(manifest.workload_id)
         workspace_config = manifest.config_payload.get('workspace')
+        network_policy = 'none'
         if isinstance(workspace_config, dict):
-            network_policy = str(workspace_config.get('network_policy', '')).strip()
-            if network_policy:
-                labels['glasslab.io/network-policy'] = _sanitize_label(network_policy)
+            network_policy = str(workspace_config.get('network_policy', '')).strip() or 'none'
+        labels['glasslab.io/network-policy'] = _sanitize_label(network_policy)
 
         priority_class_name = ''
         if manifest.run_priority == 'autonomous':
@@ -796,7 +821,19 @@ class KubernetesJobSubmitter(JobSubmitter):
             ),
         )
 
-        self.batch_api.create_namespaced_job(namespace=self.settings.runner_namespace, body=job)
+        try:
+            self.batch_api.create_namespaced_job(namespace=self.settings.runner_namespace, body=job)
+        except self.api_exception as exc:
+            upstream_status = getattr(exc, 'status', None)
+            if isinstance(upstream_status, int) and 400 <= upstream_status < 500:
+                raise JobSubmissionError(
+                    upstream_status,
+                    f'Kubernetes rejected the job submission: {exc.reason or exc.body or exc}',
+                ) from exc
+            raise JobSubmissionError(
+                502,
+                'Kubernetes Job API failed during submission',
+            ) from exc
         return JobSubmissionReceipt(
             job_name=job_name,
             namespace=self.settings.runner_namespace,

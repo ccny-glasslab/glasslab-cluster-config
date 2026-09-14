@@ -244,6 +244,17 @@ class DiscordRestCircuit:
                 self._half_open_in_flight = True
                 return
 
+    def release_half_open_probe(self) -> None:
+        """Release the half-open probe slot without recording an outcome.
+
+        Used when a guarded attempt exits without recording (e.g. an
+        unexpected exception escaped the attempt loop), so the breaker can
+        recover on the next call instead of wedging half-open forever.
+        """
+        with self._lock:
+            if self._state == STATE_HALF_OPEN:
+                self._half_open_in_flight = False
+
     def record(self, outcome: DiscordRestOutcome) -> None:
         """Record an observed outcome and advance the state machine."""
         with self._lock:
@@ -339,58 +350,78 @@ def execute_guarded(
     budget = policy.total_sleep_budget_seconds
     retries_429 = 0
     retries_transient = 0
-    while True:
-        try:
-            response = attempt()
-        except httpx.HTTPError as exc:
-            outcome = classify_exception(exc)
+    recorded = False
+
+    def _record(outcome: DiscordRestOutcome) -> None:
+        nonlocal recorded
+        recorded = True
+        circuit.record(outcome)
+
+    try:
+        while True:
+            try:
+                response = attempt()
+            except Exception as exc:
+                # Any attempt exception is a transport failure: httpx.HTTPError
+                # subclasses and non-httpx exceptions alike (e.g.
+                # httpx.InvalidURL, httpx.StreamError) classify as network so
+                # the circuit always records an outcome and can never wedge
+                # half-open.
+                outcome = classify_exception(exc)
+                if (
+                    is_retryable(outcome.category)
+                    and retries_transient < policy.max_transient_retries
+                    and budget > 0
+                ):
+                    delay = _transient_backoff(policy, retries_transient)
+                    if delay > budget:
+                        _record(outcome)
+                        raise
+                    policy.sleep(delay)
+                    budget -= delay
+                    retries_transient += 1
+                    continue
+                _record(outcome)
+                raise
+            outcome = classify_response(response)
+            if outcome.category == CATEGORY_OK:
+                _record(outcome)
+                return response
             if (
                 is_retryable(outcome.category)
-                and retries_transient < policy.max_transient_retries
                 and budget > 0
             ):
-                delay = _transient_backoff(policy, retries_transient)
+                if outcome.category == CATEGORY_RATE_LIMITED:
+                    if retries_429 >= policy.max_429_retries:
+                        _record(outcome)
+                        raise_failure(response)
+                        return response
+                    delay = _retry_delay(policy, outcome, retries_429)
+                    retries_429 += 1
+                else:
+                    if retries_transient >= policy.max_transient_retries:
+                        _record(outcome)
+                        raise_failure(response)
+                        return response
+                    delay = _transient_backoff(policy, retries_transient)
+                    retries_transient += 1
                 if delay > budget:
-                    circuit.record(outcome)
-                    raise
+                    _record(outcome)
+                    raise_failure(response)
+                    return response
                 policy.sleep(delay)
                 budget -= delay
-                retries_transient += 1
                 continue
-            circuit.record(outcome)
-            raise
-        outcome = classify_response(response)
-        if outcome.category == CATEGORY_OK:
-            circuit.record(outcome)
+            _record(outcome)
+            raise_failure(response)
             return response
-        if (
-            is_retryable(outcome.category)
-            and budget > 0
-        ):
-            if outcome.category == CATEGORY_RATE_LIMITED:
-                if retries_429 >= policy.max_429_retries:
-                    circuit.record(outcome)
-                    raise_failure(response)
-                    return response
-                delay = _retry_delay(policy, outcome, retries_429)
-                retries_429 += 1
-            else:
-                if retries_transient >= policy.max_transient_retries:
-                    circuit.record(outcome)
-                    raise_failure(response)
-                    return response
-                delay = _transient_backoff(policy, retries_transient)
-                retries_transient += 1
-            if delay > budget:
-                circuit.record(outcome)
-                raise_failure(response)
-                return response
-            policy.sleep(delay)
-            budget -= delay
-            continue
-        circuit.record(outcome)
-        raise_failure(response)
-        return response
+    finally:
+        if not recorded:
+            # No outcome was recorded (an unexpected exception escaped from
+            # classify_response/sleep/raise_failure, or a BaseException):
+            # release the half-open probe slot so the breaker recovers on the
+            # next call instead of wedging open forever.
+            circuit.release_half_open_probe()
 
 
 def _retry_delay(

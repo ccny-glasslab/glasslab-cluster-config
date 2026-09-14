@@ -126,7 +126,7 @@ if [[ ! -d "${DATASET_PATH}" ]]; then
   mkdir -p "${DATASET_PATH}"
   
   # Generate synthetic CIFAR-100 data (replace with actual download if needed)
-  python3 <<'PYTHON'
+  DATASET_PATH="${DATASET_PATH}" python3 <<'PYTHON'
 import os
 import numpy as np
 from PIL import Image
@@ -137,8 +137,9 @@ num_classes = 100
 samples_per_class = 500  # Reduced for testing
 img_size = 32
 
-os.makedirs('/tmp/cifar100/train', exist_ok=True)
-os.makedirs('/tmp/cifar100/test', exist_ok=True)
+dataset_path = os.environ['DATASET_PATH']
+os.makedirs(os.path.join(dataset_path, 'train'), exist_ok=True)
+os.makedirs(os.path.join(dataset_path, 'test'), exist_ok=True)
 
 # Class names (CIFAR-100 fine labels)
 class_names = [
@@ -162,14 +163,14 @@ class_names = [
 for class_idx, class_name in enumerate(class_names):
     for sample_idx in range(samples_per_class):
         img = np.random.randint(0, 256, (img_size, img_size, 3), dtype=np.uint8)
-        img_path = f'/tmp/cifar100/train/{class_name}_{sample_idx:04d}.png'
+        img_path = os.path.join(dataset_path, 'train', f'{class_name}_{sample_idx:04d}.png')
         Image.fromarray(img).save(img_path)
 
 # Generate test images
 for class_idx, class_name in enumerate(class_names):
     for sample_idx in range(samples_per_class // 5):  # 20% for test
         img = np.random.randint(0, 256, (img_size, img_size, 3), dtype=np.uint8)
-        img_path = f'/tmp/cifar100/test/{class_name}_{sample_idx:04d}.png'
+        img_path = os.path.join(dataset_path, 'test', f'{class_name}_{sample_idx:04d}.png')
         Image.fromarray(img).save(img_path)
 
 print(f'Generated CIFAR-100 dataset: {len(class_names)} classes, {samples_per_class} train samples/class')
@@ -186,7 +187,7 @@ run_mc cp --recursive "${DATASET_PATH}/test" "glasslab/${BUCKET_NAME}/datasets/$
 
 # Upload dataset config
 printf '[upload-cifar100] uploading dataset config...\n'
-cat <<'CONFIG' > /tmp/cifar100_config.yaml
+cat <<'CONFIG' > "${DATASET_PATH}/config.yaml"
 name: cifar100
 description: CIFAR-100 dataset for contrastive learning
 type: image_classification
@@ -208,12 +209,15 @@ augmentation:
   random_horizontal_flip: true
 CONFIG
 
-run_mc cp /tmp/cifar100_config.yaml "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/config.yaml"
+run_mc cp "${DATASET_PATH}/config.yaml" "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/config.yaml"
 
 # Verify upload
 printf '[upload-cifar100] verifying upload...\n'
-run_mc ls "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/train/" | head -5
-run_mc ls "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/test/" | head -5
+# Capture the full listing first so mc never gets SIGPIPE from head under pipefail.
+train_listing="$(run_mc ls "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/train/")"
+test_listing="$(run_mc ls "glasslab/${BUCKET_NAME}/datasets/${DATASET_NAME}/test/")"
+printf '%s\n' "$train_listing" | head -5
+printf '%s\n' "$test_listing" | head -5
 
 unset minio_host
 if [[ "$TRACE_WAS_ENABLED" -eq 1 ]]; then

@@ -80,7 +80,10 @@ def authenticate_request(request: Request, settings: Settings) -> CallerPolicy:
         )
 
     policy = next((candidate for candidate in settings.caller_policies if candidate.name == caller_name), None)
-    if policy is None or not secrets.compare_digest(supplied_token, policy.token.get_secret_value()):
+    if policy is None or not secrets.compare_digest(
+        supplied_token.encode('utf-8'),
+        policy.token.get_secret_value().encode('utf-8'),
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail='valid workflow caller credentials required',

@@ -20,7 +20,7 @@
   "allowed_models": [
     "agent-generated-python"
   ],
-  "runner_image": "ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:3c169671563c165e5a72e16d20daf955dfefcba7cb99d44aca47931dd093ed6a",
+  "runner_image": "ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:dae5bc4967f5ac54edb6c6d63d8d3db9e4652cc46e035118b0c456eb70121061",
   "runner_service_account_name": "glasslab-gpu-runner",
   "max_wallclock_minutes": 60,
   "evaluator_type": "rubric-gated-v1",

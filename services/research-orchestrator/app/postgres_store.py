@@ -255,7 +255,7 @@ class PostgresStore:
                 active = conn.execute('SELECT run_id, payload, version FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE AND investigation_id IS NOT DISTINCT FROM %s LIMIT 1', (states, record.investigation_id)).fetchone()
                 if active:
                     if stale_paused_cutoff is not None and active['payload'] is not None:
-                        current = RunRecord.model_validate_json(active['payload'])
+                        current = self._run(active, str(active['run_id']))
                         if current.state is RunState.PAUSED and current.updated_at < stale_paused_cutoff:
                             now = utc_now()
                             cancelled = current.model_copy(update={'state': RunState.CANCELLED, 'version': int(active['version']) + 1, 'updated_at': now})
@@ -284,7 +284,7 @@ class PostgresStore:
                 active = conn.execute('SELECT run_id, payload, version FROM orchestrator_runs WHERE state <> ALL(%s) AND conversation = FALSE AND investigation_id IS NOT DISTINCT FROM %s LIMIT 1', ([state.value for state in TERMINAL_STATES], record.investigation_id)).fetchone()
                 if active:
                     if stale_paused_cutoff is not None and active['payload'] is not None:
-                        current = RunRecord.model_validate_json(active['payload'])
+                        current = self._run(active, str(active['run_id']))
                         if current.state is RunState.PAUSED and current.updated_at < stale_paused_cutoff:
                             now = utc_now()
                             cancelled = current.model_copy(update={'state': RunState.CANCELLED, 'version': int(active['version']) + 1, 'updated_at': now})
@@ -356,18 +356,25 @@ class PostgresStore:
             self._append_event_conn(conn, run_id=run_id, source=source, event_type='run.state_changed', payload={'from': current.state.value, 'to': target.value, **(payload or {})})
         return updated
 
-    def _save_payload(self, table: str, id_column: str, record: Any, *, columns: dict[str, Any], conflict: str = 'update') -> Any:
+    def _save_payload(self, table: str, id_column: str, record: Any, *, columns: dict[str, Any], conflict: str = 'update', preserve: Sequence[str] = ()) -> Any:
         keys = [id_column, *columns.keys(), 'payload']; values = [getattr(record, id_column), *columns.values(), self._payload(record)]
-        assignments = ', '.join(f'{key}=EXCLUDED.{key}' for key in keys[1:])
         with self.transaction() as conn:
             if conflict == 'return_existing':
                 row = conn.execute(f'SELECT payload FROM {table} WHERE idempotency_key=%s', (columns['idempotency_key'],)).fetchone()
                 if row: return type(record).model_validate(row['payload'])
-            conn.execute(f'INSERT INTO {table} ({", ".join(keys)}) VALUES ({", ".join(["%s"] * len(keys))}) ON CONFLICT ({id_column}) DO UPDATE SET {assignments}', values)
+            if conflict == 'ignore':
+                # First-write-wins for immutable records, matching SQLite's
+                # INSERT OR IGNORE reference semantics (issue #238).
+                conn.execute(f'INSERT INTO {table} ({", ".join(keys)}) VALUES ({", ".join(["%s"] * len(keys))}) ON CONFLICT ({id_column}) DO NOTHING', values)
+            else:
+                assignments = ', '.join(f'{key}=EXCLUDED.{key}' for key in keys[1:] if key not in preserve)
+                conn.execute(f'INSERT INTO {table} ({", ".join(keys)}) VALUES ({", ".join(["%s"] * len(keys))}) ON CONFLICT ({id_column}) DO UPDATE SET {assignments}', values)
         return record
 
     def save_turn(self, record: TurnRecord) -> TurnRecord:
-        return self._save_payload('orchestrator_turns', 'turn_id', record, columns={'run_id': record.run_id, 'status': record.status, 'created_at': record.created_at, 'updated_at': record.updated_at})
+        # Idempotent upsert like SQLite: status/payload/updated_at may be
+        # rewritten by recovery, but created_at and run_id are preserved.
+        return self._save_payload('orchestrator_turns', 'turn_id', record, columns={'run_id': record.run_id, 'status': record.status, 'created_at': record.created_at, 'updated_at': record.updated_at}, preserve=('run_id', 'created_at'))
     def list_turns(self, run_id: str) -> list[TurnRecord]:
         with self._connect() as conn: return [TurnRecord.model_validate(r['payload']) for r in conn.execute('SELECT payload FROM orchestrator_turns WHERE run_id=%s ORDER BY created_at', (run_id,)).fetchall()]
     def mark_running_turns_interrupted(self, run_id: str) -> int:
@@ -425,10 +432,22 @@ class PostgresStore:
             conn.execute('INSERT INTO orchestrator_jobs (job_id, run_id, action_id, status, idempotency_key, payload, created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)', (record.job_id, record.run_id, record.action_id, record.status.value, record.idempotency_key, self._payload(record), record.created_at, record.updated_at))
         return record, True
     def update_job(self, record: JobRecord) -> JobRecord:
+        # Blind write keyed on job_id only (no version guard): the job watcher
+        # is the sole writer and re-reads before every update, so the rowcount
+        # check is purely a not-found signal. CANCELLED is terminal: a blind
+        # update that would resurrect the row (e.g. a submitter committing
+        # RUNNING after a cancel swept it) raises instead of leaking a
+        # permanently-running external cluster job (issue #246).
+        updated = record.model_copy(update={'updated_at': utc_now()})
         with self.transaction() as conn:
-            result = conn.execute('UPDATE orchestrator_jobs SET status=%s, payload=%s, updated_at=%s WHERE job_id=%s', (record.status.value, self._payload(record), record.updated_at, record.job_id))
+            row = conn.execute('SELECT payload FROM orchestrator_jobs WHERE job_id=%s', (record.job_id,)).fetchone()
+            if row is None: raise RecordNotFound(record.job_id)
+            current_status = JobRecord.model_validate(row['payload']).status
+            if current_status == JobStatus.CANCELLED and updated.status != JobStatus.CANCELLED:
+                raise ConcurrencyConflict(f'job {record.job_id} is CANCELLED and cannot transition to {updated.status.value}')
+            result = conn.execute('UPDATE orchestrator_jobs SET status=%s, payload=%s, updated_at=%s WHERE job_id=%s', (updated.status.value, self._payload(updated), updated.updated_at, updated.job_id))
             if result.rowcount != 1: raise RecordNotFound(record.job_id)
-        return record
+        return updated
     def get_job(self, job_id: str) -> JobRecord:
         with self._connect() as conn: row = conn.execute('SELECT payload FROM orchestrator_jobs WHERE job_id=%s', (job_id,)).fetchone()
         if not row: raise RecordNotFound(job_id)
@@ -441,11 +460,14 @@ class PostgresStore:
         with self._connect() as conn: return [JobRecord.model_validate(r['payload']) for r in conn.execute(query, params).fetchall()]
 
     def save_artifact(self, record: ArtifactRecord) -> ArtifactRecord:
-        return self._save_payload('orchestrator_artifacts', 'artifact_id', record, columns={'run_id': record.run_id, 'job_id': record.job_id, 'created_at': record.created_at})
+        return self._save_payload('orchestrator_artifacts', 'artifact_id', record, columns={'run_id': record.run_id, 'job_id': record.job_id, 'created_at': record.created_at}, conflict='ignore')
     def list_artifacts(self, run_id: str) -> list[ArtifactRecord]:
         with self._connect() as conn: return [ArtifactRecord.model_validate(r['payload']) for r in conn.execute('SELECT payload FROM orchestrator_artifacts WHERE run_id=%s ORDER BY created_at', (run_id,)).fetchall()]
     def save_dataset(self, record: IngestedDatasetRecord) -> IngestedDatasetRecord:
-        return self._save_payload('orchestrator_datasets', 'dataset_id', record, columns={'created_at': record.created_at})
+        self._save_payload('orchestrator_datasets', 'dataset_id', record, columns={'created_at': record.created_at}, conflict='ignore')
+        # Re-read the stored row so a duplicate ingest returns the canonical
+        # record (first write wins) rather than the caller's copy.
+        return self.get_dataset(record.dataset_id)
     def get_dataset(self, dataset_id: str) -> IngestedDatasetRecord:
         with self._connect() as conn: row = conn.execute('SELECT payload FROM orchestrator_datasets WHERE dataset_id=%s', (dataset_id,)).fetchone()
         if not row: raise RecordNotFound(dataset_id)
@@ -542,6 +564,36 @@ class PostgresStore:
         if row is None:
             return None
         return ConversationSourceBinding.model_validate(row['payload'])
+
+    def get_conversation_binding_by_thread_id(
+        self,
+        thread_id: str,
+    ) -> ConversationSourceBinding | None:
+        with self._connect() as conn:
+            rows = conn.execute(
+                'SELECT payload FROM orchestrator_conversation_bindings'
+            ).fetchall()
+        for row in rows:
+            binding = ConversationSourceBinding.model_validate(row['payload'])
+            if binding.discord_thread_id == thread_id:
+                return binding
+        return None
+
+    def bind_conversation_thread(
+        self,
+        conversation_id: str,
+        thread_id: str,
+    ) -> ConversationSourceBinding:
+        existing = self.get_conversation_binding(conversation_id)
+        binding = ConversationSourceBinding(
+            conversation_id=conversation_id,
+            source_ids=existing.source_ids if existing else [],
+            discord_thread_id=thread_id,
+            created_by=existing.created_by if existing else 'operator',
+            created_at=existing.created_at if existing else utc_now(),
+            updated_at=utc_now(),
+        )
+        return self.save_conversation_binding(binding)
 
     def bind_conversation_sources(
         self,

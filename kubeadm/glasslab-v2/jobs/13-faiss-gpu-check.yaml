@@ -8,7 +8,7 @@ spec:
     spec:
       containers:
         - name: faiss-check
-          image: pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime
+          image: pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime@sha256:eee11b3b3872a8c838e35ef48f08b2d5def2080902c7f666831310ca1a0ef2be
           command: ["python", "-c", "import faiss; print(f'FAISS version: {faiss.__version__}'); print(f'Is CPU: {faiss.is_cpu()}'); print(f'Use CUDA: {faiss.use_cuda()}')"]
           resources:
             limits:

@@ -11,12 +11,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import json
+import os
 from pathlib import Path
 from types import ModuleType
 from threading import Lock
 from typing import Any, TypeVar
 
-from services.common.schemas import ArtifactsIndex
+from services.common.schemas import ArtifactsIndex, RunStatus
 
 from .schemas import (
     AutoresearchCampaignRecord,
@@ -43,6 +44,15 @@ from .schemas import (
 )
 
 ModelT = TypeVar('ModelT')
+
+
+class IdempotencyConflict(RuntimeError):
+    """A run with the same idempotency key already exists in the store.
+
+    Raised by save_run when a caller tries to persist a second run under a
+    key that is already bound to a different run_id. Callers catch this and
+    return the existing run instead of creating a duplicate Job.
+    """
 
 
 def _import_psycopg() -> ModuleType:
@@ -246,6 +256,20 @@ class RunStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def transition_run_status(
+        self,
+        run_id: str,
+        *,
+        from_statuses: frozenset[str],
+        to_status: RunStatus,
+    ) -> RunRecord | None:
+        """Atomically transition a run's status when it is currently in one of
+        ``from_statuses``. Returns the updated record, the existing record when
+        the transition is not allowed, or None when the run does not exist.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def save_research_problem(self, record: ResearchProblemRecord) -> None:
         raise NotImplementedError
 
@@ -291,6 +315,10 @@ class RunStore(ABC):
 
     @abstractmethod
     def get_run(self, run_id: str) -> RunRecord | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_run_by_idempotency_key(self, idempotency_key: str) -> RunRecord | None:
         raise NotImplementedError
 
     @abstractmethod
@@ -658,8 +686,40 @@ class InMemoryRunStore(RunStore):
 
     def save_run(self, record: RunRecord) -> None:
         with self._lock:
+            if record.idempotency_key:
+                for existing in self._runs.values():
+                    if (
+                        existing.run_id != record.run_id
+                        and existing.idempotency_key == record.idempotency_key
+                    ):
+                        raise IdempotencyConflict(
+                            f'idempotency key already used: {record.idempotency_key}'
+                        )
             self._runs[record.run_id] = record
             self._latest_run_id = record.run_id
+
+    def transition_run_status(
+        self,
+        run_id: str,
+        *,
+        from_statuses: frozenset[str],
+        to_status: RunStatus,
+    ) -> RunRecord | None:
+        with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return None
+            if record.status.status not in from_statuses:
+                return record
+            updated = record.model_copy(
+                update={
+                    'updated_at': to_status.updated_at,
+                    'status': to_status,
+                }
+            )
+            self._runs[run_id] = updated
+            self._latest_run_id = run_id
+            return updated
 
     def save_research_problem(self, record: ResearchProblemRecord) -> None:
         with self._lock:
@@ -719,6 +779,13 @@ class InMemoryRunStore(RunStore):
     def get_run(self, run_id: str) -> RunRecord | None:
         with self._lock:
             return self._runs.get(run_id)
+
+    def get_run_by_idempotency_key(self, idempotency_key: str) -> RunRecord | None:
+        with self._lock:
+            for record in self._runs.values():
+                if record.idempotency_key == idempotency_key:
+                    return record
+            return None
 
     def get_latest_run(self) -> RunRecord | None:
         with self._lock:
@@ -934,7 +1001,12 @@ class JsonFileRunStore(InMemoryRunStore):
                 'latest_operation_id': self._latest_operation_id,
             }
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        self._state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding='utf-8')
+        tmp_path = self._state_path.with_name(self._state_path.name + '.tmp')
+        with tmp_path.open('w', encoding='utf-8') as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=True))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, self._state_path)
 
     def save_research_session(self, record: ResearchSessionRecord) -> None:
         super().save_research_session(record)
@@ -957,7 +1029,12 @@ class JsonFileRunStore(InMemoryRunStore):
         self._flush()
 
     def save_autoresearch_iteration(self, record: AutoresearchIterationRecord) -> None:
-        super().save_autoresearch_iteration(record)
+        # model_copy(update=...) does not re-validate, so a caller can hand us
+        # a record whose status violates the schema Literal. Re-validate before
+        # flushing so contract violations fail at the mutation site instead of
+        # poisoning the store and crash-looping on reload.
+        validated = AutoresearchIterationRecord.model_validate(record.model_dump())
+        super().save_autoresearch_iteration(validated)
         self._flush()
 
     def save_autoresearch_decision(self, record: AutoresearchDecisionRecord) -> None:
@@ -991,6 +1068,22 @@ class JsonFileRunStore(InMemoryRunStore):
     def save_run(self, record: RunRecord) -> None:
         super().save_run(record)
         self._flush()
+
+    def transition_run_status(
+        self,
+        run_id: str,
+        *,
+        from_statuses: frozenset[str],
+        to_status: RunStatus,
+    ) -> RunRecord | None:
+        updated = super().transition_run_status(
+            run_id,
+            from_statuses=from_statuses,
+            to_status=to_status,
+        )
+        if updated is not None and updated.status.status == to_status.status:
+            self._flush()
+        return updated
 
     def save_research_problem(self, record: ResearchProblemRecord) -> None:
         super().save_research_problem(record)
@@ -1256,7 +1349,12 @@ class PostgresRunStore(InMemoryRunStore):
         self._flush()
 
     def save_autoresearch_iteration(self, record: AutoresearchIterationRecord) -> None:
-        super().save_autoresearch_iteration(record)
+        # model_copy(update=...) does not re-validate, so a caller can hand us
+        # a record whose status violates the schema Literal. Re-validate before
+        # flushing so contract violations fail at the mutation site instead of
+        # poisoning the store and crash-looping on reload.
+        validated = AutoresearchIterationRecord.model_validate(record.model_dump())
+        super().save_autoresearch_iteration(validated)
         self._flush()
 
     def save_autoresearch_decision(self, record: AutoresearchDecisionRecord) -> None:
@@ -1290,6 +1388,22 @@ class PostgresRunStore(InMemoryRunStore):
     def save_run(self, record: RunRecord) -> None:
         super().save_run(record)
         self._flush()
+
+    def transition_run_status(
+        self,
+        run_id: str,
+        *,
+        from_statuses: frozenset[str],
+        to_status: RunStatus,
+    ) -> RunRecord | None:
+        updated = super().transition_run_status(
+            run_id,
+            from_statuses=from_statuses,
+            to_status=to_status,
+        )
+        if updated is not None and updated.status.status == to_status.status:
+            self._flush()
+        return updated
 
     def save_research_problem(self, record: ResearchProblemRecord) -> None:
         super().save_research_problem(record)
