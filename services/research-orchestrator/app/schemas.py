@@ -613,6 +613,7 @@ class ConversationSourceBinding(BaseModel):
 
     conversation_id: str = Field(min_length=1)
     source_ids: list[str] = Field(default_factory=list)
+    discord_thread_id: str | None = None
     created_by: str = 'operator'
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
