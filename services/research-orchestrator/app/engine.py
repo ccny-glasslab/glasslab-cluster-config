@@ -751,7 +751,13 @@ class ResearchOrchestrator:
                 'version': run.evaluation_contract_version,
                 'digest': run.evaluation_contract_digest,
             },
-            'protocol_path': run.protocol_path,
+            # Worktree-relative, not the absolute /mnt/... protocol path:
+            # freeze_protocol copies program.md into both agents' worktrees,
+            # so the basename is the reachable reference for the fresh session
+            # (an absolute path would invite a denied external-directory read).
+            'protocol_path': (
+                Path(run.protocol_path).name if run.protocol_path else None
+            ),
             'task_id': run.task_id,
             'failed_turn_error': error[:1000],
             'workspace_status': workspace_status,
@@ -5589,9 +5595,12 @@ class ResearchOrchestrator:
         """Persist the full evidence snapshot inside the agent's workspace.
 
         The agent reads it with its file tool; only a content-free digest goes
-        into the prompt (see _inline_evidence_digest). The workspace is the
-        only location the agent's file tool may reach (external_directory is
-        denied in the runtime config).
+        into the prompt (see _inline_evidence_digest). Besides its own
+        worktree, the agent's file tool may reach only the same run's
+        read-only durable directories (protocol/, shared-artifacts/,
+        reports/, events/); runtime/** (session databases and secrets) and the
+        other agent's worktree stay denied by the runtime config's
+        external_directory rules.
         """
         run = self.store.get_run(run_id)
         workspace = Path(
