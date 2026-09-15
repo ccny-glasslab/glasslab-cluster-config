@@ -563,6 +563,23 @@ Exceeding the limit pauses at `BEAKER_REVISING` and emits
 `methodology.human_resolution_requested` instead of consuming the remaining
 turn budget in an unbounded review loop.
 
+When the deterministic preflight rejects a matrix for a missing or
+under-populated contract `config_path`, the orchestrator materializes the
+required shape in `matrix.base_config` before handing Beaker the revision: it
+creates the file/skeleton if missing, inserts every missing dotted key, and
+tops up any list to the contract's `minimum_distinct_values` with deterministic
+`<leaf>-candidate-N` placeholders, each annotated with a YAML comment. The
+engine owns only the structural shape the preflight checks; Beaker still owns
+the values and is instructed to replace every placeholder. The repair is
+bounded and idempotent, so existing valid values and unrelated keys survive and
+a second pass makes no change. This emits `methodology.base_config_materialized`.
+
+A repeated identical preflight rejection — same normalized error set and same
+`base_config` digest — is a deterministic fixed point (agents run at
+`temperature: 0`). Instead of spending the revision budget, the orchestrator
+emits `methodology.non_convergence_detected` and pauses the run for human
+resolution with the repeated signature and offending errors.
+
 Approval and execution are separate audited facts. If an approved action cannot
 execute, the orchestrator records `action.execution_failed` with the error,
 authoritative job and artifact counts, retry classification, resulting safe
