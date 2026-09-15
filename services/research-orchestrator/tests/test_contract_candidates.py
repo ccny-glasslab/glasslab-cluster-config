@@ -328,3 +328,281 @@ def test_candidate_valid_methodology_requirements_seal_cleanly(
         version='1.0.0',
     )
     assert sealed.digest
+
+
+def _manager(tmp_path: Path) -> ContractCandidateManager:
+    return ContractCandidateManager(
+        sealed_root=str(tmp_path / 'sealed'),
+        promoted_root=str(tmp_path / 'shared' / 'bundles'),
+        catalog_path=str(tmp_path / 'shared' / 'catalog.json'),
+        shared_mount_root=str(tmp_path),
+    )
+
+
+def _candidate_with_requirements(
+    tmp_path: Path,
+    requirements: list[dict[str, object]],
+) -> tuple[ContractCandidateManager, Path]:
+    # Reuse the complete candidate bundle and swap in the methodology
+    # requirements under test, mirroring what Beaker's agent emits.
+    source = tmp_path / 'source'
+    _write_candidate(source)
+    descriptor_path = source / 'contract.json'
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor['manifest']['methodology_requirements'] = requirements
+    descriptor_path.write_text(json.dumps(descriptor))
+    return _manager(tmp_path), source
+
+
+def _seal(manager: ContractCandidateManager, source: Path) -> None:
+    manager.seal(source=source, contract_id='candidate-v1', version='1.0.0')
+
+
+def test_candidate_valid_comparison_requirement_seals_cleanly(
+    tmp_path: Path,
+) -> None:
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'model_families',
+                'config_path': 'experiment_dimensions.model',
+                'mode': 'comparison',
+                'minimum_distinct_values': 2,
+                'description': 'Compare a linear and a non-linear model family.',
+            }
+        ],
+    )
+
+    sealed = manager.seal(
+        source=source,
+        contract_id='candidate-v1',
+        version='1.0.0',
+    )
+
+    assert sealed.digest
+
+
+def test_candidate_unknown_root_config_path_is_rejected(tmp_path: Path) -> None:
+    # Issue #457: a requirement rooted anywhere other than the
+    # experiment_dimensions namespace cannot be materialized by the matrix
+    # template, so sealing it would send the run into a revision loop.
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'search_technique',
+                'config_path': 'methodology.search_technique',
+                'mode': 'comparison',
+                'minimum_distinct_values': 2,
+                'description': 'Compare at least two search techniques.',
+            }
+        ],
+    )
+
+    with pytest.raises(
+        ContractCandidateError,
+        match='experiment_dimensions',
+    ) as excinfo:
+        _seal(manager, source)
+
+    assert 'search_technique' in str(excinfo.value)
+    assert 'methodology.search_technique' in str(excinfo.value)
+
+
+def test_candidate_config_path_must_address_a_dimension_key(
+    tmp_path: Path,
+) -> None:
+    # A bare root names the whole experiment_dimensions mapping, which preflight
+    # rejects as a metadata object; sealing must require a nested dimension key.
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'dimensions-root',
+                'config_path': 'experiment_dimensions',
+                'mode': 'decision',
+                'description': 'Pick one experiment dimension.',
+            }
+        ],
+    )
+
+    with pytest.raises(
+        ContractCandidateError,
+        match='experiment_dimensions.model',
+    ):
+        _seal(manager, source)
+
+
+@pytest.mark.parametrize(
+    'config_path',
+    [
+        '../experiment_dimensions/model',
+        '/etc/passwd',
+        'experiment_dimensions/../model',
+        'experiment_dimensions..model',
+        'experiment_dimensions.',
+        'experiment_dimensions/model',
+        'src/train.py',
+        'configs/train.yaml',
+    ],
+)
+def test_candidate_malformed_config_path_is_rejected(
+    tmp_path: Path,
+    config_path: str,
+) -> None:
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'baseline-comparison',
+                'config_path': config_path,
+                'mode': 'comparison',
+                'minimum_distinct_values': 2,
+                'description': 'Compare baseline with non-linear ensembles.',
+            }
+        ],
+    )
+
+    with pytest.raises(ContractCandidateError, match='dotted key path'):
+        _seal(manager, source)
+
+
+def test_candidate_comparison_requirement_needs_two_values(
+    tmp_path: Path,
+) -> None:
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'model_families',
+                'config_path': 'experiment_dimensions.model',
+                'mode': 'comparison',
+                'minimum_distinct_values': 1,
+                'description': 'Compare model families.',
+            }
+        ],
+    )
+
+    with pytest.raises(
+        ContractCandidateError,
+        match='comparison requirement must',
+    ) as excinfo:
+        _seal(manager, source)
+
+    assert 'model_families' in str(excinfo.value)
+    assert 'experiment_dimensions.model' in str(excinfo.value)
+
+
+def test_candidate_decision_requirement_pins_exactly_one_value(
+    tmp_path: Path,
+) -> None:
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'missing_data_strategy',
+                'config_path': 'experiment_dimensions.missing_strategy',
+                'mode': 'decision',
+                'minimum_distinct_values': 2,
+                'description': 'Choose one missing-data strategy.',
+            }
+        ],
+    )
+
+    with pytest.raises(
+        ContractCandidateError,
+        match='decision requirement must',
+    ) as excinfo:
+        _seal(manager, source)
+
+    assert 'missing_data_strategy' in str(excinfo.value)
+
+
+def test_candidate_duplicate_requirement_id_is_rejected(tmp_path: Path) -> None:
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'model_families',
+                'config_path': 'experiment_dimensions.model',
+                'mode': 'comparison',
+                'minimum_distinct_values': 2,
+                'description': 'Compare model families.',
+            },
+            {
+                'requirement_id': 'model_families',
+                'config_path': 'experiment_dimensions.encoding',
+                'mode': 'decision',
+                'description': 'Choose one encoding.',
+            },
+        ],
+    )
+
+    with pytest.raises(
+        ContractCandidateError,
+        match='duplicate requirement_id',
+    ) as excinfo:
+        _seal(manager, source)
+
+    assert 'model_families' in str(excinfo.value)
+
+
+def test_candidate_maximum_below_minimum_is_rejected(tmp_path: Path) -> None:
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'model_families',
+                'config_path': 'experiment_dimensions.model',
+                'mode': 'comparison',
+                'minimum_distinct_values': 3,
+                'maximum_distinct_values': 2,
+                'description': 'Compare model families.',
+            }
+        ],
+    )
+
+    with pytest.raises(
+        ContractCandidateError,
+        match='below minimum_distinct_values',
+    ) as excinfo:
+        _seal(manager, source)
+
+    assert 'model_families' in str(excinfo.value)
+
+
+def test_candidate_blank_requirement_fields_are_rejected(
+    tmp_path: Path,
+) -> None:
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': '   ',
+                'config_path': 'experiment_dimensions.model',
+                'mode': 'decision',
+                'description': '   ',
+            }
+        ],
+    )
+
+    with pytest.raises(ContractCandidateError, match='non-empty'):
+        _seal(manager, source)
+
+
+def test_candidate_empty_requirement_id_is_rejected(tmp_path: Path) -> None:
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': '',
+                'config_path': 'experiment_dimensions.model',
+                'mode': 'decision',
+                'description': 'accuracy is the primary metric',
+            }
+        ],
+    )
+
+    with pytest.raises(ContractCandidateError, match='methodology_requirements'):
+        _seal(manager, source)

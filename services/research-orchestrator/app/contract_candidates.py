@@ -21,6 +21,9 @@ from .contracts import (
     ContractIntegrityError,
     compute_contract_digest,
 )
+from .methodology_requirement_validation import (
+    validate_methodology_requirements,
+)
 from .preflight import MethodologyRequirement
 from .schemas import EvaluationContractDescriptor
 
@@ -29,19 +32,15 @@ class ContractCandidateError(ValueError):
     pass
 
 
-def _looks_like_filesystem_path(config_path: str) -> bool:
-    # config_path is a dotted key path into the matrix.base_config YAML, so a
-    # value containing a directory separator and a file extension is a
-    # filesystem path, not a key path (issue #198).
-    return '/' in config_path and Path(config_path).suffix != ''
-
-
 def _validate_methodology_requirements(
     descriptor: EvaluationContractDescriptor,
 ) -> None:
     # config_path semantics are validated at seal and promotion time, before a
     # contract can bind a run, so a filesystem-looking value cannot survive to
     # preflight where it is resolved as a nonsensical nested key (issue #198).
+    # A requirement that cannot be expressed in the matrix's base_config shape
+    # is rejected here rather than discovered at preflight, where it would drive
+    # a deterministic revision loop (issue #457).
     raw_requirements = descriptor.manifest.get(
         'methodology_requirements',
         [],
@@ -55,15 +54,9 @@ def _validate_methodology_requirements(
         raise ContractCandidateError(
             f'methodology_requirements are invalid: {exc}'
         ) from exc
-    for requirement in requirements:
-        if _looks_like_filesystem_path(requirement.config_path):
-            raise ContractCandidateError(
-                f'methodology_requirements config_path '
-                f'{requirement.config_path!r} looks like a filesystem path; '
-                'config_path must be a dotted key path into the '
-                'matrix.base_config YAML (for example '
-                '"experiment_dimensions.model"), not a file path'
-            )
+    errors = validate_methodology_requirements(requirements)
+    if errors:
+        raise ContractCandidateError('; '.join(errors))
 
 
 @dataclass(frozen=True)
