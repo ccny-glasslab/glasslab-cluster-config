@@ -17,7 +17,11 @@ from pathlib import Path
 from services.common.schemas import ArtifactIndexEntry, ArtifactsIndex, RunStatus
 
 from .config import Settings
-from .job_submission import JobSubmitter, LiveStatusUnavailableError
+from .job_submission import (
+    JobSubmitter,
+    LiveStatusUnavailableError,
+    validate_run_artifact_subpath,
+)
 from .schemas import LogEntry, RunRecord
 
 MEDIA_TYPES = {
@@ -40,7 +44,7 @@ def file_sha256(path: Path) -> str:
 
 
 def artifact_run_dir(settings: Settings, run_id: str) -> Path:
-    return Path(settings.artifacts_mount_path) / run_id
+    return Path(settings.artifacts_mount_path) / validate_run_artifact_subpath(run_id)
 
 
 def load_status_from_disk(settings: Settings, run_id: str) -> RunStatus | None:
@@ -48,7 +52,10 @@ def load_status_from_disk(settings: Settings, run_id: str) -> RunStatus | None:
     if not path.exists():
         return None
     payload = json.loads(path.read_text())
-    payload.setdefault('run_id', run_id)
+    # Identity binding: a status.json that omits run_id or names a different
+    # run was not written by this run and must never resolve as its status.
+    if not isinstance(payload, dict) or payload.get('run_id') != run_id:
+        return None
     payload.setdefault('updated_at', datetime.now(timezone.utc).isoformat())
     try:
         return RunStatus.model_validate(payload)
@@ -99,6 +106,10 @@ def load_artifacts_from_disk(settings: Settings, run_id: str) -> ArtifactsIndex 
     index_path = artifact_run_dir(settings, run_id) / 'artifacts_index.json'
     if index_path.exists():
         payload = json.loads(index_path.read_text())
+        # The runner-written index is only authoritative for the run it names;
+        # a foreign or unbound index must never be served for this run.
+        if not isinstance(payload, dict) or payload.get('run_id') != run_id:
+            return None
         return ArtifactsIndex.model_validate(payload)
     return build_artifacts_from_directory(settings, run_id)
 

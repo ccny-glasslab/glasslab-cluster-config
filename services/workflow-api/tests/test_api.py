@@ -597,7 +597,7 @@ def test_confirmatory_investigation_freezes_workspace_plan_launches_run_and_reco
         'metrics.json': '{"rubric_score":88,"integrity_pass":1}',
         'artifacts_index.json': '{}',
         'report.md': '# Adult Income report\n',
-        'status.json': '{"status":"succeeded"}',
+        'status.json': '{"run_id":"%s","status":"succeeded"}' % run_id,
         'source.zip': 'frozen source bundle',
     }
     for name, content in artifact_contents.items():
