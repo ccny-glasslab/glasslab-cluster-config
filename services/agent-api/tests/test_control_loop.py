@@ -9,6 +9,7 @@ import logging
 
 from fastapi.testclient import TestClient
 
+from app.auth import TOKEN_HEADER
 from app.config import Settings
 from app.main import RuntimeContext, create_app
 from app.qwen_client import ChatResponse
@@ -61,6 +62,7 @@ class FakeJobStatusService:
 def test_experiment_post_and_get_flow(tmp_path) -> None:
     settings = Settings(
         qwen_api_key='fixture-qwen-key',
+        api_token='fixture-agent-token',
         state_db_path=str(tmp_path / 'agent.db'),
         auto_monitor_submitted_jobs=False,
         llm_summary_enabled=False,
@@ -74,7 +76,10 @@ def test_experiment_post_and_get_flow(tmp_path) -> None:
         summarizer=ResultSummarizer(settings, None),
         logger=logging.getLogger('test-control-loop'),
     )
-    client = TestClient(create_app(settings=settings, runtime=runtime))
+    client = TestClient(
+        create_app(settings=settings, runtime=runtime),
+        headers={TOKEN_HEADER: 'fixture-agent-token'},
+    )
 
     response = client.post(
         '/experiments',
