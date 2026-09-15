@@ -240,6 +240,16 @@ class Settings(BaseSettings):
     ]
 
     maximum_turns: int = 20
+    # Threshold-triggered turn-history rotation (#431). A continuing OpenCode
+    # session carries its whole turn history; on the shared Coder endpoint that
+    # unbounded history competes with page cache (the model wires ~48 of 64
+    # GB). Once the estimated tokens accumulated by one agent's live session
+    # cross this ceiling, the engine rotates the session through the same
+    # recovery-checkpoint path it uses after a failed turn: the session is
+    # released, a compact checkpoint records recent context, and the run
+    # continues from that checkpoint instead of restarting. 0 disables
+    # threshold rotation; failure-driven recovery still applies.
+    turn_history_rotation_token_threshold: int = 128_000
     maximum_methodology_revisions: int = 2
     # Hard cap on deterministic matrix-preflight failures before the run fails.
     # Without it, Beaker can re-propose an invalid matrix in an unbounded
@@ -396,6 +406,17 @@ class Settings(BaseSettings):
         # comma-separated spelling instead.
         if isinstance(value, str):
             return [item.strip() for item in value.split(',') if item.strip()]
+        return value
+
+    @field_validator('turn_history_rotation_token_threshold')
+    @classmethod
+    def enforce_turn_history_rotation_threshold_nonnegative(
+        cls, value: int
+    ) -> int:
+        if value < 0:
+            raise ValueError(
+                'turn_history_rotation_token_threshold must be >= 0'
+            )
         return value
 
     @field_validator('discord_rest_circuit_max_failures')

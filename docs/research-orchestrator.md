@@ -609,6 +609,17 @@ recovery. A pause or cancellation received while an agent turn is completing
 is rechecked after the turn output is stored; the output remains auditable, but
 the orchestrator does not record requested actions or start another turn.
 
+Long sessions also rotate proactively. A continuing session carries its whole
+turn history, which on the shared Coder endpoint competes with page cache.
+Before a turn starts, the orchestrator estimates the tokens accumulated by the
+agent's live session; when that estimate crosses
+`GLASSLAB_ORCHESTRATOR_TURN_HISTORY_ROTATION_TOKEN_THRESHOLD` (128000 by
+default, `0` disables), it rotates the session through the same
+recovery-checkpoint path a failed turn uses: the session is released, a compact
+checkpoint is written, and the next turn starts fresh from that checkpoint so
+the run continues rather than restarts. This is bounded history, not a second
+state format; failure-driven recovery is unchanged.
+
 The run-level runtime ceiling measures active workflow time. The orchestrator
 accumulates elapsed active seconds when a run is paused, stops the clock while
 it remains `PAUSED`, and starts it again on resume. Operator review time in
