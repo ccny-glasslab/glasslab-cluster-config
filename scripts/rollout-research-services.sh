@@ -77,7 +77,7 @@ require_secret_key() {
   value="$("$KUBECTL" -n "$NAMESPACE" get secret "$name" \
     -o "jsonpath={.data.${key}}" 2>/dev/null || true)"
   if [[ -z "$value" ]]; then
-    printf '[rollout-research-services] secret %s/%s is missing required key %q; the deployment secretKeyRef expects data key %q\n' \
+    printf "[rollout-research-services] secret %s/%s is missing required key '%s'; the deployment secretKeyRef expects data key '%s'\n" \
       "$NAMESPACE" "$name" "$key" "$key" >&2
     exit 1
   fi
