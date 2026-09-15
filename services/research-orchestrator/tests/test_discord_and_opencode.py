@@ -1307,9 +1307,62 @@ def test_opencode_writable_runtime_directories_are_per_agent(
     assert config['lsp'] is False
     assert config['permission']['task'] == 'deny'
     assert config['permission']['websearch'] == 'deny'
-    assert config['permission']['external_directory'] == 'deny'
+    external = config['permission']['external_directory']
+    run_root = workspace.parent
+    assert external == {
+        '*': 'deny',
+        f'{run_root}/protocol/*': 'allow',
+        f'{run_root}/shared-artifacts/*': 'allow',
+        f'{run_root}/reports/*': 'allow',
+        f'{run_root}/events/*': 'allow',
+    }
+    # The same-run allows must never widen to runtime state (session DBs,
+    # secrets), either agent's worktree, a blanket run-root rule, or another
+    # run's tree.
+    other_run_root = tmp_path / 'run-2'
+    for pattern in external:
+        assert pattern == '*' or (
+            pattern.startswith(f'{run_root}/')
+            and pattern != f'{run_root}/*'
+        )
+        assert 'runtime/' not in pattern
+        assert 'beaker-worktree' not in pattern
+        assert 'honeydew-worktree' not in pattern
+        assert not pattern.startswith(str(other_run_root))
     assert config['model'].startswith('exo/')
     assert 'exo' in config['provider']
+
+
+def test_opencode_external_directory_deny_precedes_allows_in_key_order(
+    tmp_path,
+) -> None:
+    # OpenCode evaluates permission rules last-match-wins over the config key
+    # order, so the run-scoped allows only win if the catch-all '*' deny is
+    # serialized before them. sort_keys=True guarantees that solely because
+    # '*' (0x2A) sorts before '/' (0x2F); this test fails the moment that
+    # ordering breaks.
+    runtime = OpenCodeProcessRuntime(
+        Settings(opencode_shared_cache_root=str(tmp_path / 'shared-cache'))
+    )
+    workspace = tmp_path / 'run-1' / 'honeydew-worktree'
+    workspace.mkdir(parents=True)
+
+    config_root, *_ = runtime._write_runtime_config(
+        run_id='run-1',
+        agent=AgentName.HONEYDEW,
+        workspace=workspace,
+    )
+
+    # json.loads inserts keys in document order, which is the order OpenCode
+    # merges and evaluates.
+    config = json.loads((config_root / 'opencode' / 'opencode.json').read_text())
+    external = config['permission']['external_directory']
+    keys = list(external)
+    allow_keys = [key for key in keys if external[key] == 'allow']
+    assert allow_keys
+    assert keys[0] == '*'
+    assert external['*'] == 'deny'
+    assert keys == ['*', *allow_keys]
 
 
 def test_opencode_cache_directory_is_shared_across_runs_and_agents(
