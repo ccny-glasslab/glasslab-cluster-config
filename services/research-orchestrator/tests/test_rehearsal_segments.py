@@ -197,3 +197,160 @@ def test_full_run_with_mock_writes_gate_snapshots(tmp_path: Path) -> None:
     assert meta is not None
     assert meta['state'] == 'AWAITING_PROTOCOL_APPROVAL'
     assert meta['git_commit']
+
+
+def _pause_for_human_resolution(store, engine, run) -> None:
+    """Drive the engine's own revision-cap path into a human-resolution pause.
+
+    With the automatic revision budget set to 0, the very first
+    _request_methodology_revision emits methodology.human_resolution_requested
+    and calls pause_run, exactly as the live non-convergence loop does.
+    """
+    engine.settings.maximum_methodology_revisions = 0
+    store.replace_run(
+        run.model_copy(update={'state': RunState.HONEYDEW_REVIEWING}),
+        expected_version=run.version,
+    )
+    engine._request_methodology_revision(
+        run.run_id,
+        feedback='Deterministic matrix preflight failed repeatedly.',
+    )
+
+
+def test_human_resolution_pause_returns_blocked_without_resuming(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / 'root'
+    snapshots = tmp_path / 'snapshots'
+    _, store, _, engine = _build(root)
+    run = engine.create_run(
+        RunCreateRequest(objective='Block on a human-resolution pause.')
+    )
+
+    # Given: the run paused itself for human resolution after the engine's
+    # automatic revision budget was exhausted.
+    _pause_for_human_resolution(store, engine, run)
+    paused = store.get_run(run.run_id)
+    assert paused.state is RunState.PAUSED
+    assert paused.resume_state is RunState.BEAKER_REVISING
+    assert any(
+        event.event_type == 'methodology.human_resolution_requested'
+        for event in store.list_events(run.run_id)
+    )
+
+    resumed: list[str] = []
+    original_resume = rehearsal.ResearchOrchestrator.resume_run
+
+    def _spy_resume(self, run_id, **kwargs):
+        resumed.append(run_id)
+        return original_resume(self, run_id, **kwargs)
+
+    monkeypatch.setattr(
+        rehearsal.ResearchOrchestrator, 'resume_run', _spy_resume
+    )
+
+    # When: the driver processes the paused run.
+    summary = rehearsal.run_rehearsal(
+        root=root,
+        snapshot_root=snapshots,
+        runtime_factory=_mock_factory,
+    )
+
+    # Then: it stops as BLOCKED (never RESUMABLE), the run stays paused, and
+    # the driver never calls resume_run.
+    assert summary['result'] == 'BLOCKED'
+    assert summary['result'] != 'RESUMABLE'
+    assert summary['entry_state'] == 'PAUSED'
+    assert summary['reached_state'] == 'PAUSED'
+    assert summary.get('blocked_reason') or summary.get('reason')
+    assert resumed == []
+    assert store.get_run(run.run_id).state is RunState.PAUSED
+    assert not any(
+        event.event_type == 'run.resumed'
+        for event in store.list_events(run.run_id)
+    )
+
+
+def test_transient_turn_pause_still_resumes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / 'root'
+    snapshots = tmp_path / 'snapshots'
+    _, store, _, engine = _build(root)
+    run = engine.create_run(
+        RunCreateRequest(objective='Resume a transient turn-timeout pause.')
+    )
+
+    # Given: a run paused only by a transient turn wall (no human-resolution
+    # event was ever emitted).
+    engine.pause_run(
+        run.run_id,
+        requested_by='orchestrator',
+        reason='Agent turn exceeded the wall-clock timeout.',
+    )
+    paused = store.get_run(run.run_id)
+    assert paused.state is RunState.PAUSED
+    assert paused.resume_state is RunState.AWAITING_PROTOCOL_APPROVAL
+    assert not any(
+        'human_resolution_requested' in event.event_type
+        for event in store.list_events(run.run_id)
+    )
+
+    resumed: list[str] = []
+    original_resume = rehearsal.ResearchOrchestrator.resume_run
+
+    def _spy_resume(self, run_id, **kwargs):
+        resumed.append(run_id)
+        return original_resume(self, run_id, **kwargs)
+
+    monkeypatch.setattr(
+        rehearsal.ResearchOrchestrator, 'resume_run', _spy_resume
+    )
+
+    # When: the driver processes the paused run.
+    summary = rehearsal.run_rehearsal(
+        root=root,
+        snapshot_root=snapshots,
+        max_gates=1,
+        runtime_factory=_mock_factory,
+    )
+
+    # Then: the transient pause is still auto-resumed and the segment reaches
+    # the next human-wait gate (the pre-existing RESUMABLE/resume behavior).
+    assert resumed == [run.run_id]
+    assert summary['result'] == 'SEGMENT_DONE'
+    assert summary['entry_state'] == 'PAUSED'
+    assert summary['reached_state'] == 'AWAITING_EXECUTION_APPROVAL'
+    assert store.get_run(run.run_id).state is RunState.AWAITING_EXECUTION_APPROVAL
+
+
+def test_human_resolution_signal_clears_after_a_resume(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / 'root'
+    _, store, _, engine = _build(root)
+    run = engine.create_run(
+        RunCreateRequest(objective='Clear the human-resolution signal.')
+    )
+    _pause_for_human_resolution(store, engine, run)
+
+    # Given: the current pause carries the human-resolution signal.
+    event = rehearsal._human_resolution_pause(store, run.run_id)
+    assert event is not None
+    assert 'human_resolution_requested' in event.event_type
+
+    # When: a human resumes the run (the durable run.resumed event) and it
+    # later pauses for a transient turn wall.
+    monkeypatch.setattr(engine, '_recover_run', lambda run_id: None)
+    engine.resume_run(run.run_id, requested_by='human', reason='Resolved.')
+    engine.pause_run(
+        run.run_id,
+        requested_by='orchestrator',
+        reason='Agent turn exceeded the wall-clock timeout.',
+    )
+
+    # Then: the earlier human-resolution event no longer marks this pause.
+    assert rehearsal._human_resolution_pause(store, run.run_id) is None
