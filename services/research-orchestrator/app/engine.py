@@ -1101,13 +1101,16 @@ class ResearchOrchestrator:
             'Do not place answer, citations, unanswerable, or '
             'suggested_followups anywhere else.\n'
         )
+        research_model, research_base_url = self.settings.honeydew_model_for(
+            TurnKind.RESEARCH_ANSWER
+        )
         result, message_id = self.runtime.run_turn(
             run_id=conversation_id,
             agent=AgentName.HONEYDEW,
             workspace=workspace,
             session_id=session.session_id,
-            model_override=self.settings.honeydew_structured_model(),
-            base_url_override=self.settings.honeydew_structured_base_url(),
+            model_override=research_model,
+            base_url_override=research_base_url,
             prompt=prompt,
             knowledge_tool=knowledge_tool,
         )
@@ -1473,8 +1476,9 @@ class ResearchOrchestrator:
                 self.settings.honeydew_model_for(expected_kind)
             )
         else:
-            model_override = None
-            base_url_override = None
+            model_override, base_url_override = (
+                self.settings.beaker_model_for(expected_kind)
+            )
         run = self.store.get_run(run_id)
         self._check_turn_budget(run)
         workspace = Path(

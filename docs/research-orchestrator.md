@@ -195,6 +195,18 @@ the checked repository configuration. The service does not assume that the
 label `qwen3-coder-next-70b` is accepted by the endpoint. Confirm the served
 model list before changing these values.
 
+### Per-Turn-Kind Routing
+
+Which of the two models serves a turn is a recorded, evidence-derived decision,
+not a per-agent constant. Every turn kind is routed from
+`fixtures/model-routing/v1/routing_table.json`, which is derived from the
+per-turn-kind pass rates in `fixtures/model-routing/v1/evidence.json` over the
+frozen fixtures in `fixtures/model-routing/v1/fixtures.json`; a missing or
+malformed table falls back to the legacy structured/reasoning split. The
+mapping, its evidence source, and how to refresh it are documented in
+[`glasslab-v2/per-turn-kind-model-routing.md`](glasslab-v2/per-turn-kind-model-routing.md)
+(issue #433).
+
 ## Structured Turns
 
 Every completed turn is validated as an `AgentTurnResult`. It contains a kind,
@@ -630,7 +642,13 @@ internal automation and recovery interface; operators are not expected to
 construct it by hand for normal work.
 
 `/dataset-upload` registers a bounded attachment in the immutable dataset
-registry and returns a `glasslab-dataset://<sha256>` reference.
+registry and returns a `glasslab-dataset://<sha256>` reference. `/dataset-url`
+does the same for a public HTTPS resource that is too large to attach: it
+fetches once under the same redirect/private-address protections as task
+assets, streams under the byte ceiling, dedups by content digest, and preserves
+provenance (original and final URL, retrieval time, size, media type/filename,
+and optional expected checksum). The equivalent authenticated HTTP endpoint is
+`POST /datasets/register-url`.
 `/research-pause`, `/research-resume`, and `/research-cancel` resolve the run
 from its thread, or accept an explicit run ID in the main channel. They record
 the Discord actor and optional reason in the append-only event history.
@@ -770,6 +788,12 @@ Upload a local dataset before starting a task:
 ```
 
 Put the returned `glasslab-dataset://<sha256>` reference in `problem.md`.
+
+For a public dataset too large to attach, ingest it by URL instead:
+
+```text
+/dataset-url url:https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz name:cifar10 role:input
+```
 
 Pause and resume from the run thread:
 
