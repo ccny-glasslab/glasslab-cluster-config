@@ -29,6 +29,7 @@ from app.discord_controls import (
     build_run_status_view,
     execute_discord_action,
     execute_discord_dataset_ingestion,
+    execute_discord_dataset_url_ingestion,
     execute_discord_research_question,
     execute_discord_run_control,
     execute_discord_run_cancellation,
@@ -427,6 +428,7 @@ def test_discord_gateway_registers_component_handler() -> None:
         'research-turns',
         'research-question',
         'dataset-upload',
+        'dataset-url',
         'research-status',
         'research-list',
     ):
@@ -531,6 +533,38 @@ def test_discord_dataset_ingestion_records_actor() -> None:
         contains_labels=True,
         media_type='text/csv',
         uploaded_by='discord:142100176322953216:Tyler',
+    )
+
+
+def test_discord_dataset_url_ingestion_records_actor() -> None:
+    engine = Mock()
+    expected = SimpleNamespace(reference_uri='glasslab-dataset://' + 'b' * 64)
+    engine.datasets.register_url.return_value = expected
+    actor = DiscordControlActor(
+        user_id='142100176322953216',
+        display_name='Tyler',
+        guild_id='guild-1',
+        role_ids=frozenset({'role-1'}),
+    )
+
+    result = execute_discord_dataset_url_ingestion(
+        engine,
+        url='https://example.com/cifar-10-python.tar.gz',
+        name='cifar10',
+        role='input',
+        contains_labels=False,
+        expected_sha256='c' * 64,
+        actor=actor,
+    )
+
+    assert result is expected
+    engine.datasets.register_url.assert_called_once_with(
+        url='https://example.com/cifar-10-python.tar.gz',
+        name='cifar10',
+        expected_sha256='c' * 64,
+        role='input',
+        contains_labels=False,
+        created_by='discord:142100176322953216:Tyler',
     )
 
 

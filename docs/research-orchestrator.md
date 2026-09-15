@@ -617,7 +617,13 @@ internal automation and recovery interface; operators are not expected to
 construct it by hand for normal work.
 
 `/dataset-upload` registers a bounded attachment in the immutable dataset
-registry and returns a `glasslab-dataset://<sha256>` reference.
+registry and returns a `glasslab-dataset://<sha256>` reference. `/dataset-url`
+does the same for a public HTTPS resource that is too large to attach: it
+fetches once under the same redirect/private-address protections as task
+assets, streams under the byte ceiling, dedups by content digest, and preserves
+provenance (original and final URL, retrieval time, size, media type/filename,
+and optional expected checksum). The equivalent authenticated HTTP endpoint is
+`POST /datasets/register-url`.
 `/research-pause`, `/research-resume`, and `/research-cancel` resolve the run
 from its thread, or accept an explicit run ID in the main channel. They record
 the Discord actor and optional reason in the append-only event history.
@@ -757,6 +763,12 @@ Upload a local dataset before starting a task:
 ```
 
 Put the returned `glasslab-dataset://<sha256>` reference in `problem.md`.
+
+For a public dataset too large to attach, ingest it by URL instead:
+
+```text
+/dataset-url url:https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz name:cifar10 role:input
+```
 
 Pause and resume from the run thread:
 

@@ -21,6 +21,7 @@ and approval role or explicit administrator allowlist.
 | `/task-start [archive:<zip>] [objective:<text>]` | Main Glasslab channel | Starts an investigation: with an archive, compiles + preflights + starts the task; without one, starts an objective-driven run. Honeydew drafts the protocol and evaluation contract proposal either way. |
 | `/research-question question:<text>` | Main Glasslab channel | Asks the knowledge corpus — a ~1-minute cited answer, no run. Use `/task-start` to launch an investigation from the direction. |
 | `/dataset-upload dataset:<file> name:<name> [role:<role>] [contains_labels:<bool>]` | Main Glasslab channel | Stores a file immutably and returns a checksum-addressed `glasslab-dataset://` reference. |
+| `/dataset-url url:<https-url> name:<name> [role:<role>] [contains_labels:<bool>] [expected_sha256:<sha256>]` | Main Glasslab channel | Fetches a public HTTPS resource once, content-addresses it, and returns a reusable `glasslab-dataset://` reference. Intended for datasets larger than the Discord upload limit. Optional `expected_sha256` fails closed on mismatch. |
 | `/research-artifacts [run_id:<id>] [include_source:<bool>]` | Run thread, or main channel with `run_id` | Downloads a digest-verified ZIP of the latest run-level artifacts and successful-job outputs. |
 | `/research-turns [run_id:<id>] [limit:<int>]` | Run thread, or main channel with `run_id` | Shows the run's most recent redacted agent turns (default 5, max 20) with agent identity, status, and timestamps. |
 | `/research-pause [run_id:<id>] [reason:<text>]` | Run thread, or main channel with `run_id` | Aborts an active model turn, preserves state, and records where to resume. |
@@ -71,7 +72,10 @@ For a question without an archive, use `/task-start` with only an objective.
 Honeydew still begins
 with the protocol and evaluation contract. For local data, run
 `/dataset-upload` first and put the returned `glasslab-dataset://<sha256>`
-reference in `problem.md` or the objective.
+reference in `problem.md` or the objective. For a public dataset that is too
+large to attach, use `/dataset-url url:<https-url> name:<name>` instead; the
+orchestrator fetches it once, dedups by content digest, and returns the same
+kind of `glasslab-dataset://<sha256>` reference.
 
 ## Failure And Recovery Behavior
 
