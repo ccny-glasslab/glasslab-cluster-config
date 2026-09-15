@@ -50,6 +50,7 @@ from .datasets import DatasetIngestionError, DatasetIngestionManager, DatasetUrl
 from .engine import ResearchOrchestrator, WorkflowError
 from .hermes_runtime import HermesProcessRuntime
 from .knowledge_manager import KnowledgeError
+from .knowledge_tool import KnowledgeToolDenied, KnowledgeToolError
 from .opencode_runtime import AgentRuntime, OpenCodeProcessRuntime
 from .policy import ActionPolicy
 from .research_store import ResearchStore
@@ -70,6 +71,7 @@ IngestedDatasetRecord,
     KnowledgeSource,
     KnowledgeSourceListResponse,
     KnowledgeSourceRequest,
+    RetrieveEvidenceToolRequest,
     RejectionRequest,
     ResearchAnswer,
     RunCreateRequest,
@@ -917,6 +919,42 @@ def create_app(
             )
         except Exception as exc:
             raise map_error(exc) from exc
+
+    @app.post(
+        '/internal/agent-tools/retrieve-evidence',
+        response_model=dict[str, object],
+    )
+    def retrieve_evidence_tool(
+        request: RetrieveEvidenceToolRequest,
+        supplied_token: str | None = Header(
+            default=None,
+            alias='X-Glasslab-Tool-Token',
+        ),
+    ) -> dict[str, object]:
+        if not supplied_token:
+            raise HTTPException(
+                status_code=401,
+                detail='tool capability token required',
+            )
+        try:
+            result = engine.execute_knowledge_tool(
+                token=supplied_token,
+                query=request.query,
+                k=request.k,
+            )
+        except KnowledgeToolDenied as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except KnowledgeToolError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            'packet_id': result.packet_id,
+            'context': result.context,
+            'returned_uris': list(result.uris),
+            'verified': list(result.verified),
+            'chunk_count': result.chunk_count,
+            'bytes_returned': result.bytes_returned,
+            'truncated': result.truncated,
+        }
 
     @app.delete(
         '/knowledge/sources/{source_id}',

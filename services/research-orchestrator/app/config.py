@@ -66,6 +66,16 @@ class Settings(BaseSettings):
     knowledge_max_source_bytes: int = 2 * 1024 * 1024
     knowledge_max_results: int = 10
     knowledge_token_budget: int = 4000
+    # Read-only, agent-directed retrieval tool (#379), Honeydew only. The
+    # generated OpenCode tool file posts to this internal callback endpoint
+    # with a per-run capability token; Beaker's surface never exposes it.
+    knowledge_tool_enabled: bool = True
+    knowledge_tool_endpoint_url: str = (
+        'http://127.0.0.1:8080/internal/agent-tools/retrieve-evidence'
+    )
+    knowledge_tool_default_k: int = 5
+    knowledge_tool_max_k: int = 20
+    knowledge_tool_max_query_chars: int = 2000
     # Dense method-advisory retrieval (corpus-RAG productionization). Dense
     # degrades to lexical automatically whenever the backend/model is not
     # ready; advisory generation additionally requires these knobs only.
@@ -122,7 +132,7 @@ class Settings(BaseSettings):
     opencode_server_host: str = '127.0.0.1'
     opencode_start_port: int = 4210
     opencode_start_timeout_seconds: float = 60.0
-    opencode_turn_timeout_seconds: float = 2400.0
+    opencode_turn_timeout_seconds: float = 3600.0
     opencode_repeated_tool_limit: int = 6
     agent_turn_max_retries: int = 2
     # Max deterministic redrafts of a contract candidate that fails
@@ -136,9 +146,12 @@ class Settings(BaseSettings):
     # Model-output budget per agent turn. Thinking-family models (Honeydew's
     # Qwen3-Next-80B-A3B-Thinking) emit a long reasoning prefix before the
     # structured answer; capping output here truncates the reasoning and can
-    # drop the structured envelope entirely. Kept high enough for a full
-    # reasoning+answer turn on the split-model serving (~45 tok/s).
-    agent_model_max_output_tokens: int = 8192
+    # drop the structured envelope entirely. Widened for the iterative
+    # retrieve_evidence lane: at the measured ~45 tok/s reasoning-first rate,
+    # reasoning plus several retrieval rounds plus the answer needs more than
+    # one 8192-token envelope, and opencode_turn_timeout_seconds is widened in
+    # lockstep so the wall clock never truncates a legitimate reasoning turn.
+    agent_model_max_output_tokens: int = 16384
     # OpenCode's package/model download cache (XDG_CACHE_HOME) is shared
     # across every run and both agents instead of copied per run: it is
     # non-essential, regenerable data (the same OpenCode version and plugin

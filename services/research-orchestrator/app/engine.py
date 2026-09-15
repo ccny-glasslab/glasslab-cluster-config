@@ -76,6 +76,11 @@ from .task_bundles import (
 )
 from .workspaces import WorkspaceManager
 from .knowledge_manager import KnowledgeManager
+from .knowledge_tool import (
+    BoundRetrieveEvidenceTool,
+    KnowledgeToolRegistry,
+    KnowledgeToolResult,
+)
 from .method_advisor import MethodAdvisor
 
 
@@ -214,6 +219,11 @@ class ResearchOrchestrator:
             except Exception:
                 # Dense retrieval/advisory is additive; startup never depends on it.
                 self.method_advisor = None
+        self._knowledge_tools = KnowledgeToolRegistry(
+            knowledge=self.knowledge,
+            store=store,
+            settings=settings,
+        )
         self.policy = policy
         self.cluster = cluster
         self.discord = discord
@@ -753,6 +763,7 @@ class ResearchOrchestrator:
             self.runtime.release(run_id=run_id, agent=agent)
         except Exception as exc:
             release_error = str(exc)
+        self._knowledge_tools.revoke_agent(run_id, agent)
         current = self.store.get_run(run_id)
         # Clear the session ids from the authoritative record BEFORE writing the
         # checkpoint: any later recovery then sees a fresh-session run and must
@@ -852,6 +863,37 @@ class ResearchOrchestrator:
             )
         except Exception:
             return None
+
+    def _knowledge_tool_for(
+        self,
+        *,
+        run_id: str,
+        agent: AgentName,
+        turn_number: int,
+        turn_kind: TurnKind,
+    ) -> BoundRetrieveEvidenceTool | None:
+        # Per-agent tool surface: only Honeydew receives retrieve_evidence.
+        # Beaker gets None, so its runtime never registers the tool.
+        if (
+            not self.settings.knowledge_tool_enabled
+            or agent is not AgentName.HONEYDEW
+        ):
+            return None
+        return self._knowledge_tools.bind(
+            run_id=run_id,
+            agent=agent,
+            turn_number=turn_number,
+            turn_kind=turn_kind,
+        )
+
+    def execute_knowledge_tool(
+        self,
+        *,
+        token: str,
+        query: str,
+        k: int,
+    ) -> KnowledgeToolResult:
+        return self._knowledge_tools.execute(token=token, query=query, k=k)
 
     def _retrieval_query(
         self,
@@ -967,11 +1009,18 @@ class ResearchOrchestrator:
                 updated_at=now,
             )
             self.store.create_run(record, one_active_run=False)
+        knowledge_tool = self._knowledge_tool_for(
+            run_id=conversation_id,
+            agent=AgentName.HONEYDEW,
+            turn_number=1,
+            turn_kind=TurnKind.RESEARCH_ANSWER,
+        )
         session = self.runtime.ensure_session(
             run_id=conversation_id,
             agent=AgentName.HONEYDEW,
             workspace=workspace,
             existing_session_id=None,
+            knowledge_tool=knowledge_tool,
         )
         if bind_source_ids:
             self.store.bind_conversation_sources(
@@ -1063,6 +1112,7 @@ class ResearchOrchestrator:
             model_override=research_model,
             base_url_override=research_base_url,
             prompt=prompt,
+            knowledge_tool=knowledge_tool,
         )
         if result.kind != TurnKind.RESEARCH_ANSWER or result.research_answer is None:
             self._event(
@@ -1441,6 +1491,12 @@ class ResearchOrchestrator:
             if agent == AgentName.HONEYDEW
             else run.beaker_session_id
         )
+        knowledge_tool = self._knowledge_tool_for(
+            run_id=run_id,
+            agent=agent,
+            turn_number=run.turn_number + 1,
+            turn_kind=expected_kind,
+        )
         recovery_context = ''
         if existing_session is None:
             # The recovery checkpoint is injected only into a brand-new session
@@ -1457,6 +1513,7 @@ class ResearchOrchestrator:
             existing_session_id=existing_session,
             model_override=model_override,
             base_url_override=base_url_override,
+            knowledge_tool=knowledge_tool,
         )
         run = self.store.get_run(run_id)
         # Persist the live session and turn number before the model does any
@@ -1605,6 +1662,7 @@ class ResearchOrchestrator:
                 prompt=prompt,
                 model_override=model_override,
                 base_url_override=base_url_override,
+                knowledge_tool=knowledge_tool,
             )
             if result.kind != expected_kind:
                 returned_kind = result.kind
@@ -1626,6 +1684,7 @@ class ResearchOrchestrator:
                     session_id=session.session_id,
                     model_override=model_override,
                     base_url_override=base_url_override,
+                    knowledge_tool=knowledge_tool,
                     prompt=(
                         prompt
                         + '\n\nStructured kind correction. Your previous '

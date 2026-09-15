@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 import re
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from collections.abc import Sequence
 from typing import Any, Iterable
@@ -108,6 +109,24 @@ class KnowledgeError(RuntimeError):
 
 class KnowledgeSourceNotFound(KeyError):
     pass
+
+
+@dataclass(frozen=True)
+class RetrievedEvidence:
+    """Agent-directed retrieval output built from the one retrieval pipeline.
+
+    ``packet`` is the same durable ``ContextPacket`` an ordinary per-turn
+    retrieval persists, so ranking (RRF, deterministic tie-breaks), scoping,
+    and the token budget are identical. ``entries`` is the secret-scanned
+    ranked projection with chunk text, ``chunks`` the excerpt view the
+    ``retrieve_evidence`` tool returns, and ``context`` the
+    ``<knowledge-context>`` block injected into the running turn.
+    """
+
+    packet: ContextPacket
+    entries: tuple[dict[str, Any], ...]
+    chunks: tuple[dict[str, Any], ...]
+    context: str | None
 
 
 def digest_bytes(content: bytes) -> str:
@@ -442,18 +461,34 @@ class KnowledgeManager:
         additional_queries: Sequence[str] | None = None,
         source_ids: list[str] | None = None,
         pinned_source_ids: list[str] | None = None,
+        include_excerpts: bool = False,
+        source_type_scope: set[SourceType] | None = None,
     ) -> ContextPacket:
         """Retrieve scoped, bounded context and persist a durable packet.
 
         ``additional_queries`` executes the bounded query plan: every query
         runs through the same scoped retrieval, hits are merged per chunk
         (best score wins), and one packet holds the merged ranking.
+
+        ``include_excerpts`` additionally copies each ranked entry's chunk
+        text into its packet entry. The agent-directed ``retrieve_evidence``
+        tool sets it so it can return excerpts from the one retrieval
+        pipeline, rather than re-ranking or re-reading chunks itself.
         """
         max_results = max_results or self.max_results
         token_budget = token_budget or self.token_budget
         agent_enum = AgentName(agent)
         turn_kind_enum = TurnKind(turn_kind)
-        allowed = self._default_source_types(agent_enum, turn_kind_enum)
+        if source_type_scope is not None:
+            # Agent-directed retrieval (the retrieve_evidence tool) searches
+            # the agent's full role-scoped set; evidence-only turn kinds still
+            # narrow the automatic per-turn retrieval. The scope is clamped to
+            # the agent's own types, so it can never widen the role boundary.
+            allowed = set(source_type_scope).intersection(
+                self.agent_source_types(agent_enum)
+            )
+        else:
+            allowed = self._default_source_types(agent_enum, turn_kind_enum)
 
         queries = [query]
         for extra in additional_queries or ():
@@ -606,6 +641,11 @@ class KnowledgeManager:
                     'score': entry.get('score', 0),
                     'mode': entry.get('mode', 'lexical'),
                     'verified': entry.get('verified', False),
+                    **(
+                        {'text': entry['text']}
+                        if include_excerpts and 'text' in entry
+                        else {}
+                    ),
                 }
                 for entry in tokenized
             ],
@@ -643,12 +683,92 @@ class KnowledgeManager:
         )
         return packet
 
+    def retrieve_evidence(
+        self,
+        *,
+        run_id: str,
+        agent: str,
+        turn_number: int,
+        turn_kind: str,
+        query: str,
+        max_results: int,
+        token_budget: int | None = None,
+        run_scope: str | None = None,
+        pinned_source_ids: list[str] | None = None,
+    ) -> RetrievedEvidence:
+        """Agent-directed retrieval for the read-only ``retrieve_evidence`` tool.
+
+        This is deliberately a *projection* over ``retrieve``: it calls the
+        exact same ranking/diversify/budget pipeline (so a tool query and a
+        per-turn query rank identically) and only adds excerpt extraction, the
+        ingested-content secret scan, and the untrusted-data context block.
+        It is not a second retrieval implementation.
+        """
+        packet = self.retrieve(
+            run_id=run_id,
+            agent=agent,
+            turn_number=turn_number,
+            turn_kind=turn_kind,
+            query=query,
+            index_version=INDEX_VERSION,
+            max_results=max_results,
+            token_budget=token_budget,
+            run_scope=run_scope,
+            pinned_source_ids=pinned_source_ids,
+            include_excerpts=True,
+            source_type_scope=self.agent_source_types(AgentName(agent)),
+        )
+        chunks: list[dict[str, Any]] = []
+        entries: list[dict[str, Any]] = []
+        for entry in packet.ranked_sources:
+            text = entry.get('text')
+            if not text:
+                continue
+            # Same secret scan ingested content passes: a retrieved chunk that
+            # would have been refused at ingest time is never surfaced.
+            if self._text_contains_secrets(text):
+                continue
+            # A chunk's citable URI is knowledge://<source_id> (the resolver's
+            # knowledge-source namespace), not the source's canonical path.
+            uri = entry['uri']
+            if entry.get('kind') == 'chunk' and entry.get('source_id'):
+                uri = f'knowledge://{entry["source_id"]}'
+            normalized = {**entry, 'uri': uri}
+            entries.append(normalized)
+            chunks.append(
+                {
+                    'uri': uri,
+                    'source_id': entry.get('source_id'),
+                    'excerpt': self._sanitize_retrieved(text),
+                    'verified': bool(entry.get('verified', False)),
+                    'score': float(entry.get('score', 0.0)),
+                    'token_count': int(entry.get('token_count', 0)),
+                }
+            )
+        return RetrievedEvidence(
+            packet=packet,
+            entries=tuple(entries),
+            chunks=tuple(chunks),
+            context=self.render_entries(entries),
+        )
+
+    def render_entries(self, entries: Sequence[dict[str, Any]]) -> str | None:
+        """Render ranked entries as the untrusted-data `<knowledge-context>` block."""
+        return self._build_context_string(list(entries))
+
     def get_context_packet(self, packet_id: str) -> ContextPacket:
         return self.store.get_context_packet(packet_id)
 
     # ------------------------------------------------------------------ #
     # Role and turn scoping
     # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def agent_source_types(agent: AgentName) -> set[SourceType]:
+        """The role-scoped source-type set an agent may ever retrieve."""
+        if agent == AgentName.HONEYDEW:
+            return set(HONEYDEW_SOURCE_TYPES)
+        return set(BEAKER_SOURCE_TYPES)
 
     @staticmethod
     def _default_source_types(

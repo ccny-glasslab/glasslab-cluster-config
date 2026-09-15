@@ -404,6 +404,31 @@ count, and token count, and the packet is citable as
 exact context packet that grounded a claim; a claim about knowledge requires a
 `knowledge://` evidence URI.
 
+### Agent-directed retrieval tool (`retrieve_evidence`, #379)
+
+Honeydew additionally receives one read-only tool, `retrieve_evidence(query,
+k=5)`, so a turn can iterate retrieve -> reason -> retrieve instead of relying
+only on the deterministic per-turn retrieval. The tool is exposed to Honeydew
+only: the OpenCode runtime writes the generated tool file into Honeydew's
+workspace and never into Beaker's, and the orchestrator refuses any call whose
+capability token is not bound to a Honeydew run.
+
+The tool is a projection over the same `KnowledgeManager.retrieve` pipeline (RRF
+ranking, deterministic tie-breaks, token budget, secret scan); it adds no second
+ranking. It returns the top-`k` chunks with `knowledge://<source_id>` URIs,
+verbatim excerpts, and the `verified` flag, framed as untrusted
+`<knowledge-context>` data. Each call is executed by the orchestrator and
+recorded as durable `agent.tool_call` / `agent.tool_result` events carrying the
+query and the returned URIs. Cumulative rendered tool output per run is bounded
+by `evidence_snapshot_max_bytes`. The tool is read-only by construction: it has
+no writes, no filesystem access, and no shell.
+
+Because Honeydew's verification/report reasoning runs on the Thinking model
+(`Qwen3-Next-80B-A3B-Thinking-4bit`, ~45 tok/s reasoning-first on one Mac
+Studio), `agent_model_max_output_tokens` is 16384 and
+`opencode_turn_timeout_seconds` is 3600 so the reasoning prefix plus several
+retrieval rounds plus the structured answer fit inside one turn.
+
 ## Compiled Research Tasks
 
 The generic contribution path accepts a ZIP with exactly one `problem.md` and
