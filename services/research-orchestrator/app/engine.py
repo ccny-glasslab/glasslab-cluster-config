@@ -5217,6 +5217,23 @@ class ResearchOrchestrator:
         ]
         return json.dumps(digest, indent=2, sort_keys=True, ensure_ascii=False)
 
+    def _evidence_prompt_block(self, evidence: dict[str, Any]) -> str:
+        """Render the compact evidence block every evidence-carrying turn embeds.
+
+        Analysis (Beaker), verification, and report (Honeydew) all receive the
+        same content-free digest plus a workspace reference; the full snapshot
+        is written to the agent workspace by _write_evidence_file. Keeping one
+        renderer guarantees the verify and report stages cannot silently
+        regress to inlining full artifact contents into the model window
+        (issue #430).
+        """
+        return (
+            'EVIDENCE DIGEST (read the full snapshot at '
+            'evidence-snapshot.json in your workspace for artifact '
+            'contents):\n'
+            + self._inline_evidence_digest(evidence)
+        )
+
     def _analyze_results(self, run_id: str) -> None:
         evidence = self._evidence_snapshot(
             run_id,
@@ -5232,10 +5249,7 @@ class ResearchOrchestrator:
                 'failed job is an observation to explain, not proof that the '
                 'research run failed. Cite evidence URIs for every material '
                 'claim.\n\n'
-                'EVIDENCE DIGEST (read the full snapshot at '
-                'evidence-snapshot.json in your workspace for artifact '
-                'contents):\n'
-                + self._inline_evidence_digest(evidence)
+                + self._evidence_prompt_block(evidence)
             ),
             expected_kind=TurnKind.EXPERIMENT_ANALYSIS,
             input_event=evidence,
@@ -5295,10 +5309,7 @@ class ResearchOrchestrator:
                 'flag any contradiction between the results and the corpus. Set '
                 'done=true only if the evidence supports a final report. Cite '
                 'artifact, job, event, or knowledge:// URIs.\n\n'
-                'EVIDENCE DIGEST (read the full snapshot at '
-                'evidence-snapshot.json in your workspace for artifact '
-                'contents):\n'
-                + self._inline_evidence_digest(evidence)
+                + self._evidence_prompt_block(evidence)
             ),
             expected_kind=TurnKind.VERIFICATION,
             input_event=evidence,
@@ -5397,10 +5408,7 @@ class ResearchOrchestrator:
             'a real file in your own workspace when the turn ends; do not '
             'reference job artifacts or files from other locations as your '
             'produced file.\n\n'
-            'EVIDENCE DIGEST (read the full snapshot at '
-            'evidence-snapshot.json in your workspace for artifact '
-            'contents):\n'
-            + self._inline_evidence_digest(evidence)
+            + self._evidence_prompt_block(evidence)
         )
         verdict = self._corpus_verification_verdict(run_id)
         if verdict is not None:
