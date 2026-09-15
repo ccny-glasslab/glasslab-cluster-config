@@ -7,8 +7,10 @@ touches a real backend.
 """
 
 import pytest
+from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 
+from app.idempotency import IdempotencyStore
 from app.main import Settings, _request_json, create_app
 
 
@@ -283,3 +285,146 @@ def test_dispatch_scopes_pinned_session_path() -> None:
     assert response.status_code == 200
     assert any(path == "/research-sessions/ses_abc123/context" for path in calls)
     assert all(".." not in path for path in calls)
+
+
+class _ReadTimeoutResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        raise TimeoutError("timed out")
+
+
+def test_workflow_read_timeout_maps_to_gateway_timeout(monkeypatch) -> None:
+    monkeypatch.setattr(
+        'app.main.urllib_request.urlopen',
+        lambda request, timeout: _ReadTimeoutResponse(),
+    )
+    monkeypatch.setenv('GLASSLAB_WORKFLOW_API_CALLER_NAME', 'research-command-router')
+    monkeypatch.setenv('GLASSLAB_WORKFLOW_API_TOKEN', 'router-secret')
+
+    with pytest.raises(HTTPException) as excinfo:
+        _request_json(Settings(), '/research-sessions')
+
+    assert excinfo.value.status_code == 504
+
+
+def test_duplicate_mutating_message_id_replays_without_second_backend_call() -> None:
+    calls: list[str] = []
+
+    def fake_requester(settings, path, method="GET", body=None):
+        calls.append(path)
+        return f"{settings.workflow_api_url}{path}", {
+            "run": {"run_id": "run-1", "workflow_id": "artist-similarity"}
+        }
+
+    client = _client(fake_requester)
+    first = client.post("/dispatch", json={"message": "!run", "message_id": "msg-1"})
+    second = client.post("/dispatch", json={"message": "!run", "message_id": "msg-1"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["replayed"] is False
+    assert second.json()["replayed"] is True
+    assert calls == ["/research-sessions/latest/transitions/run-happy-path"]
+
+
+def test_mutating_command_without_message_id_is_not_deduped() -> None:
+    calls: list[str] = []
+
+    def fake_requester(settings, path, method="GET", body=None):
+        calls.append(path)
+        return f"{settings.workflow_api_url}{path}", {
+            "run": {"run_id": "run-1", "workflow_id": "artist-similarity"}
+        }
+
+    client = _client(fake_requester)
+    client.post("/dispatch", json={"message": "!run"})
+    client.post("/dispatch", json={"message": "!run"})
+
+    assert len(calls) == 2
+
+
+def test_read_command_with_message_id_is_not_deduped() -> None:
+    calls: list[str] = []
+
+    def fake_requester(settings, path, method="GET", body=None):
+        calls.append(path)
+        if "context" in path:
+            return f"{settings.workflow_api_url}{path}", {
+                "session": {"session_id": "ses_abc123", "title": "Artist Similarity"}
+            }
+        return f"{settings.workflow_api_url}{path}", {
+            "campaign": {"status": "active"},
+            "iterations": [],
+        }
+
+    client = _client(fake_requester)
+    client.post("/dispatch", json={"message": "!state", "message_id": "msg-2"})
+    client.post("/dispatch", json={"message": "!state", "message_id": "msg-2"})
+
+    assert calls.count("/research-sessions/latest/context") == 4
+    assert calls.count("/research-sessions/ses_abc123/autoresearch-summary") == 2
+
+
+def test_failed_mutating_dispatch_allows_retry() -> None:
+    calls: list[str] = []
+
+    def fake_requester(settings, path, method="GET", body=None):
+        calls.append(path)
+        if len(calls) == 1:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="boom")
+        return f"{settings.workflow_api_url}{path}", {
+            "run": {"run_id": "run-1", "workflow_id": "artist-similarity"}
+        }
+
+    client = _client(fake_requester)
+    first = client.post("/dispatch", json={"message": "!run", "message_id": "msg-3"})
+    second = client.post("/dispatch", json={"message": "!run", "message_id": "msg-3"})
+
+    assert first.status_code == 502
+    assert second.status_code == 200
+    assert second.json()["replayed"] is False
+    assert len(calls) == 2
+
+
+def test_dispatch_rejects_unsafe_message_id() -> None:
+    client = _client(lambda *args, **kwargs: ("", {}))
+    response = client.post(
+        "/dispatch",
+        json={"message": "!run", "message_id": "../../../etc/passwd"},
+    )
+    assert response.status_code == 422
+    assert "message_id" in response.text
+
+
+def test_idempotency_store_replays_concurrent_claim() -> None:
+    store = IdempotencyStore()
+
+    assert store.reserve("k") == (False, None)
+    assert store.reserve("k") == (True, None)
+
+    store.complete("k", "done")
+    assert store.reserve("k") == (True, "done")
+
+
+def test_idempotency_store_expires_and_bounds_entries() -> None:
+    now = [0.0]
+    store = IdempotencyStore(max_entries=2, ttl_seconds=10.0, clock=lambda: now[0])
+
+    assert store.reserve("a") == (False, None)
+    store.complete("a", "A")
+    assert store.reserve("a") == (True, "A")
+
+    now[0] = 11.0
+    assert store.reserve("a") == (False, None)
+    store.abandon("a")
+
+    for key in ("b", "c", "d"):
+        assert store.reserve(key) == (False, None)
+        store.complete(key, key.upper())
+
+    assert store.reserve("b") == (False, None)
