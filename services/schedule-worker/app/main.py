@@ -85,7 +85,21 @@ def run_once() -> RunOnceResponse:
     # Digest cycle runs first so execution ordering is stable; rerun
     # executions are appended so the combined list reflects both phases
     # in a single response.
-    rerun_executions = run_due_approved_rerun_cycle()
+    try:
+        rerun_executions = run_due_approved_rerun_cycle()
+    except Exception as exc:
+        # The digest phase already executed and is reported below. Returning a
+        # 5xx here would make the CronJob re-run the whole cycle and re-report
+        # that completed digest work, so the partial result is returned as a
+        # non-retryable 200 that still surfaces the rerun failure. The
+        # still-due reruns remain due server-side and execute next cycle.
+        return RunOnceResponse(
+            worker_status='partial',
+            executed_count=len(digest_result.executions),
+            executions=list(digest_result.executions),
+            worker_config=worker_config(),
+            errors=[f'approved-rerun cycle failed: {exc}'],
+        )
     all_executions = list(digest_result.executions) + rerun_executions
     return RunOnceResponse(
         worker_status='ok',

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib import error as urllib_error
@@ -21,6 +22,8 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .idempotency import IdempotencyStore
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,15 @@ class Settings:
 
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
+# Commands that mutate backend state and therefore must be deduped when the
+# inbound message id is known. Reads (state/check/compare/help) are naturally
+# idempotent and are never cached.
+_MUTATING_COMMANDS = frozenset({"new", "add", "plan", "run", "next", "decide"})
+
+# Inbound message ids come from the chat transport; keep them to a safe token so
+# they can never smuggle path or log-special content into the cache key.
+_MESSAGE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:@-]{1,200}$")
+
 
 def _valid_session_id(value: str | None) -> bool:
     return value is not None and bool(_SESSION_ID_PATTERN.match(value))
@@ -51,6 +63,7 @@ class DispatchRequest(BaseModel):
     message: str = Field(min_length=1)
     submitted_by: str | None = None
     session_id: str | None = None
+    message_id: str | None = None
 
     @field_validator("message")
     @classmethod
@@ -77,6 +90,15 @@ class DispatchRequest(BaseModel):
             )
         return value
 
+    @field_validator("message_id")
+    @classmethod
+    def validate_message_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not _MESSAGE_ID_PATTERN.match(value):
+            raise ValueError("message_id must be a safe token")
+        return value
+
 
 class DispatchResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -86,6 +108,7 @@ class DispatchResponse(BaseModel):
     response_text: str
     workflow_api_endpoint: str | None = None
     payload: dict[str, Any] | None = None
+    replayed: bool = False
 
 
 class HealthResponse(BaseModel):
@@ -133,6 +156,14 @@ def _request_json(
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"workflow-api unreachable: {exc.reason}",
+        )
+    except (TimeoutError, socket.timeout):
+        # A read timeout raises a bare socket.timeout (TimeoutError on 3.10+)
+        # from response.read(), escaping the URLError arm above; without this
+        # arm FastAPI surfaces it as an opaque 500 instead of a gateway timeout.
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="workflow-api timed out while reading the response",
         )
 
 
@@ -593,12 +624,23 @@ def _dispatch(
     )
 
 
+def _idempotency_key(request: DispatchRequest) -> str | None:
+    if request.message_id is None:
+        return None
+    parsed = _parse_command(request.message)
+    if parsed is None or parsed[0] not in _MUTATING_COMMANDS:
+        return None
+    return request.message_id
+
+
 def create_app(
     settings: Settings | None = None,
     requester: Callable[..., tuple[str, dict[str, Any]]] | None = None,
+    idempotency_store: IdempotencyStore | None = None,
 ) -> FastAPI:
     active_settings = settings or Settings()
     active_requester = requester or _request_json
+    active_idempotency_store = idempotency_store or IdempotencyStore()
 
     app = FastAPI(title="Glasslab Research Command Router", version="0.1.0")
 
@@ -612,6 +654,31 @@ def create_app(
 
     @app.post("/dispatch", response_model=DispatchResponse)
     def dispatch(request: DispatchRequest) -> DispatchResponse:
-        return _dispatch(request, active_settings, active_requester)
+        cache_key = _idempotency_key(request)
+        if cache_key is None:
+            return _dispatch(request, active_settings, active_requester)
+        replayed, cached = active_idempotency_store.reserve(cache_key)
+        if replayed:
+            if cached is not None:
+                return cached.model_copy(update={"replayed": True})
+            # A concurrent delivery of the same message is still executing; let
+            # the original request own the work and treat this one as a no-op.
+            parsed = _parse_command(request.message)
+            return DispatchResponse(
+                matched=True,
+                command=parsed[0] if parsed else None,
+                response_text=(
+                    "Duplicate delivery ignored; the original request is still "
+                    "being processed."
+                ),
+                replayed=True,
+            )
+        try:
+            response = _dispatch(request, active_settings, active_requester)
+        except Exception:
+            active_idempotency_store.abandon(cache_key)
+            raise
+        active_idempotency_store.complete(cache_key, response)
+        return response
 
     return app

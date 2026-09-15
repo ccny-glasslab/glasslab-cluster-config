@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     app_version: str = '0.1.0'
     log_level: str = 'INFO'
 
+    api_token: str
     planner_model_name: str = 'Qwen/Qwen3-4B-Instruct-2507'
     qwen_api_base: str = 'http://vllm.glasslab-agents.svc.cluster.local:8000/v1'
     qwen_api_key: str
@@ -71,6 +72,18 @@ class Settings(BaseSettings):
             or normalized in {'redacted', '<redacted>', 'replace-me'}
         ):
             raise ValueError('qwen_api_key must contain a non-placeholder value')
+        return value
+
+    @field_validator('api_token')
+    @classmethod
+    def reject_placeholder_api_token(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if (
+            not normalized
+            or normalized.startswith('change-me')
+            or normalized in {'redacted', '<redacted>', 'replace-me'}
+        ):
+            raise ValueError('api_token must contain a non-placeholder value')
         return value
 
     @property

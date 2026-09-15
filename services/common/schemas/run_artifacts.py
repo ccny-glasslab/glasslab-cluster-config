@@ -82,7 +82,7 @@ class MetricRecord(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     name: str
-    value: float
+    value: float = Field(allow_inf_nan=False)
     direction: MetricDirection
     split: str | None = None
 
