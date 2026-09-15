@@ -150,6 +150,34 @@ METHODOLOGY_REQUIREMENTS_GUIDANCE = (
     'turn a required choice into a comparison. '
 )
 
+# Issue #474: the variant naming rule and the comparison shape are restated at
+# every matrix proposal and revision turn, so the agent learns them from the
+# task rather than from a deterministic schema rejection. The pattern text
+# matches ExperimentVariant.name; the drift guard lives in
+# tests/test_matrix_template_derivation.py.
+MATRIX_VARIANT_RULES_GUIDANCE = (
+    '\nVariant naming and comparison rules: every variant `name` must match '
+    'the pattern `^[a-z0-9][a-z0-9_-]{0,62}$` (lowercase letters, digits, '
+    'hyphens, or underscores). When the evaluation contract declares a '
+    '`comparison` methodology requirement, emit exactly one variant per '
+    'required distinct method (at least `minimum_distinct_values` variants), '
+    'each with a distinct NON-EMPTY `overrides` object that sets that '
+    "requirement's `config_path` to one distinct value; never propose a "
+    'single variant with empty `overrides` when a comparison is required. '
+    'Write the same distinct values into `base_config` at the same '
+    '`config_path`, so the deterministic preflight (which reads base_config) '
+    'and the methodology review (which reads the variants) agree.\n'
+)
+
+
+def _variant_name_from_value(value: str) -> str:
+    # The template derives each variant name from the distinct value it
+    # demonstrates. Sanitizing to the schema pattern keeps the template a
+    # valid ExperimentMatrix even when a contract config_path leaf is not
+    # already pattern-conforming.
+    slug = re.sub(r'[^a-z0-9_-]+', '-', value.lower()).strip('-_')
+    return slug[:63] or 'candidate'
+
 
 def _is_retryable_turn_failure(exc: Exception) -> bool:
     """Transient runtime failures are retryable; deterministic ones are not."""
@@ -4163,6 +4191,7 @@ class ResearchOrchestrator:
                 indent=2,
                 sort_keys=True,
             )
+            + MATRIX_VARIANT_RULES_GUIDANCE
             + '\nKeep reason beside type and arguments. Put the ExperimentMatrix '
             'fields directly in arguments; do not add a matrix or evaluator_type '
             'wrapper. arguments.base_config must be the exact relative path '
@@ -4259,6 +4288,7 @@ class ResearchOrchestrator:
                 indent=2,
                 sort_keys=True,
             )
+            + MATRIX_VARIANT_RULES_GUIDANCE
             + '\nKeep reason beside type and arguments. Put the ExperimentMatrix '
             'fields directly in arguments; do not add a matrix or evaluator_type '
             'wrapper. arguments.base_config must be the exact relative path '
@@ -4377,12 +4407,7 @@ class ResearchOrchestrator:
             'type': 'submit_experiment_matrix',
             'arguments': {
                 'base_config': 'configs/candidate.yaml',
-                'variants': [
-                    {
-                        'name': 'candidate',
-                        'overrides': {},
-                    }
-                ],
+                'variants': self._matrix_template_variants(run.run_id),
                 'seeds': seeds,
                 'maximum_parallel_jobs': min(
                     1,
@@ -4396,6 +4421,39 @@ class ResearchOrchestrator:
                 'Run the bounded candidate for methodology and human review.'
             ),
         }
+
+    def _matrix_template_variants(self, run_id: str) -> list[dict[str, Any]]:
+        # Issue #474: Honeydew rejects a single variant with empty overrides
+        # whenever the contract requires a method comparison, so the template
+        # demonstrates one distinct, non-empty variant per required distinct
+        # method. The agent still replaces the placeholder values with the
+        # real methods; the leaf-based value matches the deterministic
+        # base_config repair placeholders.
+        variants: list[dict[str, Any]] = []
+        names: set[str] = set()
+        for requirement in self._contract_methodology_requirements(run_id):
+            if requirement.mode != 'comparison':
+                continue
+            leaf = requirement.config_path.split('.')[-1]
+            for index in range(1, requirement.minimum_distinct_values + 1):
+                value = f'{leaf}-candidate-{index}'
+                base = _variant_name_from_value(value)
+                name = base
+                suffix = 2
+                while name in names:
+                    marker = f'-{suffix}'
+                    name = f'{base[: 63 - len(marker)]}{marker}'
+                    suffix += 1
+                names.add(name)
+                variants.append(
+                    {
+                        'name': name,
+                        'overrides': {requirement.config_path: value},
+                    }
+                )
+        # With nothing required to compare, one candidate run is the correct
+        # shape and its empty overrides are expected.
+        return variants or [{'name': 'candidate', 'overrides': {}}]
 
     def _matrix_template_seeds(self, run: RunRecord) -> list[int]:
         # A comparison methodology contract needs at least the comparison
@@ -5128,6 +5186,7 @@ class ResearchOrchestrator:
                 indent=2,
                 sort_keys=True,
             )
+            + MATRIX_VARIANT_RULES_GUIDANCE
             + '\nKeep reason beside type and arguments. Put the ExperimentMatrix '
             'fields directly in arguments; do not add a matrix or evaluator_type '
             'wrapper. Matrix seeds create separate cluster jobs. If the workload '
