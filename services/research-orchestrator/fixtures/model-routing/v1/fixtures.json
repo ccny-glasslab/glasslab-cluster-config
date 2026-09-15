@@ -1,0 +1,137 @@
+{
+  "schema_version": "glasslab-model-routing-fixtures-v1",
+  "description": "Frozen per-turn-kind inputs for issue #433. One stable fixture per TurnKind. The benchmark scorer (app/model_routing.py::score_envelope) checks that a model response parses to an AgentTurnResult envelope with the fixture's required kind and variant fields. These inputs are the fixed unit against which the recorded pass-rate evidence (evidence.json) was measured; refresh them together with the evidence.",
+  "fixtures": [
+    {
+      "fixture_id": "task_spec-archive-compile",
+      "turn_kind": "task_spec",
+      "agent": "honeydew",
+      "context_profile": "long-context-structured",
+      "prompt": "Compile the attached task archive into a Glasslab TaskSpec. Read `problem.md` and `eval_agent_prompt.md`. Select exactly one approved runtime profile: `cpu-ml-standard-v1` for tabular/classical ML, or `gpu-ml-standard-v1` when PyTorch/CUDA training is materially required. Identify every external dataset or model asset as an asset proposal and preserve any exact `glasslab-dataset://<sha256>` reference as approved_uri. List the exact metric keys and evidence artifacts the rubric requires. Put unresolved requirements in missing_inputs. Do not invent credentials, private URLs, commands, images, or evaluator code. Return an AgentTurnResult with kind `task_spec` and a populated task_spec_proposal, no requested actions.",
+      "required_envelope_kind": "task_spec",
+      "required_envelope_fields": [
+        "task_spec_proposal"
+      ],
+      "source": "mirrors the task-compiler prompt in app/engine.py::compile_task_bundle"
+    },
+    {
+      "fixture_id": "protocol_draft-bounded-comparison",
+      "turn_kind": "protocol_draft",
+      "agent": "honeydew",
+      "context_profile": "long-context-structured",
+      "prompt": "You are Honeydew, drafting a research protocol. Draft a concrete program.md for this objective: compare cosine-similarity metric learning against Euclidean-distance embedding retrieval on a triplet benchmark, measuring mean reciprocal rank across three seeds. Use evaluation contract contract://example-research-v1/1.0.0. Return an AgentTurnResult envelope with kind `protocol_draft` and a summary. Populate produced_files with a file whose purpose is `protocol`. Also populate evaluation_contract_proposal with the scientific evaluator type, primary metric and direction, minimum meaningful effect, guardrails, required artifacts, budget policy, resource ceilings, and rationale. Propose data and metrics only; do not propose executable paths, container images, commands, or checksums.",
+      "required_envelope_kind": "protocol_draft",
+      "required_envelope_fields": [
+        "produced_files",
+        "evaluation_contract_proposal"
+      ],
+      "source": "mirrors the protocol-draft prompt in app/engine.py::_draft_protocol and the rehearsal objective"
+    },
+    {
+      "fixture_id": "contract_candidate-draft",
+      "turn_kind": "contract_candidate",
+      "agent": "beaker",
+      "context_profile": "coding",
+      "prompt": "You are Beaker. Draft a candidate evaluation contract for the approved scientific proposal. The contract must specify the evaluator type, primary metric and direction, minimum meaningful effect, guardrails, required artifacts, and bounded resource ceilings. Write the candidate contract files into the workspace and return an AgentTurnResult with kind `contract_candidate`, a summary, and produced_files describing what you wrote. Do not request cluster execution.",
+      "required_envelope_kind": "contract_candidate",
+      "required_envelope_fields": [
+        "produced_files"
+      ],
+      "source": "mirrors the contract-candidate prompt in app/engine.py::_beaker_draft_contract"
+    },
+    {
+      "fixture_id": "implementation_plan-bounded",
+      "turn_kind": "implementation_plan",
+      "agent": "beaker",
+      "context_profile": "coding",
+      "prompt": "You are Beaker. Write implementation-plan.md for the approved protocol. The plan must state the bounded experiment, the exact matrix of seeds/variants, the metric keys, and the evidence artifacts the workload will emit. Inspect the repository and the task inputs first. Return an AgentTurnResult with kind `implementation_plan`, a summary, and produced_files listing implementation-plan.md. Do not submit jobs.",
+      "required_envelope_kind": "implementation_plan",
+      "required_envelope_fields": [
+        "produced_files"
+      ],
+      "source": "mirrors the implementation-plan prompt in app/engine.py::_beaker_plan"
+    },
+    {
+      "fixture_id": "implementation_proposal-bounded",
+      "turn_kind": "implementation_proposal",
+      "agent": "beaker",
+      "context_profile": "coding",
+      "prompt": "You are Beaker. Implement the approved plan. Write the smallest complete experiment runner and candidate configuration into the workspace, run the bounded local checks, and propose the experiment matrix. Return an AgentTurnResult with kind `implementation_proposal`, a summary, produced_files for every file you wrote, and a single `submit_experiment_matrix` requested action. Matrix seeds create separate cluster jobs; do not duplicate an internal seed list.",
+      "required_envelope_kind": "implementation_proposal",
+      "required_envelope_fields": [
+        "produced_files"
+      ],
+      "source": "mirrors the implementation-proposal prompt in app/engine.py::_beaker_implement"
+    },
+    {
+      "fixture_id": "methodology_review-independent",
+      "turn_kind": "methodology_review",
+      "agent": "honeydew",
+      "context_profile": "long-context-structured",
+      "prompt": "You are Honeydew. Independently review Beaker's implementation and proposed matrix against the approved protocol and the evaluation contract. Check that the metric keys, variants, seeds, and required artifacts match the contract, that the workload cannot score itself, and that the design answers the objective. Set done=true only if the implementation is scientifically sound; otherwise summarize the specific defects. Return an AgentTurnResult with kind `methodology_review` and a summary. Cite artifact or contract URIs for claims.",
+      "required_envelope_kind": "methodology_review",
+      "required_envelope_fields": [],
+      "source": "mirrors the methodology-review prompt in app/engine.py::_review_implementation"
+    },
+    {
+      "fixture_id": "revision-bounded",
+      "turn_kind": "revision",
+      "agent": "beaker",
+      "context_profile": "coding",
+      "prompt": "You are Beaker. Revise the implementation in response to review feedback. Keep the change bounded to the cited defects, re-run the local checks, and update the matrix only if the science requires it. Return an AgentTurnResult with kind `revision`, a summary, produced_files for every changed file, and the requested matrix action if the matrix changed.",
+      "required_envelope_kind": "revision",
+      "required_envelope_fields": [
+        "produced_files"
+      ],
+      "source": "mirrors the revision prompt in app/engine.py::_beaker_revise"
+    },
+    {
+      "fixture_id": "experiment_analysis-results",
+      "turn_kind": "experiment_analysis",
+      "agent": "beaker",
+      "context_profile": "coding",
+      "prompt": "You are Beaker. Analyze the completed job results. Read the evaluator metrics artifact from the workspace, report the measured values for every contract metric, note any integrity or guardrail failure, and state whether the evidence supports proceeding to the next phase. Return an AgentTurnResult with kind `experiment_analysis`, a summary, produced_files for the analysis artifact, and claims that cite artifact:// and job:// URIs only. Do not create or score evaluation.json.",
+      "required_envelope_kind": "experiment_analysis",
+      "required_envelope_fields": [
+        "produced_files"
+      ],
+      "source": "mirrors the experiment-analysis prompt in app/engine.py::_analyze_results"
+    },
+    {
+      "fixture_id": "verification-independent",
+      "turn_kind": "verification",
+      "agent": "honeydew",
+      "context_profile": "bounded-reasoning",
+      "prompt": "You are Honeydew. Independently verify Beaker's important claims against the authoritative records and the approved program.md. Sanity-check the claims and numbers against the retrieved corpus material; flag any contradiction between the results and the corpus. Set done=true only if the evidence supports a final report. Cite artifact, job, event, or knowledge:// URIs. Return an AgentTurnResult with kind `verification`, a summary, and a verification_verdict (status consistent or contradicts, with citations).",
+      "required_envelope_kind": "verification",
+      "required_envelope_fields": [
+        "verification_verdict"
+      ],
+      "source": "mirrors the verification prompt in app/engine.py::_verify_results"
+    },
+    {
+      "fixture_id": "final_report-evidence",
+      "turn_kind": "final_report",
+      "agent": "honeydew",
+      "context_profile": "long-context-structured",
+      "prompt": "You are Honeydew, writing the final research report for a completed run. Objective: compare cosine-similarity metric learning against Euclidean-distance embedding retrieval on a triplet benchmark, measuring mean reciprocal rank across three seeds. Evidence from the evaluator: mean reciprocal rank cosine=0.74, euclidean=0.61, three seeds, no integrity failures. Write report.md and return an AgentTurnResult with kind `final_report`, a summary, and produced_files containing the report file (purpose `report`). Report what the evidence actually supports; do not overclaim.",
+      "required_envelope_kind": "final_report",
+      "required_envelope_fields": [
+        "produced_files"
+      ],
+      "source": "mirrors the final-report prompt in app/engine.py::_write_report"
+    },
+    {
+      "fixture_id": "research_answer-grounded",
+      "turn_kind": "research_answer",
+      "agent": "honeydew",
+      "context_profile": "long-context-structured",
+      "prompt": "You are Honeydew, answering a direct research question from an operator. Answer strictly from the retrieved reference material. Every substantive claim must carry a knowledge:// citation in the citations[] field (knowledge_uri + source + a short verbatim excerpt). If the retrieved material does not answer the question, set unanswerable: true and leave citations empty rather than guessing. QUESTION: Which retrieval metric is preferred for embedding vectors? Return an AgentTurnResult with kind `research_answer` and the answer content nested under the research_answer field.",
+      "required_envelope_kind": "research_answer",
+      "required_envelope_fields": [
+        "research_answer"
+      ],
+      "source": "mirrors the research-answer prompt in app/engine.py::answer_research_question (#321 grounded/unanswerable cases)"
+    }
+  ]
+}

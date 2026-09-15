@@ -95,3 +95,12 @@ speed-to-knowledge ratio.
 - Staging models requires `HF_TOKEN` (present at
   `/Users/glasslab/.cache/huggingface/token`) and a reconcile placement; see
   #321 for the operational details.
+
+## Per-turn-kind routing (2026-09-14)
+
+The live split serves two models: `.17` structured (`Qwen3-Coder-Next-4bit`)
+and `.18` reasoning (`Qwen3-Next-80B-A3B-Thinking-4bit`). Which model serves a
+turn kind is now derived from recorded per-turn-kind pass rates instead of a
+static per-agent assignment (issue #433). The chosen mapping, the versioned
+fixtures and evidence behind it, and the refresh procedure are in
+[`per-turn-kind-model-routing.md`](per-turn-kind-model-routing.md).

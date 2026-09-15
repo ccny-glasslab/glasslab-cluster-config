@@ -32,9 +32,11 @@ import discord
 from discord import app_commands
 
 from .artifact_delivery import ArtifactBundle, build_run_artifact_bundle
+from .datasets import DatasetUrlError
 from .schemas import (
     ActionRecord,
     ApprovalStatus,
+    CatalogDatasetRecord,
     IngestedDatasetRecord,
     JobRecord,
     JobStatus,
@@ -385,6 +387,26 @@ def execute_discord_dataset_ingestion(
     )
 
 
+def execute_discord_dataset_url_ingestion(
+    engine: ResearchOrchestrator,
+    *,
+    url: str,
+    name: str,
+    role: str,
+    contains_labels: bool,
+    actor: DiscordControlActor,
+    expected_sha256: str | None = None,
+) -> CatalogDatasetRecord:
+    return engine.datasets.register_url(
+        url=url,
+        name=name,
+        expected_sha256=expected_sha256,
+        role=role,
+        contains_labels=contains_labels,
+        created_by=actor.reviewer,
+    )
+
+
 def execute_discord_task_creation(
     engine: ResearchOrchestrator,
     *,
@@ -725,6 +747,39 @@ class DiscordControlGateway:
                 name=str(name),
                 role=str(role),
                 contains_labels=contains_labels,
+            )
+
+        @self.tree.command(
+            name='dataset-url',
+            description='Ingest a dataset from a public HTTPS URL.',
+            guild=self.guild,
+        )
+        @app_commands.describe(
+            url='Public HTTPS URL of the dataset to fetch once and reuse.',
+            name='Stable lowercase name used by experiment code.',
+            role='Purpose such as train, test, labels, or input.',
+            contains_labels='Whether the fetched file contains target labels.',
+            expected_sha256=(
+                'Optional expected SHA-256; ingestion fails closed on mismatch.'
+            ),
+        )
+        async def dataset_url(
+            interaction: discord.Interaction,
+            url: app_commands.Range[str, 1, 2048],
+            name: app_commands.Range[str, 1, 63],
+            role: app_commands.Range[str, 1, 120] = 'input',
+            contains_labels: bool = False,
+            expected_sha256: str | None = None,
+        ) -> None:
+            await self._on_dataset_url(
+                interaction,
+                url=str(url),
+                name=str(name),
+                role=str(role),
+                contains_labels=contains_labels,
+                expected_sha256=(
+                    str(expected_sha256) if expected_sha256 else None
+                ),
             )
 
         @self.tree.command(
@@ -1229,6 +1284,79 @@ class DiscordControlGateway:
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+
+    async def _on_dataset_url(
+        self,
+        interaction: discord.Interaction,
+        *,
+        url: str,
+        name: str,
+        role: str,
+        contains_labels: bool,
+        expected_sha256: str | None,
+    ) -> None:
+        actor = self._actor(interaction)
+        if not self.policy.is_authorized(actor):
+            await self._respond(
+                interaction,
+                'You are not authorized to ingest Glasslab datasets.',
+            )
+            return
+        if str(interaction.channel_id) != self.channel_id:
+            await self._respond(
+                interaction,
+                'Ingest datasets from the configured Glasslab channel.',
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            record = await asyncio.to_thread(
+                execute_discord_dataset_url_ingestion,
+                self.engine,
+                url=url,
+                name=name,
+                role=role,
+                contains_labels=contains_labels,
+                expected_sha256=expected_sha256,
+                actor=actor,
+            )
+            await interaction.followup.send(
+                self._dataset_url_message(record),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except DatasetUrlError as exc:
+            await interaction.followup.send(
+                (
+                    f'Dataset URL ingestion failed ({exc.kind.value}): '
+                    f'{exc}'
+                ),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as exc:
+            await interaction.followup.send(
+                f'Dataset URL ingestion failed: {exc}',
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+    @staticmethod
+    def _dataset_url_message(record: CatalogDatasetRecord) -> str:
+        lines = [
+            f'Dataset `{record.name}` registered as '
+            f'`{record.reference_uri}`.',
+            f'SHA-256: `{record.sha256}`; size: {record.size_bytes} bytes.',
+        ]
+        if record.deduplicated:
+            lines.append('Identical content was already stored (dedup reuse).')
+        if record.final_url and record.final_url != record.source_url:
+            lines.append(f'Final URL: {record.final_url}')
+        lines.append(
+            'Use that reference in the task problem statement or '
+            'TaskSpec asset list.'
+        )
+        return '\n'.join(lines)
 
     async def _on_research_artifacts(
         self,

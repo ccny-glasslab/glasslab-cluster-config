@@ -170,12 +170,5 @@ def write_art_retrieval_outputs(bundle_dirs: list[Path], output_dir: Path) -> Co
     # Write summary.md
     summary_md = output_dir / 'summary.md'
     summary_md.write_text(render_art_retrieval_summary(result) + '\n')
-    
-    # If any bundle has comparison.json, copy it
-    for bundle_dir in bundle_dirs:
-        src_comparison = bundle_dir / 'comparison.json'
-        if src_comparison.exists() and not (output_dir / 'comparison.json').exists():
-            dst_comparison = output_dir / 'comparison.json'
-            dst_comparison.write_text(src_comparison.read_text())
-    
+
     return result

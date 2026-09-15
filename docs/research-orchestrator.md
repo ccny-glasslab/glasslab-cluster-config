@@ -195,6 +195,18 @@ the checked repository configuration. The service does not assume that the
 label `qwen3-coder-next-70b` is accepted by the endpoint. Confirm the served
 model list before changing these values.
 
+### Per-Turn-Kind Routing
+
+Which of the two models serves a turn is a recorded, evidence-derived decision,
+not a per-agent constant. Every turn kind is routed from
+`fixtures/model-routing/v1/routing_table.json`, which is derived from the
+per-turn-kind pass rates in `fixtures/model-routing/v1/evidence.json` over the
+frozen fixtures in `fixtures/model-routing/v1/fixtures.json`; a missing or
+malformed table falls back to the legacy structured/reasoning split. The
+mapping, its evidence source, and how to refresh it are documented in
+[`glasslab-v2/per-turn-kind-model-routing.md`](glasslab-v2/per-turn-kind-model-routing.md)
+(issue #433).
+
 ## Structured Turns
 
 Every completed turn is validated as an `AgentTurnResult`. It contains a kind,
@@ -392,6 +404,31 @@ count, and token count, and the packet is citable as
 exact context packet that grounded a claim; a claim about knowledge requires a
 `knowledge://` evidence URI.
 
+### Agent-directed retrieval tool (`retrieve_evidence`, #379)
+
+Honeydew additionally receives one read-only tool, `retrieve_evidence(query,
+k=5)`, so a turn can iterate retrieve -> reason -> retrieve instead of relying
+only on the deterministic per-turn retrieval. The tool is exposed to Honeydew
+only: the OpenCode runtime writes the generated tool file into Honeydew's
+workspace and never into Beaker's, and the orchestrator refuses any call whose
+capability token is not bound to a Honeydew run.
+
+The tool is a projection over the same `KnowledgeManager.retrieve` pipeline (RRF
+ranking, deterministic tie-breaks, token budget, secret scan); it adds no second
+ranking. It returns the top-`k` chunks with `knowledge://<source_id>` URIs,
+verbatim excerpts, and the `verified` flag, framed as untrusted
+`<knowledge-context>` data. Each call is executed by the orchestrator and
+recorded as durable `agent.tool_call` / `agent.tool_result` events carrying the
+query and the returned URIs. Cumulative rendered tool output per run is bounded
+by `evidence_snapshot_max_bytes`. The tool is read-only by construction: it has
+no writes, no filesystem access, and no shell.
+
+Because Honeydew's verification/report reasoning runs on the Thinking model
+(`Qwen3-Next-80B-A3B-Thinking-4bit`, ~45 tok/s reasoning-first on one Mac
+Studio), `agent_model_max_output_tokens` is 16384 and
+`opencode_turn_timeout_seconds` is 3600 so the reasoning prefix plus several
+retrieval rounds plus the structured answer fit inside one turn.
+
 ## Compiled Research Tasks
 
 The generic contribution path accepts a ZIP with exactly one `problem.md` and
@@ -455,7 +492,7 @@ curl -fsS -X POST http://127.0.0.1:8080/task-bundles/import \
   -H "X-Glasslab-Operator-Token: $TOKEN" \
   -F "archive=@$HOME/Downloads/my-research-task.zip"
 
-curl -fsS \
+curl -fsS -H "X-Glasslab-Operator-Token: $TOKEN" \
   "http://127.0.0.1:8080/task-bundles/<task-id>/preflight?digest=<sha256>"
 
 curl -fsS -X POST http://127.0.0.1:8080/runs \
@@ -526,6 +563,23 @@ Exceeding the limit pauses at `BEAKER_REVISING` and emits
 `methodology.human_resolution_requested` instead of consuming the remaining
 turn budget in an unbounded review loop.
 
+When the deterministic preflight rejects a matrix for a missing or
+under-populated contract `config_path`, the orchestrator materializes the
+required shape in `matrix.base_config` before handing Beaker the revision: it
+creates the file/skeleton if missing, inserts every missing dotted key, and
+tops up any list to the contract's `minimum_distinct_values` with deterministic
+`<leaf>-candidate-N` placeholders, each annotated with a YAML comment. The
+engine owns only the structural shape the preflight checks; Beaker still owns
+the values and is instructed to replace every placeholder. The repair is
+bounded and idempotent, so existing valid values and unrelated keys survive and
+a second pass makes no change. This emits `methodology.base_config_materialized`.
+
+A repeated identical preflight rejection — same normalized error set and same
+`base_config` digest — is a deterministic fixed point (agents run at
+`temperature: 0`). Instead of spending the revision budget, the orchestrator
+emits `methodology.non_convergence_detected` and pauses the run for human
+resolution with the repeated signature and offending errors.
+
 Approval and execution are separate audited facts. If an approved action cannot
 execute, the orchestrator records `action.execution_failed` with the error,
 authoritative job and artifact counts, retry classification, resulting safe
@@ -572,6 +626,17 @@ recovery. A pause or cancellation received while an agent turn is completing
 is rechecked after the turn output is stored; the output remains auditable, but
 the orchestrator does not record requested actions or start another turn.
 
+Long sessions also rotate proactively. A continuing session carries its whole
+turn history, which on the shared Coder endpoint competes with page cache.
+Before a turn starts, the orchestrator estimates the tokens accumulated by the
+agent's live session; when that estimate crosses
+`GLASSLAB_ORCHESTRATOR_TURN_HISTORY_ROTATION_TOKEN_THRESHOLD` (128000 by
+default, `0` disables), it rotates the session through the same
+recovery-checkpoint path a failed turn uses: the session is released, a compact
+checkpoint is written, and the next turn starts fresh from that checkpoint so
+the run continues rather than restarts. This is bounded history, not a second
+state format; failure-driven recovery is unchanged.
+
 The run-level runtime ceiling measures active workflow time. The orchestrator
 accumulates elapsed active seconds when a run is paused, stops the clock while
 it remains `PAUSED`, and starts it again on resume. Operator review time in
@@ -605,7 +670,13 @@ internal automation and recovery interface; operators are not expected to
 construct it by hand for normal work.
 
 `/dataset-upload` registers a bounded attachment in the immutable dataset
-registry and returns a `glasslab-dataset://<sha256>` reference.
+registry and returns a `glasslab-dataset://<sha256>` reference. `/dataset-url`
+does the same for a public HTTPS resource that is too large to attach: it
+fetches once under the same redirect/private-address protections as task
+assets, streams under the byte ceiling, dedups by content digest, and preserves
+provenance (original and final URL, retrieval time, size, media type/filename,
+and optional expected checksum). The equivalent authenticated HTTP endpoint is
+`POST /datasets/register-url`.
 `/research-pause`, `/research-resume`, and `/research-cancel` resolve the run
 from its thread, or accept an explicit run ID in the main channel. They record
 the Discord actor and optional reason in the append-only event history.
@@ -722,9 +793,13 @@ GET  /health
 GET  /ready
 ```
 
-Deployment requires `X-Glasslab-Operator-Token` on all state-changing
-endpoints. Health, readiness, run reads, events, artifacts, and SSE remain
-read-only. Local development leaves this check disabled unless
+Deployment requires `X-Glasslab-Operator-Token` on every endpoint except
+`/health` and `/ready`. Reads, events, artifacts, SSE, and the task/dataset/
+knowledge listing endpoints are gated too, because the documented contributor
+port-forward exposes the service beyond its cluster network (issue #369).
+Free-form read payloads (event payloads, action arguments, artifact metadata,
+run task/seed state) are redacted before the response is built. Local
+development leaves this check disabled unless
 `GLASSLAB_ORCHESTRATOR_REQUIRE_OPERATOR_AUTH=true`.
 
 Normal Discord usage is:
@@ -745,6 +820,12 @@ Upload a local dataset before starting a task:
 ```
 
 Put the returned `glasslab-dataset://<sha256>` reference in `problem.md`.
+
+For a public dataset too large to attach, ingest it by URL instead:
+
+```text
+/dataset-url url:https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz name:cifar10 role:input
+```
 
 Pause and resume from the run thread:
 

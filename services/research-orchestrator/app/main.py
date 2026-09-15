@@ -1,11 +1,14 @@
 """FastAPI operator surface for the research orchestrator.
 
 The app is a thin HTTP projection over the ResearchOrchestrator engine: it
-validates requests, gates mutations behind the operator token, and maps
+validates requests, gates every endpoint behind the operator token, and maps
 domain errors to HTTP statuses. State and policy live in the engine and
-store, not here. All read endpoints are intentionally unauthenticated because
-the service binds to an internal network; only state-changing endpoints
-require the operator token.
+store, not here. Read endpoints were previously left unauthenticated because
+the service binds to an internal network, but the documented contributor
+port-forward makes them reachable from any workstation, so reads now require
+the operator token too (issue #369). Only ``/health`` and ``/ready`` stay
+anonymous for the kubelet probes. Free-form read payloads are redacted before
+they leave the process even for authorized readers.
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ import asyncio
 import html
 import json
 import secrets
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -46,12 +49,14 @@ from .discord_rest import (
     DiscordRestPolicy,
     execute_guarded,
 )
-from .datasets import DatasetIngestionError, DatasetIngestionManager
+from .datasets import DatasetIngestionError, DatasetIngestionManager, DatasetUrlError
 from .engine import ResearchOrchestrator, WorkflowError
 from .hermes_runtime import HermesProcessRuntime
 from .knowledge_manager import KnowledgeError
+from .knowledge_tool import KnowledgeToolDenied, KnowledgeToolError
 from .opencode_runtime import AgentRuntime, OpenCodeProcessRuntime
 from .policy import ActionPolicy
+from .redaction import redact_payload
 from .research_store import ResearchStore
 from .schemas import (
     ActionRecord,
@@ -64,12 +69,14 @@ ConversationPromoteRequest,
     ContextPacket,
     ContextPacketListResponse,
     EventListResponse,
+    EventRecord,
 IngestedDatasetRecord,
     CatalogDatasetRecord,
     DatasetUrlRegisterRequest,
     KnowledgeSource,
     KnowledgeSourceListResponse,
     KnowledgeSourceRequest,
+    RetrieveEvidenceToolRequest,
     RejectionRequest,
     ResearchAnswer,
     RunCreateRequest,
@@ -288,6 +295,42 @@ def _discord_rest_reason(circuit: DiscordRestCircuit | None) -> str | None:
     return snapshot['last_outcome_category'] or 'circuit_open'
 
 
+def redact_event(event: EventRecord) -> EventRecord:
+    return event.model_copy(update={'payload': redact_payload(event.payload)})
+
+
+def redact_action(action: ActionRecord) -> ActionRecord:
+    return action.model_copy(
+        update={'arguments': redact_payload(action.arguments)}
+    )
+
+
+def redact_artifact(artifact: ArtifactRecord) -> ArtifactRecord:
+    return artifact.model_copy(
+        update={'metadata': redact_payload(artifact.metadata)}
+    )
+
+
+def redact_run(run: RunRecord) -> RunRecord:
+    # Objective stays readable: it is human-authored prose, and the keyword
+    # heuristic would replace the entire field rather than a secret inside it.
+    update: dict[str, Any] = {}
+    if run.task_definition is not None:
+        update['task_definition'] = redact_payload(run.task_definition)
+    if run.seed_context is not None:
+        update['seed_context'] = redact_payload(run.seed_context)
+    return run.model_copy(update=update)
+
+
+def sse_frame(event: EventRecord) -> str:
+    redacted = redact_event(event)
+    return (
+        f'id: {redacted.sequence_number}\n'
+        f'event: {redacted.event_type}\n'
+        f'data: {json.dumps(redacted.model_dump(mode="json"))}\n\n'
+    )
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -386,6 +429,12 @@ def create_app(
         title='Glasslab Research Orchestrator',
         version=settings.app_version,
         lifespan=lifespan,
+        # The auto-generated OpenAPI/docs routes are plain unauthenticated
+        # GETs and cannot carry the per-route operator dependency, so they are
+        # disabled rather than left outside the read-API auth boundary (#369).
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
     app.state.engine = engine
     app.state.discord_controls = discord_controls
@@ -423,6 +472,14 @@ def create_app(
         # anything unexpected. Domain errors never leak stack traces.
         if isinstance(exc, RecordNotFound):
             return HTTPException(status_code=404, detail=str(exc))
+        if isinstance(exc, DatasetUrlError):
+            # The failure class is machine-readable so callers can react
+            # (retry, fix the URL, verify a checksum) without parsing prose;
+            # the message never includes resolved addresses or transport text.
+            return HTTPException(
+                status_code=409,
+                detail={'kind': exc.kind.value, 'message': str(exc)},
+            )
         if isinstance(
             exc,
             (
@@ -565,7 +622,9 @@ def create_app(
             await archive.close()
 
     @app.get('/task-bundles', response_model=list[TaskBundleRecord])
-    def list_task_bundles() -> list[TaskBundleRecord]:
+    def list_task_bundles(
+        _: None = Depends(require_operator),
+    ) -> list[TaskBundleRecord]:
         return engine.task_bundles.list()
 
     @app.post(
@@ -624,14 +683,19 @@ def create_app(
             raise map_error(exc) from exc
 
     @app.get('/datasets', response_model=list[IngestedDatasetRecord])
-    def list_datasets() -> list[IngestedDatasetRecord]:
+    def list_datasets(
+        _: None = Depends(require_operator),
+    ) -> list[IngestedDatasetRecord]:
         return engine.store.list_datasets()
 
     @app.get(
         '/datasets/{dataset_id}',
         response_model=IngestedDatasetRecord,
     )
-    def get_dataset(dataset_id: str) -> IngestedDatasetRecord:
+    def get_dataset(
+        dataset_id: str,
+        _: None = Depends(require_operator),
+    ) -> IngestedDatasetRecord:
         try:
             return engine.store.get_dataset(dataset_id)
         except Exception as exc:
@@ -641,6 +705,7 @@ def create_app(
     def get_task_bundle(
         task_id: str,
         digest: str | None = Query(default=None),
+        _: None = Depends(require_operator),
     ) -> TaskBundleRecord:
         try:
             return engine.task_bundles.get(task_id, digest)
@@ -654,6 +719,7 @@ def create_app(
     def get_task_bundle_preflight(
         task_id: str,
         digest: str | None = Query(default=None),
+        _: None = Depends(require_operator),
     ) -> TaskPreflight:
         try:
             return engine.task_preflight(
@@ -768,6 +834,7 @@ def create_app(
     def list_knowledge_sources(
         source_type: str | None = Query(default=None),
         run_scope: str | None = Query(default=None),
+        _: None = Depends(require_operator),
     ) -> KnowledgeSourceListResponse:
         source_types = (
             [SourceType(source_type)] if source_type else None
@@ -910,6 +977,42 @@ def create_app(
         except Exception as exc:
             raise map_error(exc) from exc
 
+    @app.post(
+        '/internal/agent-tools/retrieve-evidence',
+        response_model=dict[str, object],
+    )
+    def retrieve_evidence_tool(
+        request: RetrieveEvidenceToolRequest,
+        supplied_token: str | None = Header(
+            default=None,
+            alias='X-Glasslab-Tool-Token',
+        ),
+    ) -> dict[str, object]:
+        if not supplied_token:
+            raise HTTPException(
+                status_code=401,
+                detail='tool capability token required',
+            )
+        try:
+            result = engine.execute_knowledge_tool(
+                token=supplied_token,
+                query=request.query,
+                k=request.k,
+            )
+        except KnowledgeToolDenied as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except KnowledgeToolError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            'packet_id': result.packet_id,
+            'context': result.context,
+            'returned_uris': list(result.uris),
+            'verified': list(result.verified),
+            'chunk_count': result.chunk_count,
+            'bytes_returned': result.bytes_returned,
+            'truncated': result.truncated,
+        }
+
     @app.delete(
         '/knowledge/sources/{source_id}',
         response_model=dict[str, object],
@@ -965,7 +1068,10 @@ def create_app(
         '/knowledge/packets/{packet_id}',
         response_class=HTMLResponse,
     )
-    def render_context_packet(packet_id: str) -> HTMLResponse:
+    def render_context_packet(
+        packet_id: str,
+        _: None = Depends(require_operator),
+    ) -> HTMLResponse:
         # Level-3 citation page: a Discord citation link resolves here and the
         # operator's browser renders the exact text the agent saw + source
         # metadata. MathJax renders LaTeX when the cluster can reach the CDN;
@@ -1015,15 +1121,20 @@ def create_app(
         return HTMLResponse(content=body)
 
     @app.get('/runs', response_model=RunListResponse)
-    def list_runs() -> RunListResponse:
-        # Read endpoints are intentionally unauthenticated (internal-only
-        # network); the operator token gates only state-changing endpoints.
-        return RunListResponse(runs=engine.store.list_runs())
+    def list_runs(
+        _: None = Depends(require_operator),
+    ) -> RunListResponse:
+        return RunListResponse(
+            runs=[redact_run(run) for run in engine.store.list_runs()]
+        )
 
     @app.get('/runs/{run_id}', response_model=RunRecord)
-    def get_run(run_id: str) -> RunRecord:
+    def get_run(
+        run_id: str,
+        _: None = Depends(require_operator),
+    ) -> RunRecord:
         try:
-            return engine.store.get_run(run_id)
+            return redact_run(engine.store.get_run(run_id))
         except Exception as exc:
             raise map_error(exc) from exc
 
@@ -1031,24 +1142,34 @@ def create_app(
     def get_events(
         run_id: str,
         after_sequence: int = Query(default=0, ge=0),
+        _: None = Depends(require_operator),
     ) -> EventListResponse:
         try:
             engine.store.get_run(run_id)
             return EventListResponse(
-                events=engine.store.list_events(
-                    run_id,
-                    after_sequence=after_sequence,
-                )
+                events=[
+                    redact_event(event)
+                    for event in engine.store.list_events(
+                        run_id,
+                        after_sequence=after_sequence,
+                    )
+                ]
             )
         except Exception as exc:
             raise map_error(exc) from exc
 
     @app.get('/runs/{run_id}/artifacts', response_model=ArtifactListResponse)
-    def get_artifacts(run_id: str) -> ArtifactListResponse:
+    def get_artifacts(
+        run_id: str,
+        _: None = Depends(require_operator),
+    ) -> ArtifactListResponse:
         try:
             engine.store.get_run(run_id)
             return ArtifactListResponse(
-                artifacts=engine.store.list_artifacts(run_id)
+                artifacts=[
+                    redact_artifact(artifact)
+                    for artifact in engine.store.list_artifacts(run_id)
+                ]
             )
         except Exception as exc:
             raise map_error(exc) from exc
@@ -1061,6 +1182,7 @@ def create_app(
             ge=1,
             le=MAXIMUM_TURN_LIMIT,
         ),
+        _: None = Depends(require_operator),
     ) -> TurnListResponse:
         # Convenience view over already-persisted TurnRecords (see
         # turn_inspection.py): redacted and bounded, but never a second
@@ -1107,9 +1229,12 @@ def create_app(
             raise map_error(exc) from exc
 
     @app.get('/actions/{action_id}', response_model=ActionRecord)
-    def get_action(action_id: str) -> ActionRecord:
+    def get_action(
+        action_id: str,
+        _: None = Depends(require_operator),
+    ) -> ActionRecord:
         try:
-            return engine.store.get_action(action_id)
+            return redact_action(engine.store.get_action(action_id))
         except Exception as exc:
             raise map_error(exc) from exc
 
@@ -1147,6 +1272,7 @@ def create_app(
     async def stream_events(
         run_id: str,
         after_sequence: int = Query(default=0, ge=0),
+        _: None = Depends(require_operator),
     ) -> StreamingResponse:
         try:
             engine.store.get_run(run_id)
@@ -1165,11 +1291,7 @@ def create_app(
                 )
                 for event in events:
                     cursor = event.sequence_number
-                    yield (
-                        f'id: {event.sequence_number}\n'
-                        f'event: {event.event_type}\n'
-                        f'data: {json.dumps(event.model_dump(mode="json"))}\n\n'
-                    )
+                    yield sse_frame(event)
                 await asyncio.sleep(0.5)
 
         return StreamingResponse(

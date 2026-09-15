@@ -8,11 +8,15 @@ import logging
 
 from fastapi.testclient import TestClient
 
+from app.auth import TOKEN_HEADER
 from app.config import Settings
 from app.main import RuntimeContext, create_app
 from app.qwen_client import ChatResponse
 from app.state_store import StateStore
 from app.summarizer import ResultSummarizer
+
+
+TOKEN = 'fixture-agent-token'
 
 
 class FakeQwenClient:
@@ -57,9 +61,10 @@ class FakeJobStatusService:
         return None
 
 
-def build_test_client(tmp_path):
+def build_test_app(tmp_path):
     settings = Settings(
         qwen_api_key='fixture-qwen-key',
+        api_token=TOKEN,
         state_db_path=str(tmp_path / 'agent.db'),
         auto_monitor_submitted_jobs=False,
         llm_summary_enabled=False,
@@ -73,7 +78,11 @@ def build_test_client(tmp_path):
         summarizer=ResultSummarizer(settings, None),
         logger=logging.getLogger('test-agent-api'),
     )
-    return TestClient(create_app(settings=settings, runtime=runtime))
+    return create_app(settings=settings, runtime=runtime)
+
+
+def build_test_client(tmp_path):
+    return TestClient(build_test_app(tmp_path), headers={TOKEN_HEADER: TOKEN})
 
 
 def test_health_and_catalog_endpoints(tmp_path) -> None:
@@ -82,3 +91,50 @@ def test_health_and_catalog_endpoints(tmp_path) -> None:
     assert client.get('/health').status_code == 200
     assert client.get('/pipelines').status_code == 200
     assert client.get('/datasets').status_code == 200
+
+
+def test_health_is_exempt_from_agent_token(tmp_path) -> None:
+    client = TestClient(build_test_app(tmp_path))
+
+    assert client.get('/health').status_code == 200
+
+
+def test_experiments_requires_agent_token(tmp_path) -> None:
+    client = TestClient(build_test_app(tmp_path))
+    body = {'request_text': 'Run a Titanic baseline.'}
+
+    missing = client.post('/experiments', json=body)
+    assert missing.status_code == 401
+
+    wrong = client.post('/experiments', json=body, headers={TOKEN_HEADER: 'wrong-token'})
+    assert wrong.status_code == 401
+
+    authorized = client.post('/experiments', json=body, headers={TOKEN_HEADER: TOKEN})
+    assert authorized.status_code != 401
+
+
+def test_every_route_except_health_requires_agent_token(tmp_path) -> None:
+    app = build_test_app(tmp_path)
+    client = TestClient(app)
+
+    protected_paths = set()
+    for route in app.routes:
+        path = getattr(route, 'path_format', None) or getattr(route, 'path', '')
+        if not path or path == '/health':
+            continue
+        methods = getattr(route, 'methods', None) or {'GET'}
+        method = sorted(methods)[0].lower()
+        probe_path = path.replace('{experiment_id}', 'missing-id')
+        protected_paths.add(path)
+        kwargs = {'json': {'request_text': 'probe'}} if method in {'post', 'put', 'patch'} else {}
+        response = getattr(client, method)(probe_path, **kwargs)
+        assert response.status_code == 401, f'{method.upper()} {path} was not guarded'
+
+    assert {
+        '/pipelines',
+        '/datasets',
+        '/experiments',
+        '/experiments/{experiment_id}',
+        '/experiments/{experiment_id}/logs',
+        '/experiments/{experiment_id}/artifacts',
+    } <= protected_paths

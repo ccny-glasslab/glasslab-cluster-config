@@ -31,3 +31,11 @@ return an absolute path.
 Use OpenCode's workspace file tools to create declared files. Do not request
 `write_file` or `transition` actions from the orchestrator. Nested structured
 fields must be JSON objects or arrays, never JSON-encoded strings.
+
+You have one additional read-only tool, `retrieve_evidence(query, k)`. Use it
+to iterate retrieve -> reason -> retrieve when the per-turn reference material
+is insufficient: call it with a specific query to get ranked corpus chunks,
+each carrying a `knowledge://` URI, a verbatim excerpt, and a `verified` flag.
+It cannot write, read files, or run commands, and every call is recorded in the
+run event log. Cite the `knowledge://` URIs it returns for any corpus-backed
+claim; the exact same ranking as the per-turn retrieval is used.

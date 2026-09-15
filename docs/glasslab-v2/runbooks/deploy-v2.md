@@ -55,7 +55,38 @@ Prereq check:
 ./scripts/check-v2-run-prereqs.sh
 ```
 
-6. For initial infrastructure creation, apply the v2 core manifest tree.
+6. Create the workflow-api caller token Secrets before deploying the service.
+
+Every non-`/healthz` workflow-api request is authenticated. workflow-api reads
+each caller's token from a dedicated Secret, and the deployment hard-codes the
+data key `token`; a missing Secret, or a Secret created under any other key
+name, leaves the pod in `CreateContainerConfigError`. The two caller Secrets
+are:
+
+- `glasslab-workflow-api-schedule-worker` — the schedule-worker caller token
+- `glasslab-workflow-api-research-orchestrator` — read by both the
+  research-orchestrator client and the workflow-api server, so one registered
+  token authenticates the orchestrator in both directions
+
+Create or rotate them through the approved SOPS operator boundary described in
+`restore-v2-secrets.md`; do not commit, paste, or echo plaintext token values.
+Confirm only the Secret names:
+
+```bash
+kubectl -n glasslab-v2 get secret \
+  glasslab-workflow-api-schedule-worker \
+  glasslab-workflow-api-research-orchestrator
+```
+
+Each must show `DATA 1`. `scripts/rollout-research-services.sh` refuses to run
+`set image` unless every caller Secret exists with the `token` key, so a
+misnamed key fails before the deployment changes rather than later as a
+`CreateContainerConfigError`.
+
+The retired `research-command-router` caller Secret and its workflow-api policy
+were removed with the #159/#289 retirement; do not recreate them.
+
+7. For initial infrastructure creation, apply the v2 core manifest tree.
 
 ```bash
 ./scripts/deploy-glasslab-v2.sh
@@ -71,7 +102,7 @@ It also applies the first explicit scheduling lanes:
 Current storage caveat:
 - Postgres and MinIO are still non-durable until the storage plan under `docs/glasslab-v2/storage-and-state.md` is implemented
 
-7. Roll out the CI-published control services. For routine updates this is the
+8. Roll out the CI-published control services. For routine updates this is the
 only deployment command required:
 
 ```bash
@@ -82,7 +113,7 @@ Deploy one service with `--service workflow-api` or
 `--service research-orchestrator`. Roll back with
 `--tag <previous-full-commit-sha>`.
 
-8. Verify rollout state and health endpoints.
+9. Verify rollout state and health endpoints.
 
 ```bash
 ./scripts/smoke-test-v2.sh
@@ -105,7 +136,7 @@ kubectl -n glasslab-v2 rollout status deployment/glasslab-design-agent --timeout
 kubectl -n glasslab-v2 rollout status deployment/glasslab-schedule-worker --timeout=120s
 ```
 
-9. If the smoke test fails, inspect the namespace directly.
+10. If the smoke test fails, inspect the namespace directly.
 
 ```bash
 kubectl -n glasslab-v2 get pods -o wide
@@ -114,16 +145,16 @@ kubectl -n glasslab-v2 describe statefulset/glasslab-postgres
 kubectl -n glasslab-v2 logs deploy/glasslab-workflow-api --tail=200
 ```
 
-10. If the rollout fails with image pull errors, verify the private registry secret before falling back to a manual import.
+11. If the rollout fails with image pull errors, verify the private registry secret before falling back to a manual import.
 
 ```bash
 kubectl -n glasslab-v2 get secret glasslab-ghcr-pull
 kubectl -n glasslab-v2 describe pod -l app.kubernetes.io/name=glasslab-workflow-api
 ```
 
-11. Do not expose v2 publicly yet. Keep access internal until the command surface and backend policies are fully validated.
+12. Do not expose v2 publicly yet. Keep access internal until the command surface and backend policies are fully validated.
 
-12. Keep all bounded-agent feature flags disabled in `workflow-api` until each service has been deployed and tested one stage at a time.
+13. Keep all bounded-agent feature flags disabled in `workflow-api` until each service has been deployed and tested one stage at a time.
 
 ## Rehearsal resume (shared PVC)
 

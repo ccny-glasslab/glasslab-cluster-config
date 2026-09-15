@@ -225,7 +225,7 @@ def test_asset_fetch_revalidates_peer_address(
     # connect-time lookup differently): the fetch must abort before reading
     # a single byte, so the private content never becomes an asset.
     monkeypatch.setattr(
-        'app.task_bundles.socket.getaddrinfo',
+        'app.url_fetch.socket.getaddrinfo',
         lambda *args, **kwargs: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443))
         ],

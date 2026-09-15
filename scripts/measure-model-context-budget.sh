@@ -42,7 +42,7 @@ fi
 
 # --- model context limit from the loaded config.json ---
 ctx="$(ssh -o BatchMode=yes -o ConnectTimeout=8 "glasslab-${HOST##*.}" \
-  'f=$(find /private/tmp/hf-cache -maxdepth 6 -name config.json 2>/dev/null | grep -v snapshots | head -1); python3 -c "import json;c=json.load(open(\"$f\"));print(c.get(\"max_position_embeddings\", c.get(\"max_model_len\", \"?\")))" 2>/dev/null' 2>/dev/null || true)"
+  'f=$(find /Users/glasslab/.cache/huggingface -maxdepth 6 -name config.json 2>/dev/null | grep -v snapshots | head -1); python3 -c "import json;c=json.load(open(\"$f\"));print(c.get(\"max_position_embeddings\", c.get(\"max_model_len\", \"?\")))" 2>/dev/null' 2>/dev/null || true)"
 [ -n "$ctx" ] && echo "model context limit: ${ctx} tokens"
 
 # --- empirical KV cost (optional) ---

@@ -396,6 +396,25 @@ def _validate_relative_subpath(relative: str, uri: str) -> str:
     return path.as_posix()
 
 
+def validate_run_artifact_subpath(run_id: str) -> str:
+    """Return run_id as a safe single path component under the artifacts root.
+
+    run_id becomes both a Kubernetes volume ``sub_path`` and the per-run
+    directory the runner writes into; absolute paths, parent traversal, empty
+    values, and nested components could escape the run's artifact directory.
+    """
+    path = PurePosixPath(run_id)
+    if (
+        not run_id
+        or run_id in {'.', '..'}
+        or path.is_absolute()
+        or len(path.parts) != 1
+        or '..' in path.parts
+    ):
+        raise ValueError(f'run_id is not a safe artifact subpath: {run_id!r}')
+    return run_id
+
+
 def _asset_volume_subpath(uri: str) -> tuple[str, str]:
     if uri.startswith(('s3://datasets/', 's3://glasslab-datasets/')):
         volume_name = 'dataset-volume'
@@ -465,10 +484,66 @@ def _research_workspace_volume_mount_specs(
         {
             'name': 'artifacts-volume',
             'mount_path': f'{settings.artifacts_mount_path}/{manifest.run_id}',
-            'sub_path': manifest.run_id,
+            'sub_path': validate_run_artifact_subpath(manifest.run_id),
             'read_only': False,
         },
     ]
+
+
+def _dataset_binding_artifact_subpaths(manifest: RunManifest) -> list[str]:
+    subpaths: list[str] = []
+    for raw_uri in manifest.dataset_bindings.values():
+        uri = str(raw_uri).strip()
+        if uri.startswith('s3://artifacts/'):
+            _, subpath = _asset_volume_subpath(uri)
+            subpaths.append(subpath)
+    return list(dict.fromkeys(subpaths))
+
+
+def _resolved_dataset_artifact_subpath(spec: dict, settings: Settings) -> str | None:
+    prefix = f"{settings.artifacts_mount_path.rstrip('/')}/"
+    dataset = str(spec.get('dataset', ''))
+    if not dataset.startswith(prefix):
+        return None
+    return _validate_relative_subpath(dataset[len(prefix):], dataset)
+
+
+def _non_research_volume_mount_specs(
+    manifest: RunManifest,
+    settings: Settings,
+    input_artifact_subpaths: list[str],
+) -> list[dict[str, str | bool]]:
+    # Generic runners still read whole datasets read-only, but artifact inputs
+    # and the run's own output directory are scoped to explicit sub-paths so a
+    # workload cannot reach a sibling run's artifacts.
+    run_subpath = validate_run_artifact_subpath(manifest.run_id)
+    mounts: list[dict[str, str | bool]] = [
+        {
+            'name': 'dataset-volume',
+            'mount_path': settings.dataset_mount_path,
+            'read_only': True,
+        },
+    ]
+    for subpath in dict.fromkeys(input_artifact_subpaths):
+        if subpath == run_subpath or subpath.startswith(f'{run_subpath}/'):
+            continue
+        mounts.append(
+            {
+                'name': 'artifacts-volume',
+                'mount_path': f'{settings.artifacts_mount_path}/{subpath}',
+                'sub_path': subpath,
+                'read_only': True,
+            }
+        )
+    mounts.append(
+        {
+            'name': 'artifacts-volume',
+            'mount_path': f'{settings.artifacts_mount_path}/{run_subpath}',
+            'sub_path': run_subpath,
+            'read_only': False,
+        }
+    )
+    return mounts
 
 
 def resolve_dataset_uri(dataset_uri: str, settings: Settings) -> str:
@@ -579,13 +654,15 @@ class KubernetesJobSubmitter(JobSubmitter):
             self.client.V1EnvVar(name='GLASSLAB_RUNNER_ARTIFACTS_ROOT', value=self.settings.artifacts_mount_path),
         ]
 
+        artifact_input_subpaths: list[str] = []
         if _is_generic_experiment_manifest(manifest):
             # Resolve dataset bindings URIs
             resolved_dataset_bindings = {}
             if manifest.dataset_bindings:
                 for binding_name, dataset_uri in manifest.dataset_bindings.items():
                     resolved_dataset_bindings[binding_name] = resolve_dataset_uri(str(dataset_uri), self.settings)
-            
+            artifact_input_subpaths = _dataset_binding_artifact_subpaths(manifest)
+
             env.extend(
                 [
                     self.client.V1EnvVar(
@@ -609,6 +686,9 @@ class KubernetesJobSubmitter(JobSubmitter):
             )
         else:
             spec = _build_runner_spec(manifest, self.settings)
+            resolved_artifact_subpath = _resolved_dataset_artifact_subpath(spec, self.settings)
+            if resolved_artifact_subpath is not None:
+                artifact_input_subpaths = [resolved_artifact_subpath]
             env.extend(
                 [
                     self.client.V1EnvVar(name='GLASSLAB_RUNNER_SPEC_JSON', value=json.dumps(spec, sort_keys=True)),
@@ -757,12 +837,17 @@ class KubernetesJobSubmitter(JobSubmitter):
             ],
         )
 
+        # The kubelet fails to mount a subPath that does not already exist, so
+        # the per-run artifact directory is created for every runner type
+        # before the Job is submitted.
+        run_artifact_dir = Path(self.settings.artifacts_mount_path) / validate_run_artifact_subpath(
+            manifest.run_id
+        )
+        if run_artifact_dir.is_symlink():
+            raise ValueError('run artifact directory cannot be a symlink')
+        run_artifact_dir.mkdir(parents=True, exist_ok=True)
+
         if research_workspace:
-            artifacts_root = Path(self.settings.artifacts_mount_path)
-            run_artifact_dir = artifacts_root / manifest.run_id
-            if run_artifact_dir.is_symlink():
-                raise ValueError('research workspace artifact directory cannot be a symlink')
-            run_artifact_dir.mkdir(parents=True, exist_ok=True)
             container.volume_mounts = [
                 self.client.V1VolumeMount(**mount_spec)
                 for mount_spec in _research_workspace_volume_mount_specs(
@@ -772,15 +857,12 @@ class KubernetesJobSubmitter(JobSubmitter):
             ]
         else:
             container.volume_mounts = [
-                self.client.V1VolumeMount(
-                    name='dataset-volume',
-                    mount_path=self.settings.dataset_mount_path,
-                    read_only=True,
-                ),
-                self.client.V1VolumeMount(
-                    name='artifacts-volume',
-                    mount_path=self.settings.artifacts_mount_path,
-                ),
+                self.client.V1VolumeMount(**mount_spec)
+                for mount_spec in _non_research_volume_mount_specs(
+                    manifest,
+                    self.settings,
+                    artifact_input_subpaths,
+                )
             ]
         if evaluation_contract:
             container.volume_mounts.append(

@@ -107,6 +107,53 @@ def test_load_status_artifacts_and_logs_from_disk(tmp_path) -> None:
     assert logs[0].payload == {'logger': 'glasslab.runner'}
 
 
+def test_load_status_from_disk_rejects_foreign_run_id(tmp_path) -> None:
+    # Issue #242: a status.json written under one run's directory but bound to
+    # a different run_id must never resolve as this run's status. The generic
+    # runner previously held the whole artifacts PVC read-write, so any
+    # workload could plant another run's status.json.
+    settings = build_settings(tmp_path)
+    run_id = 'run-victim'
+    run_dir = artifact_run_dir(settings, run_id)
+    run_dir.mkdir(parents=True)
+    (run_dir / 'status.json').write_text(
+        '{"run_id":"run-attacker","status":"succeeded",'
+        '"updated_at":"2026-03-26T12:00:00Z","detail":"forged"}'
+    )
+
+    assert load_status_from_disk(settings, run_id) is None
+
+
+def test_load_status_from_disk_rejects_missing_run_id(tmp_path) -> None:
+    # A status.json without an embedded run_id must not be silently adopted by
+    # defaulting run_id to the requested one.
+    settings = build_settings(tmp_path)
+    run_id = 'run-unbound'
+    run_dir = artifact_run_dir(settings, run_id)
+    run_dir.mkdir(parents=True)
+    (run_dir / 'status.json').write_text(
+        '{"status":"succeeded","updated_at":"2026-03-26T12:00:00Z"}'
+    )
+
+    assert load_status_from_disk(settings, run_id) is None
+
+
+def test_load_artifacts_from_disk_rejects_foreign_run_id(tmp_path) -> None:
+    # The runner-written artifacts index is only authoritative for the run it
+    # names; a foreign index must be rejected rather than served for this run.
+    settings = build_settings(tmp_path)
+    run_id = 'run-artifacts-victim'
+    run_dir = artifact_run_dir(settings, run_id)
+    run_dir.mkdir(parents=True)
+    (run_dir / 'artifacts_index.json').write_text(
+        '{"run_id":"run-artifacts-attacker","artifacts":['
+        '{"name":"status.json","path":"artifacts/run-artifacts-attacker/status.json",'
+        '"media_type":"application/json","required":true}]}'
+    )
+
+    assert load_artifacts_from_disk(settings, run_id) is None
+
+
 def test_parse_log_line_and_resolve_run_status_prefers_disk(tmp_path) -> None:
     settings = build_settings(tmp_path)
     run_id = 'run-456'
@@ -175,7 +222,9 @@ def test_load_terminal_bundle_requires_real_complete_artifacts(tmp_path) -> None
         (run_dir / name).write_text('{}')
     (run_dir / 'metrics.json').write_text('{"rubric_score": 92}')
     (run_dir / 'report.md').write_text('# Report\n')
-    (run_dir / 'status.json').write_text('{"status":"succeeded"}')
+    (run_dir / 'status.json').write_text(
+        f'{{"run_id":"{run_id}","status":"succeeded"}}'
+    )
     (run_dir / 'logs' / 'runner.log').write_text('complete\n')
 
     status, metrics, refs, artifacts = load_terminal_bundle(settings, record)
@@ -224,7 +273,9 @@ def test_terminal_bundle_rejects_symlink_artifact(tmp_path) -> None:
     )
     run_dir = artifact_run_dir(settings, run_id)
     run_dir.mkdir(parents=True)
-    (run_dir / 'status.json').write_text('{"status":"succeeded"}')
+    (run_dir / 'status.json').write_text(
+        f'{{"run_id":"{run_id}","status":"succeeded"}}'
+    )
     (run_dir / 'report.md').symlink_to('/etc/hosts')
 
     try:
@@ -298,6 +349,33 @@ def test_resolve_run_status_disk_terminal_authoritative_during_outage(tmp_path) 
 
     assert resolved.status == 'succeeded'
     assert 'Live Kubernetes status unavailable' not in (resolved.detail or '')
+
+
+def test_resolve_run_status_ignores_foreign_disk_status(tmp_path) -> None:
+    # A foreign status.json dropped under this run's directory must not win
+    # over live Kubernetes truth; the run must fall through to the live status.
+    settings = build_settings(tmp_path)
+    run_id = 'run-foreign-disk'
+    run_dir = artifact_run_dir(settings, run_id)
+    run_dir.mkdir(parents=True)
+    (run_dir / 'status.json').write_text(
+        '{"run_id":"run-someone-else","status":"succeeded",'
+        '"updated_at":"2026-03-26T12:00:00Z","detail":"forged"}'
+    )
+    record = _queued_record(run_id)
+
+    class FakeSubmitter:
+        def get_live_status(self, record):
+            return RunStatus(
+                run_id=record.run_id,
+                status='running',
+                updated_at=datetime(2026, 3, 26, 12, 1, tzinfo=timezone.utc),
+                detail='live',
+            )
+
+    resolved = resolve_run_status(record, settings, FakeSubmitter())
+
+    assert resolved.status == 'running'
 
 
 def test_get_live_status_maps_expected_exceptions_to_unavailable() -> None:

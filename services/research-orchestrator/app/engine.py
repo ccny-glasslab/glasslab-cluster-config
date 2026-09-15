@@ -29,6 +29,10 @@ from .evidence import (
 )
 from .evidence_resolver import EvidenceURIResolver
 from .matrix import expand_experiment_matrix
+from .methodology_config import (
+    MethodologyConfigRepair,
+    repair_methodology_settings,
+)
 import httpx
 
 from .opencode_runtime import AgentRuntime, OpenCodeRuntimeError
@@ -75,7 +79,12 @@ from .task_bundles import (
     TaskPreflight,
 )
 from .workspaces import WorkspaceManager
-from .knowledge_manager import KnowledgeManager
+from .knowledge_manager import KnowledgeManager, estimate_tokens
+from .knowledge_tool import (
+    BoundRetrieveEvidenceTool,
+    KnowledgeToolRegistry,
+    KnowledgeToolResult,
+)
 from .method_advisor import MethodAdvisor
 
 
@@ -214,6 +223,11 @@ class ResearchOrchestrator:
             except Exception:
                 # Dense retrieval/advisory is additive; startup never depends on it.
                 self.method_advisor = None
+        self._knowledge_tools = KnowledgeToolRegistry(
+            knowledge=self.knowledge,
+            store=store,
+            settings=settings,
+        )
         self.policy = policy
         self.cluster = cluster
         self.discord = discord
@@ -753,6 +767,7 @@ class ResearchOrchestrator:
             self.runtime.release(run_id=run_id, agent=agent)
         except Exception as exc:
             release_error = str(exc)
+        self._knowledge_tools.revoke_agent(run_id, agent)
         current = self.store.get_run(run_id)
         # Clear the session ids from the authoritative record BEFORE writing the
         # checkpoint: any later recovery then sees a fresh-session run and must
@@ -816,6 +831,65 @@ class ResearchOrchestrator:
             + '\n\nCurrent bounded task:\n'
         )
 
+    def _session_context_tokens(
+        self,
+        *,
+        run_id: str,
+        agent: AgentName,
+        session_id: str,
+    ) -> int:
+        # A continuing session carries exactly the turns recorded against its
+        # own session id; after a rotation the fresh session starts at zero.
+        total = 0
+        for turn in self.store.list_turns(run_id):
+            if turn.agent != agent or turn.opencode_session_id != session_id:
+                continue
+            if turn.structured_output is None:
+                continue
+            total += estimate_tokens(
+                json.dumps(turn.input_event, sort_keys=True, default=str)
+            )
+            total += estimate_tokens(turn.structured_output.model_dump_json())
+        return total
+
+    def _maybe_rotate_turn_history(
+        self,
+        *,
+        run_id: str,
+        agent: AgentName,
+        expected_kind: TurnKind,
+        run: RunRecord,
+    ) -> RunRecord:
+        threshold = self.settings.turn_history_rotation_token_threshold
+        if threshold <= 0:
+            return run
+        session_id = (
+            run.honeydew_session_id
+            if agent is AgentName.HONEYDEW
+            else run.beaker_session_id
+        )
+        if session_id is None:
+            # No live session to rotate: the next turn already starts fresh and
+            # will load the recovery checkpoint.
+            return run
+        tokens = self._session_context_tokens(
+            run_id=run_id,
+            agent=agent,
+            session_id=session_id,
+        )
+        if tokens < threshold:
+            return run
+        self._rotate_agent_session(
+            run_id=run_id,
+            agent=agent,
+            expected_kind=expected_kind,
+            error=(
+                f'session context of {tokens} estimated tokens reached the '
+                f'turn-history rotation threshold of {threshold}'
+            ),
+        )
+        return self.store.get_run(run_id)
+
     def _get_agent_context(
         self,
         *,
@@ -852,6 +926,37 @@ class ResearchOrchestrator:
             )
         except Exception:
             return None
+
+    def _knowledge_tool_for(
+        self,
+        *,
+        run_id: str,
+        agent: AgentName,
+        turn_number: int,
+        turn_kind: TurnKind,
+    ) -> BoundRetrieveEvidenceTool | None:
+        # Per-agent tool surface: only Honeydew receives retrieve_evidence.
+        # Beaker gets None, so its runtime never registers the tool.
+        if (
+            not self.settings.knowledge_tool_enabled
+            or agent is not AgentName.HONEYDEW
+        ):
+            return None
+        return self._knowledge_tools.bind(
+            run_id=run_id,
+            agent=agent,
+            turn_number=turn_number,
+            turn_kind=turn_kind,
+        )
+
+    def execute_knowledge_tool(
+        self,
+        *,
+        token: str,
+        query: str,
+        k: int,
+    ) -> KnowledgeToolResult:
+        return self._knowledge_tools.execute(token=token, query=query, k=k)
 
     def _retrieval_query(
         self,
@@ -967,11 +1072,18 @@ class ResearchOrchestrator:
                 updated_at=now,
             )
             self.store.create_run(record, one_active_run=False)
+        knowledge_tool = self._knowledge_tool_for(
+            run_id=conversation_id,
+            agent=AgentName.HONEYDEW,
+            turn_number=1,
+            turn_kind=TurnKind.RESEARCH_ANSWER,
+        )
         session = self.runtime.ensure_session(
             run_id=conversation_id,
             agent=AgentName.HONEYDEW,
             workspace=workspace,
             existing_session_id=None,
+            knowledge_tool=knowledge_tool,
         )
         if bind_source_ids:
             self.store.bind_conversation_sources(
@@ -1052,14 +1164,18 @@ class ResearchOrchestrator:
             'Do not place answer, citations, unanswerable, or '
             'suggested_followups anywhere else.\n'
         )
+        research_model, research_base_url = self.settings.honeydew_model_for(
+            TurnKind.RESEARCH_ANSWER
+        )
         result, message_id = self.runtime.run_turn(
             run_id=conversation_id,
             agent=AgentName.HONEYDEW,
             workspace=workspace,
             session_id=session.session_id,
-            model_override=self.settings.honeydew_structured_model(),
-            base_url_override=self.settings.honeydew_structured_base_url(),
+            model_override=research_model,
+            base_url_override=research_base_url,
             prompt=prompt,
+            knowledge_tool=knowledge_tool,
         )
         if result.kind != TurnKind.RESEARCH_ANSWER or result.research_answer is None:
             self._event(
@@ -1423,10 +1539,17 @@ class ResearchOrchestrator:
                 self.settings.honeydew_model_for(expected_kind)
             )
         else:
-            model_override = None
-            base_url_override = None
+            model_override, base_url_override = (
+                self.settings.beaker_model_for(expected_kind)
+            )
         run = self.store.get_run(run_id)
         self._check_turn_budget(run)
+        run = self._maybe_rotate_turn_history(
+            run_id=run_id,
+            agent=agent,
+            expected_kind=expected_kind,
+            run=run,
+        )
         workspace = Path(
             run.honeydew_workspace
             if agent == AgentName.HONEYDEW
@@ -1436,6 +1559,12 @@ class ResearchOrchestrator:
             run.honeydew_session_id
             if agent == AgentName.HONEYDEW
             else run.beaker_session_id
+        )
+        knowledge_tool = self._knowledge_tool_for(
+            run_id=run_id,
+            agent=agent,
+            turn_number=run.turn_number + 1,
+            turn_kind=expected_kind,
         )
         recovery_context = ''
         if existing_session is None:
@@ -1453,6 +1582,7 @@ class ResearchOrchestrator:
             existing_session_id=existing_session,
             model_override=model_override,
             base_url_override=base_url_override,
+            knowledge_tool=knowledge_tool,
         )
         run = self.store.get_run(run_id)
         # Persist the live session and turn number before the model does any
@@ -1601,6 +1731,7 @@ class ResearchOrchestrator:
                 prompt=prompt,
                 model_override=model_override,
                 base_url_override=base_url_override,
+                knowledge_tool=knowledge_tool,
             )
             if result.kind != expected_kind:
                 returned_kind = result.kind
@@ -1622,6 +1753,7 @@ class ResearchOrchestrator:
                     session_id=session.session_id,
                     model_override=model_override,
                     base_url_override=base_url_override,
+                    knowledge_tool=knowledge_tool,
                     prompt=(
                         prompt
                         + '\n\nStructured kind correction. Your previous '
@@ -4218,6 +4350,12 @@ class ResearchOrchestrator:
                     self._contract_methodology_requirements(run_id),
                 )
             )
+            previous_signature = self._last_preflight_rejection_signature(run_id)
+            signature, base_config_digest = self._preflight_rejection_signature(
+                run_id=run_id,
+                action=action,
+                errors=preflight.errors,
+            )
             self.store.update_action(
                 action.action_id,
                 approval_status=ApprovalStatus.REJECTED,
@@ -4232,8 +4370,42 @@ class ResearchOrchestrator:
                     'action_id': action.action_id,
                     'reason': rejection_reason,
                     'preflight': preflight.model_dump(mode='json'),
+                    'preflight_signature': signature,
+                    'base_config_digest': base_config_digest,
                 },
             )
+            if previous_signature is not None and previous_signature == signature:
+                # A deterministic model at temperature 0 can re-emit the exact
+                # same non-conforming matrix forever. Once an identical
+                # rejection repeats, another revision is wasted work: escalate
+                # to a human instead of spending the revision budget.
+                self._event(
+                    run_id,
+                    source='orchestrator',
+                    event_type='methodology.non_convergence_detected',
+                    payload={
+                        'action_id': action.action_id,
+                        'signature': signature,
+                        'base_config_digest': base_config_digest,
+                        'errors': sorted(preflight.errors),
+                        'revision_count': (
+                            self.store.get_run(
+                                run_id
+                            ).methodology_revision_count
+                        ),
+                    },
+                )
+                self.pause_run(
+                    run_id,
+                    requested_by='orchestrator',
+                    reason=(
+                        'Repeated identical deterministic matrix preflight '
+                        'rejection: the bound model is at a fixed point and '
+                        'another revision would repeat it. Human resolution '
+                        'is required.'
+                    ),
+                )
+                return
             self._request_methodology_revision(
                 run_id,
                 feedback=rejection_reason,
@@ -4574,6 +4746,106 @@ class ResearchOrchestrator:
                 continue
         return requirements
 
+    def _last_preflight_rejection_signature(self, run_id: str) -> str | None:
+        signature: str | None = None
+        for event in self.store.list_events(run_id):
+            if event.event_type != 'action.rejected':
+                continue
+            value = event.payload.get('preflight_signature')
+            if isinstance(value, str) and value:
+                signature = value
+        return signature
+
+    def _preflight_rejection_signature(
+        self,
+        *,
+        run_id: str,
+        action: ActionRecord,
+        errors: list[str],
+    ) -> tuple[str, str]:
+        # The signature pins both the normalized error set and the exact
+        # base_config bytes, so an identical rejection can only recur when the
+        # model re-emitted the same non-conforming matrix unchanged.
+        target = self._matrix_base_config_target(run_id=run_id, action=action)
+        base_config_digest = (
+            sha256(target.read_bytes()).hexdigest()
+            if target is not None and target.is_file()
+            else 'unavailable'
+        )
+        normalized = '\n'.join(sorted(set(errors)))
+        signature = sha256(
+            f'{normalized}\n--\n{base_config_digest}'.encode()
+        ).hexdigest()
+        return signature, base_config_digest
+
+    def _matrix_base_config_target(
+        self,
+        *,
+        run_id: str,
+        action: ActionRecord,
+    ) -> Path | None:
+        try:
+            matrix = ExperimentMatrix.model_validate(action.arguments)
+        except ValueError:
+            return None
+        run = self.store.get_run(run_id)
+        workspace = Path(run.beaker_workspace).resolve()
+        target = (workspace / matrix.base_config).resolve()
+        if not target.is_relative_to(workspace):
+            return None
+        return target
+
+    def _repair_matrix_base_config(
+        self,
+        *,
+        run_id: str,
+        action: ActionRecord,
+    ) -> MethodologyConfigRepair | None:
+        # The engine guarantees only the structural shape the deterministic
+        # preflight checks; the agent still chooses every value.
+        requirements = self._contract_methodology_requirements(run_id)
+        if not requirements:
+            return None
+        target = self._matrix_base_config_target(run_id=run_id, action=action)
+        if target is None:
+            return None
+        repair = repair_methodology_settings(
+            base_config_path=target,
+            requirements=requirements,
+        )
+        if repair.changed:
+            run = self.store.get_run(run_id)
+            workspace = Path(run.beaker_workspace).resolve()
+            self._event(
+                run_id,
+                source='orchestrator',
+                event_type='methodology.base_config_materialized',
+                payload={
+                    'base_config': target.relative_to(workspace).as_posix(),
+                    'created': repair.created,
+                    'placeholder_paths': sorted(repair.placeholders),
+                },
+            )
+        return repair
+
+    @staticmethod
+    def _methodology_repair_note(repair: MethodologyConfigRepair) -> str:
+        paths = ', '.join(
+            f'`{path}`' for path in sorted(repair.placeholders)
+        )
+        return (
+            '\nThe orchestrator has materialized the required methodology '
+            'settings in the base config as structural placeholders so the '
+            'deterministic preflight can pass. The engine controls only the '
+            'SHAPE (the dotted keys and the minimum number of distinct '
+            'values); you control the VALUES. Read the file, replace every '
+            '`<leaf>-candidate-N` placeholder'
+            + (f' ({paths})' if paths else '')
+            + ' with a meaningful, scientifically justified value, and keep at '
+            'least the required number of distinct values. Do not remove the '
+            'required keys.\n'
+        )
+
     @staticmethod
     def _methodology_feedback(result: AgentTurnResult) -> str:
         sections = [result.summary]
@@ -4666,6 +4938,7 @@ class ResearchOrchestrator:
                 'or knowledge:// URI rather than a bare path.'
             )
         preflight_focus = ''
+        repair_note = ''
         if feedback.startswith('Deterministic matrix preflight failed:'):
             rejected_matrices = [
                 action
@@ -4678,6 +4951,13 @@ class ResearchOrchestrator:
                 if rejected_matrices
                 else ''
             )
+            if rejected_matrices:
+                repair = self._repair_matrix_base_config(
+                    run_id=run_id,
+                    action=rejected_matrices[-1],
+                )
+                if repair is not None and repair.changed:
+                    repair_note = self._methodology_repair_note(repair)
             preflight_focus = (
                 '\nThis is a focused deterministic-preflight correction, not '
                 'a new implementation pass. The validator has already inspected '
@@ -4701,6 +4981,7 @@ class ResearchOrchestrator:
             'the review below. Run local checks and return a replacement '
             'submit_experiment_matrix action. Do not execute cluster work.\n\n'
             + preflight_focus
+            + repair_note
             + 'The workload must emit metrics and evidence only. Remove any '
             'workload code that creates, reads, or scores `evaluation.json`, '
             '`rubric_score`, or `integrity_pass`; the immutable contract owns '
@@ -5217,6 +5498,23 @@ class ResearchOrchestrator:
         ]
         return json.dumps(digest, indent=2, sort_keys=True, ensure_ascii=False)
 
+    def _evidence_prompt_block(self, evidence: dict[str, Any]) -> str:
+        """Render the compact evidence block every evidence-carrying turn embeds.
+
+        Analysis (Beaker), verification, and report (Honeydew) all receive the
+        same content-free digest plus a workspace reference; the full snapshot
+        is written to the agent workspace by _write_evidence_file. Keeping one
+        renderer guarantees the verify and report stages cannot silently
+        regress to inlining full artifact contents into the model window
+        (issue #430).
+        """
+        return (
+            'EVIDENCE DIGEST (read the full snapshot at '
+            'evidence-snapshot.json in your workspace for artifact '
+            'contents):\n'
+            + self._inline_evidence_digest(evidence)
+        )
+
     def _analyze_results(self, run_id: str) -> None:
         evidence = self._evidence_snapshot(
             run_id,
@@ -5232,10 +5530,7 @@ class ResearchOrchestrator:
                 'failed job is an observation to explain, not proof that the '
                 'research run failed. Cite evidence URIs for every material '
                 'claim.\n\n'
-                'EVIDENCE DIGEST (read the full snapshot at '
-                'evidence-snapshot.json in your workspace for artifact '
-                'contents):\n'
-                + self._inline_evidence_digest(evidence)
+                + self._evidence_prompt_block(evidence)
             ),
             expected_kind=TurnKind.EXPERIMENT_ANALYSIS,
             input_event=evidence,
@@ -5295,10 +5590,7 @@ class ResearchOrchestrator:
                 'flag any contradiction between the results and the corpus. Set '
                 'done=true only if the evidence supports a final report. Cite '
                 'artifact, job, event, or knowledge:// URIs.\n\n'
-                'EVIDENCE DIGEST (read the full snapshot at '
-                'evidence-snapshot.json in your workspace for artifact '
-                'contents):\n'
-                + self._inline_evidence_digest(evidence)
+                + self._evidence_prompt_block(evidence)
             ),
             expected_kind=TurnKind.VERIFICATION,
             input_event=evidence,
@@ -5397,10 +5689,7 @@ class ResearchOrchestrator:
             'a real file in your own workspace when the turn ends; do not '
             'reference job artifacts or files from other locations as your '
             'produced file.\n\n'
-            'EVIDENCE DIGEST (read the full snapshot at '
-            'evidence-snapshot.json in your workspace for artifact '
-            'contents):\n'
-            + self._inline_evidence_digest(evidence)
+            + self._evidence_prompt_block(evidence)
         )
         verdict = self._corpus_verification_verdict(run_id)
         if verdict is not None:

@@ -42,6 +42,7 @@ class ScriptedMockRuntime(AgentRuntime):
         self.prompts: list[tuple[AgentName, str]] = []
         self.model_overrides: list[tuple[AgentName, str]] = []
         self.base_url_overrides: list[tuple[AgentName, str]] = []
+        self.knowledge_tools_received: list[tuple[AgentName, object | None]] = []
 
     def ensure_session(
         self,
@@ -52,6 +53,7 @@ class ScriptedMockRuntime(AgentRuntime):
         existing_session_id: str | None,
         model_override: str | None = None,
         base_url_override: str | None = None,
+        knowledge_tool: object | None = None,
     ) -> RuntimeSession:
         key = (run_id, agent)
         session = self.sessions.get(key)
@@ -76,9 +78,11 @@ class ScriptedMockRuntime(AgentRuntime):
         prompt: str,
         model_override: str | None = None,
         base_url_override: str | None = None,
+        knowledge_tool: object | None = None,
     ) -> tuple[AgentTurnResult, str | None]:
         self.turn_counts[agent] += 1
         self.prompts.append((agent, prompt))
+        self.knowledge_tools_received.append((agent, knowledge_tool))
         if model_override is not None:
             self.model_overrides.append((agent, model_override))
         if base_url_override is not None:

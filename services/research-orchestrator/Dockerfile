@@ -43,6 +43,8 @@ LABEL io.glasslab.build-source="${GLASSLAB_BUILD_SOURCE}"
 COPY services/research-orchestrator/app ./app
 COPY services/research-orchestrator/prompts ./prompts
 COPY services/research-orchestrator/evaluation-contracts ./evaluation-contracts
+# Versioned routing evidence/table read at runtime by app/model_routing.py (#433).
+COPY services/research-orchestrator/fixtures ./fixtures
 # Operational migration tooling is part of the reviewed image so a live store
 # cutover does not depend on copying executable files into a running pod.
 COPY services/research-orchestrator/scripts ./scripts

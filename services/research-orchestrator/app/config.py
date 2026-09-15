@@ -15,6 +15,7 @@ from typing import Annotated, Literal
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from . import model_routing
 from .schemas import AgentName, TurnKind
 
 
@@ -65,6 +66,16 @@ class Settings(BaseSettings):
     knowledge_max_source_bytes: int = 2 * 1024 * 1024
     knowledge_max_results: int = 10
     knowledge_token_budget: int = 4000
+    # Read-only, agent-directed retrieval tool (#379), Honeydew only. The
+    # generated OpenCode tool file posts to this internal callback endpoint
+    # with a per-run capability token; Beaker's surface never exposes it.
+    knowledge_tool_enabled: bool = True
+    knowledge_tool_endpoint_url: str = (
+        'http://127.0.0.1:8080/internal/agent-tools/retrieve-evidence'
+    )
+    knowledge_tool_default_k: int = 5
+    knowledge_tool_max_k: int = 20
+    knowledge_tool_max_query_chars: int = 2000
     # Dense method-advisory retrieval (corpus-RAG productionization). Dense
     # degrades to lexical automatically whenever the backend/model is not
     # ready; advisory generation additionally requires these knobs only.
@@ -121,7 +132,7 @@ class Settings(BaseSettings):
     opencode_server_host: str = '127.0.0.1'
     opencode_start_port: int = 4210
     opencode_start_timeout_seconds: float = 60.0
-    opencode_turn_timeout_seconds: float = 2400.0
+    opencode_turn_timeout_seconds: float = 3600.0
     opencode_repeated_tool_limit: int = 6
     agent_turn_max_retries: int = 2
     # Max deterministic redrafts of a contract candidate that fails
@@ -135,9 +146,12 @@ class Settings(BaseSettings):
     # Model-output budget per agent turn. Thinking-family models (Honeydew's
     # Qwen3-Next-80B-A3B-Thinking) emit a long reasoning prefix before the
     # structured answer; capping output here truncates the reasoning and can
-    # drop the structured envelope entirely. Kept high enough for a full
-    # reasoning+answer turn on the split-model serving (~45 tok/s).
-    agent_model_max_output_tokens: int = 8192
+    # drop the structured envelope entirely. Widened for the iterative
+    # retrieve_evidence lane: at the measured ~45 tok/s reasoning-first rate,
+    # reasoning plus several retrieval rounds plus the answer needs more than
+    # one 8192-token envelope, and opencode_turn_timeout_seconds is widened in
+    # lockstep so the wall clock never truncates a legitimate reasoning turn.
+    agent_model_max_output_tokens: int = 16384
     # OpenCode's package/model download cache (XDG_CACHE_HOME) is shared
     # across every run and both agents instead of copied per run: it is
     # non-essential, regenerable data (the same OpenCode version and plugin
@@ -169,6 +183,9 @@ class Settings(BaseSettings):
     honeydew_structured_agent_base_url: str | None = None
     honeydew_reasoning_agent_model: str | None = None
     honeydew_reasoning_agent_base_url: str | None = None
+    # Path to the versioned, evidence-derived routing table (#433). A missing
+    # or malformed table falls back to the legacy split, never strands a run.
+    model_routing_table_path: str = str(model_routing.ROUTING_TABLE_PATH)
     # Per-agent endpoint overrides (#319 successor): when set, the agent's
     # turns run against its own OpenAI-compatible server; otherwise both
     # agents share qwen_base_url. Used to split models across machines
@@ -223,6 +240,16 @@ class Settings(BaseSettings):
     ]
 
     maximum_turns: int = 20
+    # Threshold-triggered turn-history rotation (#431). A continuing OpenCode
+    # session carries its whole turn history; on the shared Coder endpoint that
+    # unbounded history competes with page cache (the model wires ~48 of 64
+    # GB). Once the estimated tokens accumulated by one agent's live session
+    # cross this ceiling, the engine rotates the session through the same
+    # recovery-checkpoint path it uses after a failed turn: the session is
+    # released, a compact checkpoint records recent context, and the run
+    # continues from that checkpoint instead of restarting. 0 disables
+    # threshold rotation; failure-driven recovery still applies.
+    turn_history_rotation_token_threshold: int = 128_000
     maximum_methodology_revisions: int = 2
     # Hard cap on deterministic matrix-preflight failures before the run fails.
     # Without it, Beaker can re-propose an invalid matrix in an unbounded
@@ -297,7 +324,35 @@ class Settings(BaseSettings):
             AgentName.HONEYDEW
         )
 
+    def model_route(self, turn_kind: TurnKind) -> str | None:
+        """Return the recorded role for a turn kind, or None when unrecorded.
+
+        The table is the versioned, evidence-derived artifact under
+        fixtures/model-routing/v1 (#433); a missing or malformed table returns
+        None so callers fall back to the legacy split.
+        """
+        role = model_routing.load_routing_table(
+            self.model_routing_table_path
+        ).get(turn_kind)
+        return role if role in model_routing.ROLE_ORDER else None
+
     def honeydew_model_for(self, turn_kind: TurnKind) -> tuple[str, str]:
+        route = self.model_route(turn_kind)
+        if route == model_routing.REASONING_ROLE:
+            return (
+                self.honeydew_reasoning_model(),
+                self.honeydew_reasoning_base_url(),
+            )
+        if route == model_routing.STRUCTURED_ROLE:
+            return (
+                self.honeydew_structured_model(),
+                self.honeydew_structured_base_url(),
+            )
+        return self._legacy_honeydew_model_for(turn_kind)
+
+    def _legacy_honeydew_model_for(self, turn_kind: TurnKind) -> tuple[str, str]:
+        # Used only when no recorded routing table is available. Only bounded
+        # verification uses the reasoning model; every other turn is structured.
         if turn_kind in {
             TurnKind.VERIFICATION,
         }:
@@ -308,6 +363,22 @@ class Settings(BaseSettings):
         return (
             self.honeydew_structured_model(),
             self.honeydew_structured_base_url(),
+        )
+
+    def beaker_model_for(self, turn_kind: TurnKind) -> tuple[str, str]:
+        """Route a Beaker turn kind by recorded evidence (#433).
+
+        Beaker's structured role is its own per-agent model; only a recorded
+        reasoning route moves a Beaker turn off it.
+        """
+        if self.model_route(turn_kind) == model_routing.REASONING_ROLE:
+            return (
+                self.honeydew_reasoning_model(),
+                self.honeydew_reasoning_base_url(),
+            )
+        return (
+            self.agent_model_for(AgentName.BEAKER),
+            self.base_url_for(AgentName.BEAKER),
         )
 
     @field_validator('evidence_snapshot_max_bytes')
@@ -335,6 +406,17 @@ class Settings(BaseSettings):
         # comma-separated spelling instead.
         if isinstance(value, str):
             return [item.strip() for item in value.split(',') if item.strip()]
+        return value
+
+    @field_validator('turn_history_rotation_token_threshold')
+    @classmethod
+    def enforce_turn_history_rotation_threshold_nonnegative(
+        cls, value: int
+    ) -> int:
+        if value < 0:
+            raise ValueError(
+                'turn_history_rotation_token_threshold must be >= 0'
+            )
         return value
 
     @field_validator('discord_rest_circuit_max_failures')
