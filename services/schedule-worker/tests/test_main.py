@@ -143,3 +143,66 @@ def test_schedule_mutation_fails_closed_without_token(monkeypatch) -> None:
         assert str(exc) == 'workflow API mutation credentials are not configured'
     else:
         raise AssertionError('mutation unexpectedly proceeded without credentials')
+
+
+DIGEST_EXECUTION = {
+    'execution_id': 'exec-1',
+    'schedule_id': 'sched-1',
+    'operation_type': 'digest',
+    'result_status': 'ok',
+    'result_detail': 'Digest daily-run-summary matched 2 runs.',
+    'digest_payload': {'matching_run_count': 2},
+}
+
+
+class _FakeResponse:
+    def __init__(self, payload) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode('utf-8')
+
+
+def _set_credentials(monkeypatch) -> None:
+    monkeypatch.setenv('GLASSLAB_WORKFLOW_API_CALLER_NAME', 'schedule-worker')
+    monkeypatch.setenv('GLASSLAB_WORKFLOW_API_TOKEN', 'schedule-secret')
+
+
+def test_run_once_partial_failure_preserves_digest_executions(monkeypatch) -> None:
+    def fake_urlopen(request_obj, timeout):
+        if request_obj.full_url.endswith('/digest-schedules/run-due'):
+            return _FakeResponse([DIGEST_EXECUTION])
+        raise RuntimeError('approved-rerun backend unavailable')
+
+    monkeypatch.setattr(main_module.urllib_request, 'urlopen', fake_urlopen)
+    _set_credentials(monkeypatch)
+
+    client = TestClient(app)
+    response = client.post('/run-once')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['worker_status'] == 'partial'
+    assert payload['executed_count'] == 1
+    assert payload['executions'][0]['schedule_id'] == 'sched-1'
+    assert len(payload['errors']) == 1
+    assert 'approved-rerun cycle failed' in payload['errors'][0]
+
+
+def test_run_once_digest_failure_stays_retryable(monkeypatch) -> None:
+    def fake_urlopen(request_obj, timeout):
+        raise RuntimeError('digest backend unavailable')
+
+    monkeypatch.setattr(main_module.urllib_request, 'urlopen', fake_urlopen)
+    _set_credentials(monkeypatch)
+
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post('/run-once')
+
+    assert response.status_code == 500

@@ -37,6 +37,7 @@ class RunOnceResponse(BaseModel):
     executed_count: int
     executions: list[ScheduledExecutionPayload] = Field(default_factory=list)
     worker_config: WorkerConfigMetadata
+    errors: list[str] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):
