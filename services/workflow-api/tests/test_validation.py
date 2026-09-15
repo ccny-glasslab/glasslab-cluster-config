@@ -34,6 +34,7 @@ from app.job_submission import (
     _research_workspace_volume_mount_specs,
     resolve_dataset_uri,
     resolve_evaluation_contract,
+    validate_run_artifact_subpath,
 )
 import app.job_submission as job_submission_module
 from app.schemas import (
@@ -425,7 +426,7 @@ def test_evaluation_contract_rejects_agent_supplied_execution_fields() -> None:
         resolve_evaluation_contract(manifest, Settings())
 
 
-def test_kubernetes_job_mounts_trusted_contract_read_only(monkeypatch) -> None:
+def test_kubernetes_job_mounts_trusted_contract_read_only(tmp_path, monkeypatch) -> None:
     # Renders a full Kubernetes job to verify: (1) the evaluation contract
     # container image is mounted as an init container, (2) the workload
     # command is replaced by the contract execution wrapper, (3) the
@@ -515,7 +516,10 @@ def test_kubernetes_job_mounts_trusted_contract_read_only(monkeypatch) -> None:
         lambda: (client, kube_config, RuntimeError, RuntimeError),
     )
     submitter = KubernetesJobSubmitter(
-        Settings(evaluation_contracts={'example@1.0.0': trusted})
+        Settings(
+            evaluation_contracts={'example@1.0.0': trusted},
+            artifacts_mount_path=str(tmp_path / 'artifacts'),
+        )
     )
     submitter.submit_run(manifest)
 
@@ -671,6 +675,121 @@ def test_research_workspace_mounts_only_declared_asset_subpaths() -> None:
     ]
 
 
+# Issue #242: generic (non-research) runners previously received the entire
+# artifacts PVC read-write at /mnt/artifacts, so any workload could overwrite
+# another run's status.json or metrics.json. Every runner job must now see only
+# its own run sub-path, with read-only sub-path mounts for declared inputs.
+def test_generic_manifest_scopes_artifacts_mount_to_run(tmp_path, monkeypatch) -> None:
+    run_id = 'run-generic-mount'
+    manifest = RunManifest(
+        run_id=run_id,
+        workflow_id='generic-tabular-benchmark',
+        workflow_family='tabular',
+        display_name='Generic Artifact Scope',
+        objective='Verify generic runners only see their own artifact sub-path.',
+        submitted_by='test-suite',
+        submitted_at=datetime.now(timezone.utc),
+        inputs={},
+        requested_models=['logistic_regression'],
+        resource_profile='cpu-small',
+        resource_requests={'cpu': '1'},
+        resource_limits={'cpu': '1'},
+        runner_image='ghcr.io/example/runner:test',
+        runner_service_account_name='glasslab-research-workload',
+        maximum_wallclock_minutes=45,
+        budget={'max_wallclock_minutes': 45},
+        evaluator_type='none',
+        approval_tier='tier-2-approved-execution',
+        expected_artifacts={'required': ['metrics.json'], 'optional': []},
+        experiment_type='gpu-training-job',
+        workload_id='generic-tabular-benchmark',
+        entrypoint=['python3', 'run.py'],
+        config_payload={},
+        dataset_bindings={'train': 's3://artifacts/submissions/adult/train.csv'},
+    )
+
+    class Record(SimpleNamespace):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    class BatchApi:
+        submitted = None
+
+        def create_namespaced_job(self, *, namespace, body):
+            self.submitted = (namespace, body)
+
+    batch = BatchApi()
+    client = SimpleNamespace(
+        BatchV1Api=lambda: batch,
+        CoreV1Api=lambda: Record(),
+        **{
+            name: Record
+            for name in (
+                'V1Capabilities',
+                'V1Container',
+                'V1EmptyDirVolumeSource',
+                'V1EnvVar',
+                'V1Job',
+                'V1JobSpec',
+                'V1LocalObjectReference',
+                'V1ObjectMeta',
+                'V1PersistentVolumeClaimVolumeSource',
+                'V1PodSecurityContext',
+                'V1PodSpec',
+                'V1PodTemplateSpec',
+                'V1ResourceRequirements',
+                'V1SeccompProfile',
+                'V1SecurityContext',
+                'V1Volume',
+                'V1VolumeMount',
+            )
+        },
+    )
+    kube_config = SimpleNamespace(load_incluster_config=lambda: None)
+    monkeypatch.setattr(
+        job_submission_module,
+        '_load_kube_modules',
+        lambda: (client, kube_config, RuntimeError, RuntimeError),
+    )
+    artifacts_root = tmp_path / 'artifacts'
+    submitter = KubernetesJobSubmitter(
+        Settings(
+            runner_service_account_name='glasslab-research-workload',
+            artifacts_mount_path=str(artifacts_root),
+        )
+    )
+    submitter.submit_run(manifest)
+
+    _, job = batch.submitted
+    mounts = job.spec.template.spec.containers[0].volume_mounts
+    artifacts_mounts = [mount for mount in mounts if mount.name == 'artifacts-volume']
+    assert artifacts_mounts
+    for mount in artifacts_mounts:
+        assert getattr(mount, 'sub_path', None), 'artifacts-volume mount must be run-scoped'
+
+    run_mount = next(mount for mount in artifacts_mounts if mount.sub_path == run_id)
+    assert run_mount.mount_path == str(artifacts_root / run_id)
+    assert run_mount.read_only is False
+
+    input_mount = next(
+        mount
+        for mount in artifacts_mounts
+        if mount.sub_path == 'submissions/adult/train.csv'
+    )
+    assert input_mount.read_only is True
+
+    assert (artifacts_root / run_id).is_dir()
+
+
+@pytest.mark.parametrize(
+    'run_id',
+    ['../escape', '/absolute/escape', 'nested/escape', '..', '.', ''],
+)
+def test_run_artifact_subpath_rejects_unsafe_run_id(run_id: str) -> None:
+    with pytest.raises(ValueError):
+        validate_run_artifact_subpath(run_id)
+
+
 # Only s3://datasets/ and s3://artifacts/ URIs are allowed; https://,
 # file://, and parent-traversal paths are all rejected to prevent the
 # agent from referencing assets outside the approved mount roots.
@@ -771,7 +890,7 @@ def test_runner_sa_dedicated_account_is_accepted() -> None:
 # dedicated ServiceAccount flows into the pod spec while the registry budget
 # ceiling becomes activeDeadlineSeconds on the Kubernetes Job.
 
-def test_submitted_job_pod_uses_sa_and_deadline(monkeypatch) -> None:
+def test_submitted_job_pod_uses_sa_and_deadline(tmp_path, monkeypatch) -> None:
     manifest = RunManifest(
         run_id='run-sa-deadline-check',
         workflow_id='generic-tabular-benchmark',
@@ -842,7 +961,10 @@ def test_submitted_job_pod_uses_sa_and_deadline(monkeypatch) -> None:
         lambda: (client, kube_config, RuntimeError, RuntimeError),
     )
     submitter = KubernetesJobSubmitter(
-        Settings(runner_service_account_name='glasslab-research-workload')
+        Settings(
+            runner_service_account_name='glasslab-research-workload',
+            artifacts_mount_path=str(tmp_path / 'artifacts'),
+        )
     )
     submitter.submit_run(manifest)
 
@@ -853,7 +975,7 @@ def test_submitted_job_pod_uses_sa_and_deadline(monkeypatch) -> None:
     assert job.spec.active_deadline_seconds == 45 * 60
 
 
-def test_legacy_generic_job_carries_network_policy_none_label(monkeypatch) -> None:
+def test_legacy_generic_job_carries_network_policy_none_label(tmp_path, monkeypatch) -> None:
     manifest = RunManifest(
         run_id='run-netpol-legacy',
         workflow_id='generic-tabular-benchmark',
@@ -924,7 +1046,10 @@ def test_legacy_generic_job_carries_network_policy_none_label(monkeypatch) -> No
         lambda: (client, kube_config, RuntimeError, RuntimeError),
     )
     submitter = KubernetesJobSubmitter(
-        Settings(runner_service_account_name='glasslab-research-workload')
+        Settings(
+            runner_service_account_name='glasslab-research-workload',
+            artifacts_mount_path=str(tmp_path / 'artifacts'),
+        )
     )
     submitter.submit_run(manifest)
 
@@ -968,7 +1093,11 @@ class FakeApiException(Exception):
         self.body = body
 
 
-def _build_failing_submitter(monkeypatch, api_exception: Exception) -> KubernetesJobSubmitter:
+def _build_failing_submitter(
+    monkeypatch,
+    api_exception: Exception,
+    artifacts_mount_path: Path,
+) -> KubernetesJobSubmitter:
     class Record(SimpleNamespace):
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
@@ -1011,14 +1140,20 @@ def _build_failing_submitter(monkeypatch, api_exception: Exception) -> Kubernete
         lambda: (client, kube_config, RuntimeError, FakeApiException),
     )
     return KubernetesJobSubmitter(
-        Settings(runner_service_account_name='glasslab-research-workload')
+        Settings(
+            runner_service_account_name='glasslab-research-workload',
+            artifacts_mount_path=str(artifacts_mount_path),
+        )
     )
 
 
-def test_submit_run_converts_upstream_4xx_api_exception_to_typed_error(monkeypatch) -> None:
+def test_submit_run_converts_upstream_4xx_api_exception_to_typed_error(
+    tmp_path, monkeypatch
+) -> None:
     submitter = _build_failing_submitter(
         monkeypatch,
         FakeApiException(status=400, reason='Bad Request', body='job spec is invalid'),
+        tmp_path / 'artifacts',
     )
 
     with pytest.raises(JobSubmissionError) as excinfo:
@@ -1028,10 +1163,13 @@ def test_submit_run_converts_upstream_4xx_api_exception_to_typed_error(monkeypat
     assert 'Kubernetes' in excinfo.value.detail
 
 
-def test_submit_run_maps_upstream_5xx_api_exception_to_bad_gateway(monkeypatch) -> None:
+def test_submit_run_maps_upstream_5xx_api_exception_to_bad_gateway(
+    tmp_path, monkeypatch
+) -> None:
     submitter = _build_failing_submitter(
         monkeypatch,
         FakeApiException(status=500, reason='Internal Server Error', body='etcd unavailable'),
+        tmp_path / 'artifacts',
     )
 
     with pytest.raises(JobSubmissionError) as excinfo:
