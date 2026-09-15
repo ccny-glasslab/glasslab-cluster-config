@@ -101,12 +101,17 @@ ssh -L 18080:127.0.0.1:18080 glasslab-provisioner \
    port-forward svc/glasslab-research-orchestrator 18080:8080'
 ```
 
-Then inspect persisted state:
+Then inspect persisted state. Every read path except `/health` and `/ready`
+requires the operator token:
 
 ```bash
-curl -fsS http://127.0.0.1:18080/runs | jq
-curl -fsS http://127.0.0.1:18080/runs/<run-id>/events | jq
-curl -fsS http://127.0.0.1:18080/runs/<run-id>/artifacts | jq
+TOKEN=<operator-token>
+curl -fsS -H "X-Glasslab-Operator-Token: $TOKEN" \
+  http://127.0.0.1:18080/runs | jq
+curl -fsS -H "X-Glasslab-Operator-Token: $TOKEN" \
+  http://127.0.0.1:18080/runs/<run-id>/events | jq
+curl -fsS -H "X-Glasslab-Operator-Token: $TOKEN" \
+  http://127.0.0.1:18080/runs/<run-id>/artifacts | jq
 ```
 
 Do not place credentials in commands, shell history, screenshots, Discord, or

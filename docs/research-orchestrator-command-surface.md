@@ -234,7 +234,8 @@ entry point in a job request.
 The HTTP API is for automation, recovery, and diagnostics. Operators should
 not need to hand-write requests for normal Discord usage.
 
-Read paths:
+Every path except `/health` and `/ready` requires
+`X-Glasslab-Operator-Token` in the live deployment. Read paths:
 
 ```text
 GET /runs
@@ -254,8 +255,7 @@ GET /health
 GET /ready
 ```
 
-State-changing paths require `X-Glasslab-Operator-Token` in the live
-deployment:
+State-changing paths also require `X-Glasslab-Operator-Token`:
 
 ```text
 POST /runs
@@ -293,11 +293,17 @@ In another terminal:
 
 ```bash
 RUN=<run-id>
-curl -fsS "http://127.0.0.1:18080/runs/$RUN" | jq
-curl -fsS "http://127.0.0.1:18080/runs/$RUN/events" | jq
-curl -fsS "http://127.0.0.1:18080/runs/$RUN/artifacts" | jq
-curl -fsS "http://127.0.0.1:18080/runs/$RUN/turns?limit=20" | jq
-curl -N "http://127.0.0.1:18080/runs/$RUN/events/stream"
+TOKEN=<operator-token>
+curl -fsS -H "X-Glasslab-Operator-Token: $TOKEN" \
+  "http://127.0.0.1:18080/runs/$RUN" | jq
+curl -fsS -H "X-Glasslab-Operator-Token: $TOKEN" \
+  "http://127.0.0.1:18080/runs/$RUN/events" | jq
+curl -fsS -H "X-Glasslab-Operator-Token: $TOKEN" \
+  "http://127.0.0.1:18080/runs/$RUN/artifacts" | jq
+curl -fsS -H "X-Glasslab-Operator-Token: $TOKEN" \
+  "http://127.0.0.1:18080/runs/$RUN/turns?limit=20" | jq
+curl -N -H "X-Glasslab-Operator-Token: $TOKEN" \
+  "http://127.0.0.1:18080/runs/$RUN/events/stream"
 ```
 
 `GET /runs/{run_id}/turns` is a bounded, redacted convenience view over
