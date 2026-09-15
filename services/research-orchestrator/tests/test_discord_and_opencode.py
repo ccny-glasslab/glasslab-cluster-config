@@ -1046,6 +1046,138 @@ def test_watch_turn_abort_payload_carries_repeated_tool(monkeypatch) -> None:
     assert any(client.aborted for client in clients)
 
 
+class _StopAfterPolls:
+    """Stop token that lets the watchdog poll a bounded number of times."""
+
+    def __init__(self, polls: int) -> None:
+        self._remaining = polls
+
+    def wait(self, timeout: float | None = None) -> bool:
+        if self._remaining <= 0:
+            return True
+        self._remaining -= 1
+        return False
+
+
+def _role_message(role: str, *parts: dict) -> dict:
+    return {'info': {'role': role}, 'parts': list(parts)}
+
+
+def _assistant_tool_message(tool: str, tool_input: dict) -> dict:
+    return _role_message(
+        'assistant',
+        {
+            'type': 'tool',
+            'tool': tool,
+            'state': {'status': 'completed', 'input': tool_input},
+        },
+    )
+
+
+def test_turn_step_count_counts_only_the_current_turns_assistant_steps() -> None:
+    # A continuing session carries its whole history; only the assistant
+    # messages created after the latest user message belong to this turn.
+    messages = [
+        _role_message('user'),
+        _assistant_tool_message('read', {'filePath': '/prior-1'}),
+        _assistant_tool_message('read', {'filePath': '/prior-2'}),
+        _role_message('user'),
+        _role_message('assistant', {'type': 'step-start'}),
+        _role_message('assistant', {'type': 'step-start'}),
+        _role_message('assistant', {'type': 'step-start'}),
+    ]
+
+    assert OpenCodeProcessRuntime._turn_step_count(messages) == 3
+
+
+def test_turn_step_count_falls_back_without_role_metadata() -> None:
+    # A payload that omits message-role metadata still exposes per-step and
+    # terminal-tool markers, so the count degrades instead of dropping to 0.
+    step_markers = [
+        {'parts': [{'type': 'step-start'}, {'type': 'text'}]},
+        {'parts': [{'type': 'step-start'}]},
+    ]
+    assert OpenCodeProcessRuntime._turn_step_count(step_markers) == 2
+
+    tool_parts = [
+        _completed_tool_message('read', {'filePath': '/a'}),
+        _completed_tool_message('read', {'filePath': '/b'}),
+    ]
+    assert OpenCodeProcessRuntime._turn_step_count(tool_parts) == 2
+
+
+def test_watch_turn_aborts_when_step_budget_exceeded(monkeypatch) -> None:
+    # Three distinct tool calls: the identical-terminal-tool guard cannot fire,
+    # so only the per-turn step budget can stop this varied-call runaway.
+    messages = [
+        _role_message('user'),
+        _assistant_tool_message('read', {'filePath': '/a'}),
+        _assistant_tool_message('read', {'filePath': '/b'}),
+        _assistant_tool_message('read', {'filePath': '/c'}),
+    ]
+    runtime = OpenCodeProcessRuntime(
+        Settings(opencode_turn_step_limit=2, opencode_repeated_tool_limit=6)
+    )
+    handle = SimpleNamespace(base_url='http://127.0.0.1:9', password='secret')
+    abort_reasons: list = []
+    clients: list[_WatchClient] = []
+
+    def _client_factory(**kwargs: object) -> _WatchClient:
+        client = _WatchClient(messages)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(httpx, 'Client', _client_factory)
+
+    runtime._watch_turn(
+        handle=handle,
+        session_id='session-1',
+        workspace=Path('/workspace'),
+        stop=_StopAfterPolls(1),
+        abort_reasons=abort_reasons,
+    )
+
+    assert len(abort_reasons) == 1
+    abort = abort_reasons[0]
+    assert abort.failure_class == 'step_budget_exceeded'
+    assert 'step budget' in abort.reason
+    assert abort.details is not None
+    assert abort.details['step_count'] == 3
+    assert abort.details['step_limit'] == 2
+    assert any(client.aborted for client in clients)
+
+
+def test_watch_turn_step_budget_disabled_at_zero(monkeypatch) -> None:
+    messages = [_role_message('user')] + [
+        _assistant_tool_message('read', {'filePath': f'/{index}'})
+        for index in range(5)
+    ]
+    runtime = OpenCodeProcessRuntime(
+        Settings(opencode_turn_step_limit=0, opencode_repeated_tool_limit=6)
+    )
+    handle = SimpleNamespace(base_url='http://127.0.0.1:9', password='secret')
+    abort_reasons: list = []
+    clients: list[_WatchClient] = []
+
+    def _client_factory(**kwargs: object) -> _WatchClient:
+        client = _WatchClient(messages)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(httpx, 'Client', _client_factory)
+
+    runtime._watch_turn(
+        handle=handle,
+        session_id='session-1',
+        workspace=Path('/workspace'),
+        stop=_StopAfterPolls(1),
+        abort_reasons=abort_reasons,
+    )
+
+    assert abort_reasons == []
+    assert not any(client.aborted for client in clients)
+
+
 def test_extracts_current_and_legacy_opencode_structured_output() -> None:
     current = {'info': {'structured': {'kind': 'protocol_draft'}}}
     legacy = {'info': {'structured_output': {'kind': 'protocol_draft'}}}

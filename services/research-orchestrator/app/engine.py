@@ -105,6 +105,10 @@ NON_RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
         # intact via resume_run().
         'turn_timeout',
         'repeated_tool_loop',
+        # A step-budget abort is the same deterministic runaway: retrying in a
+        # fresh session repeats the explore loop, so it pauses for corrective
+        # recovery instead.
+        'step_budget_exceeded',
     }
 )
 _RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
@@ -792,6 +796,13 @@ class ResearchOrchestrator:
             digest = details.get('input_digest')
             if isinstance(digest, str):
                 entry['input_digest'] = digest
+        elif failure.failure_class == 'step_budget_exceeded' and details:
+            step_count = details.get('step_count')
+            if isinstance(step_count, int):
+                entry['step_count'] = step_count
+            step_limit = details.get('step_limit')
+            if isinstance(step_limit, int):
+                entry['step_limit'] = step_limit
         return entry
 
     def _rotate_agent_session(
@@ -865,6 +876,18 @@ class ResearchOrchestrator:
                     'input_digest': details.get('input_digest'),
                 },
             )
+        if failure is not None and failure.failure_class == 'step_budget_exceeded':
+            details = failure.details or {}
+            self._event(
+                run_id,
+                source='orchestrator',
+                event_type='agent.turn_step_budget_exceeded',
+                payload={
+                    'agent': agent.value,
+                    'step_count': details.get('step_count'),
+                    'step_limit': details.get('step_limit'),
+                },
+            )
 
     def _recovery_context(
         self,
@@ -894,6 +917,18 @@ class ResearchOrchestrator:
                 'that identical call. Inspect the current worktree/state and '
                 'either take a different action or return your structured '
                 'result with what you have.'
+            )
+        elif (
+            isinstance(last_failure, dict)
+            and last_failure.get('failure_class') == 'step_budget_exceeded'
+        ):
+            step_count = last_failure.get('step_count')
+            correction = (
+                '\n\nCORRECTIVE INSTRUCTION: The previous turn exceeded the '
+                f'step budget ({step_count} steps) without returning a result. '
+                'Stop exploring; if the worktree already contains what you '
+                'need, return your structured result now with what you have, '
+                'otherwise take the single most direct next action.'
             )
         return (
             'This is a fresh OpenCode session after an interrupted or failed '
