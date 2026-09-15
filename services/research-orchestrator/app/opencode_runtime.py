@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import secrets
@@ -40,11 +41,30 @@ class OpenCodeRuntimeError(RuntimeError):
     decision: transient classes (startup, turn_timeout, repeated_tool_loop,
     provider, network) are retryable; deterministic classes (validation,
     kind_mismatch) are not.
+
+    ``details`` carries a small, secret-free diagnostic payload (for a repeated
+    tool loop: the repeated tool name, its repeat count, and a short digest of
+    the identical input fingerprint) so recovery can be corrective without
+    persisting raw tool arguments.
     """
 
-    def __init__(self, message: str, *, failure_class: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_class: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.failure_class = failure_class
+        self.details = details
+
+
+@dataclass
+class _TurnAbort:
+    reason: str
+    failure_class: str
+    details: dict[str, Any] | None = None
 
 
 @dataclass
@@ -768,7 +788,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
             knowledge_tool=knowledge_tool,
         )
         stop_watchdog = threading.Event()
-        abort_reasons: list[tuple[str, str]] = []
+        abort_reasons: list[_TurnAbort] = []
         # The watchdog polls the transcript and enforces both the hard
         # wall-clock deadline and the identical-terminal-tool-call guard. It
         # records why the turn was aborted so run_turn surfaces a meaningful
@@ -796,16 +816,20 @@ class OpenCodeProcessRuntime(AgentRuntime):
                 model_override=model_override,
             )
             if abort_reasons:
-                reason, failure_class = abort_reasons[0]
+                abort = abort_reasons[0]
                 raise OpenCodeRuntimeError(
-                    reason, failure_class=failure_class
+                    abort.reason,
+                    failure_class=abort.failure_class,
+                    details=abort.details,
                 )
             return result
         except Exception as exc:
             if abort_reasons:
-                reason, failure_class = abort_reasons[0]
+                abort = abort_reasons[0]
                 raise OpenCodeRuntimeError(
-                    reason, failure_class=failure_class
+                    abort.reason,
+                    failure_class=abort.failure_class,
+                    details=abort.details,
                 ) from exc
             raise
         finally:
@@ -978,6 +1002,32 @@ class OpenCodeProcessRuntime(AgentRuntime):
                 )
         return signatures
 
+    @staticmethod
+    def _repeated_tool_abort(
+        signatures: list[str], limit: int
+    ) -> dict[str, Any] | None:
+        # Payload for `limit` byte-identical terminal tool signatures. The
+        # repeated tool name and count are safe to persist; the input fingerprint
+        # may contain secrets so only a short digest travels with the abort.
+        if limit <= 1 or len(signatures) < limit:
+            return None
+        repeated = signatures[-limit:]
+        if len(set(repeated)) != 1:
+            return None
+        signature = repeated[0]
+        try:
+            parsed = json.loads(signature)
+        except (TypeError, ValueError):
+            parsed = {}
+        tool = parsed.get('tool') if isinstance(parsed, dict) else None
+        return {
+            'tool': tool if isinstance(tool, str) else None,
+            'count': len(repeated),
+            'input_digest': hashlib.sha256(
+                signature.encode('utf-8')
+            ).hexdigest()[:16],
+        }
+
     def _watch_turn(
         self,
         *,
@@ -985,12 +1035,13 @@ class OpenCodeProcessRuntime(AgentRuntime):
         session_id: str,
         workspace: Path,
         stop: threading.Event,
-        abort_reasons: list[tuple[str, str]],
+        abort_reasons: list[_TurnAbort],
     ) -> None:
         deadline = time.monotonic() + self.settings.opencode_turn_timeout_seconds
         while not stop.wait(2):
             reason: str | None = None
             failure_class: str | None = None
+            details: dict[str, Any] | None = None
             if time.monotonic() >= deadline:
                 reason = (
                     'OpenCode turn exceeded the hard wall-clock limit of '
@@ -1015,11 +1066,8 @@ class OpenCodeProcessRuntime(AgentRuntime):
                         # Guard against retry loops: once `limit` consecutive
                         # terminal tool calls are byte-identical (same tool and
                         # same input) the turn is stuck and is aborted.
-                        if (
-                            limit > 1
-                            and len(signatures) >= limit
-                            and len(set(signatures[-limit:])) == 1
-                        ):
+                        details = self._repeated_tool_abort(signatures, limit)
+                        if details is not None:
                             reason = (
                                 'OpenCode turn aborted after '
                                 f'{limit} identical terminal tool calls'
@@ -1029,7 +1077,13 @@ class OpenCodeProcessRuntime(AgentRuntime):
                     continue
             if reason is None:
                 continue
-            abort_reasons.append((reason, failure_class or 'turn_timeout'))
+            abort_reasons.append(
+                _TurnAbort(
+                    reason=reason,
+                    failure_class=failure_class or 'turn_timeout',
+                    details=details,
+                )
+            )
             try:
                 with httpx.Client(
                     base_url=handle.base_url,
