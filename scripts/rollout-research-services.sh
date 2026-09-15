@@ -152,7 +152,7 @@ print_rollback_guidance() {
 
 rollback_guidance_on_error() {
   local status=$?
-  if [[ "$ROLLOUT_STARTED" == true ]]; then
+  if [[ "$status" -ne 0 && "$ROLLOUT_STARTED" == true ]]; then
     print_rollback_guidance
   fi
   exit "$status"
