@@ -471,3 +471,63 @@ def test_retry_refused_after_pause_or_cancel(
     assert final.state == (
         RunState.PAUSED if transition == 'pause' else RunState.CANCELLED
     )
+
+
+def test_create_run_draft_turn_failure_leaves_run_resumable(
+    orchestrator_bundle,
+) -> None:
+    """A protocol-draft agent-turn failure during create_run is not fatal.
+
+    Drafting is an ordinary agent turn. When it exhausts a non-retryable
+    failure (repeated_tool_loop) on the very first turn, the run must be left
+    in HONEYDEW_DRAFTING_PROTOCOL -- one of the resumable agent states -- not
+    driven terminally to FAILED. Only the setup path (dataset materialization
+    and the pre-draft transition) may fail the run terminally, so a run can
+    never strand in PREPARING holding the one-active-run slot (issue #237).
+    """
+    settings, store, cluster, runtime, engine = orchestrator_bundle
+    engine.runtime = FlakyTurnRuntime(
+        runtime, fail_calls=1, failure_class='repeated_tool_loop'
+    )
+    with pytest.raises(OpenCodeRuntimeError):
+        engine.create_run(
+            RunCreateRequest(
+                objective='First-turn doom loop must not kill the run.'
+            )
+        )
+    run = store.list_runs()[0]
+    assert run.state == RunState.HONEYDEW_DRAFTING_PROTOCOL
+    assert run.state != RunState.FAILED
+    assert not any(
+        event.event_type == 'run.failed'
+        for event in store.list_events(run.run_id)
+    )
+
+
+def test_recover_retries_draft_after_create_run_turn_failure(
+    orchestrator_bundle,
+) -> None:
+    """recover() resumes a run whose create_run draft turn failed.
+
+    The run is left in HONEYDEW_DRAFTING_PROTOCOL, so the orchestrator restart
+    path re-enters _draft_protocol and the run advances normally once the turn
+    succeeds.
+    """
+    settings, store, cluster, runtime, engine = orchestrator_bundle
+    engine.runtime = FlakyTurnRuntime(
+        runtime, fail_calls=1, failure_class='repeated_tool_loop'
+    )
+    with pytest.raises(OpenCodeRuntimeError):
+        engine.create_run(
+            RunCreateRequest(objective='Recover the failed first draft turn.')
+        )
+    failed = store.list_runs()[0]
+    assert failed.state == RunState.HONEYDEW_DRAFTING_PROTOCOL
+
+    recovered = engine.recover()
+    assert failed.run_id in recovered
+    assert engine.runtime.attempts == 2
+    assert (
+        store.get_run(failed.run_id).state
+        == RunState.AWAITING_PROTOCOL_APPROVAL
+    )

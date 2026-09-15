@@ -494,15 +494,19 @@ class ResearchOrchestrator:
                 self._transition(run_id, RunState.PREPARING)
                 self._materialize_objective_datasets(run_id)
                 self._transition(run_id, RunState.HONEYDEW_DRAFTING_PROTOCOL)
-                self._draft_protocol(run_id)
             except Exception as exc:
-                # Any failure in the creation path (dataset materialization,
-                # checksum verification, drafting) must land the run in a
-                # terminal state: a run stranded in PREPARING would hold the
-                # one-active-run slot and block every later create_run
-                # (issue #237).
+                # Only SETUP failures are fatal. A run stranded in PREPARING
+                # holds the one-active-run slot and blocks every later
+                # create_run, so dataset materialization and the pre-draft
+                # transition must land terminal (issue #237).
                 self._fail_run(run_id, exc)
                 raise
+            # Drafting is an ordinary agent turn, not setup, so it runs outside
+            # the fatal handler. _run_agent_turn already rotated the session
+            # and left the run in HONEYDEW_DRAFTING_PROTOCOL (resumable);
+            # failing it here would make a first-turn failure terminal while
+            # the identical failure at later stages stays resumable.
+            self._draft_protocol(run_id)
             return self.store.get_run(run_id)
 
     def _materialize_objective_datasets(self, run_id: str) -> None:

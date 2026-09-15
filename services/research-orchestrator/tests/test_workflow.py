@@ -54,6 +54,7 @@ from app.schemas import (
     ResearchAnswer,
     RunCreateRequest,
     RunState,
+    TERMINAL_STATES,
     TurnKind,
     TurnRecord,
     VerificationVerdict,
@@ -1305,9 +1306,13 @@ def test_missing_protocol_declaration_gets_one_focused_repair(
     assert runtime.turn_counts[AgentName.HONEYDEW] == 2
 
 
-def test_repeated_wrong_kind_fails_without_advancing(
+def test_repeated_wrong_kind_leaves_run_resumable_without_advancing(
     orchestrator_bundle,
 ) -> None:
+    # A draft turn that cannot return the required kind is an ordinary agent
+    # failure, not a setup failure: the run must stay resumable in
+    # HONEYDEW_DRAFTING_PROTOCOL instead of failing terminally, matching the
+    # same failure at every later workflow stage.
     _, store, cluster, _, engine = orchestrator_bundle
     runtime = RepeatedWrongKindRuntime(runner_image=RUNNER_IMAGE)
     engine.runtime = runtime
@@ -1318,7 +1323,8 @@ def test_repeated_wrong_kind_fails_without_advancing(
         )
 
     run = next(iter(store.list_runs()))
-    assert run.state == RunState.FAILED
+    assert run.state == RunState.HONEYDEW_DRAFTING_PROTOCOL
+    assert run.state not in TERMINAL_STATES
     assert runtime.turn_counts[AgentName.HONEYDEW] == 2
     # The failed run must not have advanced: no approval action, no submitted
     # job, and no duplicated event stream beyond the two attempted turns.
