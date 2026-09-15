@@ -87,6 +87,18 @@ class WorkflowSecurityManifestTests(unittest.TestCase):
                 )
         self.assertNotIn("GLASSLAB_WORKFLOW_API_CALLER_POLICIES", environment)
 
+    def test_caller_secret_contract_lists_exactly_the_deployed_callers(self):
+        contract = next(
+            item["caller_secret_contract"]
+            for item in documents(KUBE_ROOT / "workflow-api" / "10-secret.example")
+            if "caller_secret_contract" in item
+        )
+        required = {entry["name"]: entry["required_keys"] for entry in contract["secrets"]}
+        self.assertEqual(
+            required,
+            {expected["secret"]: ["token"] for expected in CALLERS.values()},
+        )
+
     def test_ingress_policy_only_allows_named_caller_labels_on_http_port(self):
         policy = documents(KUBE_ROOT / "workflow-api" / "50-ingress-network-policy.yaml")[0]
         self.assertEqual(policy["kind"], "NetworkPolicy")
@@ -118,14 +130,16 @@ class WorkflowSecurityManifestTests(unittest.TestCase):
         rollout = (REPOSITORY_ROOT / "scripts" / "rollout-research-services.sh").read_text(encoding="utf-8")
         bundle = rollout[rollout.index("rollout_authenticated_workflow_bundle()") :]
         for caller in CALLERS:
-            self.assertIn(f"require_object secret {CALLERS[caller]['secret']}", rollout)
+            self.assertIn(f"'{CALLERS[caller]['secret']}:token'", rollout)
         # Retired (command-router) and legacy (schedule-worker) services are
         # not part of the authenticated bundle; their images are not published
         # by the ccny service-image pipeline.
         self.assertNotIn("rollout_command_router", bundle)
         self.assertNotIn("rollout_schedule_worker", bundle)
+        secret_preflight_position = bundle.index("require_workflow_caller_secrets")
         orchestrator_position = bundle.index("rollout_research_orchestrator")
         server_position = bundle.index("rollout_workflow_api")
+        self.assertLess(secret_preflight_position, server_position)
         self.assertLess(orchestrator_position, server_position)
 
     def test_public_smoke_does_not_call_protected_workflow_routes(self):
