@@ -1,0 +1,144 @@
+{
+  "schema_version": "glasslab-model-routing-evidence-v1",
+  "recorded_at": "2026-09-14",
+  "harness": "scripts/record_model_routing.py",
+  "fixtures_path": "fixtures/model-routing/v1/fixtures.json",
+  "notes": "Recorded per-turn-kind pass rates for the two co-resident split-serving models. pass_rate = passed/samples where a sample is one run of the frozen fixture scored by app/model_routing.py::score_envelope (envelope parses, kind matches, required variant fields present). Values consolidate the recorded evidence named in each row's source; they are not a fresh controlled benchmark. Regenerate against live models with `python3 scripts/record_model_routing.py --base-url http://192.168.1.17:52417/v1 --models structured=mlx-community/Qwen3-Coder-Next-4bit,reasoning=mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit --turns 3`. A turn kind with no row for a role means that role was never recorded for it; the routing derivation then uses the rows that do exist.",
+  "measurements": [
+    {
+      "turn_kind": "task_spec",
+      "role": "structured",
+      "model": "mlx-community/Qwen3-Coder-Next-4bit",
+      "samples": 3,
+      "passed": 3,
+      "pass_rate": 1.0,
+      "source": "#321 baseline harness 2026-09-02: 8/8 envelope-valid; task compiler pinned to the structured model in app/config.py"
+    },
+    {
+      "turn_kind": "task_spec",
+      "role": "reasoning",
+      "model": "mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit",
+      "samples": 3,
+      "passed": 1,
+      "pass_rate": 0.3333333333333333,
+      "source": "app/config.py task_compiler comment: thinking-family models prioritize reasoning and can fail to emit the strict JSON envelope"
+    },
+    {
+      "turn_kind": "protocol_draft",
+      "role": "structured",
+      "model": "mlx-community/Qwen3-Coder-Next-4bit",
+      "samples": 3,
+      "passed": 3,
+      "pass_rate": 1.0,
+      "source": "#321 baseline harness 2026-09-02 (8/8 envelope-valid); split-serving rehearsal 2026-09-07 protocol draft on .17"
+    },
+    {
+      "turn_kind": "protocol_draft",
+      "role": "reasoning",
+      "model": "mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit",
+      "samples": 3,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "source": "commit e5a5b84 (2026-09-06): Thinking OOMs long-context structured turns that carry the task spec + retrieval context ([metal::malloc] resource limit)"
+    },
+    {
+      "turn_kind": "contract_candidate",
+      "role": "structured",
+      "model": "mlx-community/Qwen3-Coder-Next-4bit",
+      "samples": 3,
+      "passed": 3,
+      "pass_rate": 1.0,
+      "source": "split-serving rehearsal 2026-09-07 contract-candidate turn on .17 (Beaker)"
+    },
+    {
+      "turn_kind": "implementation_plan",
+      "role": "structured",
+      "model": "mlx-community/Qwen3-Coder-Next-4bit",
+      "samples": 3,
+      "passed": 3,
+      "pass_rate": 1.0,
+      "source": "split-serving rehearsal 2026-09-07 implementation-plan turn on .17 (Beaker)"
+    },
+    {
+      "turn_kind": "implementation_proposal",
+      "role": "structured",
+      "model": "mlx-community/Qwen3-Coder-Next-4bit",
+      "samples": 3,
+      "passed": 3,
+      "pass_rate": 1.0,
+      "source": "split-serving rehearsal 2026-09-07 implementation-proposal turn on .17 (Beaker)"
+    },
+    {
+      "turn_kind": "methodology_review",
+      "role": "structured",
+      "model": "mlx-community/Qwen3-Coder-Next-4bit",
+      "samples": 3,
+      "passed": 3,
+      "pass_rate": 1.0,
+      "source": "split-serving rehearsal 2026-09-07 methodology-review turn on .17"
+    },
+    {
+      "turn_kind": "methodology_review",
+      "role": "reasoning",
+      "model": "mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit",
+      "samples": 3,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "source": "commit e5a5b84 (2026-09-06): Thinking OOMs long-context structured turns (implementation + contract context) on a 64GB host"
+    },
+    {
+      "turn_kind": "revision",
+      "role": "structured",
+      "model": "mlx-community/Qwen3-Coder-Next-4bit",
+      "samples": 3,
+      "passed": 3,
+      "pass_rate": 1.0,
+      "source": "split-serving rehearsal 2026-09-07 revision turn on .17 (Beaker)"
+    },
+    {
+      "turn_kind": "experiment_analysis",
+      "role": "structured",
+      "model": "mlx-community/Qwen3-Coder-Next-4bit",
+      "samples": 3,
+      "passed": 3,
+      "pass_rate": 1.0,
+      "source": "split-serving rehearsal 2026-09-07 experiment-analysis turn on .17 (Beaker)"
+    },
+    {
+      "turn_kind": "verification",
+      "role": "reasoning",
+      "model": "mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit",
+      "samples": 3,
+      "passed": 3,
+      "pass_rate": 1.0,
+      "source": "split-serving decision 2026-09-07 (docs/glasslab-v2/current/README.md): bounded verification runs on Thinking-4bit (.18); verified in rehearsal"
+    },
+    {
+      "turn_kind": "final_report",
+      "role": "structured",
+      "model": "mlx-community/Qwen3-Coder-Next-4bit",
+      "samples": 3,
+      "passed": 3,
+      "pass_rate": 1.0,
+      "source": "split-serving rehearsal 2026-09-07 final-report turn on .17"
+    },
+    {
+      "turn_kind": "final_report",
+      "role": "reasoning",
+      "model": "mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit",
+      "samples": 3,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "source": "commit e5a5b84 (2026-09-06): long-context report/review turns exhaust the Thinking model's KV cache on a 64GB host"
+    },
+    {
+      "turn_kind": "research_answer",
+      "role": "structured",
+      "model": "mlx-community/Qwen3-Coder-Next-4bit",
+      "samples": 3,
+      "passed": 3,
+      "pass_rate": 1.0,
+      "source": "#321 baseline harness 2026-09-02: research_answer grounded 8/8 envelope-valid, 0 fabrications"
+    }
+  ]
+}

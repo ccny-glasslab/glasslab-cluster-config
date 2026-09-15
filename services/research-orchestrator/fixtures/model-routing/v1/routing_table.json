@@ -1,0 +1,22 @@
+{
+  "schema_version": "glasslab-model-routing-table-v1",
+  "derived_from": "fixtures/model-routing/v1/evidence.json",
+  "generated_at": "2026-09-14",
+  "tie_break_order": [
+    "structured",
+    "reasoning"
+  ],
+  "routes": {
+    "task_spec": "structured",
+    "protocol_draft": "structured",
+    "contract_candidate": "structured",
+    "implementation_plan": "structured",
+    "implementation_proposal": "structured",
+    "methodology_review": "structured",
+    "revision": "structured",
+    "experiment_analysis": "structured",
+    "verification": "reasoning",
+    "final_report": "structured",
+    "research_answer": "structured"
+  }
+}

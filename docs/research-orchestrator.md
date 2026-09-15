@@ -195,6 +195,18 @@ the checked repository configuration. The service does not assume that the
 label `qwen3-coder-next-70b` is accepted by the endpoint. Confirm the served
 model list before changing these values.
 
+### Per-Turn-Kind Routing
+
+Which of the two models serves a turn is a recorded, evidence-derived decision,
+not a per-agent constant. Every turn kind is routed from
+`fixtures/model-routing/v1/routing_table.json`, which is derived from the
+per-turn-kind pass rates in `fixtures/model-routing/v1/evidence.json` over the
+frozen fixtures in `fixtures/model-routing/v1/fixtures.json`; a missing or
+malformed table falls back to the legacy structured/reasoning split. The
+mapping, its evidence source, and how to refresh it are documented in
+[`glasslab-v2/per-turn-kind-model-routing.md`](glasslab-v2/per-turn-kind-model-routing.md)
+(issue #433).
+
 ## Structured Turns
 
 Every completed turn is validated as an `AgentTurnResult`. It contains a kind,

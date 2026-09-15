@@ -15,6 +15,7 @@ from typing import Annotated, Literal
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from . import model_routing
 from .schemas import AgentName, TurnKind
 
 
@@ -169,6 +170,9 @@ class Settings(BaseSettings):
     honeydew_structured_agent_base_url: str | None = None
     honeydew_reasoning_agent_model: str | None = None
     honeydew_reasoning_agent_base_url: str | None = None
+    # Path to the versioned, evidence-derived routing table (#433). A missing
+    # or malformed table falls back to the legacy split, never strands a run.
+    model_routing_table_path: str = str(model_routing.ROUTING_TABLE_PATH)
     # Per-agent endpoint overrides (#319 successor): when set, the agent's
     # turns run against its own OpenAI-compatible server; otherwise both
     # agents share qwen_base_url. Used to split models across machines
@@ -297,7 +301,35 @@ class Settings(BaseSettings):
             AgentName.HONEYDEW
         )
 
+    def model_route(self, turn_kind: TurnKind) -> str | None:
+        """Return the recorded role for a turn kind, or None when unrecorded.
+
+        The table is the versioned, evidence-derived artifact under
+        fixtures/model-routing/v1 (#433); a missing or malformed table returns
+        None so callers fall back to the legacy split.
+        """
+        role = model_routing.load_routing_table(
+            self.model_routing_table_path
+        ).get(turn_kind)
+        return role if role in model_routing.ROLE_ORDER else None
+
     def honeydew_model_for(self, turn_kind: TurnKind) -> tuple[str, str]:
+        route = self.model_route(turn_kind)
+        if route == model_routing.REASONING_ROLE:
+            return (
+                self.honeydew_reasoning_model(),
+                self.honeydew_reasoning_base_url(),
+            )
+        if route == model_routing.STRUCTURED_ROLE:
+            return (
+                self.honeydew_structured_model(),
+                self.honeydew_structured_base_url(),
+            )
+        return self._legacy_honeydew_model_for(turn_kind)
+
+    def _legacy_honeydew_model_for(self, turn_kind: TurnKind) -> tuple[str, str]:
+        # Used only when no recorded routing table is available. Only bounded
+        # verification uses the reasoning model; every other turn is structured.
         if turn_kind in {
             TurnKind.VERIFICATION,
         }:
@@ -308,6 +340,22 @@ class Settings(BaseSettings):
         return (
             self.honeydew_structured_model(),
             self.honeydew_structured_base_url(),
+        )
+
+    def beaker_model_for(self, turn_kind: TurnKind) -> tuple[str, str]:
+        """Route a Beaker turn kind by recorded evidence (#433).
+
+        Beaker's structured role is its own per-agent model; only a recorded
+        reasoning route moves a Beaker turn off it.
+        """
+        if self.model_route(turn_kind) == model_routing.REASONING_ROLE:
+            return (
+                self.honeydew_reasoning_model(),
+                self.honeydew_reasoning_base_url(),
+            )
+        return (
+            self.agent_model_for(AgentName.BEAKER),
+            self.base_url_for(AgentName.BEAKER),
         )
 
     @field_validator('evidence_snapshot_max_bytes')
