@@ -468,7 +468,11 @@ class OpenCodeProcessRuntime(AgentRuntime):
             '})\n'
         )
 
-    def _permissions(self, agent: AgentName) -> dict[str, Any]:
+    def _permissions(
+        self,
+        agent: AgentName,
+        run_root: Path | None = None,
+    ) -> dict[str, Any]:
         # Deny-list for the agent's bash tool. Cluster mutation, network
         # egress to the cluster, image publication, and git push/PR creation
         # are off limits for both agents; Honeydew additionally cannot mutate
@@ -503,10 +507,29 @@ class OpenCodeProcessRuntime(AgentRuntime):
                     'git switch*': 'deny',
                 }
             )
+        # external_directory default-denies every path outside the agent's
+        # own worktree. Only the SAME run's read-only durable directories
+        # (protocol/, shared-artifacts/, reports/, events/) are allowed by
+        # absolute-path pattern; runtime/** (OpenCode session databases and
+        # secrets), the other agent's worktree, other runs, and arbitrary
+        # host paths match no allow pattern and therefore stay denied.
+        #
+        # ORDER IS LOAD-BEARING: OpenCode evaluates permission rules with
+        # last-match-wins over the merged, ordered ruleset, and
+        # _write_runtime_config serializes this dict with sort_keys=True.
+        # '*' (0x2A) sorts before '/' (0x2F), so the catch-all deny is
+        # emitted first and every run-scoped allow after it. The allow is
+        # what applies to the permitted directories; swapping that order
+        # would make the catch-all deny win for them too.
+        external_directories: dict[str, str] = {'*': 'deny'}
+        if run_root is not None:
+            root = str(run_root)
+            for name in ('protocol', 'shared-artifacts', 'reports', 'events'):
+                external_directories[f'{root}/{name}/*'] = 'allow'
         return {
             '*': 'allow',
             'doom_loop': 'deny',
-            'external_directory': 'deny',
+            'external_directory': external_directories,
             'lsp': 'deny',
             'question': 'deny',
             'skill': 'deny',
@@ -554,11 +577,13 @@ class OpenCodeProcessRuntime(AgentRuntime):
             'share': 'disabled',
             'autoupdate': False,
             'lsp': False,
-            'permission': self._permissions(agent),
+            'permission': self._permissions(agent, run_root=workspace.parent),
             'agent': {
                 'build': {
                     'temperature': 0,
-                    'permission': self._permissions(agent),
+                    'permission': self._permissions(
+                        agent, run_root=workspace.parent
+                    ),
                 },
                 'plan': {'disable': True},
             },

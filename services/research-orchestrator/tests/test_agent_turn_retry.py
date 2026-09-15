@@ -10,6 +10,7 @@ must never be retried.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -257,6 +258,58 @@ def test_doom_loop_failure_records_last_failure_and_corrective_context(
     assert 'byte-identical' in context
     assert 'Do NOT repeat that identical call' in context
     assert 'workspace_status' in context
+
+
+def test_recovery_checkpoint_protocol_path_is_worktree_relative(
+    orchestrator_bundle,
+) -> None:
+    settings, store, cluster, runtime, engine = orchestrator_bundle
+    run = _make_run(engine, "Recovery checkpoint protocol path objective.")
+    run = store.get_run(run.run_id)
+    absolute_protocol = (
+        engine.workspaces.paths(run.run_id).protocol / 'program.md'
+    )
+    store.replace_run(
+        run.model_copy(update={'protocol_path': str(absolute_protocol)}),
+        expected_version=run.version,
+    )
+
+    engine._write_recovery_checkpoint(
+        run_id=run.run_id,
+        agent=AgentName.HONEYDEW,
+        expected_kind=TurnKind.PROTOCOL_DRAFT,
+        error='forced failure for protocol path checkpoint test',
+    )
+
+    checkpoint_path = (
+        engine.workspaces.paths(run.run_id).events
+        / 'honeydew-recovery-checkpoint.json'
+    )
+    checkpoint = json.loads(checkpoint_path.read_text(encoding='utf-8'))
+    assert checkpoint['protocol_path'] == 'program.md'
+    assert not Path(checkpoint['protocol_path']).is_absolute()
+
+
+def test_recovery_checkpoint_keeps_null_protocol_path_before_freeze(
+    orchestrator_bundle,
+) -> None:
+    settings, store, cluster, runtime, engine = orchestrator_bundle
+    engine.runtime = FlakyTurnRuntime(
+        runtime, fail_calls=10, failure_class='turn_timeout'
+    )
+    with pytest.raises(OpenCodeRuntimeError):
+        engine.create_run(
+            RunCreateRequest(objective="First draft failure objective.")
+        )
+
+    runs = store.list_runs()
+    assert len(runs) == 1
+    checkpoint_path = (
+        engine.workspaces.paths(runs[0].run_id).events
+        / 'honeydew-recovery-checkpoint.json'
+    )
+    checkpoint = json.loads(checkpoint_path.read_text(encoding='utf-8'))
+    assert checkpoint['protocol_path'] is None
 
 
 def test_non_doom_loop_failure_has_no_corrective_instruction(
