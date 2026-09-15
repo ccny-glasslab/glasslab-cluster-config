@@ -79,6 +79,12 @@ SCANNED_SOURCE_SUFFIXES = {
 }
 
 
+# `_config_value` resolves a dotted key path from the base_config root, so a
+# methodology requirement is materializable only when its first segment is this
+# top-level experiment-dimensions namespace.
+EXPERIMENT_DIMENSIONS_ROOT = 'experiment_dimensions'
+
+
 def _config_value(config: dict[str, Any], dotted_path: str) -> Any:
     value: Any = config
     for component in dotted_path.split('.'):
