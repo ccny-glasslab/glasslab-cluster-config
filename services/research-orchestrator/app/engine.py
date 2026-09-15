@@ -29,6 +29,10 @@ from .evidence import (
 )
 from .evidence_resolver import EvidenceURIResolver
 from .matrix import expand_experiment_matrix
+from .methodology_config import (
+    MethodologyConfigRepair,
+    repair_methodology_settings,
+)
 import httpx
 
 from .opencode_runtime import AgentRuntime, OpenCodeRuntimeError
@@ -4346,6 +4350,12 @@ class ResearchOrchestrator:
                     self._contract_methodology_requirements(run_id),
                 )
             )
+            previous_signature = self._last_preflight_rejection_signature(run_id)
+            signature, base_config_digest = self._preflight_rejection_signature(
+                run_id=run_id,
+                action=action,
+                errors=preflight.errors,
+            )
             self.store.update_action(
                 action.action_id,
                 approval_status=ApprovalStatus.REJECTED,
@@ -4360,8 +4370,42 @@ class ResearchOrchestrator:
                     'action_id': action.action_id,
                     'reason': rejection_reason,
                     'preflight': preflight.model_dump(mode='json'),
+                    'preflight_signature': signature,
+                    'base_config_digest': base_config_digest,
                 },
             )
+            if previous_signature is not None and previous_signature == signature:
+                # A deterministic model at temperature 0 can re-emit the exact
+                # same non-conforming matrix forever. Once an identical
+                # rejection repeats, another revision is wasted work: escalate
+                # to a human instead of spending the revision budget.
+                self._event(
+                    run_id,
+                    source='orchestrator',
+                    event_type='methodology.non_convergence_detected',
+                    payload={
+                        'action_id': action.action_id,
+                        'signature': signature,
+                        'base_config_digest': base_config_digest,
+                        'errors': sorted(preflight.errors),
+                        'revision_count': (
+                            self.store.get_run(
+                                run_id
+                            ).methodology_revision_count
+                        ),
+                    },
+                )
+                self.pause_run(
+                    run_id,
+                    requested_by='orchestrator',
+                    reason=(
+                        'Repeated identical deterministic matrix preflight '
+                        'rejection: the bound model is at a fixed point and '
+                        'another revision would repeat it. Human resolution '
+                        'is required.'
+                    ),
+                )
+                return
             self._request_methodology_revision(
                 run_id,
                 feedback=rejection_reason,
@@ -4702,6 +4746,106 @@ class ResearchOrchestrator:
                 continue
         return requirements
 
+    def _last_preflight_rejection_signature(self, run_id: str) -> str | None:
+        signature: str | None = None
+        for event in self.store.list_events(run_id):
+            if event.event_type != 'action.rejected':
+                continue
+            value = event.payload.get('preflight_signature')
+            if isinstance(value, str) and value:
+                signature = value
+        return signature
+
+    def _preflight_rejection_signature(
+        self,
+        *,
+        run_id: str,
+        action: ActionRecord,
+        errors: list[str],
+    ) -> tuple[str, str]:
+        # The signature pins both the normalized error set and the exact
+        # base_config bytes, so an identical rejection can only recur when the
+        # model re-emitted the same non-conforming matrix unchanged.
+        target = self._matrix_base_config_target(run_id=run_id, action=action)
+        base_config_digest = (
+            sha256(target.read_bytes()).hexdigest()
+            if target is not None and target.is_file()
+            else 'unavailable'
+        )
+        normalized = '\n'.join(sorted(set(errors)))
+        signature = sha256(
+            f'{normalized}\n--\n{base_config_digest}'.encode()
+        ).hexdigest()
+        return signature, base_config_digest
+
+    def _matrix_base_config_target(
+        self,
+        *,
+        run_id: str,
+        action: ActionRecord,
+    ) -> Path | None:
+        try:
+            matrix = ExperimentMatrix.model_validate(action.arguments)
+        except ValueError:
+            return None
+        run = self.store.get_run(run_id)
+        workspace = Path(run.beaker_workspace).resolve()
+        target = (workspace / matrix.base_config).resolve()
+        if not target.is_relative_to(workspace):
+            return None
+        return target
+
+    def _repair_matrix_base_config(
+        self,
+        *,
+        run_id: str,
+        action: ActionRecord,
+    ) -> MethodologyConfigRepair | None:
+        # The engine guarantees only the structural shape the deterministic
+        # preflight checks; the agent still chooses every value.
+        requirements = self._contract_methodology_requirements(run_id)
+        if not requirements:
+            return None
+        target = self._matrix_base_config_target(run_id=run_id, action=action)
+        if target is None:
+            return None
+        repair = repair_methodology_settings(
+            base_config_path=target,
+            requirements=requirements,
+        )
+        if repair.changed:
+            run = self.store.get_run(run_id)
+            workspace = Path(run.beaker_workspace).resolve()
+            self._event(
+                run_id,
+                source='orchestrator',
+                event_type='methodology.base_config_materialized',
+                payload={
+                    'base_config': target.relative_to(workspace).as_posix(),
+                    'created': repair.created,
+                    'placeholder_paths': sorted(repair.placeholders),
+                },
+            )
+        return repair
+
+    @staticmethod
+    def _methodology_repair_note(repair: MethodologyConfigRepair) -> str:
+        paths = ', '.join(
+            f'`{path}`' for path in sorted(repair.placeholders)
+        )
+        return (
+            '\nThe orchestrator has materialized the required methodology '
+            'settings in the base config as structural placeholders so the '
+            'deterministic preflight can pass. The engine controls only the '
+            'SHAPE (the dotted keys and the minimum number of distinct '
+            'values); you control the VALUES. Read the file, replace every '
+            '`<leaf>-candidate-N` placeholder'
+            + (f' ({paths})' if paths else '')
+            + ' with a meaningful, scientifically justified value, and keep at '
+            'least the required number of distinct values. Do not remove the '
+            'required keys.\n'
+        )
+
     @staticmethod
     def _methodology_feedback(result: AgentTurnResult) -> str:
         sections = [result.summary]
@@ -4794,6 +4938,7 @@ class ResearchOrchestrator:
                 'or knowledge:// URI rather than a bare path.'
             )
         preflight_focus = ''
+        repair_note = ''
         if feedback.startswith('Deterministic matrix preflight failed:'):
             rejected_matrices = [
                 action
@@ -4806,6 +4951,13 @@ class ResearchOrchestrator:
                 if rejected_matrices
                 else ''
             )
+            if rejected_matrices:
+                repair = self._repair_matrix_base_config(
+                    run_id=run_id,
+                    action=rejected_matrices[-1],
+                )
+                if repair is not None and repair.changed:
+                    repair_note = self._methodology_repair_note(repair)
             preflight_focus = (
                 '\nThis is a focused deterministic-preflight correction, not '
                 'a new implementation pass. The validator has already inspected '
@@ -4829,6 +4981,7 @@ class ResearchOrchestrator:
             'the review below. Run local checks and return a replacement '
             'submit_experiment_matrix action. Do not execute cluster work.\n\n'
             + preflight_focus
+            + repair_note
             + 'The workload must emit metrics and evidence only. Remove any '
             'workload code that creates, reads, or scores `evaluation.json`, '
             '`rubric_score`, or `integrity_pass`; the immutable contract owns '
