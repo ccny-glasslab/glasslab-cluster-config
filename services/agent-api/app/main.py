@@ -17,8 +17,10 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
+from .auth import authenticate_request
 from .config import Settings, get_settings
 from .job_status import JobStatusService
 from .job_submitter import JobSubmitter
@@ -79,6 +81,15 @@ def create_app(settings: Settings | None = None, runtime: RuntimeContext | None 
 
     app = FastAPI(title=settings.app_name, version=settings.app_version)
     app.state.runtime = runtime
+
+    @app.middleware('http')
+    async def authorize_requests(request: Request, call_next):
+        if request.url.path != '/health':
+            try:
+                authenticate_request(request, settings.api_token)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
+        return await call_next(request)
 
     @app.get('/health')
     def health() -> dict:

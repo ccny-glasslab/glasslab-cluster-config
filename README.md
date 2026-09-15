@@ -36,9 +36,10 @@ Useful service buckets:
   - `services/research-orchestrator`
   - `services/workflow-api`
   - `services/workflow-registry`
-  - `services/evaluator`
   - `services/reporter`
 - legacy or compatibility services:
+  - `services/evaluator` (dormant: no Dockerfile, k8s manifest, or importer;
+    authoritative evaluation lives in research-orchestrator evaluation contracts)
   - `services/research-command-router`
   - `services/intake-agent`
   - `services/interpretation-agent`

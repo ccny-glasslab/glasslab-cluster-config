@@ -117,6 +117,12 @@ if [[ "$sub" == "get" ]]; then
         ;;
     esac
   done
+  if [[ "$output" == 'jsonpath={.data.token}' ]]; then
+    if [[ -n "${KUBECTL_SECRET_KEYS:-}" ]] && grep -qxF "$name:token" "$KUBECTL_SECRET_KEYS"; then
+      printf '%s' 'ZHVtbXktY2FsbGVyLXRva2Vu'
+    fi
+    exit 0
+  fi
   if [[ "$output" == jsonpath=* && -n "$name" ]]; then
     var="KUBECTL_PRIOR_IMAGE_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"
     printf '%s\\n' "${!var:-}"
@@ -150,6 +156,11 @@ class RolloutImagePreflightTests(unittest.TestCase):
         self.probe.chmod(0o755)
         self.existing = self.root / "existing-images"
         self.existing.write_text("")
+        self.secret_keys = self.root / "secret-keys"
+        self.secret_keys.write_text(
+            "glasslab-workflow-api-schedule-worker:token\n"
+            "glasslab-workflow-api-research-orchestrator:token\n"
+        )
         self.log = self.root / "kubectl.log"
 
     def tearDown(self) -> None:
@@ -164,6 +175,7 @@ class RolloutImagePreflightTests(unittest.TestCase):
                 "KUBECTL": str(self.kubectl),
                 "IMAGE_PROBE": str(self.probe),
                 "PROBE_EXISTING": str(self.existing),
+                "KUBECTL_SECRET_KEYS": str(self.secret_keys),
                 "KUBECTL_LOG": str(self.log),
                 "IMAGE_POLL_ATTEMPTS": "2",
                 "IMAGE_POLL_INTERVAL": "0",
@@ -252,6 +264,42 @@ class RolloutImagePreflightTests(unittest.TestCase):
         self.assertIn(PRIOR_ORCHESTRATOR, completed.stderr)
         self.assertIn(PRIOR_WORKFLOW_API, completed.stderr)
         self.assertIn("set image", completed.stderr)
+
+    def test_blocks_when_caller_secret_key_is_misnamed(self) -> None:
+        # Given: the orchestrator Secret exists but uses a non-`token` key.
+        self.secret_keys.write_text(
+            "glasslab-workflow-api-schedule-worker:token\n"
+            "glasslab-workflow-api-research-orchestrator:workflow-token\n"
+        )
+        # When: the authenticated bundle rollout runs.
+        completed = self._run(
+            "--service", "all",
+            "--tag", TAG,
+            "--no-wait-for-image",
+            "--skip-smoke",
+            "--skip-image-prune",
+        )
+        # Then: the preflight refuses before any image change and names the key.
+        self.assertNotEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("glasslab-workflow-api-research-orchestrator", completed.stderr)
+        self.assertIn("required key 'token'", completed.stderr)
+        self.assertNotIn("set image", self._invocations())
+
+    def test_blocks_when_caller_secret_key_is_absent(self) -> None:
+        # Given: the orchestrator Secret exists but omits the `token` key.
+        self.secret_keys.write_text("glasslab-workflow-api-schedule-worker:token\n")
+        # When: the authenticated bundle rollout runs.
+        completed = self._run(
+            "--service", "all",
+            "--tag", TAG,
+            "--no-wait-for-image",
+            "--skip-smoke",
+            "--skip-image-prune",
+        )
+        # Then: the preflight refuses before any image change.
+        self.assertNotEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("required key 'token'", completed.stderr)
+        self.assertNotIn("set image", self._invocations())
 
 
 if __name__ == "__main__":

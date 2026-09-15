@@ -105,7 +105,10 @@ def render_summary(result: ComparisonResult) -> str:
 
 def write_outputs(bundle_dirs: list[Path], output_dir: Path, evaluator_type: str | None = None) -> ComparisonResult:
     """Write comparison outputs, dispatching to evaluator_type-specific logic."""
-    if evaluator_type == 'art-retrieval-v1':
+    # Manifests and docs spell this type both art-retrieval-v1 and
+    # art_retrieval_v1; normalize so either reaches the specialized path.
+    normalized_type = (evaluator_type or '').strip().lower().replace('_', '-')
+    if normalized_type == 'art-retrieval-v1':
         return write_art_retrieval_outputs(bundle_dirs, output_dir)
     
     # Default: use tabular metric-max comparison
@@ -120,9 +123,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description='Compare Glasslab v2 run bundles.')
     parser.add_argument('--bundle-dir', action='append', required=True, dest='bundle_dirs')
     parser.add_argument('--output-dir', required=True)
+    parser.add_argument(
+        '--evaluator-type',
+        default=None,
+        help='Evaluator specialization to dispatch on (e.g. art-retrieval-v1).',
+    )
     args = parser.parse_args()
 
-    write_outputs([Path(path) for path in args.bundle_dirs], Path(args.output_dir))
+    write_outputs(
+        [Path(path) for path in args.bundle_dirs],
+        Path(args.output_dir),
+        args.evaluator_type,
+    )
     return 0
 
 
