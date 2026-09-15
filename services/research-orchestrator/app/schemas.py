@@ -399,7 +399,7 @@ class ResourceRequest(BaseModel):
 class ExperimentVariant(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
-    name: str = Field(pattern=r'^[a-z0-9][a-z0-9-]{0,62}$')
+    name: str = Field(pattern=r'^[a-z0-9][a-z0-9_-]{0,62}$')
     overrides: dict[str, Any] = Field(default_factory=dict)
 
 

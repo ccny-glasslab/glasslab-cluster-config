@@ -12,7 +12,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.schemas import AgentTurnResult, EvaluationContractProposal, RunState
+from app.schemas import (
+    AgentTurnResult,
+    EvaluationContractProposal,
+    ExperimentVariant,
+    RunState,
+)
 from app.state_machine import InvalidTransition, validate_transition
 
 
@@ -91,6 +96,27 @@ def test_structured_agent_output_validation() -> None:
                 'done': True,
             }
         )
+
+
+def test_experiment_variant_names_accept_snake_case() -> None:
+    # Issue #474: Beaker naturally derives variant names from compared methods
+    # (gradient_clipping, weight_decay), and the sibling `name` fields already
+    # accept underscores. The variant name must not be the lone outlier that
+    # rejects the model's first conforming proposal.
+    for name in (
+        'gradient_clipping',
+        'learning_rate_scheduling',
+        'model-candidate-1',
+        'a',
+        'a_b-c',
+    ):
+        variant = ExperimentVariant.model_validate(
+            {'name': name, 'overrides': {}}
+        )
+        assert variant.name == name
+    for name in ('-leading', '_leading', 'UPPER', 'has space', 'a' * 64, ''):
+        with pytest.raises(ValidationError):
+            ExperimentVariant.model_validate({'name': name, 'overrides': {}})
 
 
 def test_evaluation_contract_proposal_requires_matching_budget_limit() -> None:
