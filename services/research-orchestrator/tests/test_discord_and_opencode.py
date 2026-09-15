@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
 
@@ -931,6 +932,118 @@ def test_opencode_terminal_tool_signatures_ignore_incomplete_calls() -> None:
 
     assert len(signatures) == 2
     assert signatures[0] == signatures[1]
+
+
+def _completed_tool_message(tool: str, tool_input: dict) -> dict:
+    return {
+        'parts': [
+            {
+                'type': 'tool',
+                'tool': tool,
+                'state': {'status': 'completed', 'input': tool_input},
+            }
+        ]
+    }
+
+
+def test_repeated_tool_abort_surfaces_tool_name_and_digest() -> None:
+    secret = 'sk-live-secret-value'
+    messages = [
+        _completed_tool_message('bash', {'command': f'curl -H {secret}'})
+        for _ in range(4)
+    ]
+
+    signatures = OpenCodeProcessRuntime._terminal_tool_signatures(messages)
+    detail = OpenCodeProcessRuntime._repeated_tool_abort(signatures, 4)
+
+    assert detail is not None
+    assert detail['tool'] == 'bash'
+    assert detail['count'] == 4
+    assert isinstance(detail['input_digest'], str)
+    assert len(detail['input_digest']) == 16
+    # The raw input may contain secrets and must never travel in the payload.
+    assert secret not in json.dumps(detail)
+
+
+def test_repeated_tool_abort_requires_a_threshold_length_identical_run() -> None:
+    same = [
+        json.dumps({'tool': 'read', 'input': {'filePath': '/x'}}, sort_keys=True)
+    ] * 3
+    assert OpenCodeProcessRuntime._repeated_tool_abort(same, 4) is None
+
+    interleaved = [
+        json.dumps({'tool': 'read', 'input': {'filePath': '/x'}}, sort_keys=True),
+        json.dumps({'tool': 'read', 'input': {'filePath': '/y'}}, sort_keys=True),
+        json.dumps({'tool': 'read', 'input': {'filePath': '/x'}}, sort_keys=True),
+    ]
+    assert OpenCodeProcessRuntime._repeated_tool_abort(interleaved, 2) is None
+    assert OpenCodeProcessRuntime._repeated_tool_abort([], 6) is None
+
+
+class _ImmediateStop:
+    """Watchdog stop token that polls without the real two-second interval."""
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return False
+
+
+class _WatchClient:
+    """Minimal httpx.Client double for the watchdog polling loop."""
+
+    def __init__(self, messages: list[dict]) -> None:
+        self._messages = messages
+        self.aborted = False
+
+    def __enter__(self) -> '_WatchClient':
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def get(self, url: str, **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            json=lambda: self._messages,
+            raise_for_status=lambda: None,
+        )
+
+    def post(self, url: str, **kwargs: object) -> SimpleNamespace:
+        self.aborted = True
+        return SimpleNamespace(status_code=200)
+
+
+def test_watch_turn_abort_payload_carries_repeated_tool(monkeypatch) -> None:
+    messages = [
+        _completed_tool_message('read', {'filePath': '/workspace/run.py'})
+        for _ in range(3)
+    ]
+    runtime = OpenCodeProcessRuntime(Settings(opencode_repeated_tool_limit=3))
+    handle = SimpleNamespace(base_url='http://127.0.0.1:9', password='secret')
+    abort_reasons: list = []
+    clients: list[_WatchClient] = []
+
+    def _client_factory(**kwargs: object) -> _WatchClient:
+        client = _WatchClient(messages)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(httpx, 'Client', _client_factory)
+
+    runtime._watch_turn(
+        handle=handle,
+        session_id='session-1',
+        workspace=Path('/workspace'),
+        stop=_ImmediateStop(),
+        abort_reasons=abort_reasons,
+    )
+
+    assert len(abort_reasons) == 1
+    abort = abort_reasons[0]
+    assert abort.failure_class == 'repeated_tool_loop'
+    assert 'identical terminal tool calls' in abort.reason
+    assert abort.details is not None
+    assert abort.details['tool'] == 'read'
+    assert abort.details['count'] == 3
+    assert any(client.aborted for client in clients)
 
 
 def test_extracts_current_and_legacy_opencode_structured_output() -> None:

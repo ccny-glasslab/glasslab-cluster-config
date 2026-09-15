@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from hashlib import sha256
 from datetime import datetime, timedelta
 import json
@@ -109,6 +110,18 @@ NON_RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
 _RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
     {'startup', 'provider', 'network'}
 )
+
+
+@dataclass(frozen=True)
+class _TurnFailure:
+    """Classified agent-turn failure carried into session recovery.
+
+    ``details`` is the secret-free diagnostic payload from the runtime error
+    (for a repeated tool loop: repeated tool name, count, and input digest).
+    """
+
+    failure_class: str
+    details: dict[str, Any] | None = None
 
 
 METHODOLOGY_REQUIREMENTS_GUIDANCE = (
@@ -688,6 +701,7 @@ class ResearchOrchestrator:
         agent: AgentName,
         expected_kind: TurnKind,
         error: str,
+        failure: _TurnFailure | None = None,
     ) -> tuple[Path, dict[str, Any]]:
         run = self.store.get_run(run_id)
         workspace = Path(
@@ -747,12 +761,38 @@ class ResearchOrchestrator:
                 'work solely because the OpenCode session was rotated.'
             ),
         }
+        last_failure = self._last_failure_entry(failure)
+        if last_failure is not None:
+            checkpoint['last_failure'] = last_failure
         path = self.workspaces.write_recovery_checkpoint(
             run_id=run_id,
             agent=agent,
             payload=checkpoint,
         )
         return path, checkpoint
+
+    @staticmethod
+    def _last_failure_entry(
+        failure: _TurnFailure | None,
+    ) -> dict[str, Any] | None:
+        # Persist the classified failure so a fresh session can be corrected.
+        # Only the repeated-tool name/count and an input digest are recorded;
+        # raw tool arguments may contain secrets and are never persisted.
+        if failure is None or not failure.failure_class:
+            return None
+        entry: dict[str, Any] = {'failure_class': failure.failure_class}
+        details = failure.details
+        if failure.failure_class == 'repeated_tool_loop' and details:
+            tool = details.get('tool')
+            if isinstance(tool, str):
+                entry['repeated_tool'] = tool
+            count = details.get('count')
+            if isinstance(count, int):
+                entry['repeated_count'] = count
+            digest = details.get('input_digest')
+            if isinstance(digest, str):
+                entry['input_digest'] = digest
+        return entry
 
     def _rotate_agent_session(
         self,
@@ -761,6 +801,7 @@ class ResearchOrchestrator:
         agent: AgentName,
         expected_kind: TurnKind,
         error: str,
+        failure: _TurnFailure | None = None,
     ) -> None:
         release_error: str | None = None
         try:
@@ -796,6 +837,7 @@ class ResearchOrchestrator:
             agent=agent,
             expected_kind=expected_kind,
             error=error,
+            failure=failure,
         )
         self._event(
             run_id,
@@ -804,11 +846,25 @@ class ResearchOrchestrator:
             payload={
                 'agent': agent.value,
                 'reason': error[:1000],
+                'failure_class': failure.failure_class if failure else None,
                 'checkpoint_path': str(path),
                 'next_session': 'fresh',
                 'runtime_release_error': release_error,
             },
         )
+        if failure is not None and failure.failure_class == 'repeated_tool_loop':
+            details = failure.details or {}
+            self._event(
+                run_id,
+                source='orchestrator',
+                event_type='agent.doom_loop_detected',
+                payload={
+                    'agent': agent.value,
+                    'repeated_tool': details.get('tool'),
+                    'repeated_count': details.get('count'),
+                    'input_digest': details.get('input_digest'),
+                },
+            )
 
     def _recovery_context(
         self,
@@ -822,12 +878,30 @@ class ResearchOrchestrator:
         if not checkpoint_path.is_file():
             return ''
         checkpoint = json.loads(checkpoint_path.read_text(encoding='utf-8'))
+        last_failure = checkpoint.get('last_failure')
+        correction = ''
+        if (
+            isinstance(last_failure, dict)
+            and last_failure.get('failure_class') == 'repeated_tool_loop'
+        ):
+            tool = last_failure.get('repeated_tool')
+            count = last_failure.get('repeated_count')
+            tool_text = f'`{tool}`' if tool else 'the same terminal tool'
+            correction = (
+                '\n\nCORRECTIVE INSTRUCTION: The previous turn was aborted '
+                f'because you issued {tool_text} {count} times with '
+                'byte-identical input; that made no progress. Do NOT repeat '
+                'that identical call. Inspect the current worktree/state and '
+                'either take a different action or return your structured '
+                'result with what you have.'
+            )
         return (
             'This is a fresh OpenCode session after an interrupted or failed '
             'turn. The worktree and authoritative workflow state were preserved. '
             'Use this compact checkpoint and inspect the existing worktree before '
             'continuing:\n'
             + json.dumps(checkpoint, indent=2, sort_keys=True)
+            + correction
             + '\n\nCurrent bounded task:\n'
         )
 
@@ -1825,6 +1899,7 @@ class ResearchOrchestrator:
             )
             self.store.save_turn(failed)
             failure_class = getattr(exc, 'failure_class', None)
+            recovery_details = getattr(exc, 'details', None)
             self._event(
                 run_id,
                 source=agent.value,
@@ -1841,6 +1916,14 @@ class ResearchOrchestrator:
                 agent=agent,
                 expected_kind=expected_kind,
                 error=str(exc),
+                failure=(
+                    _TurnFailure(
+                        failure_class=failure_class,
+                        details=recovery_details,
+                    )
+                    if failure_class
+                    else None
+                ),
             )
             if self._should_retry_turn(exc, run_id, agent):
                 return self._retry_agent_turn(
