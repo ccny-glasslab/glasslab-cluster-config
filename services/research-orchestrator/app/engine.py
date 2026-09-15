@@ -75,7 +75,7 @@ from .task_bundles import (
     TaskPreflight,
 )
 from .workspaces import WorkspaceManager
-from .knowledge_manager import KnowledgeManager
+from .knowledge_manager import KnowledgeManager, estimate_tokens
 from .knowledge_tool import (
     BoundRetrieveEvidenceTool,
     KnowledgeToolRegistry,
@@ -827,6 +827,65 @@ class ResearchOrchestrator:
             + '\n\nCurrent bounded task:\n'
         )
 
+    def _session_context_tokens(
+        self,
+        *,
+        run_id: str,
+        agent: AgentName,
+        session_id: str,
+    ) -> int:
+        # A continuing session carries exactly the turns recorded against its
+        # own session id; after a rotation the fresh session starts at zero.
+        total = 0
+        for turn in self.store.list_turns(run_id):
+            if turn.agent != agent or turn.opencode_session_id != session_id:
+                continue
+            if turn.structured_output is None:
+                continue
+            total += estimate_tokens(
+                json.dumps(turn.input_event, sort_keys=True, default=str)
+            )
+            total += estimate_tokens(turn.structured_output.model_dump_json())
+        return total
+
+    def _maybe_rotate_turn_history(
+        self,
+        *,
+        run_id: str,
+        agent: AgentName,
+        expected_kind: TurnKind,
+        run: RunRecord,
+    ) -> RunRecord:
+        threshold = self.settings.turn_history_rotation_token_threshold
+        if threshold <= 0:
+            return run
+        session_id = (
+            run.honeydew_session_id
+            if agent is AgentName.HONEYDEW
+            else run.beaker_session_id
+        )
+        if session_id is None:
+            # No live session to rotate: the next turn already starts fresh and
+            # will load the recovery checkpoint.
+            return run
+        tokens = self._session_context_tokens(
+            run_id=run_id,
+            agent=agent,
+            session_id=session_id,
+        )
+        if tokens < threshold:
+            return run
+        self._rotate_agent_session(
+            run_id=run_id,
+            agent=agent,
+            expected_kind=expected_kind,
+            error=(
+                f'session context of {tokens} estimated tokens reached the '
+                f'turn-history rotation threshold of {threshold}'
+            ),
+        )
+        return self.store.get_run(run_id)
+
     def _get_agent_context(
         self,
         *,
@@ -1481,6 +1540,12 @@ class ResearchOrchestrator:
             )
         run = self.store.get_run(run_id)
         self._check_turn_budget(run)
+        run = self._maybe_rotate_turn_history(
+            run_id=run_id,
+            agent=agent,
+            expected_kind=expected_kind,
+            run=run,
+        )
         workspace = Path(
             run.honeydew_workspace
             if agent == AgentName.HONEYDEW
