@@ -37,6 +37,7 @@ from app.opencode_runtime import OpenCodeProcessRuntime
 from app.policy import ActionPolicy
 from app.schemas import (
     ApprovalStatus,
+    EventRecord,
     JobStatus,
     RunCreateRequest,
     RunState,
@@ -417,6 +418,36 @@ def _latest_run_state(store: 'object') -> RunState | None:
     return runs[-1].state
 
 
+def _human_resolution_pause(
+    store: 'object',
+    run_id: str,
+) -> EventRecord | None:
+    """The human-resolution event demanding the run's current pause, if any.
+
+    The run record has no pause-reason field, so the durable signal is the
+    event log: a ``*human_resolution_requested*`` event emitted after the most
+    recent ``run.resumed`` (or with no resume at all) marks the current pause
+    as a request for a human, not a transient turn wall.
+    """
+    events = store.list_events(run_id)
+    last_resume_sequence = max(
+        (
+            event.sequence_number
+            for event in events
+            if event.event_type == 'run.resumed'
+        ),
+        default=0,
+    )
+    resolution: EventRecord | None = None
+    for event in events:
+        if (
+            'human_resolution_requested' in event.event_type
+            and event.sequence_number > last_resume_sequence
+        ):
+            resolution = event
+    return resolution
+
+
 def _load_checkpoint(stages: dict[str, object]) -> None:
     checkpoint = REHEARSE_ROOT / 'checkpoint.json'
     if not checkpoint.exists():
@@ -502,10 +533,13 @@ def run_rehearsal(
 
     The run state is the source of truth, not the presence of a PENDING action:
     after a crash the driver relaunches, engine.recover() re-advances any
-    already-approved gate, and a PAUSED run is resumed via engine.resume_run().
-    A wall-clock turn timeout pauses the run and returns result RESUMABLE with
-    exit code 0 (the durable checkpoint survives); a deterministic failure
-    returns result FAIL with exit code 1 so CI still fails loudly.
+    already-approved gate, and a transiently PAUSED run is resumed via
+    engine.resume_run(). A pause the engine raised for human resolution is not
+    transient: the driver returns result BLOCKED (exit code 0) and leaves the
+    run paused instead of re-entering the loop. A wall-clock turn timeout
+    pauses the run and returns result RESUMABLE with exit code 0 (the durable
+    checkpoint survives); a deterministic failure returns result FAIL with
+    exit code 1 so CI still fails loudly.
     """
     global _stages, REHEARSE_ROOT
     if root is not None:
@@ -622,6 +656,36 @@ def run_rehearsal(
                 if run.resume_state is None:
                     stages['result'] = 'FAIL'
                     stages['reason'] = 'run is paused without a resumable phase'
+                    _stage_progress(stages)
+                    return stages
+                human_resolution = _human_resolution_pause(store, run_id)
+                if human_resolution is not None:
+                    # The engine paused for a human, not a transient turn wall.
+                    # Resuming re-enters the same non-converging loop, so stop
+                    # and leave the run paused for an operator to resolve.
+                    pause_reasons = [
+                        event.payload.get('reason')
+                        for event in store.list_events(run_id)
+                        if event.event_type == 'run.paused'
+                    ]
+                    stages['result'] = 'BLOCKED'
+                    if entry_state is not None:
+                        stages['entry_state'] = entry_state.value
+                    stages['reached_state'] = state.value
+                    stages['human_resolution_event'] = (
+                        human_resolution.event_type
+                    )
+                    stages['blocked_reason'] = str(
+                        (pause_reasons[-1] if pause_reasons else None)
+                        or human_resolution.payload.get('feedback')
+                        or 'Human resolution is required before the '
+                        'rehearsal can continue.'
+                    )
+                    stages['reason'] = (
+                        f'The run paused for human resolution ('
+                        f'{human_resolution.event_type}); the rehearsal '
+                        'driver does not auto-resume it.'
+                    )
                     _stage_progress(stages)
                     return stages
                 engine.resume_run(
@@ -863,6 +927,12 @@ def main(argv: list[str] | None = None) -> int:
         print(
             'REHEARSAL_RESUMABLE: relaunch this command to resume the paused '
             'run from its durable checkpoint.',
+            flush=True,
+        )
+    if result == 'BLOCKED':
+        print(
+            'REHEARSAL_BLOCKED: the run paused for human resolution; the '
+            'rehearsal driver will not auto-resume it.',
             flush=True,
         )
     if result == 'FAIL':
