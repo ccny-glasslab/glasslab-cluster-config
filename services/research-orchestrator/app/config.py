@@ -134,6 +134,12 @@ class Settings(BaseSettings):
     opencode_start_timeout_seconds: float = 60.0
     opencode_turn_timeout_seconds: float = 3600.0
     opencode_repeated_tool_limit: int = 6
+    # Per-turn step budget: the number of OpenCode loop steps a single turn may
+    # take before the watchdog aborts it as a runaway. The identical-tool guard
+    # only catches repeated byte-identical calls; a model that varies its calls
+    # evades it and burns the full wall clock (observed live at step=615). 0
+    # disables the budget; the wall-clock and repeated-tool guards stay active.
+    opencode_turn_step_limit: int = 250
     agent_turn_max_retries: int = 2
     # Max deterministic redrafts of a contract candidate that fails
     # validation. Real-model candidates can repeatedly fail the same check;

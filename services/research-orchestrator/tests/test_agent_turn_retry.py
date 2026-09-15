@@ -297,6 +297,113 @@ def test_non_doom_loop_failure_has_no_corrective_instruction(
     )
 
 
+def test_step_budget_failure_is_not_retried(orchestrator_bundle) -> None:
+    """A step-budget abort is deterministic, not transient."""
+    settings, store, cluster, runtime, engine = orchestrator_bundle
+    run = _make_run(engine, "Step budget objective.")
+    engine.runtime = FlakyTurnRuntime(
+        runtime,
+        fail_calls=10,
+        failure_class='step_budget_exceeded',
+        details={'step_count': 300, 'step_limit': 250},
+    )
+    with pytest.raises(OpenCodeRuntimeError):
+        engine._run_agent_turn(
+            run_id=run.run_id,
+            agent=AgentName.HONEYDEW,
+            prompt=_draft_prompt(),
+            expected_kind=TurnKind.PROTOCOL_DRAFT,
+            input_event={"objective": "step budget test"},
+        )
+    assert engine.runtime.attempts == 1
+
+
+def test_step_budget_failure_records_last_failure_and_corrective_context(
+    orchestrator_bundle,
+) -> None:
+    settings, store, cluster, runtime, engine = orchestrator_bundle
+    run = _make_run(engine, "Step budget corrective recovery objective.")
+    engine.runtime = FlakyTurnRuntime(
+        runtime,
+        fail_calls=10,
+        failure_class='step_budget_exceeded',
+        details={'step_count': 300, 'step_limit': 250},
+    )
+    with pytest.raises(OpenCodeRuntimeError):
+        engine._run_agent_turn(
+            run_id=run.run_id,
+            agent=AgentName.HONEYDEW,
+            prompt=_draft_prompt(),
+            expected_kind=TurnKind.PROTOCOL_DRAFT,
+            input_event={"objective": "step budget test"},
+        )
+
+    checkpoint_path = (
+        engine.workspaces.paths(run.run_id).events
+        / 'honeydew-recovery-checkpoint.json'
+    )
+    checkpoint = json.loads(checkpoint_path.read_text(encoding='utf-8'))
+    assert checkpoint['last_failure']['failure_class'] == 'step_budget_exceeded'
+    assert checkpoint['last_failure']['step_count'] == 300
+    assert checkpoint['last_failure']['step_limit'] == 250
+
+    budget_events = [
+        event
+        for event in store.list_events(run.run_id)
+        if event.event_type == 'agent.turn_step_budget_exceeded'
+    ]
+    assert len(budget_events) == 1
+    assert budget_events[0].payload['step_count'] == 300
+    assert budget_events[0].payload['step_limit'] == 250
+
+    context = engine._recovery_context(
+        run_id=run.run_id,
+        agent=AgentName.HONEYDEW,
+    )
+    assert 'exceeded the step budget' in context
+    assert '300' in context
+    assert 'Stop exploring' in context
+    assert 'workspace_status' in context
+    # A step-budget failure must never carry the doom-loop correction.
+    assert 'byte-identical' not in context
+    assert 'Do NOT repeat that identical call' not in context
+
+
+def test_doom_loop_corrective_context_omits_step_budget_instruction(
+    orchestrator_bundle,
+) -> None:
+    settings, store, cluster, runtime, engine = orchestrator_bundle
+    run = _make_run(engine, "Doom loop only corrective recovery objective.")
+    engine.runtime = FlakyTurnRuntime(
+        runtime,
+        fail_calls=10,
+        failure_class='repeated_tool_loop',
+        details={
+            'tool': 'bash',
+            'count': 6,
+            'input_digest': 'a1b2c3d4e5f60718',
+        },
+    )
+    with pytest.raises(OpenCodeRuntimeError):
+        engine._run_agent_turn(
+            run_id=run.run_id,
+            agent=AgentName.HONEYDEW,
+            prompt=_draft_prompt(),
+            expected_kind=TurnKind.PROTOCOL_DRAFT,
+            input_event={"objective": "doom loop test"},
+        )
+
+    context = engine._recovery_context(
+        run_id=run.run_id,
+        agent=AgentName.HONEYDEW,
+    )
+    assert 'byte-identical' in context
+    assert 'Do NOT repeat that identical call' in context
+    # The step-budget correction must not leak into a doom-loop recovery.
+    assert 'exceeded the step budget' not in context
+    assert 'Stop exploring' not in context
+
+
 def test_provider_failure_is_retryable(orchestrator_bundle) -> None:
     settings, store, cluster, runtime, engine = orchestrator_bundle
     run = _make_run(engine, "Provider failure objective.")

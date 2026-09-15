@@ -1028,6 +1028,40 @@ class OpenCodeProcessRuntime(AgentRuntime):
             ).hexdigest()[:16],
         }
 
+    @staticmethod
+    def _turn_step_count(messages: list[dict[str, Any]]) -> int:
+        # Per-turn loop-step proxy. OpenCode's session loop increments its own
+        # `step` counter once per assistant message it creates for the current
+        # user prompt (the `step=N` it logs), so the number of assistant
+        # messages created after the latest user message equals the live step
+        # count. Counting terminal tool parts undercounts text/reasoning-only
+        # steps and overcounts parallel calls, so the assistant-message count is
+        # the more robust proxy; step-start markers and terminal-tool counts are
+        # fallbacks for payloads that omit message-role metadata.
+        last_user_index = -1
+        for index, message in enumerate(messages):
+            info = message.get('info') if isinstance(message, dict) else None
+            if isinstance(info, dict) and info.get('role') == 'user':
+                last_user_index = index
+        if last_user_index >= 0:
+            return sum(
+                1
+                for message in messages[last_user_index + 1 :]
+                if isinstance(message, dict)
+                and isinstance(message.get('info'), dict)
+                and message['info'].get('role') == 'assistant'
+            )
+        step_markers = sum(
+            1
+            for message in messages
+            if isinstance(message, dict)
+            for part in message.get('parts', [])
+            if isinstance(part, dict) and part.get('type') == 'step-start'
+        )
+        if step_markers:
+            return step_markers
+        return len(OpenCodeProcessRuntime._terminal_tool_signatures(messages))
+
     def _watch_turn(
         self,
         *,
@@ -1073,6 +1107,23 @@ class OpenCodeProcessRuntime(AgentRuntime):
                                 f'{limit} identical terminal tool calls'
                             )
                             failure_class = 'repeated_tool_loop'
+                        else:
+                            step_limit = self.settings.opencode_turn_step_limit
+                            step_count = self._turn_step_count(messages)
+                            # A varied-call runaway evades the identical-tool
+                            # guard above; the step budget stops it before the
+                            # wall clock does. 0 disables the budget.
+                            if step_limit > 0 and step_count > step_limit:
+                                reason = (
+                                    'OpenCode turn exceeded the step budget of '
+                                    f'{step_limit} steps ({step_count} steps) '
+                                    'without returning a result'
+                                )
+                                failure_class = 'step_budget_exceeded'
+                                details = {
+                                    'step_count': step_count,
+                                    'step_limit': step_limit,
+                                }
                 except (httpx.HTTPError, ValueError):
                     continue
             if reason is None:
