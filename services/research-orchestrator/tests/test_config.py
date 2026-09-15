@@ -272,12 +272,12 @@ def test_per_agent_base_url_override_wins_over_shared() -> None:
 
 def test_agent_model_max_output_tokens_default_is_high_for_thinking() -> None:
     settings = Settings()
-    assert settings.agent_model_max_output_tokens == 8192
+    assert settings.agent_model_max_output_tokens == 16384
 
 
-def test_turn_timeouts_default_to_2400_for_thinking_overhead() -> None:
+def test_turn_timeouts_default_to_3600_for_thinking_overhead() -> None:
     settings = Settings()
-    assert settings.opencode_turn_timeout_seconds == 2400.0
+    assert settings.opencode_turn_timeout_seconds == 3600.0
     assert settings.hermes_turn_timeout_seconds == 2400.0
 
 
