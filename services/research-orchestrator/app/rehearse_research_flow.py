@@ -230,6 +230,14 @@ _TERMINAL_RUN_STATES = frozenset(
     {RunState.FAILED, RunState.CANCELLED, RunState.TIMED_OUT}
 )
 
+# Upper bound on fill -> complete -> reconcile passes within one driver
+# iteration. Submission is capacity-limited (at least one job per pass), so 64
+# passes clear up to 64 queued jobs; the policy caps seeds at
+# maximum_parallel_jobs * 4 and real matrices are far smaller. If the run is
+# still in a job state after that, the loop falls through to the outer driver
+# budget instead of spinning forever.
+_MAX_JOB_CAPACITY_PASSES = 64
+
 
 def _default_snapshot_root(root: Path) -> Path:
     """Resolve where snapshots live: env override, else a root SIBLING.
@@ -495,21 +503,30 @@ def _complete_active_jobs(
     store: 'object',
     run_id: str,
 ) -> None:
-    """Mark every fake-cluster job terminal so reconcile can advance the run.
+    """Mark every submitted fake-cluster job terminal so reconcile advances.
+
+    Invariant: a job passed to ``cluster.complete`` is already submitted and
+    therefore carries an ``external_run_id``. Submission is capacity-limited -
+    ``engine._fill_job_capacity`` submits at most ``maximum_parallel_jobs``
+    jobs per pass - so a job that is still ``QUEUED`` has no
+    ``external_run_id`` yet. Such a job is skipped here and picked up on a
+    later capacity pass rather than crashing the driver.
 
     The fake executor never runs the workload; this injects the digest-carrying
     metrics artifact the rest of the deterministic pipeline consumes. Already
     terminal jobs are left untouched so retries are idempotent.
     """
     for job in store.list_jobs(run_id):
-        if job.status not in {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED}:
-            assert job.external_run_id is not None
-            cluster.complete(
-                job.external_run_id,
-                metrics={
-                    'score': 0.8 if job.variant_name == 'candidate' else 0.6
-                },
-            )
+        if job.status in {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED}:
+            continue
+        if job.external_run_id is None:
+            continue
+        cluster.complete(
+            job.external_run_id,
+            metrics={
+                'score': 0.8 if job.variant_name == 'candidate' else 0.6
+            },
+        )
 
 
 def run_rehearsal(
@@ -696,10 +713,21 @@ def run_rehearsal(
                 continue
 
             if state in {RunState.JOB_QUEUED, RunState.JOB_RUNNING}:
-                _complete_active_jobs(cluster, store, run_id)
-                # reconcile records artifacts, then advances to Beaker analysis
-                # (a real-model turn) once no job is active.
-                engine.reconcile_run(run_id)
+                # Submission is capacity-limited: the engine submits at most
+                # maximum_parallel_jobs jobs per pass, so drive
+                # fill -> complete -> reconcile until the run leaves the job
+                # states. reconcile_run fills capacity on each pass; the loop
+                # is bounded so a stuck run falls through to the outer driver
+                # budget instead of spinning forever.
+                for _ in range(_MAX_JOB_CAPACITY_PASSES):
+                    current = store.get_run(run_id)
+                    if current.state not in {
+                        RunState.JOB_QUEUED,
+                        RunState.JOB_RUNNING,
+                    }:
+                        break
+                    engine.reconcile_run(run_id)
+                    _complete_active_jobs(cluster, store, run_id)
                 continue
 
             gate = _GATE_FOR_STATE.get(state)
