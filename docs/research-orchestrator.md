@@ -492,7 +492,7 @@ curl -fsS -X POST http://127.0.0.1:8080/task-bundles/import \
   -H "X-Glasslab-Operator-Token: $TOKEN" \
   -F "archive=@$HOME/Downloads/my-research-task.zip"
 
-curl -fsS \
+curl -fsS -H "X-Glasslab-Operator-Token: $TOKEN" \
   "http://127.0.0.1:8080/task-bundles/<task-id>/preflight?digest=<sha256>"
 
 curl -fsS -X POST http://127.0.0.1:8080/runs \
@@ -765,9 +765,13 @@ GET  /health
 GET  /ready
 ```
 
-Deployment requires `X-Glasslab-Operator-Token` on all state-changing
-endpoints. Health, readiness, run reads, events, artifacts, and SSE remain
-read-only. Local development leaves this check disabled unless
+Deployment requires `X-Glasslab-Operator-Token` on every endpoint except
+`/health` and `/ready`. Reads, events, artifacts, SSE, and the task/dataset/
+knowledge listing endpoints are gated too, because the documented contributor
+port-forward exposes the service beyond its cluster network (issue #369).
+Free-form read payloads (event payloads, action arguments, artifact metadata,
+run task/seed state) are redacted before the response is built. Local
+development leaves this check disabled unless
 `GLASSLAB_ORCHESTRATOR_REQUIRE_OPERATOR_AUTH=true`.
 
 Normal Discord usage is:

@@ -82,7 +82,8 @@ curl -X POST http://127.0.0.1:18080/knowledge/sources \
 ## Verify it landed
 
 ```bash
-curl -s http://127.0.0.1:18080/knowledge/sources | jq '.[].canonical_uri'
+curl -s -H "X-Glasslab-Operator-Token: $TOKEN" \
+  http://127.0.0.1:18080/knowledge/sources | jq '.[].canonical_uri'
 curl -s http://127.0.0.1:18080/health | jq .knowledge_dense
 # indexed_chunks grows after rebuild; available=true requires usable vectors
 ```

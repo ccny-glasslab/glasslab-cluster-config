@@ -192,13 +192,19 @@ ssh -L 18080:127.0.0.1:18080 glasslab-provisioner \
    svc/glasslab-research-orchestrator 18080:8080'
 ```
 
-Then inspect authoritative read APIs:
+Then inspect authoritative read APIs. Every endpoint except `/health` and
+`/ready` requires the operator token:
 
 ```bash
-curl -fsS http://127.0.0.1:18080/runs | jq
-curl -fsS http://127.0.0.1:18080/runs/<run-id>/events | jq
-curl -fsS http://127.0.0.1:18080/runs/<run-id>/artifacts | jq
-curl -fsS http://127.0.0.1:18080/runs/<run-id>/turns | jq
+TOKEN=<operator-token>
+curl -fsS -H "X-Glasslab-Operator-Token: $TOKEN" \
+  http://127.0.0.1:18080/runs | jq
+curl -fsS -H "X-Glasslab-Operator-Token: $TOKEN" \
+  http://127.0.0.1:18080/runs/<run-id>/events | jq
+curl -fsS -H "X-Glasslab-Operator-Token: $TOKEN" \
+  http://127.0.0.1:18080/runs/<run-id>/artifacts | jq
+curl -fsS -H "X-Glasslab-Operator-Token: $TOKEN" \
+  http://127.0.0.1:18080/runs/<run-id>/turns | jq
 ```
 
 Per-run durable files are mounted in the orchestrator pod at:
