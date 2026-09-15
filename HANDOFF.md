@@ -42,8 +42,11 @@ migration deferred until the active rehearsal pauses).
 - `model_guard.py` on :52417 is a single-worker serializing proxy
   (64 MB body cap, 503+retry-5s when busy). The orchestrator and rehearsal
   harness talk only to the guard.
-- Servers run with `HF_HOME=/private/tmp/hf-cache`, `HF_HUB_OFFLINE=1` —
-  never re-download the 42 GB weights.
+- Servers use a durable `HF_HOME=/Users/glasslab/.cache/huggingface` (never
+  the ephemeral `/private/tmp`, which macOS clears); the installer's
+  completeness preflight blocks a missing/partial snapshot. `HF_HUB_OFFLINE=1`
+  is opt-in (`--offline` / `GLASSLAB_MODEL_HF_OFFLINE=1`); the default allows
+  re-downloading the 42 GB weights.
 - **Cold start is slow**: after a reload the first request can take ~2 min
   (weights page in from SSD); warm requests are ~10s.
 - `.17` (64 GB RAM) is tight: ~48 GB wired to the Coder model, ~13 GB working
