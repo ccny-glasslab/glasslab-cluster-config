@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from hashlib import sha256
 from datetime import datetime, timedelta
 import json
@@ -109,6 +110,18 @@ NON_RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
 _RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
     {'startup', 'provider', 'network'}
 )
+
+
+@dataclass(frozen=True)
+class _TurnFailure:
+    """Classified agent-turn failure carried into session recovery.
+
+    ``details`` is the secret-free diagnostic payload from the runtime error
+    (for a repeated tool loop: repeated tool name, count, and input digest).
+    """
+
+    failure_class: str
+    details: dict[str, Any] | None = None
 
 
 METHODOLOGY_REQUIREMENTS_GUIDANCE = (
@@ -688,8 +701,7 @@ class ResearchOrchestrator:
         agent: AgentName,
         expected_kind: TurnKind,
         error: str,
-        failure_class: str | None = None,
-        recovery_details: dict[str, Any] | None = None,
+        failure: _TurnFailure | None = None,
     ) -> tuple[Path, dict[str, Any]]:
         run = self.store.get_run(run_id)
         workspace = Path(
@@ -749,10 +761,7 @@ class ResearchOrchestrator:
                 'work solely because the OpenCode session was rotated.'
             ),
         }
-        last_failure = self._last_failure_entry(
-            failure_class=failure_class,
-            recovery_details=recovery_details,
-        )
+        last_failure = self._last_failure_entry(failure)
         if last_failure is not None:
             checkpoint['last_failure'] = last_failure
         path = self.workspaces.write_recovery_checkpoint(
@@ -764,24 +773,23 @@ class ResearchOrchestrator:
 
     @staticmethod
     def _last_failure_entry(
-        *,
-        failure_class: str | None,
-        recovery_details: dict[str, Any] | None,
+        failure: _TurnFailure | None,
     ) -> dict[str, Any] | None:
         # Persist the classified failure so a fresh session can be corrected.
         # Only the repeated-tool name/count and an input digest are recorded;
         # raw tool arguments may contain secrets and are never persisted.
-        if not failure_class:
+        if failure is None or not failure.failure_class:
             return None
-        entry: dict[str, Any] = {'failure_class': failure_class}
-        if failure_class == 'repeated_tool_loop' and recovery_details:
-            tool = recovery_details.get('tool')
+        entry: dict[str, Any] = {'failure_class': failure.failure_class}
+        details = failure.details
+        if failure.failure_class == 'repeated_tool_loop' and details:
+            tool = details.get('tool')
             if isinstance(tool, str):
                 entry['repeated_tool'] = tool
-            count = recovery_details.get('count')
+            count = details.get('count')
             if isinstance(count, int):
                 entry['repeated_count'] = count
-            digest = recovery_details.get('input_digest')
+            digest = details.get('input_digest')
             if isinstance(digest, str):
                 entry['input_digest'] = digest
         return entry
@@ -793,8 +801,7 @@ class ResearchOrchestrator:
         agent: AgentName,
         expected_kind: TurnKind,
         error: str,
-        failure_class: str | None = None,
-        recovery_details: dict[str, Any] | None = None,
+        failure: _TurnFailure | None = None,
     ) -> None:
         release_error: str | None = None
         try:
@@ -830,8 +837,7 @@ class ResearchOrchestrator:
             agent=agent,
             expected_kind=expected_kind,
             error=error,
-            failure_class=failure_class,
-            recovery_details=recovery_details,
+            failure=failure,
         )
         self._event(
             run_id,
@@ -840,34 +846,23 @@ class ResearchOrchestrator:
             payload={
                 'agent': agent.value,
                 'reason': error[:1000],
-                'failure_class': failure_class,
+                'failure_class': failure.failure_class if failure else None,
                 'checkpoint_path': str(path),
                 'next_session': 'fresh',
                 'runtime_release_error': release_error,
             },
         )
-        if failure_class == 'repeated_tool_loop':
+        if failure is not None and failure.failure_class == 'repeated_tool_loop':
+            details = failure.details or {}
             self._event(
                 run_id,
                 source='orchestrator',
                 event_type='agent.doom_loop_detected',
                 payload={
                     'agent': agent.value,
-                    'repeated_tool': (
-                        recovery_details.get('tool')
-                        if recovery_details
-                        else None
-                    ),
-                    'repeated_count': (
-                        recovery_details.get('count')
-                        if recovery_details
-                        else None
-                    ),
-                    'input_digest': (
-                        recovery_details.get('input_digest')
-                        if recovery_details
-                        else None
-                    ),
+                    'repeated_tool': details.get('tool'),
+                    'repeated_count': details.get('count'),
+                    'input_digest': details.get('input_digest'),
                 },
             )
 
@@ -1921,8 +1916,14 @@ class ResearchOrchestrator:
                 agent=agent,
                 expected_kind=expected_kind,
                 error=str(exc),
-                failure_class=failure_class,
-                recovery_details=recovery_details,
+                failure=(
+                    _TurnFailure(
+                        failure_class=failure_class,
+                        details=recovery_details,
+                    )
+                    if failure_class
+                    else None
+                ),
             )
             if self._should_retry_turn(exc, run_id, agent):
                 return self._retry_agent_turn(
