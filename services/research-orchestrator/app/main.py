@@ -46,7 +46,7 @@ from .discord_rest import (
     DiscordRestPolicy,
     execute_guarded,
 )
-from .datasets import DatasetIngestionError, DatasetIngestionManager
+from .datasets import DatasetIngestionError, DatasetIngestionManager, DatasetUrlError
 from .engine import ResearchOrchestrator, WorkflowError
 from .hermes_runtime import HermesProcessRuntime
 from .knowledge_manager import KnowledgeError
@@ -423,6 +423,14 @@ def create_app(
         # anything unexpected. Domain errors never leak stack traces.
         if isinstance(exc, RecordNotFound):
             return HTTPException(status_code=404, detail=str(exc))
+        if isinstance(exc, DatasetUrlError):
+            # The failure class is machine-readable so callers can react
+            # (retry, fix the URL, verify a checksum) without parsing prose;
+            # the message never includes resolved addresses or transport text.
+            return HTTPException(
+                status_code=409,
+                detail={'kind': exc.kind.value, 'message': str(exc)},
+            )
         if isinstance(
             exc,
             (

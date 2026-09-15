@@ -137,7 +137,9 @@ supervised-contrastive losses, then evaluate generalization to unseen classes.
 1. **Every claim gets an exact number.** "Use contrastive learning" fails;
    "SupCon temperature ∈ {0.07, 0.1}" passes.
 2. **Name exact metric keys** — they must match what the evaluator checks.
-3. **Large datasets go through `/dataset-upload`**, never a remote URL.
+3. **Large datasets go through `/dataset-upload` (local file) or
+   `/dataset-url` (public HTTPS URL)**, then reference the returned
+   `glasslab-dataset://<sha256>` id; do not embed remote URLs in the archive.
 4. **State stopping conditions explicitly.** "Stop after X" beats "run until
    done".
 5. **Keep the archive self-contained** — no secrets, private URLs, or

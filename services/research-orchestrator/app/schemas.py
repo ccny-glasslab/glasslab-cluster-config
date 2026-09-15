@@ -777,6 +777,17 @@ class CatalogDatasetRecord(BaseModel):
     size_bytes: int = Field(gt=0)
     provenance: Literal['upload', 'url'] = 'upload'
     source_url: str | None = None
+    final_url: str | None = None
+    retrieved_at: datetime | None = None
+    media_type: str | None = Field(default=None, max_length=255)
+    filename: str | None = Field(default=None, max_length=255)
+    upstream_sha256: str | None = Field(
+        default=None,
+        pattern=r'^[a-f0-9]{64}$',
+    )
+    # True when the registration reused content already in the registry
+    # (content-addressed dedup); informative, never used for identity.
+    deduplicated: bool = False
     created_by: str = 'operator'
     created_at: datetime = Field(default_factory=utc_now)
 

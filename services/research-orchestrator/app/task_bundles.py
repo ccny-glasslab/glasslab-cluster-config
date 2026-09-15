@@ -12,14 +12,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
-import ipaddress
 import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
-import socket
 from typing import Any
-from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 import zipfile
 
@@ -28,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .schemas import TaskAssetProposal, TaskSpecProposal
 from .spec_feedback import format_spec_feedback
+from .url_fetch import PublicHttpsFetcher, UrlFetchError, UrlFetchErrorKind
 
 
 class TaskBundleError(ValueError):
@@ -162,7 +160,13 @@ class StagedTaskBundle:
 
 
 class TaskAssetFetcher:
-    """Fetch immutable assets while rejecting non-public HTTPS targets."""
+    """Fetch immutable assets while rejecting non-public HTTPS targets.
+
+    The network mechanics (redirect/peer revalidation, byte ceiling, streaming
+    SHA-256) are shared with dataset URL ingestion through
+    :class:`~app.url_fetch.PublicHttpsFetcher`; this class adds the task-local
+    staging layout and the immutable sidecar record.
+    """
 
     def __init__(
         self,
@@ -185,69 +189,49 @@ class TaskAssetFetcher:
         self.connect_timeout_seconds = connect_timeout_seconds
         self.max_retries = max_retries
         self._transport = transport
+        self._fetcher = PublicHttpsFetcher(
+            maximum_bytes=maximum_bytes,
+            timeout_seconds=timeout_seconds,
+            connect_timeout_seconds=connect_timeout_seconds,
+            max_retries=max_retries,
+            transport=transport,
+        )
 
-    @staticmethod
-    def _validate_url(url: str) -> None:
-        try:
-            parsed = urlparse(url)
-            port = parsed.port
-        except ValueError as exc:
-            raise TaskBundleError('task asset URL is malformed') from exc
-        # Assets are ingested by the orchestrator's own identity, so only
-        # public HTTPS targets with no embedded credentials and no custom port
-        # are acceptable; anything else is refused before a single byte is
-        # fetched.
-        if (
-            parsed.scheme != 'https'
-            or not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or port not in {None, 443}
+    def _asset_error(
+        self,
+        exc: UrlFetchError,
+        *,
+        name: str,
+    ) -> TaskBundleError:
+        # Domain errors keep the actionable task-bundle wording; network detail
+        # (host, exception text) is only echoed through the transport class of
+        # failure, never as an untrusted operator payload.
+        if exc.kind == UrlFetchErrorKind.CHECKSUM_MISMATCH:
+            return TaskBundleError(
+                f'task asset checksum mismatch for {name}'
+            )
+        if exc.kind in (
+            UrlFetchErrorKind.MALFORMED_URL,
+            UrlFetchErrorKind.PRIVATE_TARGET,
+            UrlFetchErrorKind.PEER_UNVERIFIABLE,
         ):
-            raise TaskBundleError('task assets require a public HTTPS URL')
-        # Resolve the host at ingestion time and reject any non-globally
-        # routable address so a task cannot point the orchestrator at
-        # cluster-internal or link-local endpoints.
-        try:
-            addresses = socket.getaddrinfo(
-                parsed.hostname,
-                443,
-                type=socket.SOCK_STREAM,
+            return TaskBundleError(str(exc))
+        if exc.kind == UrlFetchErrorKind.EMPTY_BODY:
+            return TaskBundleError(f'task asset is empty: {name}')
+        if exc.kind == UrlFetchErrorKind.SIZE_EXCEEDED:
+            return TaskBundleError(
+                f'task asset exceeds {self.maximum_bytes} bytes'
             )
-        except OSError as exc:
-            raise TaskBundleError(
-                f'cannot resolve task asset host: {parsed.hostname}'
-            ) from exc
-        for address in addresses:
-            ip = ipaddress.ip_address(address[4][0])
-            if not ip.is_global:
-                raise TaskBundleError(
-                    f'task asset host resolves to a non-public address: {ip}'
-                )
-
-    @staticmethod
-    def _revalidate_peer(response: httpx.Response) -> None:
-        # The hostname is validated before the request, but the connection
-        # resolves the name again; a DNS-rebinding attacker could answer the
-        # second lookup with a link-local or cluster-internal address. The
-        # connected peer is therefore re-checked after connect, before a
-        # single body byte is read, and the fetch aborts on mismatch.
-        stream = response.extensions.get('network_stream')
-        if stream is None:
-            raise TaskBundleError('task asset peer address is not verifiable')
-        peername = stream.get_extra_info('server_addr')
-        if not peername:
-            raise TaskBundleError('task asset peer address is not verifiable')
-        try:
-            ip = ipaddress.ip_address(peername[0])
-        except ValueError as exc:
-            raise TaskBundleError(
-                'task asset peer address is not verifiable'
-            ) from exc
-        if not ip.is_global:
-            raise TaskBundleError(
-                f'task asset peer resolves to a non-public address: {ip}'
+        if exc.kind == UrlFetchErrorKind.REDIRECT_REJECTED:
+            return TaskBundleError(
+                f'task asset redirect was rejected for {name}'
             )
+        return TaskBundleError(
+            f'task asset download failed for {name}: {exc}. '
+            'Retry the import, or upload the dataset via '
+            '/dataset-upload and reference its '
+            'glasslab-dataset://<sha256> URI in the task bundle.'
+        )
 
     def fetch(
         self,
@@ -267,86 +251,15 @@ class TaskAssetFetcher:
         staging = self.root / '.staging' / uuid4().hex
         staging.mkdir(parents=True, exist_ok=False)
         asset_path = staging / 'asset'
-        current_url = proposal.source_url
-        last_error: str | None = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                with httpx.Client(
-                    follow_redirects=False,
-                    timeout=httpx.Timeout(
-                        self.timeout_seconds,
-                        connect=self.connect_timeout_seconds,
-                    ),
-                    transport=self._transport,
-                ) as client:
-                    for _ in range(6):
-                        # Follow redirects manually so every hop is re-validated
-                        # against the same public-HTTPS + global-address rules;
-                        # automatic redirects would bypass the allowlist.
-                        self._validate_url(current_url)
-                        with client.stream('GET', current_url) as response:
-                            # The peer is re-checked after connect: the hostname
-                            # was validated above, but the connection resolves it
-                            # again, so a DNS-rebinding answer that flipped the
-                            # host to a private address aborts here before any
-                            # body byte is read.
-                            self._revalidate_peer(response)
-                            if response.status_code in {301, 302, 303, 307, 308}:
-                                location = response.headers.get('location')
-                                if not location:
-                                    raise TaskBundleError(
-                                        'task asset redirect has no location'
-                                    )
-                                current_url = urljoin(current_url, location)
-                                continue
-                            response.raise_for_status()
-                            size = 0
-                            digest = sha256()
-                            with asset_path.open('wb') as output:
-                                for chunk in response.iter_bytes():
-                                    size += len(chunk)
-                                    if size > self.maximum_bytes:
-                                        raise TaskBundleError(
-                                            f'task asset exceeds {self.maximum_bytes} bytes'
-                                        )
-                                    digest.update(chunk)
-                                    output.write(chunk)
-                            if size == 0:
-                                raise TaskBundleError(
-                                    f'task asset is empty: {proposal.name}'
-                                )
-                            break
-                    else:
-                        raise TaskBundleError('task asset redirected too many times')
-            except httpx.TransportError as exc:
-                if attempt >= self.max_retries:
-                    raise TaskBundleError(
-                        f'task asset download failed for {proposal.name}: {exc}. '
-                        'Retry the import, or upload the dataset via '
-                        '/dataset-upload and reference its '
-                        'glasslab-dataset://<sha256> URI in the task bundle.'
-                    ) from exc
-                last_error = str(exc)
-                shutil.rmtree(staging, ignore_errors=True)
-                staging = self.root / '.staging' / uuid4().hex
-                staging.mkdir(parents=True, exist_ok=False)
-                asset_path = staging / 'asset'
-                current_url = proposal.source_url
-                continue
-            except httpx.HTTPError as exc:
-                raise TaskBundleError(
-                    f'task asset download failed for {proposal.name}: {exc}'
-                ) from exc
-            break
-        actual_digest = digest.hexdigest()
-        if (
-            proposal.expected_sha256
-            and actual_digest != proposal.expected_sha256
-        ):
-            shutil.rmtree(staging, ignore_errors=True)
-            raise TaskBundleError(
-                f'task asset checksum mismatch for {proposal.name}'
+        try:
+            fetched = self._fetcher.download(
+                proposal.source_url,
+                asset_path,
+                expected_sha256=proposal.expected_sha256,
             )
+        except UrlFetchError as exc:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise self._asset_error(exc, name=proposal.name) from exc
         destination.parent.mkdir(parents=True, exist_ok=True)
         # Staged-then-renamed so a partially downloaded asset is never visible
         # at the final path; a concurrent identical fetch that won the race
@@ -364,15 +277,14 @@ class TaskAssetFetcher:
         record = DatasetAsset(
             name=proposal.name,
             uri=uri,
-            sha256=actual_digest,
+            sha256=fetched.sha256,
             role=proposal.role,
             contains_labels=proposal.contains_labels,
         )
         metadata.write_text(record.model_dump_json(indent=2) + '\n')
         # Immutability: the asset blob, its sidecar record, and the directory
         # are read-only after ingestion, so nothing downstream can modify them.
-        asset_path = destination / 'asset'
-        asset_path.chmod(0o444)
+        (destination / 'asset').chmod(0o444)
         metadata.chmod(0o444)
         destination.chmod(0o555)
         return record
