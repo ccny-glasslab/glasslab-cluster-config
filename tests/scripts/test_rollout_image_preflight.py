@@ -265,6 +265,25 @@ class RolloutImagePreflightTests(unittest.TestCase):
         self.assertIn(PRIOR_WORKFLOW_API, completed.stderr)
         self.assertIn("set image", completed.stderr)
 
+    def test_successful_rollout_prints_no_rollback_guidance(self) -> None:
+        # Given: both images exist, every component rolls out cleanly, and the
+        # cluster previously ran prior-sha (so guidance *would* name it).
+        self.existing.write_text(f"{ORCHESTRATOR_IMAGE}\n{WORKFLOW_API_IMAGE}\n")
+        # When: the full bundle completes with a zero exit status.
+        completed = self._run(
+            "--service", "all",
+            "--tag", TAG,
+            "--skip-smoke",
+            "--skip-image-prune",
+            KUBECTL_PRIOR_IMAGE_GLASSLAB_RESEARCH_ORCHESTRATOR=PRIOR_ORCHESTRATOR,
+            KUBECTL_PRIOR_IMAGE_GLASSLAB_WORKFLOW_API=PRIOR_WORKFLOW_API,
+        )
+        # Then: the success path prints no rollback guidance (issue #470).
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertNotIn("ROLLBACK GUIDANCE", completed.stderr)
+        self.assertNotIn(PRIOR_ORCHESTRATOR, completed.stderr)
+        self.assertNotIn(PRIOR_WORKFLOW_API, completed.stderr)
+
     def test_blocks_when_caller_secret_key_is_misnamed(self) -> None:
         # Given: the orchestrator Secret exists but uses a non-`token` key.
         self.secret_keys.write_text(
