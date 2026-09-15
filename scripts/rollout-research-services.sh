@@ -26,7 +26,7 @@ Images are selected by immutable Git commit tag; this script does not build or p
 
 Options:
   --service <name>  all, workflow-api, research-orchestrator, or rabbitmq.
-                    workflow-api includes all three authenticated callers.
+                    workflow-api includes the authenticated caller set.
                     rabbitmq rolls out only the task-fabric broker. Default: all
   --tag <tag>       GHCR image tag. Default: full SHA of the checked-out commit
   --sync            Fast-forward the canonical checkout to origin/main first
@@ -63,6 +63,22 @@ require_object() {
   if ! "$KUBECTL" -n "$NAMESPACE" get "$kind" "$name" >/dev/null 2>&1; then
     printf '[rollout-research-services] required %s/%s is missing in %s\n' \
       "$kind" "$name" "$NAMESPACE" >&2
+    exit 1
+  fi
+}
+
+require_secret_key() {
+  local name="$1"
+  local key="$2"
+  local value
+  # A missing key makes `jsonpath` print nothing; an empty value is equally
+  # unusable, so both cases fail. The kubelet surfaces either as
+  # CreateContainerConfigError, which is harder to diagnose post-rollout.
+  value="$("$KUBECTL" -n "$NAMESPACE" get secret "$name" \
+    -o "jsonpath={.data.${key}}" 2>/dev/null || true)"
+  if [[ -z "$value" ]]; then
+    printf "[rollout-research-services] secret %s/%s is missing required key '%s'; the deployment secretKeyRef expects data key '%s'\n" \
+      "$NAMESPACE" "$name" "$key" "$key" >&2
     exit 1
   fi
 }
@@ -184,9 +200,24 @@ rollout_schedule_worker() {
     deployment/glasslab-schedule-worker --timeout=300s
 }
 
+# Caller Secrets the workflow-api deployment mounts. Each entry is
+# "<secret-name>:<required-key>"; the deployment's secretKeyRef values in
+# kubeadm/glasslab-v2/workflow-api/20-deployment.yaml hard-code exactly these
+# key names, and tests/security/test_workflow_security_manifests.py asserts
+# them. Keep the three lists in lockstep when a caller is added or retired.
+WORKFLOW_CALLER_SECRET_KEYS=(
+  'glasslab-workflow-api-schedule-worker:token'
+  'glasslab-workflow-api-research-orchestrator:token'
+)
+
 require_workflow_caller_secrets() {
-  require_object secret glasslab-workflow-api-schedule-worker
-  require_object secret glasslab-workflow-api-research-orchestrator
+  local entry name key
+  for entry in "${WORKFLOW_CALLER_SECRET_KEYS[@]}"; do
+    name="${entry%%:*}"
+    key="${entry##*:}"
+    require_object secret "$name"
+    require_secret_key "$name" "$key"
+  done
 }
 
 rollout_authenticated_workflow_bundle() {
