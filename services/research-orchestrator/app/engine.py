@@ -3923,6 +3923,25 @@ class ResearchOrchestrator:
         except ValueError:
             installed = None
         if installed is not None:
+            run = self.store.get_run(action.run_id)
+            conflict = self._profile_contract_conflict_message(
+                run=run,
+                descriptor=installed.descriptor,
+            )
+            if conflict is not None:
+                # Issue #490: an already-promoted contract can predate the
+                # compiled task's authoritative profile. Binding it and then
+                # re-checking compatibility raises into the resume loop
+                # below, so fail closed BEFORE any binding instead.
+                self._fail_closed_on_contract_profile_conflict(
+                    run_id=action.run_id,
+                    contract_id=installed.descriptor.contract_id,
+                    contract_version=installed.descriptor.version,
+                    contract_digest=installed.digest,
+                    origin='installed_contract_binding',
+                    conflict=conflict,
+                )
+                return
             self._bind_run_to_contract(
                 run_id=action.run_id,
                 contract_id=installed.descriptor.contract_id,
@@ -3935,6 +3954,24 @@ class ResearchOrchestrator:
                 )
             self._transition(action.run_id, RunState.BEAKER_PLANNING)
             self._beaker_plan(action.run_id)
+            return
+        conflict = self._profile_contract_conflict_message(
+            run=self.store.get_run(action.run_id),
+            descriptor=descriptor,
+        )
+        if conflict is not None:
+            # A candidate sealed before the profile became authoritative can
+            # fit the promotion flow yet still contradict the profile; fail
+            # closed before promotion so no unusable contract is installed
+            # (issue #490).
+            self._fail_closed_on_contract_profile_conflict(
+                run_id=action.run_id,
+                contract_id=descriptor.contract_id,
+                contract_version=descriptor.version,
+                contract_digest=artifact.sha256,
+                origin='candidate_promotion',
+                conflict=conflict,
+            )
             return
         destination = self.contract_candidates.promote(
             sealed_path=Path(str(artifact.metadata['sealed_path'])),
@@ -3979,6 +4016,49 @@ class ResearchOrchestrator:
             )
         self._transition(action.run_id, RunState.BEAKER_PLANNING)
         self._beaker_plan(action.run_id)
+
+    def _fail_closed_on_contract_profile_conflict(
+        self,
+        *,
+        run_id: str,
+        contract_id: str,
+        contract_version: str,
+        contract_digest: str,
+        origin: str,
+        conflict: str,
+    ) -> None:
+        # A promoted contract is immutable and other runs may reference it by
+        # digest, so it is never rewritten, deleted, or silently superseded;
+        # and promoting a different artifact than the one a human approved
+        # would break the approval binding. When it cannot accommodate the
+        # authoritative task profile there is no deterministic recovery: no
+        # redraft, resume, or retry can reconcile the contradiction. Fail
+        # closed once, with the #484-style actionable message, instead of
+        # parking in a resume loop that re-enters this branch and reports
+        # "installed contract remains incompatible with the protocol" forever
+        # (issue #490). A terminal run makes resume refuse before any
+        # workflow work, and consumes no agent turn, revision, or retry.
+        reason = (
+            f'{conflict} Promoted contracts are immutable and are never '
+            f'silently superseded, so this run cannot bind {contract_id} '
+            f'{contract_version} (digest {contract_digest}) and progress. '
+            'Resolve the configuration contradiction by invalidating or '
+            'replacing the stale promoted contract, or by changing the task '
+            'runtime profile, then start a new run.'
+        )
+        self._event(
+            run_id,
+            source='orchestrator',
+            event_type='methodology.resource_authority_conflict',
+            payload={
+                'reason': reason,
+                'origin': origin,
+                'contract_id': contract_id,
+                'version': contract_version,
+                'digest': contract_digest,
+            },
+        )
+        self._fail_run(run_id, WorkflowError(reason))
 
     def _build_objective_execution(
         self,

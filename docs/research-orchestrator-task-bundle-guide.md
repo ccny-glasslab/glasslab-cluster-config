@@ -3,7 +3,10 @@
 This is the operator-facing guide for writing a task bundle that the
 research-orchestrator can compile, preflight, and run. It complements the
 contract in [`research-orchestrator.md`](research-orchestrator.md) ("Compiled
-Research Tasks") with the practical rules that make a bundle pass.
+Research Tasks") with the practical rules that make a bundle pass. For the
+field-by-field reference (what is parsed vs agent-interpreted, every validator,
+and the resource-precedence rule), see
+[`research-orchestrator-spec-fields.md`](research-orchestrator-spec-fields.md).
 
 ## The bundle contract
 
