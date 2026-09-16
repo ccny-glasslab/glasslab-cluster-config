@@ -835,7 +835,19 @@ def _task_archive() -> bytes:
     with zipfile.ZipFile(output, 'w') as handle:
         handle.writestr(
             'ML_Benchmark_Adult_Income/problem.md',
-            '# Adult task\n',
+            '# Adult task\n\n'
+            '## Objective\n'
+            'Classify adult income from the tabular features.\n\n'
+            '## Inputs\n'
+            'glasslab-dataset://' + 'a' * 64 + '\n\n'
+            '## Method and architecture\n'
+            'Logistic regression baseline.\n\n'
+            '## Hyperparameter search space (exact)\n'
+            'C: {0.1, 1.0}\n\n'
+            '## Evaluation rubric (exact)\n'
+            'accuracy >= 0.78\n\n'
+            '## Evidence artifacts (required)\n'
+            'metrics.json, report.md\n',
         )
         handle.writestr(
             'ML_Benchmark_Adult_Income/eval_agent_prompt.md',

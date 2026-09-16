@@ -1,5 +1,11 @@
 # Validate WhatsApp Command Channel
 
+> **Status: retired.** The WhatsApp gateway, research-ingress, and
+> research-command-router were retired under issue #159. This runbook is kept
+> for historical reference only; the current operator surface is the
+> research-orchestrator Discord workflow in
+> [`docs/research-orchestrator-command-surface.md`](../../research-orchestrator-command-surface.md).
+
 1. Log into the provisioner host and move to the canonical repo.
 
 ```bash

@@ -6,6 +6,7 @@ Complete these items before the first live Glasslab v2 deployment.
 
 - create `kubeadm/glasslab-v2/secrets/10-postgres.local.yaml` with a real `POSTGRES_PASSWORD`
 - create `kubeadm/glasslab-v2/secrets/20-minio.local.yaml` with a real `MINIO_ROOT_PASSWORD`
+- create `kubeadm/glasslab-v2/secrets/21-minio-workflow-api.local.yaml` with a real scoped `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY` (the bucket-scoped workflow-api user, never the root identity), then run the provisioning Job in `kubeadm/glasslab-v2/minio/45-provision-scoped-users-job.yaml`
 - keep those local files off Git
 
 ## Required image preparation

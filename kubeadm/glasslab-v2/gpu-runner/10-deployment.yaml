@@ -41,20 +41,6 @@ spec:
                   name: glasslab-v2-runner
                   key: GLASSLAB_RUNNER_STORE_POSTGRES_DSN
                   optional: false
-            - name: GLASSLAB_RUNNER_MINIO_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: glasslab-v2-minio
-                  key: MINIO_ROOT_USER
-                  optional: true
-            - name: GLASSLAB_RUNNER_MINIO_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: glasslab-v2-minio
-                  key: MINIO_ROOT_PASSWORD
-                  optional: true
-            - name: GLASSLAB_RUNNER_MINIO_ENDPOINT
-              value: glasslab-minio.glasslab-v2.svc.cluster.local:9000
             - name: GLASSLAB_RUNNER_PORT
               value: "52415"
             - name: HF_HOME

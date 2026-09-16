@@ -180,16 +180,6 @@ rollout_workflow_api() {
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/workflow-api/50-ingress-network-policy.yaml"
 }
 
-rollout_command_router() {
-  local image="ghcr.io/ccny-glasslab/glasslab-research-command-router:${IMAGE_TAG}"
-  "$KUBECTL" set image \
-    -f "$ROOT_DIR/kubeadm/glasslab-v2/research-command-router/10-deployment.yaml" \
-    "research-command-router=$image" --local -o yaml |
-    "$KUBECTL" apply -f -
-  "$KUBECTL" -n "$NAMESPACE" rollout status \
-    deployment/glasslab-research-command-router --timeout=300s
-}
-
 rollout_schedule_worker() {
   local image="ghcr.io/ccny-glasslab/glasslab-schedule-worker:${IMAGE_TAG}"
   "$KUBECTL" set image \

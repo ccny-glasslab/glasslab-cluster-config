@@ -22,6 +22,8 @@ from pydantic import (
     model_validator,
 )
 
+from .matrix_naming import VARIANT_NAME_PATTERN
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -422,7 +424,7 @@ class ResourceRequest(BaseModel):
 class ExperimentVariant(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
-    name: str = Field(pattern=r'^[a-z0-9][a-z0-9_-]{0,62}$')
+    name: str = Field(pattern=VARIANT_NAME_PATTERN)
     overrides: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -477,6 +479,12 @@ class EvaluationContractDescriptor(BaseModel):
 
     contract_id: str = Field(min_length=3)
     version: str = Field(min_length=1)
+    # Human-facing contract metadata. Deterministic code reads primary_metric,
+    # primary_metric_direction, required_metric_keys, and
+    # methodology_requirements from it. budget and guardrails are
+    # informational: the job wall-clock is the task resource profile, and a
+    # declared manifest.budget.wallclock_minutes larger than the profile or
+    # resource_constraints is rejected (issue #500).
     manifest: dict[str, Any]
     execution_wrapper: str = Field(min_length=1)
     evaluation_entry_point: str = Field(min_length=1)

@@ -30,19 +30,20 @@ and a model change silently changes behavior.
 ## 1. How to author a `problem.md`
 
 **The one thing to internalize:** the orchestrator never parses your
-`problem.md` for sections or fields. It only checks that the ZIP contains
-**exactly one file named `problem.md`** (`services/research-orchestrator/app/task_bundles.py:411-425`)
-and that it decodes as UTF-8 (`task_bundles.py:445-452`). Everything else in the
-document is read by a model (Honeydew) and compiled into a typed
+`problem.md` for *fields*. Its structural checks are: the ZIP contains
+**exactly one file named `problem.md`**
+(`services/research-orchestrator/app/task_bundles.py:411-425`), it decodes as
+UTF-8 (`task_bundles.py:445-458`), and the six required section headings are
+present and non-empty (`app/problem_schema.py`, #496). Everything the sections
+*say* is read by a model (Honeydew) and compiled into a typed
 `glasslab-task-spec-v1` proposal; the typed proposal is what validators check.
-There is no markdown/frontmatter parser and no heading schema anywhere in the
-service (no markdown parser is even a dependency).
+There is no markdown/frontmatter parser for field values.
 
-Consequently the guide's "mandatory sections" are **conventions the compiler
-prompt relies on**, not structural requirements. A `problem.md` with the right
-prose in unlabeled paragraphs can compile; a `problem.md` with perfect headings
-but vague numbers will be parked in `missing_inputs`. The hard gates start after
-compilation, on the task spec, the contract, and the matrix.
+Consequently the guide's "mandatory sections" are now enforced *structurally*
+(headings present and non-empty), but what each section must *say* is still a
+convention the compiler prompt relies on. A `problem.md` with perfect headings
+but vague numbers will be parked in `missing_inputs`. The hard gates start
+after compilation, on the task spec, the contract, and the matrix.
 
 Practical rules that actually gate a run:
 
@@ -50,9 +51,9 @@ Practical rules that actually gate a run:
   `metrics.json`. The evaluator compares `task_spec.required_metric_keys` against
   the top-level keys of `metrics.json`
   (`evaluation-contracts/generic-task-integrity-v1/1.0.0/evaluator.py:43-46`).
-  For a task-specific contract the keys live in
-  `manifest.required_metric_keys` and are checked statically at matrix preflight
-  (`preflight.py:534-538`).
+  Since #497 both the task spec's keys and any contract
+  `manifest.required_metric_keys` are checked statically at matrix preflight
+  (`preflight.py`), so a missing key fails before a cluster job runs.
 - **Name exact evidence artifacts** as relative paths. They are unioned with the
   base set (`task_bundles.py:140-150`, `534-541`) and each must be statically
   referenced by a string literal in scanned source (`preflight.py:373-390`).
@@ -79,21 +80,22 @@ See [section 7](#7-minimal-viable-problemmd) for a complete worked example.
 | Field / rule | Purpose | Required | Validated where | Consumes it | Failure mode |
 |---|---|---|---|---|---|
 | File named `problem.md` | The task specification | Yes | compile: `task_bundles.py:411-415`, `421-425` | compiler session workspace (`task_bundles.py:429-437`) | `TaskBundleError: task archive requires one problem.md and at most one eval_agent_prompt.md`. Non-retryable, fail-closed. |
-| UTF-8 decodability | Text input | Yes | compile: `task_bundles.py:445-452` | compiler | `TaskBundleError: problem and evaluator prompt must be UTF-8 text`. Fail-closed. |
+| UTF-8 decodability | Text input | Yes | compile: `task_bundles.py:445-458` | compiler | `TaskBundleError: problem and evaluator prompt must be UTF-8 text`. Fail-closed. |
+| Required section headings | The guide's six mandatory sections | Yes | import: `task_bundles.stage_archive` via `problem_schema.problem_section_errors` | compiler workspace; the compiler maps the prose | `TaskBundleError: task problem.md does not satisfy the required structure: problem.md is missing the required section "Evaluation rubric"; add a heading such as "## Evaluation rubric"`. Fail-closed; matching is order-insensitive and formatting-tolerant (any ATX level, case, trailing colon, " (exact)" qualifier). |
 | Archive size / file count / path safety | Bound the upload | Yes | compile: `task_bundles.py:346-348`, `377-425` | importer | `task archive has an invalid size` / `file count is invalid` / `unsafe task archive member` / `expands too large`. Fail-closed. |
 
-**There are no other structural fields.** No heading, key, or YAML/JSON block in
-`problem.md` is parsed. The guide's six "mandatory sections"
-(`docs/research-orchestrator-task-bundle-guide.md:30-96`) are not enforced by any
-validator.
+The required headings are the only structural field besides the file itself:
+no key or YAML/JSON block in `problem.md` is parsed, and the *content* under
+each heading is still read by the compiler model.
 
 ### 2.2 What is agent-interpreted
 
 All of the following are read by the compiler model and mapped into
-`TaskSpecProposal` fields. The mapping is specified **only in the compile prompt**
-(`engine.py:701-718`) and the guide; the JSON-schema-forced structured output of
-the model is `AgentTurnResult` (`schemas.py:313-327`). There is no deterministic
-check that a given problem.md section exists.
+`TaskSpecProposal` fields. Section *presence* is deterministic now (see 2.1),
+but the mapping from section content to a field is specified only in the
+compile prompt (`engine.py:701-718`) and the guide, and the JSON-schema-forced
+structured output of the model is `AgentTurnResult` (`schemas.py:313-327`).
+There is no deterministic check of what a section *contains*.
 
 | Guide section (guide lines) | Feeds task-spec field | Where the rule lives | Failure mode if absent/vague |
 |---|---|---|---|
@@ -101,9 +103,9 @@ check that a given problem.md section exists.
 | Inputs / datasets | `assets[]` (`TaskAssetProposal`) | `[PROMPT-ONLY]` `engine.py:707-712` + schema `schemas.py:231-276` | No assets → run starts with no data bindings; workload fails at execution. A nonpublic/private URL is rejected by the fetcher. |
 | Method and architecture | `rationale`, and later `program.md` / implementation | `[PROMPT-ONLY]` | Not compiled into a typed field; becomes protocol prose. No deterministic gate. |
 | Hyperparameter search space | Later matrix `base_config` + `overrides`; contract `methodology_requirements` | `[PROMPT-ONLY]`; enforced only once a contract declares `config_path`s (`preflight.py:481-518`) | If the contract declares a comparison/decision and the values are not materialized under `experiment_dimensions.*`, preflight fails closed. |
-| Evaluation rubric → metric keys | `required_metric_keys` | schema `schemas.py:289-291` (**pattern only**); semantic check at execution for the generic contract | Keys are pattern-validated (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`) but **not** checked against `run.py` statically on the generic path (see [F7](#8-findings-and-defects)). |
+| Evaluation rubric → metric keys | `required_metric_keys` | schema `schemas.py:289-291` (**pattern only**); semantic check at matrix preflight for both the contract and task-spec lists (#497) | Keys are pattern-validated (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`) and statically checked against `run.py`'s `metrics.json` serialization (see [F7](#8-findings-and-defects)). |
 | Evaluation rubric → thresholds | Partly `rationale`; really the evaluator contract | `[PROMPT-ONLY]`; deterministic only for task-specific contracts | Thresholds are not a task-spec field. They must become contract logic, or they are prose. |
-| Evaluation rubric → stopping conditions | Contract `manifest.budget` / matrix seeds | `[PROMPT-ONLY]` | Not compiled; the profile wall-clock is authoritative. |
+| Evaluation rubric → stopping conditions | Contract `manifest.budget` / matrix seeds | `[PROMPT-ONLY]` | Not compiled; the profile wall-clock is authoritative, and a declared budget above the profile or the contract `resource_constraints` is rejected (#500). |
 | Evidence artifacts | `required_artifacts` | schema path-safety `schemas.py:295-310`; existence at preflight `preflight.py:373-390` | Unsafe path → compile rejection. Missing static reference → matrix preflight error (retryable). |
 
 **Boundary summary:** the only deterministic/agent boundary in `problem.md` is
@@ -134,16 +136,14 @@ Three distinct concepts share the word "metric":
 
 | Concept | Location | Owner | Consumed by |
 |---|---|---|---|
-| `required_metric_keys` (task spec) | `schemas.py:289-291` | compiler (from rubric) | Generic evaluator at execution: `generic-task-integrity-v1/1.0.0/evaluator.py:43-46`, read from `task_spec.required_metric_keys`. |
-| `manifest.required_metric_keys` (contract) | free-form `manifest` dict (`schemas.py:480`) | contract author (Honeydew proposes; human promotes) | Static matrix preflight `preflight.py:534-538` → `_metrics_root_errors` requires `run.py` to serialize those root keys. |
+| `required_metric_keys` (task spec) | `schemas.py:289-291` | compiler (from rubric) | Generic evaluator at execution: `generic-task-integrity-v1/1.0.0/evaluator.py:43-46`, read from `task_spec.required_metric_keys`. Since #497 also statically checked at matrix preflight (`preflight.py`). |
+| `manifest.required_metric_keys` (contract) | free-form `manifest` dict (`schemas.py:480`) | contract author (Honeydew proposes; human promotes) | Static matrix preflight (`preflight.py`) → `_metrics_root_errors` requires `run.py` to serialize those root keys. Unioned with the task spec's list (#497). |
 | `manifest.primary_metric` / `primary_metric_direction` | `schemas.py:480` | contract author | Contract validation `contract_candidates.py:161-168`; job `metric_contract` (`cluster.py:289-296`); evaluator output. |
 
-They are **not** automatically reconciled. For the generic path the contract's
-list is empty (`generic-task-integrity-v1/1.0.0/contract.json`), so the static
-check is a no-op and the task-spec keys are enforced only after the job runs
-([F7](#8-findings-and-defects)). For a task-specific contract the two lists
-should match, but nothing asserts that; the contract's list wins for preflight
-while the task spec's list still travels in the job payload
+They are **not** automatically reconciled, but since #497 the preflight source
+scan unions both lists, so the generic path (contract list empty) is checked
+statically too. For a task-specific contract the two lists should match, but
+nothing asserts that; the job payload still carries the task spec's list
 (`cluster.py:262-263`).
 
 ---
@@ -166,7 +166,7 @@ model-proposed from policy-derived.
 | `runtime_profile` | model | Yes, `Literal['cpu-ml-standard-v1','gpu-ml-standard-v1']` (`schemas.py:286`) | compile (Pydantic) | `RUNTIME_PROFILES` lookup `task_bundles.py:481` | Unknown value → compile rejection. |
 | `assets[]` | model | Optional, default `[]` (`schemas.py:287`) | compile (Pydantic + custom) | `compile()` resolves each asset `task_bundles.py:492-530`; unresolved → `missing_inputs` | Unresolvable asset → recorded in `missing_inputs`, task preflight blocks (`task_bundles.py:587-641`). |
 | `required_artifacts` | model | Optional, default `[]` (`schemas.py:288`); path-safety validator `schemas.py:295-310` | compile | unioned with `BASE_REQUIRED_ARTIFACTS` `task_bundles.py:534-541` | Unsafe path → ValueError. Missing artifact not statically referenced → matrix preflight error (retryable). |
-| `required_metric_keys` | model | Optional, default `[]` (`schemas.py:289-291`); name pattern only | compile | generic evaluator at execution | Malformed name → ValueError. Semantics not statically checked on generic path ([F7](#8-findings-and-defects)). |
+| `required_metric_keys` | model | Optional, default `[]` (`schemas.py:289-291`); name pattern only | compile | matrix preflight source scan (unioned with the contract list, #497) and the generic evaluator at execution | Malformed name → ValueError. Missing keys in `run.py`'s `metrics.json` write → matrix preflight error before submission ([F7](#8-findings-and-defects), fixed). |
 | `missing_inputs` | model | Optional, default `[]` (`schemas.py:292`) | compile | `TaskPreflight.missing_inputs`; blocks `ready` `task_bundles.py:594`, `629-639` | Any entry → task cannot start; `spec_feedback.format_spec_feedback` renders a human message. Non-retryable until the input is supplied. |
 | `rationale` | model | Yes, min length 1 (`schemas.py:293`) | compile | audit only | Empty → compile rejection. |
 | `resources` (compiled) | **policy** (profile) | Always present | derived at compile `task_bundles.py:571`; exact-match enforced at matrix preflight `engine.py:5046-5050` | matrix `resources`; job spec | Any matrix value != profile → matrix preflight error. See [section 5](#5-resource-authority-profiles-precedence-and-the-recommended-rule). |
@@ -201,8 +201,8 @@ wrapper, an evaluator, input/output JSON schemas, and `contract.sha256`
 | `manifest.primary_metric` | contract author | Yes (semantic) | seal | `contract_candidates.py:161-168` | proposal compatibility `engine.py:3628-3635`, `2578` | Missing/empty → `manifest requires primary_metric and a valid direction`. |
 | `manifest.primary_metric_direction` | contract author | Yes, `maximize`/`minimize` | seal | `contract_candidates.py:162-168` | same | Invalid direction → seal rejection. |
 | `manifest.methodology_requirements` | contract author | Optional, default `[]` | seal | see [4.1](#41-methodology_requirements) | matrix preflight | Invalid → seal rejection (`ContractCandidateError`). |
-| `manifest.budget` | contract author | Optional (free-form) | seal | not validated at seal for shape | cluster `budget` comes from `spec.resources.wallclock_minutes`, not this (`cluster.py:279-281`) | Descriptor `budget` is largely inert on the current path. |
-| `manifest.guardrails` | contract author | Optional | seal | not validated at seal |
+| `manifest.budget` | contract author | Optional (free-form) | seal/promotion | **Informational** (issue #500): shape and `wallclock_minutes <= resource_constraints` validated at seal (`contract_candidates.py`); the resource-authority gate re-checks constraints and the task profile at seal, promotion, and matrix preflight (`engine.py`) | humans only; the job wall-clock is `spec.resources.wallclock_minutes`, not this (`cluster.py:279-281`) | Malformed budget or a declaration above the contract/profile wall-clock → seal rejection or non-retryable resource-authority pause (`manifest.budget contradicts ...`). A smaller declared budget is advisory and does not shrink the job. |
+| `manifest.guardrails` | contract author | Optional | seal | not validated (**informational**, issue #500) | humans only | None; inert by design. |
 | `execution_wrapper` | contract author | Yes, min 1 | seal | referenced file must exist + AST-parse `contract_candidates.py:170-204` | workflow-api job render |
 | `evaluation_entry_point` | contract author | Yes, min 1 | seal | same | evaluator invocation | Missing file → `candidate references missing file`. Fail-closed. |
 | `expected_input_schema` | contract author | Yes, min 1 | seal | file exists + JSON object `contract_candidates.py:182-190` | evaluator |
@@ -288,8 +288,10 @@ string count must be within `[minimum, maximum]`; comparison entries land in
 
 The prompt guidance that teaches this to Honeydew/Beaker is
 `METHODOLOGY_REQUIREMENTS_GUIDANCE` (`engine.py:133-153`) and
-`MATRIX_VARIANT_RULES_GUIDANCE` (`engine.py:160-172`) - both `[PROMPT-ONLY]` (they
-mirror the validators, with a drift guard noted at `engine.py:155-159`).
+`MATRIX_VARIANT_RULES_GUIDANCE` (`app/matrix_naming.py`) - both `[PROMPT-ONLY]`.
+The variant pattern is defined once in `app/matrix_naming.py`; the prompt prose
+and the template sanitizer derive from that constant at import time, so the
+guidance cannot drift from `ExperimentVariant.name` (#501).
 
 ---
 
@@ -313,9 +315,11 @@ and `workspace-gpu-ml-v1.json` (limits `cpu 8 / mem 32Gi / nvidia.com/gpu 1`,
 into the Job (`services/workflow-api/app/job_submission.py:602-608`, `707-713`).
 
 Both runner images are in the orchestrator's permitting allowlist in the live
-configmap (`kubeadm/glasslab-v2/research-orchestrator/10-configmap.yaml:88`),
-though the *code default* `permitted_job_images` lists only the CPU image
-(`config.py:243-246`).
+configmap (`kubeadm/glasslab-v2/research-orchestrator/10-configmap.yaml:88`).
+The *code default* `permitted_job_images` now derives from `RUNTIME_PROFILES`,
+so a default deploy permits both; a real-execution deployment that overrides
+the allowlist without covering every profile fails fast at startup
+(`build_engine` -> `require_profile_runner_images`, issue #502).
 
 **Why do they exist?** The recorded intent is a bounded-execution security
 boundary, not a scientific one:
@@ -344,6 +348,11 @@ not a documented resource policy, which is why #483 was possible.
 | Contract `resource_constraints` | descriptor `resource_constraints` | Compatibility envelope. Profile must fit inside it (`preflight.py:409-438`; `engine.py:4956-4991`), and matrix must not exceed it (`matrix.py:47-55`). If the profile exceeds it, the run fails closed for human resolution. |
 | Matrix `resources` | `ExperimentMatrix.resources` (`schemas.py:437`) | Copied by the agent; must equal the profile (imported) and fit the contract and policy. |
 | Global policy | `config.py:265-268`; `policy.py:140-156` | Hard clamp evaluated at action classification: `cpu<=8`, `memory_gib<=32`, `gpus<=1`, `parallel<=4`. Also the image allowlist. |
+
+`manifest.budget` is not a fifth authority: it is an informational declaration
+(issue #500). It may not exceed the contract's `resource_constraints` or the
+compiled profile's wall-clock; a contradiction is rejected at seal and at every
+binding. `manifest.guardrails` is purely human-facing.
 
 So today, for an **imported** task, precedence is:
 
@@ -458,6 +467,7 @@ no model retry.
 |---|---|---|---|---|
 | `problem.md` present exactly once | compile | `task_bundles.stage_archive` | fail-closed | `task archive requires one problem.md and at most one eval_agent_prompt.md` |
 | `problem.md` UTF-8 | compile | `task_bundles.stage_archive` | fail-closed | `problem and evaluator prompt must be UTF-8 text` |
+| `problem.md` required sections present + non-empty | import/compile | `task_bundles.stage_archive` + `problem_schema.py` | fail-closed | `task problem.md does not satisfy the required structure: problem.md is missing the required section "Evaluation rubric"; add a heading such as "## Evaluation rubric"` |
 | ZIP size/count/paths | compile | `task_bundles.stage_archive` | fail-closed | `task archive has an invalid size` / `unsafe task archive member` / ... |
 | `TaskSpecProposal` shape (`display_name`, `runtime_profile`, `rationale`, patterns) | compile | Pydantic `schemas.py:279-310` via `AgentTurnResult` | retryable | Pydantic errors surfaced; compiler turn retried (`engine.py:721-728`) |
 | `source_url` needs `expected_sha256` | compile (preparer) | `engine._establish_source_url_asset_checksums` `engine.py:297-342` | fail-closed (fetch failure) | `source_url asset ... could not be fetched and verified: ...` |
@@ -477,7 +487,7 @@ no model retry.
 | Comparison needs ≥3 matrix seeds | preflight | `preflight.py:567-572` | retryable | `comparison contract requires at least 3 matrix seeds; found N` |
 | Internal-seed duplication | preflight | `preflight.py:548-562` | retryable | `candidate config and outer experiment matrix contain the same multi-seed list...` |
 | Evaluator-owned literals not written by workload | preflight | `preflight.py:363-372` | retryable | `<file> references evaluator-owned output ...` |
-| `run.py` serializes required metric keys | preflight | `preflight.py:191-314` | retryable | `<file> serializes metrics.json without required root key(s): ...` |
+| `run.py` serializes required metric keys (contract list ∪ task-spec list, #497) | preflight | `preflight.py:191-314`, `441-573` | retryable | `<file> serializes metrics.json without required root key(s): <keys>` |
 | Required artifacts statically referenced | preflight | `preflight.py:373-390` | retryable | `workload source does not statically reference required artifact: ...` |
 | Contract digest unchanged | preflight/execution | `engine.py:5051-5052`, `5461-5462` | fail-closed | `evaluation contract changed after run creation` |
 | Profile-vs-contract resource conflict | seal + matrix preflight | `engine.py:3567-3612`, `4956-4991` | **non-retryable** | `Contract candidate rejected by resource-authority preflight: ...` / `methodology.resource_authority_conflict` |
@@ -513,15 +523,15 @@ no model retry.
   population to an orchestrator preparer that fetches and hashes the bytes before
   validation (`engine.py:290-342`). Today fixed; the lesson is that
   model-uncomputable facts belong to deterministic code.
-- **Metric keys on the generic path (NEW, open).** The rubric section is
+- **Metric keys on the generic path (fixed by #497).** The rubric section is
   described as what "preflight enforces hardest"
   (`task-bundle-guide.md:73-75`), but for the generic contract
   `manifest.required_metric_keys` is `[]`, so
-  `_source_errors`/`_metrics_root_errors` never checks the task's metric keys
-  (`preflight.py:534-538`). They are enforced only by the evaluator after the job
-  runs (`generic-task-integrity-v1/1.0.0/evaluator.py:43-46`). A job that omits a
-  metric therefore burns cluster time before failing. See
-  [F7](#8-findings-and-defects).
+  `_source_errors`/`_metrics_root_errors` never checked the task's metric keys.
+  Preflight now unions `task_spec.required_metric_keys` (the list the evaluator
+  reads, `generic-task-integrity-v1/1.0.0/evaluator.py:43-46`) with the
+  contract's list, so a job that would omit a required metric fails before it
+  burns cluster time. See [F7](#8-findings-and-defects).
 - **Profile-vs-contract on the binding path (NEW/known, #490).** The
   non-retryable classification exists on the candidate and matrix paths but not
   in `_promote_contract_candidate` (`engine.py:3925-3935`), producing an
@@ -536,13 +546,14 @@ source reading: one UTF-8 `problem.md`, a resolvable asset declaration, exact
 metric keys, and evidence artifacts that the compiled source can statically
 reference. **Firm vs inferred:**
 
-- **Firm** (enforced by code read): file/count/UTF-8; the `glasslab-dataset://`
-  URI shape (`schemas.py:237-240`); metric-key pattern
+- **Firm** (enforced by code read): file/count/UTF-8; the six required
+  section headings present and non-empty (`problem_schema.py`, #496); the
+  `glasslab-dataset://` URI shape (`schemas.py:237-240`); metric-key pattern
   (`schemas.py:289-291`); artifact path safety (`schemas.py:295-310`); that the
   runtime profile, image, command, resources, and workload are policy-selected
   and cannot be written here.
 - **Inferred** (guide/prompt conventions only, no validator): the section
-  headings, and the exact wording that steers the compiler toward a particular
+  *content* - the exact wording that steers the compiler toward a particular
   profile and asset list. The compile step is model-driven, so this document is
   *designed* to pass, not *proven* to pass without a live run.
 
@@ -620,25 +631,25 @@ were created by this audit.
 
 | # | Finding | Status | One-line justification (evidence) |
 |---|---|---|---|
-| F1 | `problem.md` has **no structural schema**; the guide's "mandatory sections" are unenforced conventions, and the parser-free design means a well-written but oddly-structured document can compile while a well-structured but vague one silently lands in `missing_inputs`. | **NEW - needs an issue** | `task_bundles.py:411-425` checks only filename/count; no markdown parser is a dependency; guide `task-bundle-guide.md:28-96` is prompt-only. |
+| F1 | `problem.md` had **no structural schema**; the guide's "mandatory sections" were unenforced conventions, so a well-written but oddly-structured document could compile while a well-structured but vague one silently landed in `missing_inputs`. | **fixed by #496** | Required headings are now validated at import (`task_bundles.stage_archive` via `problem_schema.problem_section_errors`); a missing or empty section is rejected with the section named. Section *content* remains compiler-interpreted. |
 | F2 | A value the model cannot compute (`expected_sha256` for a URL) was required at proposal time, making URL-declared tasks uncreatable (`POST /runs` 500). Now fixed by an orchestrator preparer. | already filed (#487) | `engine.py:297-342`; issue #487. |
 | F3 | A write-time rule was enforced on read, making historical turns unreadable and breaking resume. Now fixed by `STORED_PAYLOAD_CONTEXT`. | already filed (#480) | `schemas.py:36`, `263-275`; issue #480. |
 | F4 | Two independent resource ceilings made a requirement unsatisfiable; now converted to a non-retryable human pause, but the contract remains a second, independent ceiling (root cause only detected, not removed). | already filed (#483) | `matrix.py:47-55` vs `engine.py:5046-5050`; `engine.py:4956-4991`; issue #483. |
 | F5 | `variants[].name` was stricter than sibling name fields; fixed to `^[a-z0-9][a-z0-9_-]{0,62}$`. | already filed (#474) | `schemas.py:425` vs `218/735/756/781`; issue #474. |
 | F6 | The installed-contract binding path does not route the profile-vs-contract conflict to the non-retryable handler, causing an unresolvable 409 resume loop. | already filed (#490) | `engine.py:3925-3935` raises a bare `WorkflowError`; issue #490. |
-| F7 | **Generic-path metric keys are not checked at preflight** even though the guide says the rubric is what preflight enforces hardest; they are enforced only by the evaluator after the job runs, wasting cluster time on a guaranteed failure. | **NEW - needs an issue** | `preflight.py:534-538` reads `contract.manifest.required_metric_keys` (empty for `generic-task-integrity-v1/1.0.0/contract.json`) while `evaluator.py:43-46` reads `task_spec.required_metric_keys`; guide `task-bundle-guide.md:73-75`. |
-| F8 | **No cross-layer contract test** exists between the orchestrator's submission payload and workflow-api's `GenericExperimentRunRequest`; #491 (forbidden top-level `resources`, HTTP 422) survived because the fake executor never exercised the real schema. | already filed (#491) + **NEW - needs an issue for the test** | `cluster.py:227-299`; workflow-api `schemas.py:293-329`; issue #491 acceptance explicitly asks for such a test. |
+| F7 | **Generic-path metric keys were not checked at preflight** even though the guide says the rubric is what preflight enforces hardest; they were enforced only by the evaluator after the job runs, wasting cluster time on a guaranteed failure. | **fixed by #497** | Matrix preflight unions `task_spec.required_metric_keys` (from `run.task_definition`, the list `evaluator.py:43-46` reads) with `contract.manifest.required_metric_keys` before the static `run.py` → `metrics.json` key scan; the error names the missing keys and the artifact. |
+| F8 | **No cross-layer contract test** exists between the orchestrator's submission payload and workflow-api's `GenericExperimentRunRequest`; #491 (forbidden top-level `resources`, HTTP 422) survived because the fake executor never exercised the real schema. | already filed (#491) + (#498) - guard exists and is extended in this branch | `cluster.py:227-299`; workflow-api `schemas.py:293-329`; `tests/test_workflow_api_contract.py` builds the body via `WorkflowApiClusterExecutor` and validates it with the receiver's request and workspace models, plus drift-rejection cases. |
 | F9 | **The reason for fixed runtime profiles is not recorded anywhere** - no ADR/design doc/commit body explains why a task cannot determine its own resource envelope; only the security boundary is documented. This omission is what allowed #483's accidental exact-match semantics. | **NEW - needs an issue** | `docs/research-orchestrator.md:449-451`, `959`; commits `4aaeca5`/`54a5f58`/`8b2197f` have empty bodies. |
-| F10 | **The contract's `manifest.budget` and `manifest.guardrails` are effectively inert**: the job's wall-clock comes from `spec.resources.wallclock_minutes`, not the contract budget, so a contract author's declared budget has no deterministic effect. | **NEW - needs an issue** | `schemas.py:475-487`; `cluster.py:279-281`; `job_submission.py:362-376` only checks `budget`, not `manifest.budget`. |
-| F11 | **`variants[].name` drift guard is test-only, and the pattern is duplicated in three places** (`schemas.py:425`, prompt text `engine.py:161-162`, template sanitizer `engine.py:175-181`); a prompt change can diverge from the schema without any runtime failure. | **NEW - needs an issue** | `engine.py:155-159` notes the guard lives in `tests/test_matrix_template_derivation.py`, i.e. not enforced at runtime. |
-| F12 | **The code default `permitted_job_images` allows only the CPU runner image**, so a GPU-profile task fails task preflight unless the deployment configmap overrides it (the live configmap does). A default deploy therefore cannot run GPU tasks. | **NEW - needs an issue** | `config.py:243-246` (one image) vs `10-configmap.yaml:88` (two images). |
+| F10 | **The contract's `manifest.budget` and `manifest.guardrails` are effectively inert**: the job's wall-clock comes from `spec.resources.wallclock_minutes`, not the contract budget, so a contract author's declared budget has no deterministic effect. | already filed (#500) - fix in this branch | `schemas.py:475-487`; `cluster.py:279-281`; `job_submission.py:362-376` only checks `budget`, not `manifest.budget`. |
+| F11 | **`variants[].name` drift guard is test-only, and the pattern is duplicated in three places** (`schemas.py:425`, prompt text `engine.py:161-162`, template sanitizer `engine.py:175-181`); a prompt change can diverge from the schema without any runtime failure. | **fixed by #501** | `app/matrix_naming.py` defines `VARIANT_NAME_PATTERN` once; `ExperimentVariant.name`, the prompt guidance, and the sanitizer derive from it, and the guidance renderer raises at import if the pattern interpolation is dropped. |
+| F12 | **The code default `permitted_job_images` allows only the CPU runner image**, so a GPU-profile task fails task preflight unless the deployment configmap overrides it (the live configmap does). A default deploy therefore cannot run GPU tasks. | already filed (#502) - fix in this branch | `config.py:243-246` (one image) vs `10-configmap.yaml:88` (two images). |
 
 ---
 
 ## Appendix A: Authority map (single reference)
 
 ```text
-problem.md (agent-read, no schema)
+problem.md (agent-read, required headings only)  [app/problem_schema.py]
   -> TaskSpecProposal (glasslab-task-spec-v1)        [engine.py:701-718, schemas.py:279-310]
        -> TaskBundleRecord (compiled, policy-owned)  [task_bundles.py:476-582]
             resources = RUNTIME_PROFILES[profile]     [task_bundles.py:96-125, 571]

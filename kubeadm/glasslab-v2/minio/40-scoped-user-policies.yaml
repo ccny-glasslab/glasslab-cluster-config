@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glasslab-minio-scoped-policies
+  namespace: glasslab-v2
+data:
+  # Bucket-scoped policy for the workflow-api object-store identity. It grants
+  # read-write access to the source-document bucket only. Adding a bucket to
+  # workflow-api requires extending this policy and re-running the provisioning
+  # Job in 45-provision-scoped-users-job.yaml; never widen it to "*".
+  glasslab-workflow-api-sources.json: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": ["s3:GetBucketLocation", "s3:ListBucket"],
+          "Resource": ["arn:aws:s3:::glasslab-source-documents"]
+        },
+        {
+          "Effect": "Allow",
+          "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+          "Resource": ["arn:aws:s3:::glasslab-source-documents/*"]
+        }
+      ]
+    }

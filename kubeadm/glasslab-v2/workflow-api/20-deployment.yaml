@@ -48,14 +48,14 @@ spec:
             - name: GLASSLAB_WORKFLOW_API_MINIO_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: glasslab-v2-minio
-                  key: MINIO_ROOT_USER
+                  name: glasslab-v2-workflow-api-minio
+                  key: MINIO_ACCESS_KEY
                   optional: true
             - name: GLASSLAB_WORKFLOW_API_MINIO_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: glasslab-v2-minio
-                  key: MINIO_ROOT_PASSWORD
+                  name: glasslab-v2-workflow-api-minio
+                  key: MINIO_SECRET_KEY
                   optional: true
             - name: GLASSLAB_WORKFLOW_API_MINIO_ENDPOINT
               value: glasslab-minio.glasslab-v2.svc.cluster.local:9000

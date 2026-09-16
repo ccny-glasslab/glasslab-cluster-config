@@ -443,7 +443,9 @@ and returns a validated `glasslab-task-spec-v1` containing:
 > [`research-orchestrator-task-bundle-guide.md`](research-orchestrator-task-bundle-guide.md)
 > for how to write a `problem.md` that compiles and passes preflight, and
 > [`research-orchestrator-spec-fields.md`](research-orchestrator-spec-fields.md)
-> for the field-by-field reference and the resource-precedence rule.
+> for the field-by-field reference and the resource-precedence rule, and
+> [ADR 0005](glasslab-v2/adr/0005-runtime-profile-resource-authority.md) for
+> why profiles exist and the chosen precedence.
 
 - a human-facing name
 - one approved runtime profile

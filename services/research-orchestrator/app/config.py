@@ -17,6 +17,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from . import model_routing
 from .schemas import AgentName, TurnKind
+from .task_bundles import RUNTIME_PROFILES
 
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,17 @@ SERVICE_ROOT = Path(__file__).resolve().parents[1]
 # Settings rejects it at construction. 1024 bytes keeps a documented 4x margin
 # over the measured floor while still allowing tight test caps.
 EVIDENCE_SNAPSHOT_MIN_BYTES = 1024
+
+
+def _default_permitted_job_images() -> list[str]:
+    # A default deployment must be able to compile every runtime profile, so
+    # the default derives from RUNTIME_PROFILES instead of pinning only the
+    # CPU runner image (issue #502).
+    return list(
+        dict.fromkeys(
+            profile.runner_image for profile in RUNTIME_PROFILES.values()
+        )
+    )
 
 
 class Settings(BaseSettings):
@@ -240,10 +252,9 @@ class Settings(BaseSettings):
         ),
     )
     kubernetes_namespace: str = 'glasslab-v2'
-    permitted_job_images: Annotated[list[str], NoDecode] = [
-        'ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:'
-        'dae5bc4967f5ac54edb6c6d63d8d3db9e4652cc46e035118b0c456eb70121061',
-    ]
+    permitted_job_images: Annotated[list[str], NoDecode] = Field(
+        default_factory=_default_permitted_job_images
+    )
 
     maximum_turns: int = 20
     # Threshold-triggered turn-history rotation (#431). A continuing OpenCode

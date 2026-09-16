@@ -31,12 +31,34 @@ from app.task_bundles import (
 from app.workspaces import WorkspaceManager
 
 
-def _archive(*, unsafe_name: str | None = None) -> bytes:
+def _problem_markdown() -> str:
+    return (
+        '# Adult Income Classification\n\n'
+        '## Objective\n'
+        'Predict whether an adult earns more than 50K a year.\n\n'
+        '## Inputs\n'
+        '- Dataset: glasslab-dataset://' + 'a' * 64 + '\n\n'
+        '## Method and architecture\n'
+        '- Logistic regression over the tabular features.\n\n'
+        '## Hyperparameter search space (exact)\n'
+        '- C: {0.1, 1.0}; solver: lbfgs.\n\n'
+        '## Evaluation rubric (exact)\n'
+        '- accuracy >= 0.78; stop after the approved matrix completes.\n\n'
+        '## Evidence artifacts (required)\n'
+        '- metrics.json, report.md, tables/\n'
+    )
+
+
+def _archive(
+    *,
+    unsafe_name: str | None = None,
+    problem: str | None = None,
+) -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(output, 'w') as handle:
         handle.writestr(
             unsafe_name or 'ML_Benchmark_Adult_Income/problem.md',
-            '# Adult task\n',
+            problem if problem is not None else _problem_markdown(),
         )
         handle.writestr(
             'ML_Benchmark_Adult_Income/eval_agent_prompt.md',
@@ -80,7 +102,7 @@ def test_import_task_bundle_is_immutable_and_idempotent(tmp_path: Path) -> None:
     ), proposal)
     assert first == second
     assert first.digest == sha256(content).hexdigest()
-    assert Path(first.problem_path).read_text() == '# Adult task\n'
+    assert Path(first.problem_path).read_text() == _problem_markdown()
     assert Path(first.problem_path).stat().st_mode & 0o222 == 0
     assert first.compilation_source == 'honeydew-task-spec'
     assert first.workload_id == 'workspace-cpu-ml-v1'
@@ -152,6 +174,66 @@ def test_import_task_bundle_rejects_path_traversal(tmp_path: Path) -> None:
             filename='ML_Benchmark_Adult_Income.zip',
             content=_archive(unsafe_name='../problem.md'),
         )
+
+
+def test_import_rejects_problem_missing_required_section(tmp_path: Path) -> None:
+    # Issue #496: a missing mandatory section is rejected at import with the
+    # section named, instead of being silently reinterpreted by the compiler.
+    manager = _manager(tmp_path)
+    problem = _problem_markdown().replace(
+        '## Evaluation rubric (exact)',
+        '## Scoring notes',
+    )
+    with pytest.raises(TaskBundleError) as excinfo:
+        manager.stage_archive(
+            filename='ML_Benchmark_Adult_Income.zip',
+            content=_archive(problem=problem),
+        )
+    message = str(excinfo.value)
+    assert 'Evaluation rubric' in message
+    assert 'missing' in message
+
+
+def test_import_rejects_problem_with_empty_required_section(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    problem = _problem_markdown().replace(
+        'Predict whether an adult earns more than 50K a year.',
+        '',
+    )
+    with pytest.raises(TaskBundleError) as excinfo:
+        manager.stage_archive(
+            filename='ML_Benchmark_Adult_Income.zip',
+            content=_archive(problem=problem),
+        )
+    message = str(excinfo.value)
+    assert 'Objective' in message
+    assert 'empty' in message
+
+
+def test_import_accepts_reordered_reformatted_required_sections(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+    problem = (
+        '# Adult task\n\n'
+        '### Evidence artifacts (REQUIRED):\n'
+        '- metrics.json\n\n'
+        '## method and architecture:\n'
+        'Logistic regression.\n\n'
+        '# Objective:\n'
+        'Classify adult income.\n\n'
+        '## INPUTS\n'
+        '- glasslab-dataset://' + 'a' * 64 + '\n\n'
+        '###### Hyperparameter search space\n'
+        '- C: {0.1, 1.0}\n\n'
+        '## Evaluation Rubric\n'
+        '- accuracy >= 0.78\n'
+    )
+    staged = manager.stage_archive(
+        filename='ML_Benchmark_Adult_Income.zip',
+        content=_archive(problem=problem),
+    )
+    assert staged.problem_path.read_text() == problem
 
 
 def test_task_preflight_reports_missing_inputs(tmp_path: Path) -> None:

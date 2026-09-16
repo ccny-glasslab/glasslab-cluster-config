@@ -10,6 +10,7 @@ re-verifies digests at decision time and fails closed.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -24,6 +25,7 @@ import zipfile
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from .problem_schema import problem_section_errors
 from .schemas import TaskAssetProposal, TaskSpecProposal
 from .spec_feedback import format_spec_feedback
 from .url_fetch import PublicHttpsFetcher, UrlFetchError, UrlFetchErrorKind
@@ -93,6 +95,11 @@ class RuntimeProfile:
     resources: dict[str, Any]
 
 
+# Resource authority for imported tasks: profiles are platform-selected
+# envelopes/defaults, not model-selectable values. Why they exist, the threat
+# model, and the chosen precedence (min(request, envelope,
+# contract.constraints, policy)) are recorded in
+# docs/glasslab-v2/adr/0005-runtime-profile-resource-authority.md
 RUNTIME_PROFILES = {
     'cpu-ml-standard-v1': RuntimeProfile(
         workload_id='workspace-cpu-ml-v1',
@@ -136,6 +143,35 @@ FIXED_WORKLOAD_RUNNER_IMAGES = {
     'workspace-cpu-ml-v1': RUNTIME_PROFILES['cpu-ml-standard-v1'].runner_image,
     'workspace-gpu-ml-v1': RUNTIME_PROFILES['gpu-ml-standard-v1'].runner_image,
 }
+
+
+def missing_profile_runner_images(
+    permitted_images: Iterable[str],
+) -> list[tuple[str, str]]:
+    """Return ``(profile_name, runner_image)`` pairs absent from an allowlist."""
+    permitted = set(permitted_images)
+    return [
+        (name, profile.runner_image)
+        for name, profile in RUNTIME_PROFILES.items()
+        if profile.runner_image not in permitted
+    ]
+
+
+def require_profile_runner_images(permitted_images: Iterable[str]) -> None:
+    """Fail fast when a deployment cannot permit every runtime profile."""
+    missing = missing_profile_runner_images(permitted_images)
+    if not missing:
+        return
+    rendered = '; '.join(f'{name} -> {image}' for name, image in missing)
+    raise TaskBundleError(
+        'permitted_job_images does not cover every runtime profile runner '
+        f'image required by RUNTIME_PROFILES; missing: {rendered}. Add the '
+        'missing images to GLASSLAB_ORCHESTRATOR_PERMITTED_JOB_IMAGES or '
+        'remove the corresponding profile from RUNTIME_PROFILES; a task that '
+        'compiles to an uncovered profile can never pass task preflight '
+        '(issue #502).'
+    )
+
 
 BASE_REQUIRED_ARTIFACTS = (
     'run_manifest.json',
@@ -443,13 +479,21 @@ class TaskBundleManager:
             shutil.rmtree(staging, ignore_errors=True)
             raise
         try:
-            problem.read_text(encoding='utf-8')
+            problem_text = problem.read_text(encoding='utf-8')
             evaluator.read_text(encoding='utf-8')
         except UnicodeDecodeError as exc:
             shutil.rmtree(staging, ignore_errors=True)
             raise TaskBundleError(
                 'problem and evaluator prompt must be UTF-8 text'
             ) from exc
+        section_errors = problem_section_errors(problem_text)
+        if section_errors:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise TaskBundleError(
+                'task problem.md does not satisfy the required structure: '
+                + '; '.join(section_errors)
+                + ' (see docs/research-orchestrator-task-bundle-guide.md)'
+            )
         return StagedTaskBundle(
             filename=Path(filename).name,
             digest=digest,

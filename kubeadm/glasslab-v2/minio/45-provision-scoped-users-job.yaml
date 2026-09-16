@@ -1,0 +1,102 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: glasslab-minio-provision-workflow-api
+  namespace: glasslab-v2
+  labels:
+    app.kubernetes.io/name: glasslab-minio-provisioner
+    app.kubernetes.io/component: scoped-users
+spec:
+  # One-shot, idempotent IAM convergence. Re-run it (delete + apply) after the
+  # scoped Secret changes: `mc admin user add` updates an existing access key's
+  # secret in place, so this is also the rotation mechanism.
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: glasslab-minio-provisioner
+        app.kubernetes.io/component: scoped-users
+    spec:
+      restartPolicy: Never
+      # The provisioner only talks to MinIO over HTTP; it never calls the
+      # Kubernetes API, so it must not carry a ServiceAccount token.
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mc
+          # minio/mc, digest-pinned (RELEASE.2025-08-13T08-35-41Z).
+          image: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          # Credentials are exported as MC_HOST_<alias> environment values and
+          # the scoped secret is piped on stdin, so no password ever appears in
+          # the process argv.
+          args:
+            - |
+              set -eu
+              endpoint="glasslab-minio.glasslab-v2.svc.cluster.local:9000"
+              export MC_HOST_root="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@${endpoint}"
+              attempt=0
+              until mc admin info root >/dev/null 2>&1; do
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 60 ]; then
+                  echo "MinIO did not accept root credentials within the timeout" >&2
+                  exit 1
+                fi
+                sleep 5
+              done
+              mc mb --ignore-existing "root/${MINIO_SOURCE_DOCUMENT_BUCKET}"
+              mc admin policy create root "$MINIO_POLICY_NAME" "/policies/${MINIO_POLICY_NAME}.json"
+              printf '%s\n%s\n' "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" | mc admin user add root
+              mc admin policy attach root "$MINIO_POLICY_NAME" --user "$MINIO_ACCESS_KEY"
+              echo "provisioned ${MINIO_ACCESS_KEY} with policy ${MINIO_POLICY_NAME}"
+          env:
+            - name: HOME
+              value: /tmp
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-v2-minio
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-v2-minio
+                  key: MINIO_ROOT_PASSWORD
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-v2-workflow-api-minio
+                  key: MINIO_ACCESS_KEY
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-v2-workflow-api-minio
+                  key: MINIO_SECRET_KEY
+            - name: MINIO_SOURCE_DOCUMENT_BUCKET
+              value: glasslab-source-documents
+            - name: MINIO_POLICY_NAME
+              value: glasslab-workflow-api-sources
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: policies
+              mountPath: /policies
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: policies
+          configMap:
+            name: glasslab-minio-scoped-policies
+        - name: tmp
+          emptyDir: {}

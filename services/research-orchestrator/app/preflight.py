@@ -438,6 +438,89 @@ def profile_contract_resource_conflicts(
     return conflicts
 
 
+@dataclass(frozen=True, slots=True)
+class DeclaredBudgetConflict:
+    """One declared contract budget that exceeds a deterministic limit."""
+
+    scope: str
+    declared_minutes: int
+    limit_minutes: float
+
+    def describe(self) -> str:
+        return (
+            f'manifest.budget.wallclock_minutes={self.declared_minutes} > '
+            f'{self.scope}={self.limit_minutes:g}'
+        )
+
+
+def declared_budget_conflicts(
+    *,
+    manifest: Mapping[str, Any],
+    constraints: ResourceRequest,
+    profile: Mapping[str, Any] | None = None,
+) -> list[DeclaredBudgetConflict]:
+    """Check a declared contract budget against what the run can receive.
+
+    ``manifest.budget`` and ``manifest.guardrails`` are informational: the
+    run's wall-clock is the compiled task profile / matrix resources, never a
+    value copied from the contract (issue #500). The declaration must still be
+    honest: a ``wallclock_minutes`` larger than the contract's own
+    ``resource_constraints`` or the task profile's wall-clock claims time the
+    run can never receive, so it is rejected instead of approved. A smaller
+    declaration is advisory and does not shrink the job.
+    """
+    raw_budget = manifest.get('budget')
+    if raw_budget is None:
+        return []
+    if not isinstance(raw_budget, Mapping):
+        raise ValueError('manifest.budget must be a JSON object when declared')
+    raw_minutes = raw_budget.get('wallclock_minutes')
+    if raw_minutes is None:
+        return []
+    if (
+        isinstance(raw_minutes, bool)
+        or not isinstance(raw_minutes, int)
+        or raw_minutes < 1
+    ):
+        raise ValueError(
+            'manifest.budget.wallclock_minutes must be a positive integer '
+            'number of minutes'
+        )
+    limits: list[tuple[str, float]] = [
+        ('contract resource_constraints', float(constraints.wallclock_minutes)),
+    ]
+    if profile is not None and 'wallclock_minutes' in profile:
+        limits.append(
+            ('task resource profile', float(profile['wallclock_minutes']))
+        )
+    return [
+        DeclaredBudgetConflict(
+            scope=scope,
+            declared_minutes=raw_minutes,
+            limit_minutes=limit,
+        )
+        for scope, limit in limits
+        if raw_minutes > limit
+    ]
+
+
+def _task_spec_required_metric_keys(
+    task_definition: Mapping[str, Any] | None,
+) -> list[str]:
+    # The generic evaluator reads task_spec.required_metric_keys from the job
+    # payload; the contract's optional manifest list does not restate them, so
+    # the static source scan must check both lists (issue #497).
+    if not task_definition:
+        return []
+    task_spec = task_definition.get('task_spec')
+    if not isinstance(task_spec, Mapping):
+        return []
+    keys = task_spec.get('required_metric_keys')
+    if not isinstance(keys, list):
+        return []
+    return [key for key in keys if isinstance(key, str) and key]
+
+
 def preflight_matrix(
     *,
     run: RunRecord,
@@ -529,14 +612,20 @@ def preflight_matrix(
         if not source.is_relative_to(workspace):
             errors.append('imported task source directory escapes the workspace')
         else:
+            required_metric_keys = list(
+                dict.fromkeys(
+                    [
+                        *contract.descriptor.manifest.get(
+                            'required_metric_keys',
+                            [],
+                        ),
+                        *_task_spec_required_metric_keys(run.task_definition),
+                    ]
+                )
+            )
             source_findings = _source_errors(
                 source,
-                required_metric_keys=list(
-                    contract.descriptor.manifest.get(
-                        'required_metric_keys',
-                        [],
-                    )
-                ),
+                required_metric_keys=required_metric_keys,
                 required_artifacts=list(contract.descriptor.required_artifacts),
             )
             errors.extend(source_findings)
