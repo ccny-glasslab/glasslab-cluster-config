@@ -127,6 +127,7 @@ If you want the current source of truth:
 - [docs/glasslab-v2/command-surface-spec.md](docs/glasslab-v2/command-surface-spec.md)
 - [docs/research-orchestrator-command-surface.md](docs/research-orchestrator-command-surface.md)
 - [docs/research-orchestrator.md](docs/research-orchestrator.md)
+- [docs/research-orchestrator-spec-fields.md](docs/research-orchestrator-spec-fields.md)
 - [docs/glasslab-v2/router-and-backend-contract.md](docs/glasslab-v2/router-and-backend-contract.md)
 - [docs/glasslab-v2/deprecation-map-2026-04.md](docs/glasslab-v2/deprecation-map-2026-04.md)
 
