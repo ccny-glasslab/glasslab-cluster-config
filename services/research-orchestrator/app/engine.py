@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from datetime import datetime, timedelta
@@ -42,6 +43,7 @@ from .preflight import (
     MatrixPreflightReport,
     MethodologyRequirement,
     preflight_matrix,
+    profile_contract_resource_conflicts,
 )
 from .research_store import ResearchStore
 from .schemas import (
@@ -2573,6 +2575,24 @@ class ResearchOrchestrator:
                     sort_keys=True,
                 )
             )
+            profile_resources = run.task_definition.get('resources')
+            if isinstance(profile_resources, Mapping):
+                # The compiled task's runtime profile is fixed platform policy
+                # (issue #483): the proposal must leave room for it so the
+                # sealed contract can accommodate the profile and the matrix
+                # can copy it exactly.
+                task_context += (
+                    '\nThe imported task has a fixed, preselected runtime '
+                    'resource profile. The evaluation contract '
+                    'resource_constraints must be at least these values in '
+                    'every dimension, and the experiment matrix will request '
+                    'exactly them:\n'
+                    + json.dumps(
+                        dict(profile_resources),
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
         prompt = (
             'Draft a concrete program.md for this objective:\n\n'
             f'{run.objective}\n\n'
@@ -3487,6 +3507,52 @@ class ResearchOrchestrator:
                 version=request.version,
             )
             descriptor = sealed.descriptor
+            conflict = self._profile_contract_conflict_message(
+                run=run,
+                descriptor=descriptor,
+            )
+            if conflict is not None:
+                # The same configuration contradiction the matrix preflight
+                # detects, caught at the earliest deterministic point: a
+                # candidate whose limits cannot fit the preselected profile can
+                # never pass preflight, so no redraft is requested and none of
+                # the contract-redraft budget is spent (issue #483).
+                reason = (
+                    'Contract candidate rejected by resource-authority '
+                    f'preflight: {conflict}'
+                )
+                self.store.update_action(
+                    action.action_id,
+                    approval_status=ApprovalStatus.REJECTED,
+                    reviewer='orchestrator',
+                    reason=reason,
+                )
+                self._event(
+                    run_id,
+                    source='orchestrator',
+                    event_type='action.rejected',
+                    payload={'action_id': action.action_id, 'reason': reason},
+                )
+                self._event(
+                    run_id,
+                    source='orchestrator',
+                    event_type='methodology.resource_authority_conflict',
+                    payload={
+                        'action_id': action.action_id,
+                        'reason': reason,
+                        'origin': 'contract_seal',
+                    },
+                )
+                self.pause_run(
+                    run_id,
+                    requested_by='orchestrator',
+                    reason=(
+                        f'{reason} Human resolution is required: no model '
+                        'redraft or retry can reconcile the preselected task '
+                        'profile with the contract resource_constraints.'
+                    ),
+                )
+                return
             primary = proposal.get('primary_metric')
             resources = proposal.get('resource_constraints')
             required_artifacts = proposal.get('required_artifacts')
@@ -4372,6 +4438,10 @@ class ResearchOrchestrator:
 
     def _matrix_action_template(self, run: RunRecord) -> dict[str, Any]:
         if run.task_definition:
+            # Issue #483: the compiled task's preselected runtime profile is
+            # the single authority for the matrix resources, so the
+            # demonstrated shape carries the profile's exact values and the
+            # deterministic preflight rejects any matrix that differs from it.
             task = run.task_definition
             runner_image = str(task['runner_image'])
             resources = dict(task['resources'])
@@ -4536,6 +4606,50 @@ class ResearchOrchestrator:
                     self._contract_methodology_requirements(run_id),
                 )
             )
+            if preflight.non_retryable:
+                # Configuration contradiction, not a model failure: reject
+                # once and park for a human. It must never count against
+                # maximum_revisions or maximum_turns and must not consume a
+                # retry, so no revision is requested and no agent turn is
+                # started (issue #483).
+                self.store.update_action(
+                    action.action_id,
+                    approval_status=ApprovalStatus.REJECTED,
+                    reviewer='orchestrator',
+                    reason=rejection_reason,
+                )
+                self._event(
+                    run_id,
+                    source='orchestrator',
+                    event_type='action.rejected',
+                    payload={
+                        'action_id': action.action_id,
+                        'reason': rejection_reason,
+                        'preflight': preflight.model_dump(mode='json'),
+                        'non_retryable': True,
+                    },
+                )
+                self._event(
+                    run_id,
+                    source='orchestrator',
+                    event_type='methodology.resource_authority_conflict',
+                    payload={
+                        'action_id': action.action_id,
+                        'reason': rejection_reason,
+                        'errors': list(preflight.errors),
+                    },
+                )
+                self.pause_run(
+                    run_id,
+                    requested_by='orchestrator',
+                    reason=(
+                        f'{rejection_reason} Human resolution is required: '
+                        'the preselected task resource profile and the bound '
+                        'evaluation contract cannot both hold, and no model '
+                        'revision or retry can reconcile them.'
+                    ),
+                )
+                return
             previous_signature = self._last_preflight_rejection_signature(run_id)
             signature, base_config_digest = self._preflight_rejection_signature(
                 run_id=run_id,
@@ -4782,6 +4896,43 @@ class ResearchOrchestrator:
                 f'failed to create Honeydew review snapshot: {exc}'
             ) from exc
 
+    def _profile_contract_conflict_message(
+        self,
+        *,
+        run: RunRecord,
+        descriptor: EvaluationContractDescriptor,
+    ) -> str | None:
+        # Precedence for imported benchmarks (issue #483): the compiled task's
+        # preselected resource profile is the single authority for the matrix
+        # resources, and the contract's resource_constraints are the
+        # compatibility envelope the profile must fit inside. A profile that
+        # exceeds the contract is a configuration contradiction between the
+        # task bundle and the (possibly agent-drafted) contract, so the engine
+        # fails closed with one actionable message naming both values and the
+        # offending dimension instead of letting the model chase two mutually
+        # exclusive deterministic rules.
+        profile = (run.task_definition or {}).get('resources')
+        if not isinstance(profile, Mapping) or not profile:
+            return None
+        conflicts = profile_contract_resource_conflicts(
+            profile=profile,
+            constraints=descriptor.resource_constraints,
+        )
+        if not conflicts:
+            return None
+        joined = '; '.join(conflict.describe() for conflict in conflicts)
+        return (
+            'preselected task resource profile is incompatible with the '
+            f'evaluation contract `{descriptor.contract_id}` '
+            f'{descriptor.version} resource_constraints: {joined}. '
+            'For imported benchmarks the preselected profile is the single '
+            'authority for matrix resources, so the contract must be able to '
+            'accommodate it. Raise the contract resource_constraints to fit '
+            'the profile or change the task runtime profile; no model '
+            'revision, redraft, or retry can resolve this configuration '
+            'contradiction.'
+        )
+
     def _matrix_preflight_report(
         self,
         *,
@@ -4790,8 +4941,28 @@ class ResearchOrchestrator:
     ) -> MatrixPreflightReport:
         errors: list[str] = []
         try:
-            matrix = ExperimentMatrix.model_validate(action.arguments)
             run = self.store.get_run(run_id)
+            contract = self.contracts.resolve(
+                run.evaluation_contract_id,
+                run.evaluation_contract_version,
+            )
+            conflict = self._profile_contract_conflict_message(
+                run=run,
+                descriptor=contract.descriptor,
+            )
+            if conflict is not None:
+                # Fail closed once, before any matrix-content check: while the
+                # profile cannot fit the contract, no matrix can satisfy both
+                # the exact-profile match and the contract ceiling, so
+                # reporting any other error (or handing Beaker a revision)
+                # only restarts the loop.
+                return MatrixPreflightReport(
+                    passed=False,
+                    job_count=0,
+                    errors=[conflict],
+                    non_retryable=True,
+                )
+            matrix = ExperimentMatrix.model_validate(action.arguments)
             if not self._contract_binding_compatible(run_id):
                 errors.append(
                     'installed evaluation contract is incompatible with the '
@@ -4820,10 +4991,6 @@ class ResearchOrchestrator:
                         'imported benchmark resources must exactly match the '
                         'preselected task resource profile'
                     )
-            contract = self.contracts.resolve(
-                run.evaluation_contract_id,
-                run.evaluation_contract_version,
-            )
             if contract.digest != run.evaluation_contract_digest:
                 errors.append('evaluation contract changed after run creation')
             expand_experiment_matrix(
