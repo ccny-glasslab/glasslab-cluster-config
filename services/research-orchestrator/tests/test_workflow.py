@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import time
 from datetime import timedelta
 from hashlib import sha256
@@ -2724,6 +2725,135 @@ def test_http_turns_endpoint_redacts_and_bounds_history(
             f'/runs/{run.run_id}/turns',
             params={'limit': 10000},
         ).status_code == 422
+
+
+def test_http_turns_endpoint_serves_turns_persisted_before_checksum_rule(
+    orchestrator_bundle,
+) -> None:
+    """Regression for the live 500 on GET /runs/{run_id}/turns.
+
+    Run 8536f8bcecd1483d8de44472ccde4b3b persisted a Honeydew protocol_draft
+    turn carrying a task_spec_proposal on 2026-09-07, before ad53979
+    (2026-09-09) required expected_sha256 for source_url assets. Re-validating
+    that stored payload on read raised a ValidationError inside list_turns,
+    which map_error mapped to an HTTP 500 with no logged cause. The row below
+    reproduces the stored shape exactly; it is inserted through the connection
+    because current code rightly refuses to *construct* a source_url asset
+    without a checksum.
+    """
+    settings, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(
+            objective='Serve turns persisted before a later schema rule.'
+        )
+    )
+    legacy_turn_id = 'legacy-pre-checksum-task-spec-turn'
+    legacy_payload = {
+        'turn_id': legacy_turn_id,
+        'run_id': run.run_id,
+        'agent': 'honeydew',
+        'opencode_session_id': None,
+        'opencode_message_id': None,
+        'input_event': {
+            'objective': run.objective,
+            # Credential-shaped input so this request also proves the read
+            # path still redacts legacy payloads.
+            'discord_bot_token': 'not-a-real-token',
+        },
+        'structured_output': {
+            'kind': 'protocol_draft',
+            'summary': 'legacy task spec with unverified source_url assets',
+            'task_spec_proposal': {
+                'schema_version': 'glasslab-task-spec-v1',
+                'display_name': 'Legacy titanic task',
+                'runtime_profile': 'cpu-ml-standard-v1',
+                'assets': [
+                    {
+                        'name': 'titanic_train',
+                        'role': 'training data',
+                        'source_url': (
+                            'https://example.invalid/kaggle-titanic/train.csv'
+                        ),
+                        'approved_uri': None,
+                        'expected_sha256': None,
+                        'contains_labels': True,
+                    },
+                ],
+                'required_artifacts': [],
+                'required_metric_keys': [],
+                'missing_inputs': [],
+                'rationale': 'persisted before expected_sha256 was required',
+            },
+        },
+        'status': 'completed',
+        'error': None,
+        'created_at': '2026-09-07T14:00:29.405825Z',
+        'updated_at': '2026-09-07T14:04:24.349192Z',
+    }
+    with store._connect() as connection:
+        connection.execute(
+            'INSERT INTO turns (turn_id, run_id, status, payload, '
+            'created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+            (
+                legacy_turn_id,
+                run.run_id,
+                legacy_payload['status'],
+                json.dumps(legacy_payload),
+                legacy_payload['created_at'],
+                legacy_payload['updated_at'],
+            ),
+        )
+
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        response = client.get(f'/runs/{run.run_id}/turns')
+        assert response.status_code == 200
+        turns = response.json()['turns']
+        legacy = next(
+            item for item in turns if item['turn_id'] == legacy_turn_id
+        )
+        assert legacy['status'] == 'completed'
+        assert legacy['ended_at'] is not None
+        assert legacy['output']['kind'] == 'protocol_draft'
+        asset = legacy['output']['task_spec_proposal']['assets'][0]
+        assert asset['source_url'].startswith('https://example.invalid/')
+        assert asset['expected_sha256'] is None
+        assert legacy['input']['discord_bot_token'] == '[REDACTED]'
+
+
+def test_unexpected_endpoint_errors_log_with_traceback_and_return_generic_500(
+    orchestrator_bundle,
+    caplog,
+) -> None:
+    """map_error must keep root causes server-side, not in the response.
+
+    The live turns 500 printed no traceback anywhere, and its body carried
+    str(exc) — for a pydantic ValidationError that includes stored payload
+    values. Unexpected failures now log with exc_info and answer with a
+    generic detail.
+    """
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Exercise the unexpected-error funnel.')
+    )
+    leaky = RuntimeError('provider failed: Bearer abcdefghijklmnop0123456789')
+
+    def explode(_run_id: str, *, after_sequence: int = 0):
+        raise leaky
+
+    engine.store.list_events = explode
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        with caplog.at_level(logging.ERROR, logger='app.main'):
+            response = client.get(f'/runs/{run.run_id}/events')
+
+    assert response.status_code == 500
+    assert response.json() == {'detail': 'internal server error'}
+    assert 'abcdefghijklmnop0123456789' not in response.text
+    records = [record for record in caplog.records if record.name == 'app.main']
+    assert records, 'unexpected exceptions must be logged'
+    assert any(record.exc_info is not None for record in records)
+    assert 'RuntimeError' in caplog.text
 
 
 def test_http_api_with_mock_runtime(orchestrator_bundle) -> None:
