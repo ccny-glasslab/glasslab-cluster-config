@@ -1,5 +1,10 @@
 # Contrastive Learning Deployment Summary
 
+> **Status note (2026-09-16):** the `services/runner` sources and the
+> CIFAR-100/contrastive deployment described below were removed from the
+> repository during the v1 Titanic stack retirement (issues #157/#158).
+> Retained as a historical record of the deployment.
+
 ## Overview
 
 This document summarizes the contrastive learning deployment for Glasslab cluster.

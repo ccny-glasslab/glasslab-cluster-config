@@ -26,7 +26,6 @@ echo "Submitted run: $RUN"
 
 # 6) Cleanup
 kubectl -n glasslab-v2 delete pod smoke-test
-kubectl -n glasslab-v2 delete jobs -l app=glasslab-titanic 2>/dev/null || true
 ```
 
 If all steps succeed → workflow-api and Calico are healthy.

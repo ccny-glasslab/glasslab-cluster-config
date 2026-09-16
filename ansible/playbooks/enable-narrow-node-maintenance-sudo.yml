@@ -38,14 +38,6 @@
 
           ctr -n k8s.io images ls | awk '{print $1}' | grep -Fx "$image_ref" >/dev/null
 
-    - name: Install wrapper for staging the Titanic dataset into the live path
-      ansible.builtin.copy:
-        dest: /usr/local/sbin/glasslab-install-titanic-dataset
-        mode: '0755'
-        owner: root
-        group: root
-        src: glasslab-install-titanic-dataset
-
     - name: Install narrow sudoers policy for reviewed maintenance wrappers
       ansible.builtin.copy:
         dest: /etc/sudoers.d/50-glasslab-node-maintenance
@@ -55,7 +47,6 @@
         content: |
           {{ maintenance_sudo_user }} ALL=(root) NOPASSWD: /usr/local/sbin/glasslab-import-k8s-image *
           {{ maintenance_sudo_user }} ALL=(root) NOPASSWD: /usr/local/sbin/glasslab-has-k8s-image *
-          {{ maintenance_sudo_user }} ALL=(root) NOPASSWD: /usr/local/sbin/glasslab-install-titanic-dataset *
 
     - name: Validate sudoers policy
       ansible.builtin.command: visudo -cf /etc/sudoers.d/50-glasslab-node-maintenance
@@ -66,56 +57,8 @@
       register: import_wrapper_check
       changed_when: false
 
-    - name: Verify dataset wrapper-based passwordless sudo
-      ansible.builtin.command: sudo -n /usr/local/sbin/glasslab-install-titanic-dataset --help
-      register: dataset_wrapper_check
-      changed_when: false
-
-    - name: Prepare wrapper traversal probes
-      ansible.builtin.file:
-        path: /tmp/glasslab-titanic-sync-verify-real
-        state: directory
-      changed_when: false
-
-    - name: Create symlink escape probe
-      ansible.builtin.file:
-        src: /var
-        dest: /tmp/glasslab-titanic-sync-verify-escape
-        state: link
-      changed_when: false
-
-    - name: Verify dotdot traversal staging path is refused
-      ansible.builtin.command: sudo -n /usr/local/sbin/glasslab-install-titanic-dataset '/tmp/glasslab-titanic-sync-verify-real/../../var' /var/lib/glasslab-agent/datasets/titanic
-      register: dotdot_traversal
-      changed_when: false
-      ignore_errors: true
-
-    - name: Verify symlink escape staging path is refused
-      ansible.builtin.command: sudo -n /usr/local/sbin/glasslab-install-titanic-dataset '/tmp/glasslab-titanic-sync-verify-escape' /var/lib/glasslab-agent/datasets/titanic
-      register: symlink_traversal
-      changed_when: false
-      ignore_errors: true
-
-    - name: Remove wrapper traversal probes
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /tmp/glasslab-titanic-sync-verify-real
-        - /tmp/glasslab-titanic-sync-verify-escape
-      changed_when: false
-
-    - name: Assert traversal staging paths are refused
-      ansible.builtin.assert:
-        that:
-          - dotdot_traversal.rc != 0
-          - symlink_traversal.rc != 0
-          - "'refusing' in (dotdot_traversal.stderr | default(''))"
-          - "'refusing' in (symlink_traversal.stderr | default(''))"
-
     - name: Summarize narrow maintenance sudo state
       ansible.builtin.debug:
         msg:
           host: "{{ inventory_hostname }}"
           import_wrapper_sudo: "{{ import_wrapper_check.rc == 0 }}"
-          dataset_wrapper_sudo: "{{ dataset_wrapper_check.rc == 0 }}"

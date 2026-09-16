@@ -60,8 +60,6 @@ Live validation on 2026-03-19:
 - `glasslab-minio` restarted and retained a marker file across restart
 - `./scripts/smoke-test-v2.sh` still passed after the cutover
 
-This matches the existing v1 pattern in `kubeadm/agent-stack/02-persistent-volume-claims.yaml`, where single-node local PVs are explicit and reviewable.
-
 Future storage placeholders live under `kubeadm/glasslab-v2/storage/`.
 
 ## Workload expectations

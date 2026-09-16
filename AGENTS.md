@@ -96,8 +96,9 @@ Primary code and deployment areas:
 
 The following are not the current research front door:
 
-- `services/agent-api`, `services/runner`, and `kubeadm/agent-stack` are the
-  legacy Titanic v1 reference implementation.
+- The legacy Titanic v1 stack (`services/agent-api`, `services/runner`, and
+  `kubeadm/agent-stack`) has been removed from this repository; do not treat
+  those paths as usable or as a template for new work.
 - OpenClaw and WhatsApp material is compatibility or historical context unless
   a current task explicitly targets those adapters.
 - The older `!new`, `!plan`, and related command vocabulary does not describe

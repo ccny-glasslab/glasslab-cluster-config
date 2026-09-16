@@ -58,7 +58,6 @@ LEGACY_IMAGE_ALLOWLIST = {
     'ghcr.io/ccny-glasslab/glasslab-research-orchestrator:0.1.0',
     'ghcr.io/ccny-glasslab/glasslab-design-agent:0.1.0',
     'ghcr.io/ccny-glasslab/glasslab-schedule-worker:0.1.0',
-    'ghcr.io/ccny-glasslab/glasslab-agent-api:0.1.0',
 }
 
 

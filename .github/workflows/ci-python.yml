@@ -296,11 +296,6 @@ jobs:
             requirements: services/reporter/requirements.txt
             pythonpath: .
             tests: tests/test_main.py
-          - name: contrastive-learning-runner
-            workdir: services/runner
-            requirements: services/runner/requirements.txt
-            pythonpath: ../..:.
-            tests: tests/test_contrastive_runner.py
 
     steps:
       - name: Checkout
