@@ -11,6 +11,8 @@ errors, and every error is surfaced to the human reviewer.
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -24,6 +26,7 @@ from .schemas import (
     ExperimentMatrix,
     MIN_COMPARISON_SEEDS,
     ResolvedEvaluationContract,
+    ResourceRequest,
     RunRecord,
 )
 
@@ -48,6 +51,11 @@ class MatrixPreflightReport(BaseModel):
     comparisons: dict[str, list[str]] = Field(default_factory=dict)
     decisions: dict[str, list[str]] = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
+    # A non-retryable report is a configuration contradiction, not a model
+    # mistake: no revision, redraft, or retry can satisfy it, so the engine
+    # parks the run for human resolution instead of spending budget on an
+    # unsatisfiable matrix (issue #483).
+    non_retryable: bool = False
 
 
 class VerificationPreflightReport(BaseModel):
@@ -381,6 +389,53 @@ def _source_errors(
             f'{artifact}'
         )
     return errors
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceConstraintConflict:
+    """One resource dimension where a profile exceeds contract constraints."""
+
+    dimension: str
+    profile_value: float
+    contract_value: float
+
+    def describe(self) -> str:
+        return (
+            f'{self.dimension} profile={self.profile_value:g} > '
+            f'contract={self.contract_value:g}'
+        )
+
+
+def profile_contract_resource_conflicts(
+    *,
+    profile: Mapping[str, Any],
+    constraints: ResourceRequest,
+) -> list[ResourceConstraintConflict]:
+    """Compare a preselected task resource profile with contract limits.
+
+    The profile is the single authority for an imported benchmark's matrix
+    resources (issue #483): the matrix must match it exactly. The contract's
+    ``resource_constraints`` are a compatibility envelope the profile has to
+    fit inside, not an independent ceiling that can override the profile.
+    Dimensions the profile does not declare are ignored so hand-authored task
+    bindings stay comparable; the compiled platform profiles always declare
+    all four.
+    """
+    conflicts: list[ResourceConstraintConflict] = []
+    for dimension in ('cpu', 'memory_gib', 'gpus', 'wallclock_minutes'):
+        if dimension not in profile:
+            continue
+        profile_value = float(profile[dimension])
+        contract_value = float(getattr(constraints, dimension))
+        if profile_value > contract_value:
+            conflicts.append(
+                ResourceConstraintConflict(
+                    dimension=dimension,
+                    profile_value=profile_value,
+                    contract_value=contract_value,
+                )
+            )
+    return conflicts
 
 
 def preflight_matrix(
