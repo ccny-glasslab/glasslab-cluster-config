@@ -92,14 +92,11 @@ commands, and the read/report commands (`discord_controls.py:679-910`), and the
 tests assert the retired names are absent
 (`services/research-orchestrator/tests/test_discord_and_opencode.py:415-419`).
 
-Several documents still advertise the retired names. Flagged, not yet fixed:
+The previously stale references now defer to `/task-start`:
 
-- `docs/research-orchestrator.md:667` and `:810` still show
-  `/research-start objective:...`; `:481` and `:814` still describe
-  `/benchmark-start` as a compatibility alias.
-- `docs/research-orchestrator-discord-operator-guide.md:19` shows
-  `/research-start`, and `:28-29` presents `/benchmark-start`.
-- `AGENTS.md` (Discord Workflow) still shows `/research-start objective:...`.
+- `docs/research-orchestrator.md` (the Discord section and the worked example).
+- `docs/research-orchestrator-discord-operator-guide.md` (`Start A Run`).
+- `AGENTS.md` (Discord Workflow) and `kubeadm/glasslab-v2/research-orchestrator/README.md`.
 
 Use `/task-start` for both objective-only and archive runs.
 
