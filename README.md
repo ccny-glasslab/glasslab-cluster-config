@@ -40,7 +40,6 @@ Useful service buckets:
 - legacy or compatibility services:
   - `services/evaluator` (dormant: no Dockerfile, k8s manifest, or importer;
     authoritative evaluation lives in research-orchestrator evaluation contracts)
-  - `services/research-command-router`
   - `services/intake-agent`
   - `services/interpretation-agent`
   - `services/assessment-agent`
@@ -49,9 +48,8 @@ Useful service buckets:
 The legacy services are retained for migration and historical reference. They
 are not the current research front door.
 
-`whatsapp-gateway` and `research-ingress` have been retired; see
-`docs/glasslab-v2/historical/README.md`. `research-command-router` is held
-pending confirmation on the #173 workflow-api auth work.
+`whatsapp-gateway`, `research-ingress`, and `research-command-router` have been
+retired; see `docs/glasslab-v2/historical/README.md`.
 
 ## Canonical Product Direction
 

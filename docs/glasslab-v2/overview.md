@@ -49,7 +49,7 @@ The canonical interactive path is:
 - repo-owned tools
 - `workflow-api`
 
-WhatsApp, research ingress, and the command router are optional adapters.
+WhatsApp, research ingress, and the command router are retired (issue #159).
 
 Primary commands:
 
@@ -107,25 +107,11 @@ Retired (issue #159). See `docs/glasslab-v2/historical/README.md`.
 
 ### `research-command-router`
 
-Deterministic command dispatch.
-
-Owns:
-
-- command matching
-- argument parsing
-- pinned-session routing
-- one backend-owned action per primary command
+Retired (issue #159). See `docs/glasslab-v2/historical/README.md`.
 
 ### `whatsapp-gateway`
 
-Repo-owned operator shell.
-
-Owns:
-
-- sender transcript persistence
-- sender/session pinning
-- attachment normalization
-- duplicate suppression
+Retired (issue #159). See `docs/glasslab-v2/historical/README.md`.
 
 ### `evaluator` and `reporter`
 

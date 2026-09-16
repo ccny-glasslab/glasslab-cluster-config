@@ -1,5 +1,10 @@
 # Router And Backend Contract
 
+> **Status: historical.** `whatsapp-gateway`, `research-ingress`, and
+> `research-command-router` were retired under issue #159 (the #173 workflow-api
+> auth work landed and #289 removed the router's caller). This document is kept
+> for historical context; see `historical/README.md`.
+
 This document defines the command-routing contract between:
 
 * `whatsapp-gateway`
