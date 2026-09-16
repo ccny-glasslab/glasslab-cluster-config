@@ -354,6 +354,61 @@ def _candidate_with_requirements(
     return _manager(tmp_path), source
 
 
+def _candidate_with_budget(
+    tmp_path: Path,
+    budget: object,
+) -> tuple[ContractCandidateManager, Path]:
+    # manifest.budget is informational, but a declaration that exceeds the
+    # contract's own resource_constraints contradicts the artifact a human is
+    # asked to approve (issue #500).
+    source = tmp_path / 'source'
+    _write_candidate(source)
+    descriptor_path = source / 'contract.json'
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor['manifest']['budget'] = budget
+    descriptor_path.write_text(json.dumps(descriptor))
+    return _manager(tmp_path), source
+
+
+def test_candidate_budget_above_resource_constraints_is_rejected(
+    tmp_path: Path,
+) -> None:
+    manager, source = _candidate_with_budget(
+        tmp_path,
+        {'wallclock_minutes': 600},
+    )
+
+    with pytest.raises(ContractCandidateError, match='manifest.budget'):
+        _seal(manager, source)
+
+
+def test_candidate_budget_within_resource_constraints_seals(
+    tmp_path: Path,
+) -> None:
+    manager, source = _candidate_with_budget(
+        tmp_path,
+        {'wallclock_minutes': 5, 'notes': 'Small deterministic evaluator.'},
+    )
+
+    sealed = manager.seal(
+        source=source,
+        contract_id='candidate-v1',
+        version='1.0.0',
+    )
+
+    assert sealed.descriptor.manifest['budget'] == {
+        'wallclock_minutes': 5,
+        'notes': 'Small deterministic evaluator.',
+    }
+
+
+def test_candidate_malformed_budget_is_rejected(tmp_path: Path) -> None:
+    manager, source = _candidate_with_budget(tmp_path, 'ten minutes')
+
+    with pytest.raises(ContractCandidateError, match='manifest.budget'):
+        _seal(manager, source)
+
+
 def _seal(manager: ContractCandidateManager, source: Path) -> None:
     manager.seal(source=source, contract_id='candidate-v1', version='1.0.0')
 

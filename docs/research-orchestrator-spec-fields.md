@@ -103,7 +103,7 @@ check that a given problem.md section exists.
 | Hyperparameter search space | Later matrix `base_config` + `overrides`; contract `methodology_requirements` | `[PROMPT-ONLY]`; enforced only once a contract declares `config_path`s (`preflight.py:481-518`) | If the contract declares a comparison/decision and the values are not materialized under `experiment_dimensions.*`, preflight fails closed. |
 | Evaluation rubric → metric keys | `required_metric_keys` | schema `schemas.py:289-291` (**pattern only**); semantic check at execution for the generic contract | Keys are pattern-validated (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`) but **not** checked against `run.py` statically on the generic path (see [F7](#8-findings-and-defects)). |
 | Evaluation rubric → thresholds | Partly `rationale`; really the evaluator contract | `[PROMPT-ONLY]`; deterministic only for task-specific contracts | Thresholds are not a task-spec field. They must become contract logic, or they are prose. |
-| Evaluation rubric → stopping conditions | Contract `manifest.budget` / matrix seeds | `[PROMPT-ONLY]` | Not compiled; the profile wall-clock is authoritative. |
+| Evaluation rubric → stopping conditions | Contract `manifest.budget` / matrix seeds | `[PROMPT-ONLY]` | Not compiled; the profile wall-clock is authoritative, and a declared budget above the profile or the contract `resource_constraints` is rejected (#500). |
 | Evidence artifacts | `required_artifacts` | schema path-safety `schemas.py:295-310`; existence at preflight `preflight.py:373-390` | Unsafe path → compile rejection. Missing static reference → matrix preflight error (retryable). |
 
 **Boundary summary:** the only deterministic/agent boundary in `problem.md` is
@@ -201,8 +201,8 @@ wrapper, an evaluator, input/output JSON schemas, and `contract.sha256`
 | `manifest.primary_metric` | contract author | Yes (semantic) | seal | `contract_candidates.py:161-168` | proposal compatibility `engine.py:3628-3635`, `2578` | Missing/empty → `manifest requires primary_metric and a valid direction`. |
 | `manifest.primary_metric_direction` | contract author | Yes, `maximize`/`minimize` | seal | `contract_candidates.py:162-168` | same | Invalid direction → seal rejection. |
 | `manifest.methodology_requirements` | contract author | Optional, default `[]` | seal | see [4.1](#41-methodology_requirements) | matrix preflight | Invalid → seal rejection (`ContractCandidateError`). |
-| `manifest.budget` | contract author | Optional (free-form) | seal | not validated at seal for shape | cluster `budget` comes from `spec.resources.wallclock_minutes`, not this (`cluster.py:279-281`) | Descriptor `budget` is largely inert on the current path. |
-| `manifest.guardrails` | contract author | Optional | seal | not validated at seal |
+| `manifest.budget` | contract author | Optional (free-form) | seal/promotion | **Informational** (issue #500): shape and `wallclock_minutes <= resource_constraints` validated at seal (`contract_candidates.py`); the resource-authority gate re-checks constraints and the task profile at seal, promotion, and matrix preflight (`engine.py`) | humans only; the job wall-clock is `spec.resources.wallclock_minutes`, not this (`cluster.py:279-281`) | Malformed budget or a declaration above the contract/profile wall-clock → seal rejection or non-retryable resource-authority pause (`manifest.budget contradicts ...`). A smaller declared budget is advisory and does not shrink the job. |
+| `manifest.guardrails` | contract author | Optional | seal | not validated (**informational**, issue #500) | humans only | None; inert by design. |
 | `execution_wrapper` | contract author | Yes, min 1 | seal | referenced file must exist + AST-parse `contract_candidates.py:170-204` | workflow-api job render |
 | `evaluation_entry_point` | contract author | Yes, min 1 | seal | same | evaluator invocation | Missing file → `candidate references missing file`. Fail-closed. |
 | `expected_input_schema` | contract author | Yes, min 1 | seal | file exists + JSON object `contract_candidates.py:182-190` | evaluator |
@@ -313,9 +313,11 @@ and `workspace-gpu-ml-v1.json` (limits `cpu 8 / mem 32Gi / nvidia.com/gpu 1`,
 into the Job (`services/workflow-api/app/job_submission.py:602-608`, `707-713`).
 
 Both runner images are in the orchestrator's permitting allowlist in the live
-configmap (`kubeadm/glasslab-v2/research-orchestrator/10-configmap.yaml:88`),
-though the *code default* `permitted_job_images` lists only the CPU image
-(`config.py:243-246`).
+configmap (`kubeadm/glasslab-v2/research-orchestrator/10-configmap.yaml:88`).
+The *code default* `permitted_job_images` now derives from `RUNTIME_PROFILES`,
+so a default deploy permits both; a real-execution deployment that overrides
+the allowlist without covering every profile fails fast at startup
+(`build_engine` -> `require_profile_runner_images`, issue #502).
 
 **Why do they exist?** The recorded intent is a bounded-execution security
 boundary, not a scientific one:
@@ -344,6 +346,11 @@ not a documented resource policy, which is why #483 was possible.
 | Contract `resource_constraints` | descriptor `resource_constraints` | Compatibility envelope. Profile must fit inside it (`preflight.py:409-438`; `engine.py:4956-4991`), and matrix must not exceed it (`matrix.py:47-55`). If the profile exceeds it, the run fails closed for human resolution. |
 | Matrix `resources` | `ExperimentMatrix.resources` (`schemas.py:437`) | Copied by the agent; must equal the profile (imported) and fit the contract and policy. |
 | Global policy | `config.py:265-268`; `policy.py:140-156` | Hard clamp evaluated at action classification: `cpu<=8`, `memory_gib<=32`, `gpus<=1`, `parallel<=4`. Also the image allowlist. |
+
+`manifest.budget` is not a fifth authority: it is an informational declaration
+(issue #500). It may not exceed the contract's `resource_constraints` or the
+compiled profile's wall-clock; a contradiction is rejected at seal and at every
+binding. `manifest.guardrails` is purely human-facing.
 
 So today, for an **imported** task, precedence is:
 
@@ -627,11 +634,11 @@ were created by this audit.
 | F5 | `variants[].name` was stricter than sibling name fields; fixed to `^[a-z0-9][a-z0-9_-]{0,62}$`. | already filed (#474) | `schemas.py:425` vs `218/735/756/781`; issue #474. |
 | F6 | The installed-contract binding path does not route the profile-vs-contract conflict to the non-retryable handler, causing an unresolvable 409 resume loop. | already filed (#490) | `engine.py:3925-3935` raises a bare `WorkflowError`; issue #490. |
 | F7 | **Generic-path metric keys are not checked at preflight** even though the guide says the rubric is what preflight enforces hardest; they are enforced only by the evaluator after the job runs, wasting cluster time on a guaranteed failure. | **NEW - needs an issue** | `preflight.py:534-538` reads `contract.manifest.required_metric_keys` (empty for `generic-task-integrity-v1/1.0.0/contract.json`) while `evaluator.py:43-46` reads `task_spec.required_metric_keys`; guide `task-bundle-guide.md:73-75`. |
-| F8 | **No cross-layer contract test** exists between the orchestrator's submission payload and workflow-api's `GenericExperimentRunRequest`; #491 (forbidden top-level `resources`, HTTP 422) survived because the fake executor never exercised the real schema. | already filed (#491) + **NEW - needs an issue for the test** | `cluster.py:227-299`; workflow-api `schemas.py:293-329`; issue #491 acceptance explicitly asks for such a test. |
+| F8 | **No cross-layer contract test** exists between the orchestrator's submission payload and workflow-api's `GenericExperimentRunRequest`; #491 (forbidden top-level `resources`, HTTP 422) survived because the fake executor never exercised the real schema. | already filed (#491) + (#498) - guard exists and is extended in this branch | `cluster.py:227-299`; workflow-api `schemas.py:293-329`; `tests/test_workflow_api_contract.py` builds the body via `WorkflowApiClusterExecutor` and validates it with the receiver's request and workspace models, plus drift-rejection cases. |
 | F9 | **The reason for fixed runtime profiles is not recorded anywhere** - no ADR/design doc/commit body explains why a task cannot determine its own resource envelope; only the security boundary is documented. This omission is what allowed #483's accidental exact-match semantics. | **NEW - needs an issue** | `docs/research-orchestrator.md:449-451`, `959`; commits `4aaeca5`/`54a5f58`/`8b2197f` have empty bodies. |
-| F10 | **The contract's `manifest.budget` and `manifest.guardrails` are effectively inert**: the job's wall-clock comes from `spec.resources.wallclock_minutes`, not the contract budget, so a contract author's declared budget has no deterministic effect. | **NEW - needs an issue** | `schemas.py:475-487`; `cluster.py:279-281`; `job_submission.py:362-376` only checks `budget`, not `manifest.budget`. |
+| F10 | **The contract's `manifest.budget` and `manifest.guardrails` are effectively inert**: the job's wall-clock comes from `spec.resources.wallclock_minutes`, not the contract budget, so a contract author's declared budget has no deterministic effect. | already filed (#500) - fix in this branch | `schemas.py:475-487`; `cluster.py:279-281`; `job_submission.py:362-376` only checks `budget`, not `manifest.budget`. |
 | F11 | **`variants[].name` drift guard is test-only, and the pattern is duplicated in three places** (`schemas.py:425`, prompt text `engine.py:161-162`, template sanitizer `engine.py:175-181`); a prompt change can diverge from the schema without any runtime failure. | **NEW - needs an issue** | `engine.py:155-159` notes the guard lives in `tests/test_matrix_template_derivation.py`, i.e. not enforced at runtime. |
-| F12 | **The code default `permitted_job_images` allows only the CPU runner image**, so a GPU-profile task fails task preflight unless the deployment configmap overrides it (the live configmap does). A default deploy therefore cannot run GPU tasks. | **NEW - needs an issue** | `config.py:243-246` (one image) vs `10-configmap.yaml:88` (two images). |
+| F12 | **The code default `permitted_job_images` allows only the CPU runner image**, so a GPU-profile task fails task preflight unless the deployment configmap overrides it (the live configmap does). A default deploy therefore cannot run GPU tasks. | already filed (#502) - fix in this branch | `config.py:243-246` (one image) vs `10-configmap.yaml:88` (two images). |
 
 ---
 

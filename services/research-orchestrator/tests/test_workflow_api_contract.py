@@ -23,6 +23,7 @@ from types import ModuleType
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from app.cluster import WorkflowApiClusterExecutor
 from app.schemas import ExpandedJobSpec, ResourceRequest
@@ -55,6 +56,11 @@ def _load_workflow_api_schemas() -> ModuleType:
 
 WORKFLOW_API_SCHEMAS = _load_workflow_api_schemas()
 GENERIC_RUN_REQUEST = WORKFLOW_API_SCHEMAS.GenericExperimentRunRequest
+# The receiver model that validates config_payload['workspace'] inside
+# build_generic_run_record; exercised here so the optional workspace payload is
+# guarded by the receiver's own nested spec, not only the request's free-form
+# config_payload dict.
+INVESTIGATION_WORKSPACE_SPEC = WORKFLOW_API_SCHEMAS.InvestigationWorkspaceSpec
 
 
 def _spec(*, workspace: bool) -> ExpandedJobSpec:
@@ -176,3 +182,117 @@ def test_submission_body_keeps_wallclock_inside_budget() -> None:
     assert body['budget'] == {
         'max_wallclock_minutes': spec.resources.wallclock_minutes,
     }
+
+
+def test_workspace_payload_validates_against_receiver_workspace_spec() -> None:
+    # build_generic_run_record validates config_payload['workspace'] with the
+    # receiver's InvestigationWorkspaceSpec. Validate the real sender payload
+    # with that same nested model so a workspace-shape drift fails here.
+    spec = _spec(workspace=True)
+    body = _submission_body(spec)
+
+    workspace = INVESTIGATION_WORKSPACE_SPEC.model_validate(
+        body['config_payload']['workspace']
+    )
+
+    assert workspace.task_bundle.uri == spec.task_bundle['uri']
+    assert workspace.task_bundle.sha256 == spec.task_bundle['sha256']
+    assert workspace.source_bundle.uri == spec.source_bundle['uri']
+    assert workspace.command == spec.workspace_command
+    assert workspace.network_policy == 'none'
+
+
+@pytest.mark.parametrize('workspace', [True, False])
+def test_optional_payload_fields_round_trip_through_receiver_model(
+    workspace: bool,
+) -> None:
+    spec = _spec(workspace=workspace).model_copy(
+        update={
+            'dataset_bindings': {'train': 'glasslab-dataset://' + 'd' * 64},
+            'dataset_contracts': [{'name': 'train', 'role': 'train'}],
+            'task_spec': {'display_name': 'Round-trip task'},
+        }
+    )
+
+    body = _submission_body(spec)
+    request = GENERIC_RUN_REQUEST.model_validate(body)
+
+    assert request.budget == {
+        'max_wallclock_minutes': spec.resources.wallclock_minutes,
+    }
+    assert request.dataset_bindings == spec.dataset_bindings
+    assert request.campaign_id == spec.run_id
+    assert request.config_payload['evaluation_contract'] == {
+        'contract_id': spec.evaluation_contract_id,
+        'version': spec.evaluation_contract_version,
+        'digest': spec.evaluation_contract_digest,
+    }
+    assert request.metric_contract['evaluation_contract_digest'] == (
+        spec.evaluation_contract_digest
+    )
+    if workspace:
+        assert request.config_payload['workspace']['network_policy'] == 'none'
+        assert request.config_payload['dataset_contracts'] == (
+            spec.dataset_contracts
+        )
+        assert request.config_payload['task_spec'] == spec.task_spec
+    else:
+        assert 'workspace' not in request.config_payload
+        assert 'dataset_contracts' not in request.config_payload
+
+
+def _with_unknown_top_level_resources(body: dict) -> dict:
+    return {**body, 'resources': {'cpu': 2, 'memory_gib': 4}}
+
+
+def _without_objective(body: dict) -> dict:
+    return {key: value for key, value in body.items() if key != 'objective'}
+
+
+def _with_budget_as_list(body: dict) -> dict:
+    return {**body, 'budget': [60]}
+
+
+def _with_renamed_campaign_id(body: dict) -> dict:
+    return {
+        **{key: value for key, value in body.items() if key != 'campaign_id'},
+        'campaign': body['campaign_id'],
+    }
+
+
+@pytest.mark.parametrize(
+    'mutate',
+    [
+        _with_unknown_top_level_resources,
+        _without_objective,
+        _with_budget_as_list,
+        _with_renamed_campaign_id,
+    ],
+    ids=[
+        'unknown-top-level-resources',
+        'missing-objective',
+        'budget-wrong-type',
+        'renamed-campaign-id',
+    ],
+)
+def test_receiver_schema_rejects_drifted_submission_bodies(mutate) -> None:
+    # Proves the guard above actually catches sender drift: the unmutated body
+    # validates, and each representative drift class (the #491 top-level
+    # 'resources', a dropped required field, a retyped field, a renamed field)
+    # is rejected rather than silently accepted.
+    body = _submission_body(_spec(workspace=True))
+    GENERIC_RUN_REQUEST.model_validate(body)
+    drifted = mutate(body)
+
+    with pytest.raises(ValidationError):
+        GENERIC_RUN_REQUEST.model_validate(drifted)
+
+
+def test_receiver_workspace_spec_rejects_non_python_command() -> None:
+    body = _submission_body(_spec(workspace=True))
+    body['config_payload']['workspace']['command'] = ['bash', 'run.sh']
+
+    with pytest.raises(ValidationError):
+        INVESTIGATION_WORKSPACE_SPEC.model_validate(
+            body['config_payload']['workspace']
+        )

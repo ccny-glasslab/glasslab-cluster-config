@@ -477,6 +477,12 @@ class EvaluationContractDescriptor(BaseModel):
 
     contract_id: str = Field(min_length=3)
     version: str = Field(min_length=1)
+    # Human-facing contract metadata. Deterministic code reads primary_metric,
+    # primary_metric_direction, required_metric_keys, and
+    # methodology_requirements from it. budget and guardrails are
+    # informational: the job wall-clock is the task resource profile, and a
+    # declared manifest.budget.wallclock_minutes larger than the profile or
+    # resource_constraints is rejected (issue #500).
     manifest: dict[str, Any]
     execution_wrapper: str = Field(min_length=1)
     evaluation_entry_point: str = Field(min_length=1)

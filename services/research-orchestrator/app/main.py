@@ -95,6 +95,7 @@ from .task_bundles import (
     TaskBundleManager,
     TaskBundleRecord,
     TaskPreflight,
+    require_profile_runner_images,
 )
 from .watcher import JobWatcher
 from .workspaces import WorkspaceError, WorkspaceManager
@@ -119,6 +120,12 @@ def build_engine(
     # Composition root: wires every subsystem against the same store so all
     # mutations share one transaction boundary and one event log. The cluster
     # executor is swapped for a fake when running without a live API.
+    if settings.cluster_execution_mode != 'fake':
+        # A real-execution deployment must be able to permit every runtime
+        # profile it can compile; otherwise a GPU-profile task fails later at
+        # task preflight with an error that looks like task authoring instead
+        # of deployment configuration (issue #502).
+        require_profile_runner_images(settings.permitted_job_images)
     store: ResearchStore = (
         PostgresStore(settings.store_postgres_dsn)
         if settings.store_backend == 'postgres'

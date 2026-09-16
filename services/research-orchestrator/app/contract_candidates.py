@@ -24,12 +24,38 @@ from .contracts import (
 from .methodology_requirement_validation import (
     validate_methodology_requirements,
 )
-from .preflight import MethodologyRequirement
+from .preflight import (
+    MethodologyRequirement,
+    declared_budget_conflicts,
+)
 from .schemas import EvaluationContractDescriptor
 
 
 class ContractCandidateError(ValueError):
     pass
+
+
+def _validate_declared_budget(
+    descriptor: EvaluationContractDescriptor,
+) -> None:
+    # manifest.budget is informational (issue #500), but a declaration that
+    # exceeds the descriptor's own resource_constraints contradicts the
+    # artifact a human reviews, so it is rejected at seal, promotion, and
+    # repository install instead of being approved.
+    try:
+        conflicts = declared_budget_conflicts(
+            manifest=descriptor.manifest,
+            constraints=descriptor.resource_constraints,
+        )
+    except ValueError as exc:
+        raise ContractCandidateError(f'manifest.budget is invalid: {exc}') from exc
+    if conflicts:
+        raise ContractCandidateError(
+            'manifest.budget contradicts the contract resource_constraints: '
+            + '; '.join(conflict.describe() for conflict in conflicts)
+            + '. The run uses the task profile wall-clock, so a declared '
+            'budget must not exceed the wall-clock the contract allows.'
+        )
 
 
 def _validate_methodology_requirements(
@@ -166,6 +192,7 @@ class ContractCandidateManager:
             raise ContractCandidateError(
                 'manifest requires primary_metric and a valid direction'
             )
+        _validate_declared_budget(descriptor)
         _validate_methodology_requirements(descriptor)
         try:
             for field in (
