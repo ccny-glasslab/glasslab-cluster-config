@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import socket
 import time
 from datetime import timedelta
 from hashlib import sha256
@@ -19,6 +20,7 @@ from pathlib import Path
 from threading import Event, Thread
 import zipfile
 
+import httpx
 from fastapi.testclient import TestClient
 import pytest
 
@@ -34,6 +36,7 @@ from app.engine import (
 from app.evidence import EvidencePhase
 from app.main import create_app
 from app.mock_runtime import ScriptedMockRuntime
+from app.opencode_runtime import apply_result_preparers
 from app.policy import ActionPolicy
 from app.preflight import MethodologyRequirement
 from app.schemas import (
@@ -62,6 +65,7 @@ from app.schemas import (
     utc_now,
 )
 from app.storage import ConcurrencyConflict, SqliteStore
+from app.task_bundles import TaskAssetFetcher
 from app.workspaces import WorkspaceManager
 
 from conftest import RUNNER_IMAGE
@@ -2854,6 +2858,90 @@ def test_unexpected_endpoint_errors_log_with_traceback_and_return_generic_500(
     assert records, 'unexpected exceptions must be logged'
     assert any(record.exc_info is not None for record in records)
     assert 'RuntimeError' in caplog.text
+
+
+class _UrlAssetProtocolRuntime(ScriptedMockRuntime):
+    """Protocol-draft turn carrying an unverified public source_url asset."""
+
+    def run_turn(self, *, result_preparers=(), **kwargs):
+        structured = {
+            'kind': 'protocol_draft',
+            'summary': 'Drafted a protocol over URL-declared task assets.',
+            'task_spec_proposal': {
+                'schema_version': 'glasslab-task-spec-v1',
+                'display_name': 'Titanic Survival Classification',
+                'runtime_profile': 'cpu-ml-standard-v1',
+                'assets': [
+                    {
+                        'name': 'titanic_train',
+                        'role': 'training data',
+                        'source_url': (
+                            'https://internal.example.com/kaggle-titanic/'
+                            'train.csv'
+                        ),
+                        'contains_labels': True,
+                    }
+                ],
+                'rationale': 'The problem declares these bytes by public URL.',
+            },
+        }
+        prepared = apply_result_preparers(structured, result_preparers)
+        return AgentTurnResult.model_validate(prepared), 'message-url-asset'
+
+
+def test_http_create_run_source_url_failure_is_actionable_not_500(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    """A source_url that cannot be verified is a 409 naming the asset.
+
+    Before the fix the same path raised an unhandled OpenCodeRuntimeError and
+    POST /runs answered a generic 500. The run must stay resumable with the
+    reason recorded on the failed turn instead of burning turns silently.
+    """
+    settings, store, _, _, engine = orchestrator_bundle
+    monkeypatch.setattr(
+        'app.url_fetch.socket.getaddrinfo',
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 443))
+        ],
+    )
+    engine.task_bundles.assets = TaskAssetFetcher(
+        root=str(settings.task_asset_root),
+        shared_mount_root=settings.shared_mount_root,
+        maximum_bytes=1024 * 1024,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=b'x')
+        ),
+    )
+    engine.runtime = _UrlAssetProtocolRuntime(runner_image=RUNNER_IMAGE)
+
+    app = create_app(settings, engine=engine, start_watcher=False)
+    with TestClient(app) as client:
+        response = client.post(
+            '/runs',
+            json={
+                'objective': (
+                    'Start a run whose task declares public-URL assets.'
+                )
+            },
+        )
+
+    assert response.status_code == 409
+    detail = response.json()['detail']
+    assert 'titanic_train' in detail
+    assert 'non-public' in detail
+
+    runs = store.list_runs()
+    assert len(runs) == 1
+    assert runs[0].state == RunState.HONEYDEW_DRAFTING_PROTOCOL
+    failed_turns = [
+        turn
+        for turn in store.list_turns(runs[0].run_id)
+        if turn.status == 'failed'
+    ]
+    assert len(failed_turns) == 1
+    assert 'titanic_train' in failed_turns[0].error
 
 
 def test_http_api_with_mock_runtime(orchestrator_bundle) -> None:

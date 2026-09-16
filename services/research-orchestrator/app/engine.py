@@ -37,7 +37,7 @@ from .methodology_config import (
 )
 import httpx
 
-from .opencode_runtime import AgentRuntime, OpenCodeRuntimeError
+from .opencode_runtime import AgentRuntime, OpenCodeRuntimeError, ResultPreparer
 from .policy import ActionPolicy
 from .preflight import (
     MatrixPreflightReport,
@@ -287,6 +287,59 @@ class ResearchOrchestrator:
         self._run_locks: dict[str, RLock] = {}
         self._run_locks_guard = Lock()
         self._compiler_lock = RLock()
+        # Orchestrator-owned preparers run against every raw agent turn result
+        # before schema validation (see AgentRuntime.run_turn). They populate
+        # facts the schema requires but the model cannot know.
+        self._turn_result_preparers: tuple[ResultPreparer, ...] = (
+            self._establish_source_url_asset_checksums,
+        )
+
+    def _establish_source_url_asset_checksums(
+        self,
+        structured: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Populate missing source_url asset digests from the fetched bytes.
+
+        C6 requires a verified expected_sha256 for every source_url asset, but
+        the digest of a remote URL is information the proposing model cannot
+        know: only the orchestrator can fetch the bytes. Resolving it through
+        the same public-HTTPS fetch path used for immutable ingestion - before
+        the turn result is validated and committed - is genuine verification,
+        and an unfetchable or unverifiable asset fails loudly instead of being
+        recorded as verified.
+        """
+        proposal = structured.get('task_spec_proposal')
+        if not isinstance(proposal, dict):
+            return structured
+        assets = proposal.get('assets')
+        if not isinstance(assets, list):
+            return structured
+        resolved: list[Any] = []
+        changed = False
+        for asset in assets:
+            if (
+                isinstance(asset, dict)
+                and asset.get('source_url')
+                and not asset.get('expected_sha256')
+                and not asset.get('approved_uri')
+            ):
+                asset = {
+                    **asset,
+                    'expected_sha256': (
+                        self.task_bundles.assets.establish_source_url_checksum(
+                            url=str(asset['source_url']),
+                            name=str(asset.get('name') or 'unnamed asset'),
+                        )
+                    ),
+                }
+                changed = True
+            resolved.append(asset)
+        if not changed:
+            return structured
+        return {
+            **structured,
+            'task_spec_proposal': {**proposal, 'assets': resolved},
+        }
 
     def _run_lock(self, run_id: str) -> RLock:
         with self._run_locks_guard:
@@ -663,6 +716,7 @@ class ResearchOrchestrator:
                     '"task_spec", task_spec_proposal, no requested actions, '
                     'and done=true.'
                 ),
+                result_preparers=self._turn_result_preparers,
             )
             if (
                 result.kind != TurnKind.TASK_SPEC
@@ -1325,6 +1379,7 @@ class ResearchOrchestrator:
             base_url_override=research_base_url,
             prompt=prompt,
             knowledge_tool=knowledge_tool,
+            result_preparers=self._turn_result_preparers,
         )
         if result.kind != TurnKind.RESEARCH_ANSWER or result.research_answer is None:
             self._event(
@@ -1881,6 +1936,7 @@ class ResearchOrchestrator:
                 model_override=model_override,
                 base_url_override=base_url_override,
                 knowledge_tool=knowledge_tool,
+                result_preparers=self._turn_result_preparers,
             )
             if result.kind != expected_kind:
                 returned_kind = result.kind
@@ -1903,6 +1959,7 @@ class ResearchOrchestrator:
                     model_override=model_override,
                     base_url_override=base_url_override,
                     knowledge_tool=knowledge_tool,
+                    result_preparers=self._turn_result_preparers,
                     prompt=(
                         prompt
                         + '\n\nStructured kind correction. Your previous '
