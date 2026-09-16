@@ -303,6 +303,39 @@ def _backup_sqlite(source_path: Path, dest_path: Path) -> None:
         source.close()
 
 
+def _clear_read_only_modes(path: Path) -> None:
+    """Give the owner write access to a path without touching its content.
+
+    Snapshots copy the engine's read-only review surface (files 0444,
+    directories 0555). copytree reproduces the directory modes through
+    copystat even when its copy function does not, and shutil.copy preserves
+    file modes, so a snapshot that kept either would defeat a plain rm -rf
+    later. Only the owner bits change here.
+    """
+    if path.is_symlink():
+        return
+    wanted = 0o700 if path.is_dir() else 0o600
+    mode = path.stat().st_mode
+    if mode & wanted != wanted:
+        path.chmod(mode | wanted)
+
+
+def _force_rmtree(path: Path) -> None:
+    """Remove a directory tree even when it contains read-only modes.
+
+    A snapshot can hold the engine's review surface, where directories are
+    0555. rmtree unlinks every entry through its containing directory, and a
+    directory without the write bit refuses the unlink, so the plain call
+    raises PermissionError. Clear the read-only bits bottom-up first, then
+    remove normally; a tree that is still undeletable raises as before.
+    """
+    for dirpath, _dirnames, _filenames in os.walk(
+        path, topdown=False, followlinks=False
+    ):
+        Path(dirpath).chmod(0o700)
+    shutil.rmtree(path)
+
+
 def _copy_root_snapshot(root: Path, state_dir: Path) -> None:
     """Copy root into state_dir, replacing each SQLite DB with a clean backup."""
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -318,9 +351,18 @@ def _copy_root_snapshot(root: Path, state_dir: Path) -> None:
         if entry.is_symlink():
             os.symlink(os.readlink(entry), target)
         elif entry.is_dir():
-            shutil.copytree(entry, target, symlinks=True)
+            shutil.copytree(
+                entry,
+                target,
+                symlinks=True,
+                copy_function=shutil.copy,
+            )
+            _clear_read_only_modes(target)
+            for path in target.rglob('*'):
+                _clear_read_only_modes(path)
         else:
             shutil.copy2(entry, target)
+            _clear_read_only_modes(target)
 
 
 def create_snapshot(
@@ -355,7 +397,7 @@ def create_snapshot(
             'snapshot state directory must not live inside the rehearsal root'
         )
     if dest.exists():
-        shutil.rmtree(dest)
+        _force_rmtree(dest)
     dest.mkdir(parents=True)
     _copy_root_snapshot(root, state_dir)
     meta: dict[str, object] = {

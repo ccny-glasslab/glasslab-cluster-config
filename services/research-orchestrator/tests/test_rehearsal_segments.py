@@ -5,12 +5,17 @@ root snapshot, restoring it, reading snapshot metadata, and advancing a run
 one segment (one human-wait gate approval, plus any intervening job states) at
 a time. ScriptedMockRuntime is injected via runtime_factory so no model server
 or Kubernetes cluster is ever contacted.
+
+It also locks in that snapshots survive the read-only review surface the
+engine materializes (files 0444, directories 0555): a snapshot must be
+re-creatable and removable without a chmod walk (#473).
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 
 from app import rehearse_research_flow as rehearsal
 from app.mock_runtime import ScriptedMockRuntime
@@ -84,6 +89,26 @@ def _pending_action(store, run_id: str, action_type: str):
         for action in store.list_actions(run_id)
         if action.type == action_type
         and action.approval_status == ApprovalStatus.PENDING
+    )
+
+
+def _materialize_readonly_review_copy(engine, run_id: str, staging: Path) -> Path:
+    """Mirror the read-only contract-candidate review surface in the root.
+
+    The engine copies a sealed candidate into the run's Honeydew workspace and
+    makes the copy read-only (files 0444, directories 0555) before review; the
+    mock runtime never reaches that step, so tests materialize it directly.
+    """
+    sealed = staging / 'sealed-candidate'
+    (sealed / 'tests').mkdir(parents=True)
+    (sealed / 'evaluator.py').write_text('# sealed evaluator\n')
+    (sealed / 'tests' / 'test_vectors.py').write_text('# sealed vectors\n')
+    return engine.workspaces.copy_contract_candidate_for_review(
+        run_id=run_id,
+        source=sealed,
+        contract_id='wine-classification',
+        version='1.0.0',
+        digest='0' * 64,
     )
 
 
@@ -241,6 +266,87 @@ def test_full_run_with_mock_writes_gate_snapshots(tmp_path: Path) -> None:
     assert meta is not None
     assert meta['state'] == 'AWAITING_PROTOCOL_APPROVAL'
     assert meta['git_commit']
+
+
+def test_snapshot_taken_twice_over_readonly_review_copy(tmp_path: Path) -> None:
+    root = tmp_path / 'root'
+    snapshots = tmp_path / 'snapshots'
+    _, _, _, engine = _build(root)
+    run = engine.create_run(
+        RunCreateRequest(objective='Snapshot a read-only review surface twice.')
+    )
+    review = _materialize_readonly_review_copy(engine, run.run_id, tmp_path)
+    assert (review / 'tests').stat().st_mode & 0o777 == 0o555
+    assert (review / 'evaluator.py').stat().st_mode & 0o777 == 0o444
+
+    # Given: a snapshot of the state, then the same state snapshotted again.
+    # Re-creating the snapshot used to abort with PermissionError while
+    # deleting the read-only copy the first snapshot had preserved (#473).
+    first = rehearsal.create_snapshot(
+        root, snapshots, 'AWAITING_PROTOCOL_APPROVAL'
+    )
+    second = rehearsal.create_snapshot(
+        root, snapshots, 'AWAITING_PROTOCOL_APPROVAL'
+    )
+
+    # Then: the destination was re-created and the content stayed faithful.
+    assert second == first
+    copied = second / 'state' / review.relative_to(root) / 'evaluator.py'
+    assert copied.read_text() == '# sealed evaluator\n'
+    meta = rehearsal.read_snapshot_meta(
+        snapshots, 'AWAITING_PROTOCOL_APPROVAL'
+    )
+    assert meta is not None
+    assert meta['run_id'] == run.run_id
+
+
+def test_harness_snapshot_is_removable_without_chmod_walk(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / 'root'
+    snapshots = tmp_path / 'snapshots'
+    _, _, _, engine = _build(root)
+    run = engine.create_run(
+        RunCreateRequest(objective='Keep snapshots removable from the shell.')
+    )
+    review = _materialize_readonly_review_copy(engine, run.run_id, tmp_path)
+
+    # Given: a snapshot of a root that contains the read-only review copy.
+    dest = rehearsal.create_snapshot(root, snapshots, 'gate')
+
+    # Then: the copy kept the review bytes but not the read-only modes, so a
+    # plain tree removal (an operator's rm -rf) succeeds without a chmod walk.
+    copied = dest / 'state' / review.relative_to(root)
+    assert (copied / 'tests' / 'test_vectors.py').read_text() == '# sealed vectors\n'
+    shutil.rmtree(dest)
+    assert not dest.exists()
+
+
+def test_snapshot_recreated_over_legacy_readonly_snapshot(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / 'root'
+    snapshots = tmp_path / 'snapshots'
+    _, _, _, engine = _build(root)
+    engine.create_run(
+        RunCreateRequest(objective='Re-create over a frozen snapshot.')
+    )
+    dest = rehearsal.create_snapshot(root, snapshots, 'gate')
+
+    # Given: a snapshot frozen read-only, the on-disk shape every snapshot
+    # taken by the older harness had.
+    for path in dest.rglob('*'):
+        if not path.is_symlink():
+            path.chmod(0o555 if path.is_dir() else 0o444)
+    dest.chmod(0o555)
+
+    # When: the harness frees the destination itself and snapshots again.
+    second = rehearsal.create_snapshot(root, snapshots, 'gate')
+
+    # Then: the read-only destination was removed by the harness, not by a
+    # PermissionError.
+    assert second == dest
+    assert (dest / 'meta.json').is_file()
 
 
 def test_capacity_limited_matrix_advances_without_asserting(
