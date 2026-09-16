@@ -504,6 +504,23 @@ def declared_budget_conflicts(
     ]
 
 
+def _task_spec_required_metric_keys(
+    task_definition: Mapping[str, Any] | None,
+) -> list[str]:
+    # The generic evaluator reads task_spec.required_metric_keys from the job
+    # payload; the contract's optional manifest list does not restate them, so
+    # the static source scan must check both lists (issue #497).
+    if not task_definition:
+        return []
+    task_spec = task_definition.get('task_spec')
+    if not isinstance(task_spec, Mapping):
+        return []
+    keys = task_spec.get('required_metric_keys')
+    if not isinstance(keys, list):
+        return []
+    return [key for key in keys if isinstance(key, str) and key]
+
+
 def preflight_matrix(
     *,
     run: RunRecord,
@@ -595,14 +612,20 @@ def preflight_matrix(
         if not source.is_relative_to(workspace):
             errors.append('imported task source directory escapes the workspace')
         else:
+            required_metric_keys = list(
+                dict.fromkeys(
+                    [
+                        *contract.descriptor.manifest.get(
+                            'required_metric_keys',
+                            [],
+                        ),
+                        *_task_spec_required_metric_keys(run.task_definition),
+                    ]
+                )
+            )
             source_findings = _source_errors(
                 source,
-                required_metric_keys=list(
-                    contract.descriptor.manifest.get(
-                        'required_metric_keys',
-                        [],
-                    )
-                ),
+                required_metric_keys=required_metric_keys,
                 required_artifacts=list(contract.descriptor.required_artifacts),
             )
             errors.extend(source_findings)

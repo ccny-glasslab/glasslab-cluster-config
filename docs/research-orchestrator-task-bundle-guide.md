@@ -98,7 +98,11 @@ List the space or the fixed values, exactly. Ranges must be concrete:
 
 ### 5. Evaluation rubric (exact)
 
-This is the section preflight enforces hardest. It must contain:
+This is the section preflight enforces hardest. The exact metric keys you
+name here become the task spec's `required_metric_keys`, and deterministic
+matrix preflight statically checks that the implementation's `run.py`
+serializes every one of them at the root of `metrics.json` - a workload that
+omits a key is rejected **before** any cluster job runs. It must contain:
 
 - **Exact metric keys** — the names the evaluator will check (e.g.
   `test_seen_accuracy`, `nmi`, `silhouette_score`).

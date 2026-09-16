@@ -51,9 +51,9 @@ Practical rules that actually gate a run:
   `metrics.json`. The evaluator compares `task_spec.required_metric_keys` against
   the top-level keys of `metrics.json`
   (`evaluation-contracts/generic-task-integrity-v1/1.0.0/evaluator.py:43-46`).
-  For a task-specific contract the keys live in
-  `manifest.required_metric_keys` and are checked statically at matrix preflight
-  (`preflight.py:534-538`).
+  Since #497 both the task spec's keys and any contract
+  `manifest.required_metric_keys` are checked statically at matrix preflight
+  (`preflight.py`), so a missing key fails before a cluster job runs.
 - **Name exact evidence artifacts** as relative paths. They are unioned with the
   base set (`task_bundles.py:140-150`, `534-541`) and each must be statically
   referenced by a string literal in scanned source (`preflight.py:373-390`).
@@ -103,7 +103,7 @@ There is no deterministic check of what a section *contains*.
 | Inputs / datasets | `assets[]` (`TaskAssetProposal`) | `[PROMPT-ONLY]` `engine.py:707-712` + schema `schemas.py:231-276` | No assets → run starts with no data bindings; workload fails at execution. A nonpublic/private URL is rejected by the fetcher. |
 | Method and architecture | `rationale`, and later `program.md` / implementation | `[PROMPT-ONLY]` | Not compiled into a typed field; becomes protocol prose. No deterministic gate. |
 | Hyperparameter search space | Later matrix `base_config` + `overrides`; contract `methodology_requirements` | `[PROMPT-ONLY]`; enforced only once a contract declares `config_path`s (`preflight.py:481-518`) | If the contract declares a comparison/decision and the values are not materialized under `experiment_dimensions.*`, preflight fails closed. |
-| Evaluation rubric → metric keys | `required_metric_keys` | schema `schemas.py:289-291` (**pattern only**); semantic check at execution for the generic contract | Keys are pattern-validated (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`) but **not** checked against `run.py` statically on the generic path (see [F7](#8-findings-and-defects)). |
+| Evaluation rubric → metric keys | `required_metric_keys` | schema `schemas.py:289-291` (**pattern only**); semantic check at matrix preflight for both the contract and task-spec lists (#497) | Keys are pattern-validated (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`) and statically checked against `run.py`'s `metrics.json` serialization (see [F7](#8-findings-and-defects)). |
 | Evaluation rubric → thresholds | Partly `rationale`; really the evaluator contract | `[PROMPT-ONLY]`; deterministic only for task-specific contracts | Thresholds are not a task-spec field. They must become contract logic, or they are prose. |
 | Evaluation rubric → stopping conditions | Contract `manifest.budget` / matrix seeds | `[PROMPT-ONLY]` | Not compiled; the profile wall-clock is authoritative, and a declared budget above the profile or the contract `resource_constraints` is rejected (#500). |
 | Evidence artifacts | `required_artifacts` | schema path-safety `schemas.py:295-310`; existence at preflight `preflight.py:373-390` | Unsafe path → compile rejection. Missing static reference → matrix preflight error (retryable). |
@@ -136,16 +136,14 @@ Three distinct concepts share the word "metric":
 
 | Concept | Location | Owner | Consumed by |
 |---|---|---|---|
-| `required_metric_keys` (task spec) | `schemas.py:289-291` | compiler (from rubric) | Generic evaluator at execution: `generic-task-integrity-v1/1.0.0/evaluator.py:43-46`, read from `task_spec.required_metric_keys`. |
-| `manifest.required_metric_keys` (contract) | free-form `manifest` dict (`schemas.py:480`) | contract author (Honeydew proposes; human promotes) | Static matrix preflight `preflight.py:534-538` → `_metrics_root_errors` requires `run.py` to serialize those root keys. |
+| `required_metric_keys` (task spec) | `schemas.py:289-291` | compiler (from rubric) | Generic evaluator at execution: `generic-task-integrity-v1/1.0.0/evaluator.py:43-46`, read from `task_spec.required_metric_keys`. Since #497 also statically checked at matrix preflight (`preflight.py`). |
+| `manifest.required_metric_keys` (contract) | free-form `manifest` dict (`schemas.py:480`) | contract author (Honeydew proposes; human promotes) | Static matrix preflight (`preflight.py`) → `_metrics_root_errors` requires `run.py` to serialize those root keys. Unioned with the task spec's list (#497). |
 | `manifest.primary_metric` / `primary_metric_direction` | `schemas.py:480` | contract author | Contract validation `contract_candidates.py:161-168`; job `metric_contract` (`cluster.py:289-296`); evaluator output. |
 
-They are **not** automatically reconciled. For the generic path the contract's
-list is empty (`generic-task-integrity-v1/1.0.0/contract.json`), so the static
-check is a no-op and the task-spec keys are enforced only after the job runs
-([F7](#8-findings-and-defects)). For a task-specific contract the two lists
-should match, but nothing asserts that; the contract's list wins for preflight
-while the task spec's list still travels in the job payload
+They are **not** automatically reconciled, but since #497 the preflight source
+scan unions both lists, so the generic path (contract list empty) is checked
+statically too. For a task-specific contract the two lists should match, but
+nothing asserts that; the job payload still carries the task spec's list
 (`cluster.py:262-263`).
 
 ---
@@ -168,7 +166,7 @@ model-proposed from policy-derived.
 | `runtime_profile` | model | Yes, `Literal['cpu-ml-standard-v1','gpu-ml-standard-v1']` (`schemas.py:286`) | compile (Pydantic) | `RUNTIME_PROFILES` lookup `task_bundles.py:481` | Unknown value → compile rejection. |
 | `assets[]` | model | Optional, default `[]` (`schemas.py:287`) | compile (Pydantic + custom) | `compile()` resolves each asset `task_bundles.py:492-530`; unresolved → `missing_inputs` | Unresolvable asset → recorded in `missing_inputs`, task preflight blocks (`task_bundles.py:587-641`). |
 | `required_artifacts` | model | Optional, default `[]` (`schemas.py:288`); path-safety validator `schemas.py:295-310` | compile | unioned with `BASE_REQUIRED_ARTIFACTS` `task_bundles.py:534-541` | Unsafe path → ValueError. Missing artifact not statically referenced → matrix preflight error (retryable). |
-| `required_metric_keys` | model | Optional, default `[]` (`schemas.py:289-291`); name pattern only | compile | generic evaluator at execution | Malformed name → ValueError. Semantics not statically checked on generic path ([F7](#8-findings-and-defects)). |
+| `required_metric_keys` | model | Optional, default `[]` (`schemas.py:289-291`); name pattern only | compile | matrix preflight source scan (unioned with the contract list, #497) and the generic evaluator at execution | Malformed name → ValueError. Missing keys in `run.py`'s `metrics.json` write → matrix preflight error before submission ([F7](#8-findings-and-defects), fixed). |
 | `missing_inputs` | model | Optional, default `[]` (`schemas.py:292`) | compile | `TaskPreflight.missing_inputs`; blocks `ready` `task_bundles.py:594`, `629-639` | Any entry → task cannot start; `spec_feedback.format_spec_feedback` renders a human message. Non-retryable until the input is supplied. |
 | `rationale` | model | Yes, min length 1 (`schemas.py:293`) | compile | audit only | Empty → compile rejection. |
 | `resources` (compiled) | **policy** (profile) | Always present | derived at compile `task_bundles.py:571`; exact-match enforced at matrix preflight `engine.py:5046-5050` | matrix `resources`; job spec | Any matrix value != profile → matrix preflight error. See [section 5](#5-resource-authority-profiles-precedence-and-the-recommended-rule). |
@@ -489,7 +487,7 @@ no model retry.
 | Comparison needs ≥3 matrix seeds | preflight | `preflight.py:567-572` | retryable | `comparison contract requires at least 3 matrix seeds; found N` |
 | Internal-seed duplication | preflight | `preflight.py:548-562` | retryable | `candidate config and outer experiment matrix contain the same multi-seed list...` |
 | Evaluator-owned literals not written by workload | preflight | `preflight.py:363-372` | retryable | `<file> references evaluator-owned output ...` |
-| `run.py` serializes required metric keys | preflight | `preflight.py:191-314` | retryable | `<file> serializes metrics.json without required root key(s): ...` |
+| `run.py` serializes required metric keys (contract list ∪ task-spec list, #497) | preflight | `preflight.py:191-314`, `441-573` | retryable | `<file> serializes metrics.json without required root key(s): <keys>` |
 | Required artifacts statically referenced | preflight | `preflight.py:373-390` | retryable | `workload source does not statically reference required artifact: ...` |
 | Contract digest unchanged | preflight/execution | `engine.py:5051-5052`, `5461-5462` | fail-closed | `evaluation contract changed after run creation` |
 | Profile-vs-contract resource conflict | seal + matrix preflight | `engine.py:3567-3612`, `4956-4991` | **non-retryable** | `Contract candidate rejected by resource-authority preflight: ...` / `methodology.resource_authority_conflict` |
@@ -525,15 +523,15 @@ no model retry.
   population to an orchestrator preparer that fetches and hashes the bytes before
   validation (`engine.py:290-342`). Today fixed; the lesson is that
   model-uncomputable facts belong to deterministic code.
-- **Metric keys on the generic path (NEW, open).** The rubric section is
+- **Metric keys on the generic path (fixed by #497).** The rubric section is
   described as what "preflight enforces hardest"
   (`task-bundle-guide.md:73-75`), but for the generic contract
   `manifest.required_metric_keys` is `[]`, so
-  `_source_errors`/`_metrics_root_errors` never checks the task's metric keys
-  (`preflight.py:534-538`). They are enforced only by the evaluator after the job
-  runs (`generic-task-integrity-v1/1.0.0/evaluator.py:43-46`). A job that omits a
-  metric therefore burns cluster time before failing. See
-  [F7](#8-findings-and-defects).
+  `_source_errors`/`_metrics_root_errors` never checked the task's metric keys.
+  Preflight now unions `task_spec.required_metric_keys` (the list the evaluator
+  reads, `generic-task-integrity-v1/1.0.0/evaluator.py:43-46`) with the
+  contract's list, so a job that would omit a required metric fails before it
+  burns cluster time. See [F7](#8-findings-and-defects).
 - **Profile-vs-contract on the binding path (NEW/known, #490).** The
   non-retryable classification exists on the candidate and matrix paths but not
   in `_promote_contract_candidate` (`engine.py:3925-3935`), producing an
@@ -639,7 +637,7 @@ were created by this audit.
 | F4 | Two independent resource ceilings made a requirement unsatisfiable; now converted to a non-retryable human pause, but the contract remains a second, independent ceiling (root cause only detected, not removed). | already filed (#483) | `matrix.py:47-55` vs `engine.py:5046-5050`; `engine.py:4956-4991`; issue #483. |
 | F5 | `variants[].name` was stricter than sibling name fields; fixed to `^[a-z0-9][a-z0-9_-]{0,62}$`. | already filed (#474) | `schemas.py:425` vs `218/735/756/781`; issue #474. |
 | F6 | The installed-contract binding path does not route the profile-vs-contract conflict to the non-retryable handler, causing an unresolvable 409 resume loop. | already filed (#490) | `engine.py:3925-3935` raises a bare `WorkflowError`; issue #490. |
-| F7 | **Generic-path metric keys are not checked at preflight** even though the guide says the rubric is what preflight enforces hardest; they are enforced only by the evaluator after the job runs, wasting cluster time on a guaranteed failure. | **NEW - needs an issue** | `preflight.py:534-538` reads `contract.manifest.required_metric_keys` (empty for `generic-task-integrity-v1/1.0.0/contract.json`) while `evaluator.py:43-46` reads `task_spec.required_metric_keys`; guide `task-bundle-guide.md:73-75`. |
+| F7 | **Generic-path metric keys were not checked at preflight** even though the guide says the rubric is what preflight enforces hardest; they were enforced only by the evaluator after the job runs, wasting cluster time on a guaranteed failure. | **fixed by #497** | Matrix preflight unions `task_spec.required_metric_keys` (from `run.task_definition`, the list `evaluator.py:43-46` reads) with `contract.manifest.required_metric_keys` before the static `run.py` → `metrics.json` key scan; the error names the missing keys and the artifact. |
 | F8 | **No cross-layer contract test** exists between the orchestrator's submission payload and workflow-api's `GenericExperimentRunRequest`; #491 (forbidden top-level `resources`, HTTP 422) survived because the fake executor never exercised the real schema. | already filed (#491) + (#498) - guard exists and is extended in this branch | `cluster.py:227-299`; workflow-api `schemas.py:293-329`; `tests/test_workflow_api_contract.py` builds the body via `WorkflowApiClusterExecutor` and validates it with the receiver's request and workspace models, plus drift-rejection cases. |
 | F9 | **The reason for fixed runtime profiles is not recorded anywhere** - no ADR/design doc/commit body explains why a task cannot determine its own resource envelope; only the security boundary is documented. This omission is what allowed #483's accidental exact-match semantics. | **NEW - needs an issue** | `docs/research-orchestrator.md:449-451`, `959`; commits `4aaeca5`/`54a5f58`/`8b2197f` have empty bodies. |
 | F10 | **The contract's `manifest.budget` and `manifest.guardrails` are effectively inert**: the job's wall-clock comes from `spec.resources.wallclock_minutes`, not the contract budget, so a contract author's declared budget has no deterministic effect. | already filed (#500) - fix in this branch | `schemas.py:475-487`; `cluster.py:279-281`; `job_submission.py:362-376` only checks `budget`, not `manifest.budget`. |
