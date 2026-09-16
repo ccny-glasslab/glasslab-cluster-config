@@ -22,6 +22,8 @@ from pydantic import (
     model_validator,
 )
 
+from .matrix_naming import VARIANT_NAME_PATTERN
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -422,7 +424,7 @@ class ResourceRequest(BaseModel):
 class ExperimentVariant(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
-    name: str = Field(pattern=r'^[a-z0-9][a-z0-9_-]{0,62}$')
+    name: str = Field(pattern=VARIANT_NAME_PATTERN)
     overrides: dict[str, Any] = Field(default_factory=dict)
 
 
