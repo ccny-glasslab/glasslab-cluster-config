@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -17,7 +18,12 @@ import yaml
 from pydantic import ValidationError
 
 from .config import Settings
-from .opencode_runtime import AgentRuntime, RuntimeSession
+from .opencode_runtime import (
+    AgentRuntime,
+    ResultPreparer,
+    RuntimeSession,
+    apply_result_preparers,
+)
 from .runtime_env import build_agent_environment
 from .schemas import AgentName, AgentTurnResult, TurnKind
 
@@ -86,6 +92,7 @@ def _decode_structured_output(
     output: Any,
     *,
     required_kind: TurnKind | None = None,
+    result_preparers: Sequence[ResultPreparer] = (),
 ) -> AgentTurnResult:
     if not isinstance(output, str):
         raise HermesRuntimeError(
@@ -103,6 +110,7 @@ def _decode_structured_output(
             'Hermes turn did not return a JSON object',
             failure_class='malformed_json',
         ) from exc
+    payload = apply_result_preparers(payload, result_preparers)
     try:
         result = AgentTurnResult.model_validate(payload)
     except ValidationError as exc:
@@ -430,6 +438,7 @@ class HermesProcessRuntime(AgentRuntime):
         model_override: str | None = None,
         base_url_override: str | None = None,
         knowledge_tool: object | None = None,
+        result_preparers: Sequence[ResultPreparer] = (),
     ) -> tuple[AgentTurnResult, str | None]:
         handle = self._start_process(
             run_id=run_id,
@@ -470,6 +479,7 @@ class HermesProcessRuntime(AgentRuntime):
                 return _decode_structured_output(
                     output,
                     required_kind=required_kind,
+                    result_preparers=result_preparers,
                 ), hermes_run_id
             except HermesRuntimeError as exc:
                 if attempt + 1 >= attempts:

@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
+import tempfile
 from typing import Any
 from uuid import uuid4
 import zipfile
@@ -232,6 +233,57 @@ class TaskAssetFetcher:
             '/dataset-upload and reference its '
             'glasslab-dataset://<sha256> URI in the task bundle.'
         )
+
+    def establish_source_url_checksum(self, *, url: str, name: str) -> str:
+        """Fetch ``url`` only to record the digest of the bytes it serves.
+
+        The digest of a remote asset is a property of the fetched bytes, not
+        information a proposing model can know, so C6's "source_url assets
+        need a verified expected_sha256" rule can only be satisfied by the
+        orchestrator performing the fetch. The bytes are discarded here:
+        immutable ingestion later re-fetches the URL and must match this
+        digest before any asset record is written.
+        """
+        with tempfile.TemporaryDirectory(
+            prefix='glasslab-source-url-'
+        ) as staging:
+            try:
+                fetched = self._fetcher.download(
+                    url,
+                    Path(staging) / 'asset',
+                )
+            except UrlFetchError as exc:
+                raise TaskBundleError(
+                    f'source_url asset `{name}` could not be fetched and '
+                    f'verified: {self._verification_reason(exc)}'
+                ) from exc
+            return fetched.sha256
+
+    @staticmethod
+    def _verification_reason(exc: UrlFetchError) -> str:
+        match exc.kind:
+            case (
+                UrlFetchErrorKind.MALFORMED_URL
+                | UrlFetchErrorKind.PRIVATE_TARGET
+                | UrlFetchErrorKind.PEER_UNVERIFIABLE
+            ):
+                return str(exc)
+            case UrlFetchErrorKind.CHECKSUM_MISMATCH:
+                return (
+                    'the served bytes do not match the declared '
+                    'expected_sha256'
+                )
+            case UrlFetchErrorKind.EMPTY_BODY:
+                return 'the URL served an empty body'
+            case UrlFetchErrorKind.SIZE_EXCEEDED:
+                return 'the content exceeds the configured asset size limit'
+            case UrlFetchErrorKind.REDIRECT_REJECTED:
+                return 'a redirect hop was rejected'
+            case _:
+                return (
+                    'the download failed after retries; the run stays '
+                    'resumable, so retry once the URL is reachable'
+                )
 
     def fetch(
         self,

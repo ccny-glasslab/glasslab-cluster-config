@@ -436,6 +436,163 @@ def test_source_url_asset_requires_expected_sha256() -> None:
         )
 
 
+def test_source_url_and_approved_uri_cannot_be_combined() -> None:
+    with pytest.raises(ValueError, match='both source_url and approved_uri'):
+        TaskAssetProposal(
+            name='public_data',
+            role='train',
+            source_url='https://example.com/data.csv',
+            approved_uri=f'glasslab-dataset://{"a" * 64}',
+            expected_sha256='b' * 64,
+        )
+
+
+def _public_getaddrinfo(*args, **kwargs):
+    return [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443))
+    ]
+
+
+def _private_getaddrinfo(*args, **kwargs):
+    return [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 443))
+    ]
+
+
+def _serving_transport(body: bytes) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={'content-type': 'text/csv'},
+            content=body,
+            extensions={
+                'network_stream': _FakeNetworkStream(
+                    ('93.184.216.34', 443)
+                )
+            },
+        )
+
+    return httpx.MockTransport(handler)
+
+
+def _source_url_structured(*, name: str, url: str) -> dict:
+    return {
+        'kind': 'protocol_draft',
+        'summary': 'Drafted a protocol over URL-declared task assets.',
+        'task_spec_proposal': {
+            'schema_version': 'glasslab-task-spec-v1',
+            'display_name': 'Titanic Survival Classification',
+            'runtime_profile': 'cpu-ml-standard-v1',
+            'assets': [
+                {
+                    'name': name,
+                    'role': 'training data',
+                    'source_url': url,
+                    'contains_labels': True,
+                }
+            ],
+            'rationale': 'The problem declares these bytes by public URL.',
+        },
+    }
+
+
+def test_source_url_without_checksum_records_observed_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    orchestrator_bundle,
+) -> None:
+    # The digest of a remote asset is established by the orchestrator from the
+    # bytes the public URL actually serves, never invented by the model. The
+    # prepared proposal then satisfies C6 and validates.
+    monkeypatch.setattr(
+        'app.url_fetch.socket.getaddrinfo',
+        _public_getaddrinfo,
+    )
+    served = b'PassengerId,Pclass,Survived\n1,3,0\n'
+    _, _, _, _, engine = orchestrator_bundle
+    engine.task_bundles.assets = TaskAssetFetcher(
+        root=str(tmp_path / 'task-assets'),
+        shared_mount_root=str(tmp_path),
+        maximum_bytes=1024 * 1024,
+        transport=_serving_transport(served),
+    )
+    structured = _source_url_structured(
+        name='titanic_train',
+        url='https://example.com/kaggle-titanic/train.csv',
+    )
+
+    prepared = engine._establish_source_url_asset_checksums(structured)
+
+    asset = prepared['task_spec_proposal']['assets'][0]
+    assert asset['expected_sha256'] == sha256(served).hexdigest()
+    proposal = TaskSpecProposal.model_validate(prepared['task_spec_proposal'])
+    assert proposal.assets[0].expected_sha256 == sha256(served).hexdigest()
+    assert (
+        TaskAssetProposal.model_validate(asset).expected_sha256
+        == sha256(served).hexdigest()
+    )
+
+
+def test_source_url_asset_declared_checksum_still_verified_at_materialisation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression guard: a declared expected_sha256 that does not match the
+    # served bytes is still rejected when the asset is materialised.
+    monkeypatch.setattr(
+        'app.url_fetch.socket.getaddrinfo',
+        _public_getaddrinfo,
+    )
+    fetcher = TaskAssetFetcher(
+        root=str(tmp_path / 'task-assets'),
+        shared_mount_root=str(tmp_path),
+        maximum_bytes=1024 * 1024,
+        transport=_serving_transport(b'the bytes actually served'),
+    )
+    with pytest.raises(TaskBundleError, match='checksum mismatch for titanic_train'):
+        fetcher.fetch(
+            task_digest='a' * 64,
+            proposal=TaskAssetProposal(
+                name='titanic_train',
+                role='train',
+                source_url='https://example.com/kaggle-titanic/train.csv',
+                expected_sha256=sha256(b'some other bytes').hexdigest(),
+            ),
+        )
+
+
+def test_source_url_fetch_failure_names_asset_and_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    orchestrator_bundle,
+) -> None:
+    # A source_url that cannot be fetched and verified is rejected with the
+    # asset name and the reason, so the operator can fix the task instead of
+    # chasing an opaque 500.
+    monkeypatch.setattr(
+        'app.url_fetch.socket.getaddrinfo',
+        _private_getaddrinfo,
+    )
+    _, _, _, _, engine = orchestrator_bundle
+    engine.task_bundles.assets = TaskAssetFetcher(
+        root=str(tmp_path / 'task-assets'),
+        shared_mount_root=str(tmp_path),
+        maximum_bytes=1024 * 1024,
+        transport=_serving_transport(b'whatever'),
+    )
+    structured = _source_url_structured(
+        name='titanic_test',
+        url='https://internal.example.com/kaggle-titanic/test.csv',
+    )
+
+    with pytest.raises(TaskBundleError) as excinfo:
+        engine._establish_source_url_asset_checksums(structured)
+
+    message = str(excinfo.value)
+    assert 'titanic_test' in message
+    assert 'non-public' in message
+
+
 def _flaky_asset_transport(*, fail_times: int, body: bytes):
     """MockTransport that raises transient read timeouts then serves the body."""
     import httpx

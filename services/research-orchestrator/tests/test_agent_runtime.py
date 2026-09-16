@@ -8,6 +8,7 @@ silently regress.
 
 from __future__ import annotations
 
+from hashlib import sha256
 import json
 from types import SimpleNamespace
 
@@ -15,10 +16,11 @@ import httpx
 import pytest
 
 from app.config import Settings
-from app.hermes_runtime import HermesProcessRuntime
+from app.hermes_runtime import HermesProcessRuntime, _decode_structured_output
 from app.main import build_agent_runtime
 from app.opencode_runtime import OpenCodeProcessRuntime, OpenCodeRuntimeError
 from app.schemas import AgentName
+from app.task_bundles import TaskBundleError
 
 
 def _read_opencode_config(
@@ -280,3 +282,181 @@ def test_opencode_runtime_port_is_reserved_until_handle_registered(
     first = runtime._runtime_port()
     second = runtime._runtime_port()
     assert first != second
+
+
+def _turn_structured_with_source_url_asset() -> dict:
+    return {
+        'kind': 'protocol_draft',
+        'summary': 'Drafted a protocol over URL-declared task assets.',
+        'task_spec_proposal': {
+            'schema_version': 'glasslab-task-spec-v1',
+            'display_name': 'URL-asset protocol task',
+            'runtime_profile': 'cpu-ml-standard-v1',
+            'assets': [
+                {
+                    'name': 'titanic_train',
+                    'role': 'training data',
+                    'source_url': (
+                        'https://example.com/kaggle-titanic/train.csv'
+                    ),
+                    'contains_labels': True,
+                }
+            ],
+            'rationale': 'The problem declares these bytes by public URL.',
+        },
+    }
+
+
+def _mock_opencode_runtime(monkeypatch, tmp_path, structured: dict):
+    def respond(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                'info': {
+                    'id': 'message-source-url',
+                    'structured': structured,
+                }
+            },
+        )
+
+    runtime = OpenCodeProcessRuntime(Settings())
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    handle = SimpleNamespace(
+        base_url='http://opencode.test',
+        password='password',
+    )
+    monkeypatch.setattr(runtime, '_start_process', lambda **_: handle)
+    monkeypatch.setattr(
+        runtime,
+        '_client',
+        lambda _: httpx.Client(
+            base_url=handle.base_url,
+            transport=httpx.MockTransport(respond),
+        ),
+    )
+    return runtime, workspace
+
+
+def test_opencode_turn_preparers_establish_source_url_checksum(
+    tmp_path, monkeypatch,
+) -> None:
+    # The model cannot know the checksum of a remote URL, so the engine passes
+    # a result preparer that fetches the bytes and populates expected_sha256
+    # before AgentTurnResult validation runs. The prepared digest is the hash
+    # of the bytes actually served.
+    served = b'PassengerId,Pclass,Survived\n1,3,0\n'
+    runtime, workspace = _mock_opencode_runtime(
+        monkeypatch, tmp_path, _turn_structured_with_source_url_asset()
+    )
+    observed: list[dict] = []
+
+    def preparer(structured: dict) -> dict:
+        observed.append(structured)
+        proposal = structured['task_spec_proposal']
+        assert proposal['assets'][0].get('expected_sha256') is None
+        return {
+            **structured,
+            'task_spec_proposal': {
+                **proposal,
+                'assets': [
+                    {
+                        **proposal['assets'][0],
+                        'expected_sha256': sha256(served).hexdigest(),
+                    }
+                ],
+            },
+        }
+
+    result, message_id = runtime.run_turn(
+        run_id='run-1',
+        agent=AgentName.HONEYDEW,
+        workspace=workspace,
+        session_id='session-1',
+        prompt='Draft a protocol.',
+        result_preparers=(preparer,),
+    )
+
+    assert message_id == 'message-source-url'
+    assert observed, 'the preparer must see the raw structured payload'
+    asset = result.task_spec_proposal.assets[0]
+    assert asset.expected_sha256 == sha256(served).hexdigest()
+
+
+def test_opencode_turn_without_preparer_still_rejects_unverified_source_url(
+    tmp_path, monkeypatch,
+) -> None:
+    # C6 guard: the rule is not weakened. Without the fetch path there is no
+    # verified digest, and the raw proposal must still fail validation.
+    runtime, workspace = _mock_opencode_runtime(
+        monkeypatch, tmp_path, _turn_structured_with_source_url_asset()
+    )
+
+    with pytest.raises(OpenCodeRuntimeError) as excinfo:
+        runtime.run_turn(
+            run_id='run-1',
+            agent=AgentName.HONEYDEW,
+            workspace=workspace,
+            session_id='session-1',
+            prompt='Draft a protocol.',
+        )
+
+    assert excinfo.value.failure_class == 'validation'
+    assert 'expected_sha256' in str(excinfo.value)
+
+
+def test_opencode_turn_preparer_failure_is_actionable_not_a_validation_error(
+    tmp_path, monkeypatch,
+) -> None:
+    # A URL that cannot be fetched and verified is deterministic: the model
+    # cannot repair it, so the preparer's own actionable error must propagate
+    # instead of being collapsed into a generic validation failure.
+    runtime, workspace = _mock_opencode_runtime(
+        monkeypatch, tmp_path, _turn_structured_with_source_url_asset()
+    )
+
+    def preparer(_: dict) -> dict:
+        raise TaskBundleError(
+            'source_url asset `titanic_train` could not be fetched and '
+            'verified: URL host resolves to a non-public address: 127.0.0.1'
+        )
+
+    with pytest.raises(TaskBundleError, match='titanic_train') as excinfo:
+        runtime.run_turn(
+            run_id='run-1',
+            agent=AgentName.HONEYDEW,
+            workspace=workspace,
+            session_id='session-1',
+            prompt='Draft a protocol.',
+            result_preparers=(preparer,),
+        )
+
+    assert 'non-public' in str(excinfo.value)
+
+
+def test_hermes_decode_applies_result_preparers_before_validation() -> None:
+    # The rollback backend shares the same result-prepare seam: a preparer
+    # populates the digest before the payload is validated against the schema.
+    payload = _turn_structured_with_source_url_asset()
+
+    def preparer(structured: dict) -> dict:
+        proposal = structured['task_spec_proposal']
+        return {
+            **structured,
+            'task_spec_proposal': {
+                **proposal,
+                'assets': [
+                    {
+                        **proposal['assets'][0],
+                        'expected_sha256': 'a' * 64,
+                    }
+                ],
+            },
+        }
+
+    result = _decode_structured_output(
+        json.dumps(payload),
+        result_preparers=(preparer,),
+    )
+
+    assert result.task_spec_proposal.assets[0].expected_sha256 == 'a' * 64
