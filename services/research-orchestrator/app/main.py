@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 import asyncio
 import html
 import json
+import logging
 import secrets
 from typing import Any, AsyncIterator
 
@@ -97,6 +98,9 @@ from .task_bundles import (
 )
 from .watcher import JobWatcher
 from .workspaces import WorkspaceError, WorkspaceManager
+
+
+logger = logging.getLogger(__name__)
 
 
 def build_agent_runtime(settings: Settings) -> AgentRuntime:
@@ -493,7 +497,13 @@ def create_app(
             ),
         ):
             return HTTPException(status_code=409, detail=str(exc))
-        return HTTPException(status_code=500, detail=str(exc))
+        # Unexpected failures are server bugs: map_error is called from the
+        # handler's except block, so logger.exception records the traceback
+        # server-side. The client gets a generic detail because str(exc) can
+        # embed stored payload values (e.g. pydantic ValidationError input
+        # snapshots) that this surface deliberately redacts on success.
+        logger.exception('unhandled %s mapped to HTTP 500', type(exc).__name__)
+        return HTTPException(status_code=500, detail='internal server error')
 
     @app.get('/health')
     def health() -> dict[str, object]:

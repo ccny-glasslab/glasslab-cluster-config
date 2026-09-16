@@ -44,6 +44,7 @@ ConversationSourceBinding,
     RunRecord,
     RunState,
     SourceType,
+    STORED_PAYLOAD_CONTEXT,
     TERMINAL_STATES,
     TurnKind,
     TurnRecord,
@@ -953,7 +954,13 @@ class SqliteStore:
                 'SELECT payload FROM turns WHERE run_id = ? ORDER BY created_at',
                 (run_id,),
             ).fetchall()
-        return [TurnRecord.model_validate_json(row['payload']) for row in rows]
+        return [
+            TurnRecord.model_validate_json(
+                row['payload'],
+                context=STORED_PAYLOAD_CONTEXT,
+            )
+            for row in rows
+        ]
 
     def mark_running_turns_interrupted(self, run_id: str) -> int:
         # Recovery sweep: turns left 'running' by a crashed process are marked

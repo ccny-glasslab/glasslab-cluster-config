@@ -13,11 +13,27 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# Validation context passed by stores when re-validating a payload read back
+# from durable storage. Records are written once and read for as long as they
+# exist, so a validator tightened after a record was persisted (e.g. a new
+# required field) must not retroactively make that record unreadable. Only
+# write-time policy checks consult this context; structural rules keep
+# applying to stored payloads.
+STORED_PAYLOAD_CONTEXT: dict[str, bool] = {'stored_payload': True}
 
 
 class RunState(StrEnum):
@@ -236,7 +252,7 @@ class TaskAssetProposal(BaseModel):
     contains_labels: bool = False
 
     @model_validator(mode='after')
-    def validate_asset_source(self) -> 'TaskAssetProposal':
+    def validate_asset_source(self, info: ValidationInfo) -> 'TaskAssetProposal':
         # An asset is either fetched from a network URL or referenced from an
         # already-ingested approved dataset; both sources would create two
         # authoritative copies of the same bytes, which is never allowed.
@@ -244,7 +260,14 @@ class TaskAssetProposal(BaseModel):
             raise ValueError(
                 'asset proposal cannot use both source_url and approved_uri'
             )
-        if self.source_url and not self.expected_sha256:
+        # The expected_sha256 requirement is a submission-time rule (C6): a
+        # stored payload persisted before the rule existed is historical
+        # fact, not a proposal about to be fetched, so it stays readable.
+        if (
+            self.source_url
+            and not self.expected_sha256
+            and not (info.context or {}).get('stored_payload')
+        ):
             raise ValueError(
                 'source_url assets require a verified expected_sha256 '
                 'checksum; without one the orchestrator would label the '

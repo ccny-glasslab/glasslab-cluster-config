@@ -30,7 +30,7 @@ from .schemas import (
     ActionRecord, AgentName, ApprovalStatus, ArtifactRecord, ContextPacket,
     CatalogDatasetRecord, ConversationSourceBinding, EventRecord, IngestedDatasetRecord, JobRecord,
     JobStatus, KnowledgeChunk, KnowledgeSource, RunRecord, RunState,
-    SourceType, TERMINAL_STATES, TurnKind, TurnRecord, utc_now,
+    SourceType, STORED_PAYLOAD_CONTEXT, TERMINAL_STATES, TurnKind, TurnRecord, utc_now,
 )
 from .state_machine import HUMAN_WAIT_STATES, validate_transition
 from .storage import ConcurrencyConflict, RecordNotFound
@@ -376,7 +376,8 @@ class PostgresStore:
         # rewritten by recovery, but created_at and run_id are preserved.
         return self._save_payload('orchestrator_turns', 'turn_id', record, columns={'run_id': record.run_id, 'status': record.status, 'created_at': record.created_at, 'updated_at': record.updated_at}, preserve=('run_id', 'created_at'))
     def list_turns(self, run_id: str) -> list[TurnRecord]:
-        with self._connect() as conn: return [TurnRecord.model_validate(r['payload']) for r in conn.execute('SELECT payload FROM orchestrator_turns WHERE run_id=%s ORDER BY created_at', (run_id,)).fetchall()]
+        with self._connect() as conn: rows = conn.execute('SELECT payload FROM orchestrator_turns WHERE run_id=%s ORDER BY created_at', (run_id,)).fetchall()
+        return [TurnRecord.model_validate(r['payload'], context=STORED_PAYLOAD_CONTEXT) for r in rows]
     def mark_running_turns_interrupted(self, run_id: str) -> int:
         changed = 0
         for turn in self.list_turns(run_id):
