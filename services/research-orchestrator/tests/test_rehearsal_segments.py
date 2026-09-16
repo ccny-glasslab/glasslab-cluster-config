@@ -14,11 +14,55 @@ from pathlib import Path
 
 from app import rehearse_research_flow as rehearsal
 from app.mock_runtime import ScriptedMockRuntime
-from app.schemas import ApprovalStatus, RunCreateRequest, RunState
+from app.schemas import ApprovalStatus, JobStatus, RunCreateRequest, RunState
+from app.storage import SqliteStore
 
 
 def _mock_factory(settings):
     return ScriptedMockRuntime(runner_image=rehearsal.RUNNER_IMAGE)
+
+
+class _CapacityLimitedMockRuntime(ScriptedMockRuntime):
+    """Scripted runtime whose matrix exceeds the run's parallel capacity.
+
+    The stock scripted matrix is two jobs wide and the rehearsal runs with
+    ``maximum_parallel_jobs=2``, so a single capacity pass submits every job.
+    Real-model matrices routinely exceed the cap, leaving queued jobs with no
+    ``external_run_id``; this runtime reproduces that shape deterministically
+    so the driver's fill -> complete -> reconcile loop is exercised.
+    """
+
+    def run_turn(self, **kwargs):
+        result, message_id = super().run_turn(**kwargs)
+        matrix = next(
+            (
+                action
+                for action in result.requested_actions
+                if action.type == 'submit_experiment_matrix'
+            ),
+            None,
+        )
+        if matrix is None:
+            return result, message_id
+        arguments = dict(matrix.arguments)
+        arguments['variants'] = [
+            {'name': 'baseline', 'overrides': {'learning_rate': 0.0001}},
+            {'name': 'candidate-a', 'overrides': {'learning_rate': 0.0002}},
+            {'name': 'candidate-b', 'overrides': {'learning_rate': 0.0003}},
+            {'name': 'candidate-c', 'overrides': {'learning_rate': 0.0004}},
+        ]
+        arguments['maximum_parallel_jobs'] = 2
+        updated = [
+            matrix.model_copy(update={'arguments': arguments})
+            if action is matrix
+            else action
+            for action in result.requested_actions
+        ]
+        return result.model_copy(update={'requested_actions': updated}), message_id
+
+
+def _capacity_limited_factory(settings):
+    return _CapacityLimitedMockRuntime(runner_image=rehearsal.RUNNER_IMAGE)
 
 
 def _build(root: Path):
@@ -197,6 +241,39 @@ def test_full_run_with_mock_writes_gate_snapshots(tmp_path: Path) -> None:
     assert meta is not None
     assert meta['state'] == 'AWAITING_PROTOCOL_APPROVAL'
     assert meta['git_commit']
+
+
+def test_capacity_limited_matrix_advances_without_asserting(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / 'root'
+    snapshots = tmp_path / 'snapshots'
+
+    # Given: a matrix with four jobs but maximum_parallel_jobs=2, so the engine
+    # can submit only two per capacity pass and leaves the rest QUEUED with no
+    # external_run_id.
+    summary = rehearsal.run_rehearsal(
+        root=root,
+        snapshot_root=snapshots,
+        runtime_factory=_capacity_limited_factory,
+    )
+
+    # Then: the driver drove fill -> complete -> reconcile to COMPLETE instead
+    # of asserting on a queued job that had no external_run_id yet.
+    assert summary['result'] == 'PASS'
+    assert summary['final_state'] == 'COMPLETE'
+    assert _run_state(root) is RunState.COMPLETE
+
+    # And every job actually finished, not just the first capacity batch.
+    run_id, _ = rehearsal._current_run_state(root)
+    assert run_id is not None
+    jobs = SqliteStore(str(root / 'orchestrator.db')).list_jobs(run_id)
+    assert len(jobs) == 4
+    assert all(
+        job.status
+        in {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED}
+        for job in jobs
+    )
 
 
 def _pause_for_human_resolution(store, engine, run) -> None:
