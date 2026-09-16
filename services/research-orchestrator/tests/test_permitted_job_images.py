@@ -31,7 +31,20 @@ from app.task_bundles import (
 def _archive() -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(output, 'w') as handle:
-        handle.writestr('task/problem.md', '# Task\n')
+        # issue #496 enforces the guide's mandatory problem.md sections at
+        # import, so this fixture must be structurally valid for the bundle to
+        # compile; the content itself is irrelevant to the image-coverage check.
+        handle.writestr(
+            'task/problem.md',
+            '# Task\n\n'
+            '## Objective\n\nRun a GPU-profile task under the default '
+            'deployment.\n\n'
+            '## Inputs\n\nA small generated dataset.\n\n'
+            '## Method and architecture\n\nA single training script.\n\n'
+            '## Hyperparameter search space\n\nOne fixed configuration.\n\n'
+            '## Evaluation rubric\n\nReport the primary metric.\n\n'
+            '## Evidence artifacts\n\nmetrics.json.\n',
+        )
     return output.getvalue()
 
 
