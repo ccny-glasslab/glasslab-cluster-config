@@ -15,6 +15,7 @@ import yaml
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+VLLM_DEPLOYMENT = REPOSITORY_ROOT / "kubeadm" / "agent-stack" / "11-vllm-deployment.yaml"
 UPLOAD_CIFAR100 = REPOSITORY_ROOT / "scripts" / "upload-cifar100.sh"
 GHCR_HELPER = REPOSITORY_ROOT / "scripts" / "create-ghcr-pull-secret.sh"
 POSTGRES_IMPORTER = (
@@ -33,6 +34,65 @@ RESEARCH_POSTGRES_IMPORTER = (
     / "import-sqlite-store-to-postgres.py"
 )
 RESEARCH_POSTGRES_DSN_ENV = "GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN"
+
+
+@unittest.skipUnless(
+    VLLM_DEPLOYMENT.exists(),
+    "legacy Titanic v1 agent-stack vLLM deployment is not present "
+    f"({VLLM_DEPLOYMENT})",
+)
+class VllmPodBoundaryTests(unittest.TestCase):
+    """The vLLM key is inherited from the Secret environment, never Python argv."""
+
+    def test_manifest_launches_vllm_without_expanding_api_key_into_argv(self):
+        """Restoring --api-key expansion would disclose the key through the pod process list."""
+        deployment = yaml.safe_load(VLLM_DEPLOYMENT.read_text(encoding="utf-8"))
+        container = deployment["spec"]["template"]["spec"]["containers"][0]
+        command = container["command"]
+        sentinel = "vllm-pod-argv-sentinel"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            records = root / "records.jsonl"
+            fake_python = root / "python3"
+            fake_python.write_text(
+                f"""#!{os.path.realpath(sys.executable)}
+import json
+import os
+import sys
+from pathlib import Path
+
+Path(os.environ["VLLM_RECORDS"]).write_text(json.dumps({{
+    "argv": sys.argv[1:],
+    "api_key_environment": os.environ.get("VLLM_API_KEY"),
+}}), encoding="utf-8")
+""",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PATH": f"{root}:{environment['PATH']}",
+                    "MODEL_NAME": "fixture-model",
+                    "MAX_MODEL_LEN": "128",
+                    "VLLM_API_KEY": sentinel,
+                    "VLLM_RECORDS": str(records),
+                }
+            )
+            result = subprocess.run(
+                command,
+                cwd=REPOSITORY_ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            record = json.loads(records.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(sentinel, json.dumps(record["argv"]))
+        self.assertEqual(record["api_key_environment"], sentinel)
 
 
 class CifarUploadBoundaryTests(unittest.TestCase):

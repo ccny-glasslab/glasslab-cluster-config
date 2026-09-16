@@ -542,6 +542,9 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
         / "research-orchestrator"
         / "11-secret.example.yaml",
     )
+    AGENT_STACK_DEPLOY_SCRIPT = REPOSITORY_ROOT / "scripts" / "deploy-agent-stack.sh"
+    VLLM_DEPLOY_SCRIPT = REPOSITORY_ROOT / "scripts" / "deploy-vllm.sh"
+    VLLM_TEST_SCRIPT = REPOSITORY_ROOT / "scripts" / "test-vllm.sh"
     GPU_RUNNER_DIR = REPOSITORY_ROOT / "kubeadm" / "glasslab-v2" / "gpu-runner"
     GPU_DEPLOY_SCRIPT = REPOSITORY_ROOT / "scripts" / "deploy-gpu-runner.sh"
     PXE_ROOT = (
@@ -556,6 +559,208 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
     )
     PXE_PROFILES = ("default", "node02", "node03", "node04", "node05", "node48", "node49")
 
+    def run_vllm_deploy(
+        self,
+        *,
+        deploy_script: Path | None = None,
+        secret_file: Path | None = None,
+        cluster_secret_exists: bool = False,
+        cluster_secret_value: str | None = None,
+        cluster_secret_values: dict[str, str] | None = None,
+        applied_secret_has_key: bool = True,
+        xtrace: bool = False,
+        source_wrapper: bool = False,
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_root = Path(directory)
+            bin_dir = fixture_root / "bin"
+            bin_dir.mkdir()
+            calls_path = fixture_root / "kubectl-calls"
+            live_secret_dir = fixture_root / "live-secret"
+            live_secret_dir.mkdir()
+            if cluster_secret_exists:
+                values = cluster_secret_values or {
+                    "VLLM_API_KEY": cluster_secret_value if cluster_secret_value is not None else "fixture-live-key"
+                }
+                for key, value in values.items():
+                    (live_secret_dir / key).write_text(encoded(value), encoding="utf-8")
+            kubectl = bin_dir / "kubectl"
+            kubectl.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$*\" >> \"$KUBECTL_CALLS\"\n"
+                "if [[ \"${1-}\" == get && \"${2-}\" == secret ]]; then\n"
+                "  [[ \"${3-}\" == glasslab-agent-secrets && \"${4-}\" == -n && \"${5-}\" == glasslab-agents ]] || exit 1\n"
+                "  case \"${7-}\" in\n"
+                "    'jsonpath={.data.VLLM_API_KEY}') key=VLLM_API_KEY ;;\n"
+                "    'jsonpath={.data.HUGGING_FACE_HUB_TOKEN}') key=HUGGING_FACE_HUB_TOKEN ;;\n"
+                "    'jsonpath={.data.GLASSLAB_AGENT_QWEN_API_KEY}') key=GLASSLAB_AGENT_QWEN_API_KEY ;;\n"
+                "    *) exit 1 ;;\n"
+                "  esac\n"
+                "  [[ -f \"$FAKE_LIVE_SECRET_DIR/$key\" ]] || exit 1\n"
+                "  cat \"$FAKE_LIVE_SECRET_DIR/$key\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [[ \"${1-}\" == apply && \"${FAKE_APPLIED_SECRET_HAS_KEY:-0}\" == 1 ]]; then\n"
+                "  case \"${3-}\" in\n"
+                "    *agent-secrets*)\n"
+                "      printf 'Zml4dHVyZS1saXZlLWtleQ==' > \"$FAKE_LIVE_SECRET_DIR/VLLM_API_KEY\"\n"
+                "      printf 'Zml4dHVyZS1odWYtdG9rZW4=' > \"$FAKE_LIVE_SECRET_DIR/HUGGING_FACE_HUB_TOKEN\"\n"
+                "      printf 'Zml4dHVyZS1xd2VuLWtleQ==' > \"$FAKE_LIVE_SECRET_DIR/GLASSLAB_AGENT_QWEN_API_KEY\"\n"
+                "      ;;\n"
+                "  esac\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            kubectl.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
+            environment["KUBECTL_CALLS"] = str(calls_path)
+            environment["FAKE_LIVE_SECRET_DIR"] = str(live_secret_dir)
+            environment["FAKE_APPLIED_SECRET_HAS_KEY"] = "1" if applied_secret_has_key else "0"
+            if secret_file is None:
+                environment["GLASSLAB_VLLM_SECRET_FILE"] = str(fixture_root / "missing.local.yaml")
+            else:
+                environment["GLASSLAB_VLLM_SECRET_FILE"] = str(secret_file)
+
+            script = str(deploy_script or self.VLLM_DEPLOY_SCRIPT)
+            if not Path(script).exists():
+                self.skipTest(
+                    "legacy Titanic v1 agent-stack deploy script is not present "
+                    f"({script})"
+                )
+            if source_wrapper:
+                command = [
+                    "bash",
+                    "-x",
+                    "-c",
+                    'source "$1"; printf "trace-restored-marker\\n"',
+                    "vllm-deploy-wrapper",
+                    script,
+                ]
+            else:
+                command = ["bash", *(["-x"] if xtrace else []), script]
+            result = subprocess.run(
+                command,
+                cwd=REPOSITORY_ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            calls = calls_path.read_text(encoding="utf-8").splitlines() if calls_path.exists() else []
+            return result, calls
+
+    def run_vllm_test(
+        self,
+        api_key: str | None,
+        *,
+        xtrace: bool = False,
+        source_wrapper: bool = False,
+    ) -> tuple[subprocess.CompletedProcess[str], str, str, list[str], list[str]]:
+        if not self.VLLM_TEST_SCRIPT.exists():
+            self.skipTest(
+                "legacy Titanic v1 vLLM smoke script is not present "
+                f"({self.VLLM_TEST_SCRIPT})"
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_root = Path(directory)
+            bin_dir = fixture_root / "bin"
+            bin_dir.mkdir()
+            argv_path = fixture_root / "curl-argv"
+            config_copy_path = fixture_root / "curl-config-copy"
+            config_paths_path = fixture_root / "curl-config-paths"
+            config_modes_path = fixture_root / "curl-config-modes"
+            curl = bin_dir / "curl"
+            curl.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$*\" >> \"$CURL_ARGV\"\n"
+                "previous=''\n"
+                "for argument in \"$@\"; do\n"
+                "  if [[ \"$previous\" == --config ]]; then\n"
+                "    printf '%s\\n' \"$argument\" >> \"$CURL_CONFIG_PATHS\"\n"
+                "    stat -c '%a' \"$argument\" >> \"$CURL_CONFIG_MODES\"\n"
+                "    cp \"$argument\" \"$CURL_CONFIG_COPY\"\n"
+                "  fi\n"
+                "  previous=\"$argument\"\n"
+                "done\n",
+                encoding="utf-8",
+            )
+            curl.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
+            environment["CURL_ARGV"] = str(argv_path)
+            environment["CURL_CONFIG_COPY"] = str(config_copy_path)
+            environment["CURL_CONFIG_PATHS"] = str(config_paths_path)
+            environment["CURL_CONFIG_MODES"] = str(config_modes_path)
+            if api_key is None:
+                environment.pop("VLLM_API_KEY", None)
+            else:
+                environment["VLLM_API_KEY"] = api_key
+
+            if source_wrapper:
+                command = [
+                    "bash",
+                    "-x",
+                    "-c",
+                    'source "$1"; printf "trace-restored-marker\\n"',
+                    "vllm-test-wrapper",
+                    str(self.VLLM_TEST_SCRIPT),
+                ]
+            else:
+                command = [
+                    "bash",
+                    *(["-x"] if xtrace else []),
+                    str(self.VLLM_TEST_SCRIPT),
+                ]
+            result = subprocess.run(
+                command,
+                cwd=REPOSITORY_ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            argv = argv_path.read_text(encoding="utf-8") if argv_path.exists() else ""
+            config_copy = config_copy_path.read_text(encoding="utf-8") if config_copy_path.exists() else ""
+            config_paths = config_paths_path.read_text(encoding="utf-8").splitlines() if config_paths_path.exists() else []
+            config_modes = config_modes_path.read_text(encoding="utf-8").splitlines() if config_modes_path.exists() else []
+            removed_config_paths = [path for path in config_paths if not Path(path).exists()]
+            return result, argv, config_copy, config_modes, removed_config_paths
+
+    @staticmethod
+    def vllm_secret_manifest(api_key: str) -> str:
+        return (
+            "apiVersion: v1\n"
+            "kind: Secret\n"
+            "metadata:\n"
+            "  name: glasslab-agent-secrets\n"
+            "  namespace: glasslab-agents\n"
+            "stringData:\n"
+            f"  VLLM_API_KEY: {api_key}\n"
+        )
+
+    @staticmethod
+    def agent_secret_values() -> dict[str, str]:
+        return {
+            "VLLM_API_KEY": "fixture-vllm-key",
+            "HUGGING_FACE_HUB_TOKEN": "fixture-hugging-face-token",
+            "GLASSLAB_AGENT_QWEN_API_KEY": "fixture-qwen-key",
+        }
+
+    @classmethod
+    def agent_secret_manifest(cls, values: dict[str, str] | None = None) -> str:
+        values = values or cls.agent_secret_values()
+        lines = [
+            "apiVersion: v1",
+            "kind: Secret",
+            "metadata:",
+            "  name: glasslab-agent-secrets",
+            "  namespace: glasslab-agents",
+            "stringData:",
+        ]
+        lines.extend(f"  {key}: {value}" for key, value in values.items())
+        return "\n".join(lines) + "\n"
+
     def test_tracked_secret_examples_are_not_deployable_kubernetes_secrets(self):
         """Copy-pasting a tracked secret example must never create a live Secret."""
         for example_path in self.SECRET_EXAMPLES:
@@ -565,6 +770,224 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
                     "Secret",
                     {document.get("kind") for document in documents if isinstance(document, dict)},
                 )
+
+    def test_vllm_deploy_exits_before_apply_when_explicit_secret_file_is_absent(self):
+        """A missing explicit vLLM Secret source must stop deployment before apply."""
+        result, calls = self.run_vllm_deploy()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+
+    def test_vllm_deploy_accepts_preexisting_named_cluster_secret(self):
+        """A pre-existing named Secret remains a valid fail-closed deployment source."""
+        result, calls = self.run_vllm_deploy(cluster_secret_exists=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            calls[0],
+            "get secret glasslab-agent-secrets -n glasslab-agents -o jsonpath={.data.VLLM_API_KEY}",
+        )
+        self.assertTrue(any(call.endswith("/11-vllm-deployment.yaml") for call in calls), calls)
+
+    def test_vllm_deploy_rejects_placeholder_in_preexisting_cluster_secret(self):
+        """A non-empty but placeholder live Secret key must block deployment."""
+        result, calls = self.run_vllm_deploy(
+            cluster_secret_exists=True,
+            cluster_secret_value="change-me",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+        self.assertNotIn("change-me", result.stdout + result.stderr)
+
+    def test_vllm_deploy_disables_inherited_xtrace_before_secret_capture(self):
+        """Cluster Secret bytes must stay out of a caller-enabled bash trace."""
+        api_key = "vllm-deploy-xtrace-sentinel"
+        result, calls = self.run_vllm_deploy(
+            cluster_secret_exists=True,
+            cluster_secret_value=api_key,
+            xtrace=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(any(call.endswith("/11-vllm-deployment.yaml") for call in calls), calls)
+        self.assertNotIn(api_key, result.stdout + result.stderr)
+        self.assertNotIn(encoded(api_key), result.stdout + result.stderr)
+
+    def test_vllm_deploy_restores_inherited_xtrace_after_secret_state_is_gone(self):
+        """A sourced deploy helper must return the caller's trace state without leaking keys."""
+        api_key = "vllm-deploy-restore-trace-sentinel"
+        result, _ = self.run_vllm_deploy(
+            cluster_secret_exists=True,
+            cluster_secret_value=api_key,
+            source_wrapper=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(api_key, result.stdout + result.stderr)
+        self.assertNotIn(encoded(api_key), result.stdout + result.stderr)
+        self.assertRegex(result.stderr, r"\+ printf ['\"]trace-restored-marker\\n['\"]")
+
+    def test_vllm_deploy_applies_explicit_live_secret_before_workload(self):
+        """A valid explicit local Secret remains usable and precedes the workload."""
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = Path(directory) / "agent-secrets.local.yaml"
+            secret_path.write_text(self.vllm_secret_manifest("fixture-live-key"), encoding="utf-8")
+            result, calls = self.run_vllm_deploy(secret_file=secret_path)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"apply -f {secret_path}", calls)
+        secret_apply_index = calls.index(f"apply -f {secret_path}")
+        workload_apply_index = next(
+            index for index, call in enumerate(calls) if call.endswith("/11-vllm-deployment.yaml")
+        )
+        self.assertLess(secret_apply_index, workload_apply_index)
+
+    def test_vllm_deploy_rejects_placeholder_local_secret(self):
+        """An explicit local Secret containing a placeholder must never be applied."""
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = Path(directory) / "agent-secrets.local.yaml"
+            secret_path.write_text(self.vllm_secret_manifest("change-me"), encoding="utf-8")
+            result, calls = self.run_vllm_deploy(secret_file=secret_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
+
+    def test_vllm_test_requires_explicit_api_key(self):
+        """The smoke test must stop rather than silently substituting a credential."""
+        result, argv, _, _, _ = self.run_vllm_test(None)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(argv, "")
+
+    def test_vllm_test_rejects_explicit_placeholder_api_key(self):
+        """An explicit placeholder key must stop before curl runs."""
+        result, argv, _, _, _ = self.run_vllm_test("change-me")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(argv, "")
+        self.assertNotIn("change-me", result.stdout + result.stderr)
+
+    def test_vllm_test_keeps_api_key_out_of_argv_and_removes_private_config(self):
+        """A real key must reach curl only through a temporary private config file."""
+        api_key = "vllm-fixture-secret"
+        result, argv, config_copy, config_modes, removed_paths = self.run_vllm_test(api_key)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(api_key, argv)
+        self.assertIn(f"Authorization: Bearer {api_key}", config_copy)
+        self.assertEqual(config_modes, ["600", "600"])
+        self.assertEqual(len(removed_paths), 2)
+
+    def test_vllm_test_disables_inherited_xtrace_until_key_and_config_cleanup(self):
+        """The smoke-test key and private curl config must not enter bash -x output."""
+        api_key = "vllm-test-xtrace-sentinel"
+        result, argv, _, _, removed_paths = self.run_vllm_test(
+            api_key,
+            source_wrapper=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(api_key, result.stdout + result.stderr + argv)
+        self.assertEqual(len(removed_paths), 2)
+        self.assertRegex(result.stderr, r"\+ printf ['\"]trace-restored-marker\\n['\"]")
+
+    def test_agent_stack_deploy_exits_before_apply_when_secret_is_absent(self):
+        """Missing agent credentials must prevent every stack mutation."""
+        result, calls = self.run_vllm_deploy(deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+
+    def test_agent_stack_deploy_accepts_preexisting_named_cluster_secret(self):
+        """The full stack must remain deployable with the exact live Secret/key."""
+        result, calls = self.run_vllm_deploy(
+            deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT,
+            cluster_secret_exists=True,
+            cluster_secret_values=self.agent_secret_values(),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            calls[0],
+            "get secret glasslab-agent-secrets -n glasslab-agents -o jsonpath={.data.VLLM_API_KEY}",
+        )
+        self.assertTrue(any(call.endswith("/21-agent-api-deployment.yaml") for call in calls), calls)
+
+    def test_agent_stack_deploy_accepts_explicit_live_secret(self):
+        """The full stack must retain the explicit local live Secret path."""
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = Path(directory) / "agent-secrets.local.yaml"
+            secret_path.write_text(self.agent_secret_manifest(), encoding="utf-8")
+            result, calls = self.run_vllm_deploy(
+                deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT,
+                secret_file=secret_path,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"apply -f {secret_path}", calls)
+        self.assertTrue(any(call.endswith("/21-agent-api-deployment.yaml") for call in calls), calls)
+
+    def test_agent_stack_rejects_local_secret_missing_each_required_key_before_apply(self):
+        """Every full-stack local Secret key is mandatory before any mutation."""
+        for missing_key in self.agent_secret_values():
+            with self.subTest(missing_key=missing_key), tempfile.TemporaryDirectory() as directory:
+                values = self.agent_secret_values()
+                del values[missing_key]
+                secret_path = Path(directory) / "agent-secrets.local.yaml"
+                secret_path.write_text(self.agent_secret_manifest(values), encoding="utf-8")
+                result, calls = self.run_vllm_deploy(
+                    deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT,
+                    secret_file=secret_path,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+
+    def test_agent_stack_rejects_preexisting_secret_missing_each_required_key_before_apply(self):
+        """Every full-stack cluster Secret key is mandatory before any mutation."""
+        for missing_key in self.agent_secret_values():
+            with self.subTest(missing_key=missing_key):
+                values = self.agent_secret_values()
+                del values[missing_key]
+                result, calls = self.run_vllm_deploy(
+                    deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT,
+                    cluster_secret_exists=True,
+                    cluster_secret_values=values,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+
+    def test_agent_stack_rejects_placeholder_local_qwen_key_before_apply(self):
+        """A local QWEN placeholder must not reach full-stack deployment."""
+        with tempfile.TemporaryDirectory() as directory:
+            values = self.agent_secret_values()
+            values["GLASSLAB_AGENT_QWEN_API_KEY"] = "change-me"
+            secret_path = Path(directory) / "agent-secrets.local.yaml"
+            secret_path.write_text(self.agent_secret_manifest(values), encoding="utf-8")
+            result, calls = self.run_vllm_deploy(
+                deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT,
+                secret_file=secret_path,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+        self.assertNotIn("change-me", result.stdout + result.stderr)
+
+    def test_agent_stack_rejects_placeholder_cluster_qwen_key_before_apply(self):
+        """A cluster QWEN placeholder must not reach full-stack deployment."""
+        values = self.agent_secret_values()
+        values["GLASSLAB_AGENT_QWEN_API_KEY"] = "change-me"
+        result, calls = self.run_vllm_deploy(
+            deploy_script=self.AGENT_STACK_DEPLOY_SCRIPT,
+            cluster_secret_exists=True,
+            cluster_secret_values=values,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call.startswith("apply ") for call in calls), calls)
+        self.assertNotIn("change-me", result.stdout + result.stderr)
 
     def run_gpu_deploy(
         self,
