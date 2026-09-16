@@ -301,7 +301,10 @@ When a queued paper is staged, `workflow-api` now fetches the paper URL and
 creates a `SourceDocumentRecord`. Storage is explicit:
 
 - filesystem mode: writes under `GLASSLAB_WORKFLOW_API_SOURCE_DOCUMENT_STORAGE_DIR`
-- MinIO mode: writes to `GLASSLAB_WORKFLOW_API_SOURCE_DOCUMENT_BUCKET`
+- MinIO mode: writes to `GLASSLAB_WORKFLOW_API_SOURCE_DOCUMENT_BUCKET` using the
+  bucket-scoped identity in the `glasslab-v2-workflow-api-minio` Secret
+  (`MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`), never the MinIO root credential; see
+  `docs/glasslab-v2/runbooks/provision-minio-scoped-users.md`
 
 By default, filesystem storage writes paper/source blobs under:
 
