@@ -10,6 +10,7 @@ re-verifies digests at decision time and fails closed.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -136,6 +137,35 @@ FIXED_WORKLOAD_RUNNER_IMAGES = {
     'workspace-cpu-ml-v1': RUNTIME_PROFILES['cpu-ml-standard-v1'].runner_image,
     'workspace-gpu-ml-v1': RUNTIME_PROFILES['gpu-ml-standard-v1'].runner_image,
 }
+
+
+def missing_profile_runner_images(
+    permitted_images: Iterable[str],
+) -> list[tuple[str, str]]:
+    """Return ``(profile_name, runner_image)`` pairs absent from an allowlist."""
+    permitted = set(permitted_images)
+    return [
+        (name, profile.runner_image)
+        for name, profile in RUNTIME_PROFILES.items()
+        if profile.runner_image not in permitted
+    ]
+
+
+def require_profile_runner_images(permitted_images: Iterable[str]) -> None:
+    """Fail fast when a deployment cannot permit every runtime profile."""
+    missing = missing_profile_runner_images(permitted_images)
+    if not missing:
+        return
+    rendered = '; '.join(f'{name} -> {image}' for name, image in missing)
+    raise TaskBundleError(
+        'permitted_job_images does not cover every runtime profile runner '
+        f'image required by RUNTIME_PROFILES; missing: {rendered}. Add the '
+        'missing images to GLASSLAB_ORCHESTRATOR_PERMITTED_JOB_IMAGES or '
+        'remove the corresponding profile from RUNTIME_PROFILES; a task that '
+        'compiles to an uncovered profile can never pass task preflight '
+        '(issue #502).'
+    )
+
 
 BASE_REQUIRED_ARTIFACTS = (
     'run_manifest.json',

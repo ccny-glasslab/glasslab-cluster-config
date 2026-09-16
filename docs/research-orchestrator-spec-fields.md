@@ -313,9 +313,11 @@ and `workspace-gpu-ml-v1.json` (limits `cpu 8 / mem 32Gi / nvidia.com/gpu 1`,
 into the Job (`services/workflow-api/app/job_submission.py:602-608`, `707-713`).
 
 Both runner images are in the orchestrator's permitting allowlist in the live
-configmap (`kubeadm/glasslab-v2/research-orchestrator/10-configmap.yaml:88`),
-though the *code default* `permitted_job_images` lists only the CPU image
-(`config.py:243-246`).
+configmap (`kubeadm/glasslab-v2/research-orchestrator/10-configmap.yaml:88`).
+The *code default* `permitted_job_images` now derives from `RUNTIME_PROFILES`,
+so a default deploy permits both; a real-execution deployment that overrides
+the allowlist without covering every profile fails fast at startup
+(`build_engine` -> `require_profile_runner_images`, issue #502).
 
 **Why do they exist?** The recorded intent is a bounded-execution security
 boundary, not a scientific one:
@@ -636,7 +638,7 @@ were created by this audit.
 | F9 | **The reason for fixed runtime profiles is not recorded anywhere** - no ADR/design doc/commit body explains why a task cannot determine its own resource envelope; only the security boundary is documented. This omission is what allowed #483's accidental exact-match semantics. | **NEW - needs an issue** | `docs/research-orchestrator.md:449-451`, `959`; commits `4aaeca5`/`54a5f58`/`8b2197f` have empty bodies. |
 | F10 | **The contract's `manifest.budget` and `manifest.guardrails` are effectively inert**: the job's wall-clock comes from `spec.resources.wallclock_minutes`, not the contract budget, so a contract author's declared budget has no deterministic effect. | already filed (#500) - fix in this branch | `schemas.py:475-487`; `cluster.py:279-281`; `job_submission.py:362-376` only checks `budget`, not `manifest.budget`. |
 | F11 | **`variants[].name` drift guard is test-only, and the pattern is duplicated in three places** (`schemas.py:425`, prompt text `engine.py:161-162`, template sanitizer `engine.py:175-181`); a prompt change can diverge from the schema without any runtime failure. | **NEW - needs an issue** | `engine.py:155-159` notes the guard lives in `tests/test_matrix_template_derivation.py`, i.e. not enforced at runtime. |
-| F12 | **The code default `permitted_job_images` allows only the CPU runner image**, so a GPU-profile task fails task preflight unless the deployment configmap overrides it (the live configmap does). A default deploy therefore cannot run GPU tasks. | **NEW - needs an issue** | `config.py:243-246` (one image) vs `10-configmap.yaml:88` (two images). |
+| F12 | **The code default `permitted_job_images` allows only the CPU runner image**, so a GPU-profile task fails task preflight unless the deployment configmap overrides it (the live configmap does). A default deploy therefore cannot run GPU tasks. | already filed (#502) - fix in this branch | `config.py:243-246` (one image) vs `10-configmap.yaml:88` (two images). |
 
 ---
 
