@@ -10,10 +10,11 @@ files so downstream copy/freeze/packaging code sees the same shape.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
 
-from .opencode_runtime import AgentRuntime, RuntimeSession
+from .opencode_runtime import AgentRuntime, ResultPreparer, RuntimeSession
 from .schemas import (
     AgentName,
     AgentTurnResult,
@@ -79,7 +80,13 @@ class ScriptedMockRuntime(AgentRuntime):
         model_override: str | None = None,
         base_url_override: str | None = None,
         knowledge_tool: object | None = None,
+        result_preparers: Sequence[ResultPreparer] = (),
     ) -> tuple[AgentTurnResult, str | None]:
+        # result_preparers belongs to the AgentRuntime surface so the engine
+        # can pass orchestrator-owned normalization to any backend. This
+        # runtime builds typed AgentTurnResult objects directly, so there is
+        # no raw structured payload a preparer could transform.
+        del result_preparers
         self.turn_counts[agent] += 1
         self.prompts.append((agent, prompt))
         self.knowledge_tools_received.append((agent, knowledge_tool))

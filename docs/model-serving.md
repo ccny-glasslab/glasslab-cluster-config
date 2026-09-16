@@ -1,47 +1,32 @@
 # Model Serving Notes
 
-## vLLM / Qwen
+## Current Model Serving
 
-This stack started with a single in-cluster vLLM Deployment exposing an OpenAI-compatible `/v1` API inside the `glasslab-agents` namespace.
+Glasslab serves models from dedicated macOS inference hosts outside the
+Kubernetes cluster. Each Mac runs one full model locally; `exo` is retired:
 
-That is still the safe repo default, but Glasslab can also treat a separate inference host such as a Mac Studio as the primary model-serving tier if it exposes a stable OpenAI-compatible `/v1` endpoint reachable from the cluster.
+| Host | Model | mlx port | guard port |
+|---|---|---|---|
+| `.17` | `mlx-community/Qwen3-Coder-Next-4bit` | 52416 | 52417 |
+| `.18` | `mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit` | 52416 | 52417 |
 
-Configured environment keys:
+`mlx_lm.server` runs behind `model_guard.py`, a serializing proxy (single
+queue, 64 MB body cap, 503+retry when busy); the orchestrator and the
+rehearsal harness talk only to the guard. Weights live in the durable Hugging
+Face cache under `/Users/glasslab/.cache/huggingface`; launchd daemons keep
+the servers up across reboots. Install, (re)download, offline mode, and
+verification steps live in `scripts/model-serve/README.md`.
 
-- `MODEL_NAME`
-- `MAX_MODEL_LEN`
-- `VLLM_API_KEY`
-- `HUGGING_FACE_HUB_TOKEN`
-
-Current manifest assumptions:
-
-- service name: `vllm`
-- service port: `8000`
-- runtime class: `nvidia`
-- node selector: `glasslab.io/gpu-candidate=true`
-- GPU resource key: `nvidia.com/gpu`
-- cache PVC: `vllm-model-cache`
-
-Validation path after deployment:
-
-```bash
-/home/glasslab/cluster-config/scripts/port-forward-vllm.sh
-/home/glasslab/cluster-config/scripts/test-vllm.sh
-```
-
-The agent API talks to:
-
-- `http://vllm.glasslab-agents.svc.cluster.local:8000/v1/models`
-- `http://vllm.glasslab-agents.svc.cluster.local:8000/v1/chat/completions`
+The legacy in-cluster vLLM Deployment in the `glasslab-agents` namespace was
+part of the Titanic v1 stack. It has been removed from this repository (issues
+#157/#158), together with its manifests, planner, and smoke scripts.
 
 ## External Primary Inference
 
-If the Mac Studio becomes the main inference box, the cleanest path is:
-
-- keep the Mac outside the Kubernetes worker set
-- expose a stable internal or Tailscale-reachable OpenAI-compatible `/v1` endpoint
-- point OpenClaw at that endpoint during runtime export
-- update any legacy v1 `agent-api` config that still depends on the old in-cluster `vllm` service
+Inference hosts stay outside the Kubernetes worker set and expose a stable
+internal or Tailscale-reachable OpenAI-compatible `/v1` endpoint. Point
+OpenClaw at that endpoint during runtime export. The external-inference
+decision note is `docs/glasslab-v2/mac-studio-inference.md`.
 
 Example OpenClaw export override:
 
@@ -51,45 +36,9 @@ GLASSLAB_OPENCLAW_DEFAULT_MODEL="your-primary-model-id" \
 ./scripts/export-openclaw-config.sh
 ```
 
-Example smoke test against a non-default endpoint and model:
-
-```bash
-VLLM_BASE_URL="https://mac-studio.example.internal/v1" \
-VLLM_MODEL_NAME="your-primary-model-id" \
-./scripts/test-vllm.sh
-```
-
-## Planner Behavior
-
-The planner prompt is intentionally narrow.
-
-Rules:
-
-- only the Titanic baseline is supported
-- output must be JSON only
-- no shell, Python, or YAML is accepted
-- unknown models or resource profiles are rejected by the validator even if the model invents them
-
-A deterministic fallback parser exists for common Titanic requests so the API remains testable when model output is missing or malformed.
-
 ## Optional MLflow
 
-`kubeadm/agent-stack/30-mlflow-optional.yaml` is a minimal optional deployment.
-
-What it does now:
-
-- starts one `mlflow server`
-- uses a single PVC-backed sqlite backend store
-- exposes `mlflow` as a ClusterIP service on port `5000`
-
-What it does not try to solve yet:
-
-- production auth
-- external object storage
-- HA database backing
-- ingress
-
-The runner only logs to MLflow when these settings are enabled:
-
-- `GLASSLAB_AGENT_MLFLOW_ENABLED=true`
-- `GLASSLAB_AGENT_MLFLOW_TRACKING_URI=http://mlflow.glasslab-agents.svc.cluster.local:5000`
+Optional MLflow manifests belong under `kubeadm/glasslab-v2/mlflow/` if that
+history layer is enabled; no manifests are tracked there yet. The old
+`kubeadm/agent-stack/30-mlflow-optional.yaml` deployment was removed with the
+v1 stack.

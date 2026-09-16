@@ -25,8 +25,6 @@ Reference:
 - `MinIO` on `node01`
 - `OpenClaw` on `node01`
 - `NATS` on `node05`
-- `glasslab-agent-api` on `node03`
-- `vLLM` on `node02`
 
 As of 2026-03-23, the lab also has a validated NFS target:
 
@@ -66,7 +64,6 @@ Why:
 
 Best first use:
 
-- Titanic dataset area
 - future workflow input corpora
 - literature or replication input bundles
 

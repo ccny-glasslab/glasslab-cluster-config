@@ -895,13 +895,14 @@ Before deployment:
 
 ## Legacy Relationship
 
-The Titanic agent stack remains under `services/agent-api`, `services/runner`,
-and `kubeadm/agent-stack`. It is preserved as v1 reference material.
+The legacy Titanic v1 stack (`services/agent-api`, `services/runner`, and
+`kubeadm/agent-stack`) has been removed from this repository (issues
+#157/#158).
 
 The orchestrator does not copy its Titanic-specific intent parser, legacy SQLite
 schema, or direct Kubernetes submission model. It reuses the lessons and the
 bounded execution boundary represented by `workflow-api` and
-`research-workspace-runner`. The old stack can continue to run during migration.
+`research-workspace-runner`.
 
 ## Validation Status
 

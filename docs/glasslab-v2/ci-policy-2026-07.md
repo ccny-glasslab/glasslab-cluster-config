@@ -30,7 +30,6 @@ OpenCode -> repo-owned scripts -> workflow-api -> Kubernetes Jobs
 So default CI should prioritize:
 
 - `services/workflow-api`
-- `services/runner`
 - `services/workflow-registry`
 - `kubeadm/glasslab-v2` current manifests
 - repo-owned scripts used by the current path

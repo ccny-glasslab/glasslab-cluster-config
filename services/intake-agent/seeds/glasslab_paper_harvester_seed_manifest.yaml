@@ -4,7 +4,7 @@ created_on: '2026-03-25'
 owner_project: glasslab-cluster-config
 repo_context:
   repo_url: https://github.com/ccny-glasslab/glasslab-cluster-config
-  reference_doc: https://github.com/ccny-glasslab/glasslab-cluster-config/blob/main/docs/titanic-agent-stack.md
+  reference_doc: https://github.com/ccny-glasslab/glasslab-cluster-config/blob/main/docs/glasslab-system-spec-for-research.md
   architecture_bias:
   - favor bounded, reproducible jobs that fit a Kubernetes job runner
   - prefer papers with public code, public benchmarks, and clear artifact outputs

@@ -13,6 +13,7 @@ workspace and purpose check.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
@@ -32,6 +33,9 @@ from .config import Settings
 from .knowledge_tool import TOOL_NAME, BoundRetrieveEvidenceTool
 from .runtime_env import build_agent_environment
 from .schemas import AgentName, AgentTurnResult, ProducedFile
+
+
+ResultPreparer = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 class OpenCodeRuntimeError(RuntimeError):
@@ -100,6 +104,7 @@ class AgentRuntime(ABC):
         model_override: str | None = None,
         base_url_override: str | None = None,
         knowledge_tool: BoundRetrieveEvidenceTool | None = None,
+        result_preparers: Sequence[ResultPreparer] = (),
     ) -> tuple[AgentTurnResult, str | None]:
         raise NotImplementedError
 
@@ -238,6 +243,25 @@ def normalize_structured_output(structured: Any) -> Any:
             }
         normalized['evaluation_contract_proposal'] = proposal
     return normalized
+
+
+def apply_result_preparers(
+    structured: Any,
+    preparers: Sequence[ResultPreparer],
+) -> Any:
+    """Apply orchestrator-owned preparers to a raw structured payload.
+
+    Preparers run before schema validation so orchestrator-established facts
+    required by the schema (for example a task asset's verified digest) are
+    present when the payload is validated and committed. A preparer raising
+    aborts the turn: its failure is a deterministic rejection, not something a
+    model repair turn can fix.
+    """
+    if not isinstance(structured, dict) or not preparers:
+        return structured
+    for prepare in preparers:
+        structured = prepare(structured)
+    return structured
 
 
 def materialize_declared_workspace_files(
@@ -803,6 +827,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
         model_override: str | None = None,
         base_url_override: str | None = None,
         knowledge_tool: BoundRetrieveEvidenceTool | None = None,
+        result_preparers: Sequence[ResultPreparer] = (),
     ) -> tuple[AgentTurnResult, str | None]:
         handle = self._start_process(
             run_id=run_id,
@@ -839,6 +864,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
                 session_id=session_id,
                 prompt=prompt,
                 model_override=model_override,
+                result_preparers=result_preparers,
             )
             if abort_reasons:
                 abort = abort_reasons[0]
@@ -870,6 +896,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
         session_id: str,
         prompt: str,
         model_override: str | None = None,
+        result_preparers: Sequence[ResultPreparer] = (),
     ) -> tuple[AgentTurnResult, str | None]:
         message_id: str | None = None
         current_prompt = prompt
@@ -961,6 +988,13 @@ class OpenCodeProcessRuntime(AgentRuntime):
                             continue
                     structured = normalize_structured_output(structured)
                     if isinstance(structured, dict):
+                        # Orchestrator-owned preparers run before validation so
+                        # facts the schema requires but the model cannot know
+                        # (verified task-asset digests) are populated first.
+                        structured = apply_result_preparers(
+                            structured,
+                            result_preparers,
+                        )
                         structured = materialize_declared_workspace_files(
                             structured=structured,
                             workspace=workspace,

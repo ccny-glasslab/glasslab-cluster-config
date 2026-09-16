@@ -122,27 +122,14 @@ Documented practical inference target:
 
 ## 6. The Two Application Stacks
 
-Glasslab currently contains two generations of stack.
+Glasslab's active stack is the v2 workflow platform.
 
-### v1: Legacy / Reference Stack
+### v1: Legacy / Reference Stack (removed)
 
-Purpose:
-
-- prove that plain-language request -> validation -> Kubernetes job -> artifacts can work end-to-end
-
-Shape:
-
-- FastAPI agent API
-- local vLLM model service
-- fixed Titanic runner
-- Kubernetes Jobs
-- SQLite state
-
-Role today:
-
-- legacy/reference scaffolding
-- useful worked example
-- not the long-term architecture
+The v1 stack proved that plain-language request -> validation -> Kubernetes job
+-> artifacts could work end-to-end (FastAPI agent API, local vLLM model
+service, fixed Titanic runner, SQLite state). It has been removed from this
+repository (issues #157/#158) and is no longer an available path.
 
 ### v2: Current Direction
 
@@ -183,15 +170,14 @@ Responsibilities:
 
 - actual workloads run
 - runner images exist
-- vLLM serves models
+- model serving is provided outside the cluster
 - artifacts are stored
 - state is mounted
 
 Representative repo areas:
 
-- `kubeadm/agent-stack`
 - `kubeadm/glasslab-v2`
-- `services/runner`
+- `services/research-workspace-runner`
 - `docs/model-serving.md`
 - `docs/glasslab-v2/storage-and-state.md`
 
@@ -352,21 +338,22 @@ Current state:
 - still on `emptyDir`
 - current remaining core durability gap
 
-### vLLM
+### Model Serving
 
 Role:
 
-- local LLM inference layer
-- OpenAI-compatible `/v1` endpoint
-- local model path for OpenClaw and legacy stack uses
+- local LLM inference layer for the operator and research agents
+- OpenAI-compatible `/v1` endpoints on dedicated inference hosts
 
-Current documented model path:
+Current state:
 
-- `Qwen/Qwen3-4B-Instruct-2507`
+- model serving runs outside the cluster; see `docs/model-serving.md`
+- the legacy in-cluster vLLM deployment was part of the v1 stack and has been
+  removed from this repository (issues #157/#158)
 
 Important architectural note:
 
-- vLLM is model-serving infrastructure, not orchestration logic
+- model serving is infrastructure, not orchestration logic
 
 ## 12. Current OpenClaw Usage
 

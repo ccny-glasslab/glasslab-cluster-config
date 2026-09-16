@@ -4,6 +4,11 @@
 **Issue**: CI/CD pipelines don't validate contrastive learning functionality  
 **Status**: Critical Gap Identified
 
+> **Status note (2026-09-16):** the legacy `services/runner` sources and the
+> pre-2026-07 CI workflow set referenced below were removed from the repository
+> during the v1 Titanic stack retirement (issues #157/#158). This document is
+> retained as a historical record of the gap identified on 2026-04-24.
+
 ---
 
 ## Current CI/CD Coverage

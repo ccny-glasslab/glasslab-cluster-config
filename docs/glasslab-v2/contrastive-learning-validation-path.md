@@ -1,5 +1,10 @@
 # Contrastive Learning Validation Path
 
+> **Status note (2026-09-16):** the contrastive-learning runner and the legacy
+> `services/runner` sources referenced below were removed from the repository
+> during the v1 Titanic stack retirement (issues #157/#158). Retained as a
+> historical record of the validation design.
+
 ## Overview
 
 Contrastive learning features cannot be validated through GitHub Actions hosted runners
