@@ -2,9 +2,9 @@
 
 Discord is the human control surface for a Glasslab research run. It projects
 the durable PostgreSQL records and append-only event log; it is not agent
-memory, job truth, or the source of authority. Honeydew and Beaker are Hermes
-agents backed by the lab Qwen endpoint. Their raw model tokens and tool traces
-are intentionally not posted to Discord.
+memory, job truth, or the source of authority. Honeydew and Beaker are OpenCode
+agent runtimes against the lab model endpoint. Their raw model tokens and tool
+traces are intentionally not posted to Discord.
 
 Only the configured channel accepts commands. Approval controls require the
 configured administrator role (`Mystic Arts Master`) or an explicitly allowed
@@ -16,7 +16,7 @@ secret data and must not be committed.
 Use the configured Glasslab channel.
 
 ```text
-/research-start objective:<research question>
+/task-start objective:<research question>
 ```
 
 For an arbitrary packaged task, attach a ZIP containing `problem.md` and run:
@@ -25,8 +25,9 @@ For an arbitrary packaged task, attach a ZIP containing `problem.md` and run:
 /task-start archive:<ZIP> objective:<optional narrower objective>
 ```
 
-`/benchmark-start` is a compatibility alias for `/task-start`. New work
-should use `/task-start`.
+`/task-start` is the only registered start command. The retired
+`/research-start` and `/benchmark-start` names are not registered and do
+nothing; use `/task-start` for both forms.
 
 For local data, upload it before starting the task:
 
@@ -67,7 +68,7 @@ Inside a run thread, commands infer the run ID. From the main channel, supply
 
 | Command | Effect |
 | --- | --- |
-| `/research-pause [run_id] [reason]` | Aborts an active Hermes turn, preserves workspaces and recovery state, and records the pause. |
+| `/research-pause [run_id] [reason]` | Aborts an active model turn, preserves workspaces and recovery state, and records the pause. |
 | `/research-resume [run_id] [reason]` | Restarts workflow recovery from the recorded state. |
 | `/research-cancel [run_id] [reason]` | Cancels the run, aborts active agent work, requests cancellation for active jobs, and records the actor and reason. A paused run may be cancelled. |
 | `/research-artifacts [run_id] [include_source]` | Delivers a digest-verified archive of run artifacts and successful-job outputs. |

@@ -1,6 +1,6 @@
 # Glasslab Work Queue
 
-Last reviewed: 2026-09-10
+Last reviewed: 2026-09-16
 
 GitHub Issues are the authoritative backlog. This file is a compact priority
 index for humans and coding agents arriving in the repository; it must not
@@ -30,15 +30,9 @@ Current issues:
 
 ## P2: Runtime Hardening And Cleanup
 
-- [#427 Reconcile tracked orchestrator configmap with live split-model serving](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/427)
-- [#426 Make rehearsal state durable on shared PVC (rollout-safe run-through)](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/426)
 - [#431 Threshold-triggered turn-history rotation](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/431)
-- [#432 Migrate `.17` mlx serving to launchd (reboot-survivable)](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/432)
 - [#433 Evidence-driven per-turn-kind model routing](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/433)
-- [#369 Unauthenticated read API on research-orchestrator exposes unredacted run state](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/369)
 - [#271 Dormant-but-deployed service defects: router idempotency/timeouts, schedule-worker partial failures, evaluator dead paths](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/271)
-- [#270 workflow-api low-severity hardening batch](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/270)
-- [#269 Orchestrator low-severity cleanups found during defect trawl](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/269)
 - [#229 Stabilize the OpenCode agent runtime (protocol-draft hangs and transient compile failures)](https://github.com/ccny-glasslab/glasslab-cluster-config/issues/229)
 
 ## Maintenance Rule

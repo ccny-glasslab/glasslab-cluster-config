@@ -1,6 +1,6 @@
 # Glasslab Current Handoff
 
-Last updated: 2026-09-10
+Last updated: 2026-09-16
 
 This is the compact current-state checkpoint for switching human or coding
 agents. Read `AGENTS.md` first for stable rules, architecture, vocabulary,
@@ -80,11 +80,12 @@ sudo -n env KUBECONFIG=/home/glasslab/.kube/config \
   -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 ```
 
-## Committed State (`testing`, 2026-09-10)
+## Committed State (`testing`, 2026-09-16)
 
-`testing` is the shared integration branch and is **~70 commits ahead of
-`main`**. `main` (production/releasable) is at `97d0caa`, which is also the
-deployed image (see "Deployed State" below). The Sept-2026 hardening wave is
+`testing` is the shared integration branch; `main` (production/releasable)
+receives reviewed promotions from it. Check the current divergence with
+`git rev-list --left-right --count origin/main...origin/testing`.
+The Sept-2026 hardening wave is
 merged to `testing`: security backlog (#368, #372, #373, #377), supply-chain
 pinning (#264), pod/network hardening (#263, #265, #266), shell defects (#267),
 and the orchestrator recovery/lock/idempotency batch (#237, #238, #240, #246,

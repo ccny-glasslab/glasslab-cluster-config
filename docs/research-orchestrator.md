@@ -481,8 +481,8 @@ references through `workflow-api`.
 
 The three previously imported Adult, Wine, and Fashion-MNIST records remain
 readable and keep their original task-specific contracts and workload IDs.
-The old registry entries and `/benchmark-start` command are compatibility
-aliases, not the extension mechanism for new tasks.
+The old registry entries remain readable for compatibility but are not the
+extension mechanism for new tasks; `/benchmark-start` is retired.
 
 Start from Discord:
 
@@ -667,7 +667,7 @@ Honeydew, Beaker, and Orchestrator messages and one editable status message.
 Messages are rendered from persisted events after transaction commit. No
 token-by-token output is posted, and Discord history is never used as memory.
 
-The guild-scoped `/research-start objective:...` command is the human front
+The guild-scoped `/task-start objective:...` command is the human front
 door. It invokes the same authoritative `create_run` engine method as the HTTP
 API, then creates the run thread. The command is role-gated using the same
 configured Discord control policy as approvals. The HTTP endpoint remains an
@@ -810,12 +810,12 @@ development leaves this check disabled unless
 Normal Discord usage is:
 
 ```text
-/research-start objective: Compare naive and semi-hard triplet mining on unseen CIFAR-100 classes.
+/task-start objective: Compare naive and semi-hard triplet mining on unseen CIFAR-100 classes.
 ```
 
 Imported task usage is `/task-start` with a ZIP attachment. The command
-compiles, preflights, and starts only ready tasks. `/benchmark-start` remains
-as a compatibility alias. All start commands are restricted to the configured
+compiles, preflights, and starts only ready tasks. `/benchmark-start` is
+retired; use `/task-start`. All start commands are restricted to the configured
 channel and Discord administrator role.
 
 Upload a local dataset before starting a task:

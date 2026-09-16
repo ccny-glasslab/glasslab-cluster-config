@@ -1,5 +1,10 @@
 # Legacy Scale-to-Zero Audit (2026-09)
 
+> **Status note (2026-09-16):** the legacy Titanic v1 stack referenced below
+> (the `kubeadm/agent-stack` manifests and the `services/runner` sources) was
+> removed from the repository by #485 after this audit. The dispositions below
+> are a historical record of the 2026-09-04 live cluster.
+
 Issue #353 (hyperplan T8/E5). Audits each listed service for live references
 and records a disposition. Live state queried from the provisioner cluster on
 2026-09-04. Repo references checked with `grep -rl` over `kubeadm/ services/
