@@ -10,7 +10,6 @@ on:
         type: choice
         options:
           - workflow-api
-          - research-command-router
           - schedule-worker
           - research-orchestrator
           - research-workspace-runner
@@ -51,11 +50,6 @@ jobs:
               echo "context=." >> "$GITHUB_OUTPUT"
               echo "dockerfile=services/workflow-api/Dockerfile" >> "$GITHUB_OUTPUT"
               echo "image=ghcr.io/${REPO_OWNER}/glasslab-workflow-api" >> "$GITHUB_OUTPUT"
-              ;;
-            research-command-router)
-              echo "context=services/research-command-router" >> "$GITHUB_OUTPUT"
-              echo "dockerfile=services/research-command-router/Dockerfile" >> "$GITHUB_OUTPUT"
-              echo "image=ghcr.io/${REPO_OWNER}/glasslab-research-command-router" >> "$GITHUB_OUTPUT"
               ;;
             schedule-worker)
               echo "context=services/schedule-worker" >> "$GITHUB_OUTPUT"

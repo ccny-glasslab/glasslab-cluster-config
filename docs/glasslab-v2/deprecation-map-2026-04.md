@@ -10,10 +10,10 @@ This document explains what is current, what is secondary, and what should now b
 
 ### Secondary remote command adapter
 
-* `whatsapp-gateway` and `research-ingress` are retired (issue #159); see
-  `docs/glasslab-v2/historical/README.md`. The remaining
-  `research-command-router -> workflow-api` link is held pending confirmation
-  on the #173 workflow-api auth work.
+* `whatsapp-gateway`, `research-ingress`, and `research-command-router` are
+  retired (issue #159); see `docs/glasslab-v2/historical/README.md`. The #173
+  workflow-api auth work landed and #289 removed the router's workflow-api
+  caller.
 
 ### Primary product loop
 

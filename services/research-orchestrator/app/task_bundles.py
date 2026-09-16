@@ -94,6 +94,11 @@ class RuntimeProfile:
     resources: dict[str, Any]
 
 
+# Resource authority for imported tasks: profiles are platform-selected
+# envelopes/defaults, not model-selectable values. Why they exist, the threat
+# model, and the chosen precedence (min(request, envelope,
+# contract.constraints, policy)) are recorded in
+# docs/glasslab-v2/adr/0005-runtime-profile-resource-authority.md
 RUNTIME_PROFILES = {
     'cpu-ml-standard-v1': RuntimeProfile(
         workload_id='workspace-cpu-ml-v1',

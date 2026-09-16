@@ -106,7 +106,7 @@ These may remain live, but they should not define the product.
 
 | Component | Path | Decision |
 | --- | --- | --- |
-| research-command-router | `services/research-command-router/` | Compatibility router; do not add new workflow logic here. Held pending confirmation on the #173 workflow-api auth work. |
+| research-command-router | retired | Retired (issue #159). The #173 workflow-api auth work landed and #289 removed the router's caller; source and manifests removed. |
 | intake / interpretation / design / assessment agents | `services/*-agent/` | Bounded agents, not the core execution engine. |
 | schedule-worker | `services/schedule-worker/` | Useful for scheduled execution; keep behind workflow-api records. |
 
@@ -197,10 +197,9 @@ docs/glasslab-v2/ci-policy-2026-07.md
 
 ### Phase 3: Prune services and manifests
 
-- Done: WhatsApp (gateway, web bridge) and research-ingress are retired
-  (issue #159); source, manifests, and CI entries removed.
-  research-command-router is held pending confirmation on the #173
-  workflow-api auth work.
+- Done: WhatsApp (gateway, web bridge), research-ingress, and
+  research-command-router are retired (issue #159); source, manifests, and CI
+  entries removed.
 - Keep bounded agents only if they consume/produce workflow-api records.
 - Done: the v1 Titanic agent stack and manifests were removed (issues
   #157/#158); the generic experiment path covers the same demonstration value.

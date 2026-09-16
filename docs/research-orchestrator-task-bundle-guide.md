@@ -7,6 +7,9 @@ Research Tasks") with the practical rules that make a bundle pass. For the
 field-by-field reference (what is parsed vs agent-interpreted, every validator,
 and the resource-precedence rule), see
 [`research-orchestrator-spec-fields.md`](research-orchestrator-spec-fields.md).
+For why a task cannot choose its own resources - the platform envelope and the
+resolution precedence - see
+[ADR 0005](glasslab-v2/adr/0005-runtime-profile-resource-authority.md).
 
 ## The bundle contract
 

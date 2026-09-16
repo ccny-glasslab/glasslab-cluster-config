@@ -14,7 +14,6 @@ publication uses the workflow's short-lived GITHUB_TOKEN.
 
 Services:
   workflow-api
-  research-command-router
   research-orchestrator
   research-workspace-runner
   runner
@@ -30,7 +29,7 @@ SERVICE="$1"
 TAG="${2:-}"
 
 case "$SERVICE" in
-  workflow-api|research-command-router|research-orchestrator|research-workspace-runner|runner)
+  workflow-api|research-orchestrator|research-workspace-runner|runner)
     ;;
   *)
     printf 'Unsupported service: %s\n' "$SERVICE" >&2
