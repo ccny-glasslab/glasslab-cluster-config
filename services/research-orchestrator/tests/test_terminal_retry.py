@@ -64,7 +64,22 @@ def _terminal_parent(engine, store):
 def _task_archive() -> bytes:
     content = io.BytesIO()
     with zipfile.ZipFile(content, 'w') as archive:
-        archive.writestr('task/problem.md', '# Task\n')
+        archive.writestr(
+            'task/problem.md',
+            '# Task\n\n'
+            '## Objective\n'
+            'Retry a verified task-bound research run.\n\n'
+            '## Inputs\n'
+            'Synthetic inputs only.\n\n'
+            '## Method and architecture\n'
+            'Reuse the bounded runner entrypoint.\n\n'
+            '## Hyperparameter search space (exact)\n'
+            'seed: {17}\n\n'
+            '## Evaluation rubric (exact)\n'
+            'accuracy >= 0.5\n\n'
+            '## Evidence artifacts (required)\n'
+            'metrics.json, report.md\n',
+        )
         archive.writestr('task/eval_agent_prompt.md', '# Evaluator\n')
     return content.getvalue()
 

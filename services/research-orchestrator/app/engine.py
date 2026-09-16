@@ -31,6 +31,10 @@ from .evidence import (
 )
 from .evidence_resolver import EvidenceURIResolver
 from .matrix import expand_experiment_matrix
+from .matrix_naming import (
+    MATRIX_VARIANT_RULES_GUIDANCE,
+    variant_name_from_value,
+)
 from .methodology_config import (
     MethodologyConfigRepair,
     repair_methodology_settings,
@@ -165,33 +169,9 @@ METHODOLOGY_REQUIREMENTS_GUIDANCE = (
 
 # Issue #474: the variant naming rule and the comparison shape are restated at
 # every matrix proposal and revision turn, so the agent learns them from the
-# task rather than from a deterministic schema rejection. The pattern text
-# matches ExperimentVariant.name; the drift guard lives in
-# tests/test_matrix_template_derivation.py.
-MATRIX_VARIANT_RULES_GUIDANCE = (
-    '\nVariant naming and comparison rules: every variant `name` must match '
-    'the pattern `^[a-z0-9][a-z0-9_-]{0,62}$` (lowercase letters, digits, '
-    'hyphens, or underscores). When the evaluation contract declares a '
-    '`comparison` methodology requirement, emit exactly one variant per '
-    'required distinct method (at least `minimum_distinct_values` variants), '
-    'each with a distinct NON-EMPTY `overrides` object that sets that '
-    "requirement's `config_path` to one distinct value; never propose a "
-    'single variant with empty `overrides` when a comparison is required. '
-    'Write the same distinct values into `base_config` at the same '
-    '`config_path`, so the deterministic preflight (which reads base_config) '
-    'and the methodology review (which reads the variants) agree.\n'
-)
-
-
-def _variant_name_from_value(value: str) -> str:
-    # The template derives each variant name from the distinct value it
-    # demonstrates. Sanitizing to the schema pattern keeps the template a
-    # valid ExperimentMatrix even when a contract config_path leaf is not
-    # already pattern-conforming.
-    slug = re.sub(r'[^a-z0-9_-]+', '-', value.lower()).strip('-_')
-    return slug[:63] or 'candidate'
-
-
+# task rather than from a deterministic schema rejection. The prose is rendered
+# by matrix_naming from the single pattern constant that ExperimentVariant.name
+# also uses (issue #501), so the prompt cannot drift from the validator.
 def _is_retryable_turn_failure(exc: Exception) -> bool:
     """Transient runtime failures are retryable; deterministic ones are not."""
     if isinstance(exc, (httpx.HTTPError, TimeoutError)):
@@ -4888,7 +4868,7 @@ class ResearchOrchestrator:
             leaf = requirement.config_path.split('.')[-1]
             for index in range(1, requirement.minimum_distinct_values + 1):
                 value = f'{leaf}-candidate-{index}'
-                base = _variant_name_from_value(value)
+                base = variant_name_from_value(value)
                 name = base
                 suffix = 2
                 while name in names:

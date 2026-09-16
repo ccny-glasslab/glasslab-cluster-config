@@ -25,6 +25,7 @@ import zipfile
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from .problem_schema import problem_section_errors
 from .schemas import TaskAssetProposal, TaskSpecProposal
 from .spec_feedback import format_spec_feedback
 from .url_fetch import PublicHttpsFetcher, UrlFetchError, UrlFetchErrorKind
@@ -478,13 +479,21 @@ class TaskBundleManager:
             shutil.rmtree(staging, ignore_errors=True)
             raise
         try:
-            problem.read_text(encoding='utf-8')
+            problem_text = problem.read_text(encoding='utf-8')
             evaluator.read_text(encoding='utf-8')
         except UnicodeDecodeError as exc:
             shutil.rmtree(staging, ignore_errors=True)
             raise TaskBundleError(
                 'problem and evaluator prompt must be UTF-8 text'
             ) from exc
+        section_errors = problem_section_errors(problem_text)
+        if section_errors:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise TaskBundleError(
+                'task problem.md does not satisfy the required structure: '
+                + '; '.join(section_errors)
+                + ' (see docs/research-orchestrator-task-bundle-guide.md)'
+            )
         return StagedTaskBundle(
             filename=Path(filename).name,
             digest=digest,

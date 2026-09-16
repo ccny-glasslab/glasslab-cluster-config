@@ -14,9 +14,17 @@ from pathlib import Path
 
 import pytest
 
+from app import matrix_naming
 from app.contracts import (
     EvaluationContractResolver,
     compute_contract_digest,
+)
+from app.matrix_naming import (
+    MATRIX_VARIANT_RULES_GUIDANCE,
+    VARIANT_NAME_PATTERN,
+    VARIANT_NAME_RE,
+    render_variant_rules_guidance,
+    variant_name_from_value,
 )
 from app.schemas import ExperimentMatrix, ExperimentVariant, RunCreateRequest
 
@@ -137,6 +145,71 @@ def _variant_name_pattern() -> str:
         if pattern:
             return str(pattern)
     raise AssertionError('ExperimentVariant.name has no pattern constraint')
+
+
+def test_variant_name_pattern_has_one_source() -> None:
+    # Issue #501: the schema validator must derive from the shared constant
+    # rather than restating the pattern.
+    assert _variant_name_pattern() == VARIANT_NAME_PATTERN
+
+
+def test_variant_rules_guidance_renders_the_pattern_argument() -> None:
+    # The prompt text must be rendered from the pattern it is given, not from
+    # a stored copy in the prose: rendering an arbitrary pattern yields that
+    # pattern, and the shipped guidance carries the single-source constant.
+    custom_pattern = r'^[a-z]{2,5}$'
+    rendered = render_variant_rules_guidance(custom_pattern)
+    assert custom_pattern in rendered
+    assert VARIANT_NAME_PATTERN not in rendered
+    assert VARIANT_NAME_PATTERN in MATRIX_VARIANT_RULES_GUIDANCE
+
+
+def test_variant_rules_guidance_guard_rejects_a_dropped_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The runtime guard: if a prompt edit removes the pattern placeholder, the
+    # renderer must fail loudly instead of shipping guidance that no longer
+    # names the validator pattern.
+    monkeypatch.setattr(
+        matrix_naming,
+        '_VARIANT_RULES_TEMPLATE',
+        'Variant naming rules with no pattern placeholder at all.',
+    )
+    with pytest.raises(RuntimeError, match='placeholder'):
+        render_variant_rules_guidance(VARIANT_NAME_PATTERN)
+
+
+@pytest.mark.parametrize(
+    'value',
+    [
+        '',
+        '   ',
+        '--__--',
+        '0',
+        'ABC',
+        'already-valid',
+        'Logistic Regression C=1.0',
+        'method/v2: beta',
+        'Ünïcode Çhars',
+        'x' * 200,
+    ],
+)
+def test_variant_name_sanitizer_output_conforms_to_the_single_pattern(
+    value: str,
+) -> None:
+    name = variant_name_from_value(value)
+    assert VARIANT_NAME_RE.fullmatch(name) is not None
+    assert ExperimentVariant(name=name, overrides={}).name == name
+    assert variant_name_from_value(value) == name
+
+
+def test_variant_name_sanitizer_derives_readable_names() -> None:
+    assert variant_name_from_value('gradient-boosting') == 'gradient-boosting'
+    assert (
+        variant_name_from_value('Logistic Regression C=1.0')
+        == 'logistic-regression-c-1-0'
+    )
+    assert variant_name_from_value('') == 'candidate'
 
 
 def test_template_derives_resources_from_proposal(

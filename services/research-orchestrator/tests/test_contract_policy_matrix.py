@@ -748,3 +748,101 @@ def test_non_comparison_contract_accepts_single_seed(orchestrator_bundle) -> Non
     report = preflight_matrix(run=run, matrix=matrix, contract=contract)
 
     assert report.passed
+
+
+def _single_variant_matrix() -> ExperimentMatrix:
+    return ExperimentMatrix.model_validate(
+        {
+            'base_config': 'configs/candidate.yaml',
+            'variants': [{'name': 'a', 'overrides': {}}],
+            'seeds': [17],
+            'maximum_parallel_jobs': 1,
+            'runner_image': RUNNER_IMAGE,
+            'resources': {
+                'cpu': 1,
+                'memory_gib': 1,
+                'gpus': 0,
+                'wallclock_minutes': 5,
+            },
+            'required_artifacts': ['metrics.json'],
+        }
+    )
+
+
+def _generic_task_run(engine, *, metric_body: str):
+    run = engine.create_run(
+        request=RunCreateRequest(
+            objective='Exercise the generic task metric-key preflight.'
+        )
+    )
+    workspace = Path(run.beaker_workspace)
+    (workspace / 'configs' / 'candidate.yaml').write_text('seeds: [17]\n')
+    source = workspace / 'benchmark-workspace' / 'adult-income'
+    source.mkdir(parents=True)
+    (source / 'run.py').write_text(
+        'import json\n'
+        'with open("metrics.json", "w") as handle:\n'
+        f'    json.dump({metric_body}, handle)\n'
+        'open("report.md", "w").write("report")\n'
+    )
+    return run.model_copy(
+        update={
+            'task_definition': {
+                'source_subdirectory': 'benchmark-workspace/adult-income',
+                'task_spec': {
+                    'required_metric_keys': [
+                        'accuracy',
+                        'test_unseen_accuracy',
+                    ],
+                    'required_artifacts': ['metrics.json', 'report.md'],
+                },
+            }
+        }
+    )
+
+
+def test_generic_task_preflight_rejects_omitted_task_spec_metric_keys(
+    orchestrator_bundle,
+) -> None:
+    # Issue #497: the generic evaluator checks task_spec.required_metric_keys
+    # after the job runs; the deterministic preflight must catch the omission
+    # before any cluster job is submitted.
+    _, _, _, _, engine = orchestrator_bundle
+    run = _generic_task_run(engine, metric_body='{"accuracy": 0.9}')
+
+    report = preflight_matrix(
+        run=run,
+        matrix=_single_variant_matrix(),
+        contract=engine.contracts.resolve(
+            'generic-task-integrity-v1',
+            '1.0.0',
+        ),
+    )
+
+    assert not report.passed
+    metric_error = next(
+        error for error in report.errors if 'test_unseen_accuracy' in error
+    )
+    assert 'metrics.json' in metric_error
+
+
+def test_generic_task_preflight_accepts_task_spec_metric_keys(
+    orchestrator_bundle,
+) -> None:
+    _, _, _, _, engine = orchestrator_bundle
+    run = _generic_task_run(
+        engine,
+        metric_body='{"accuracy": 0.9, "test_unseen_accuracy": 0.5}',
+    )
+
+    report = preflight_matrix(
+        run=run,
+        matrix=_single_variant_matrix(),
+        contract=engine.contracts.resolve(
+            'generic-task-integrity-v1',
+            '1.0.0',
+        ),
+    )
+
+    assert report.passed
+    assert report.errors == []
