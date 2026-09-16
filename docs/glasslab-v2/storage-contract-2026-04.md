@@ -129,6 +129,58 @@ If a later MinIO mirror/promotion step is added, it should be idempotent:
 - if a required file is missing, fail promotion explicitly
 - if upload succeeds but Postgres update fails, retry using the same keys
 
+## Run Artifact Isolation And Identity Binding
+
+Every runner Job mounts only its own run directory under `/mnt/artifacts`:
+
+- `services/workflow-api/app/job_submission.py` mounts `artifacts-volume` at
+  `/mnt/artifacts/<run_id>` with `subPath=<run_id>` for every runner type
+  (research-workspace and generic/tabular), and it creates that directory before
+  the Job is submitted because the kubelet cannot mount a missing `subPath`.
+- Read-only inputs (dataset bindings, research-workspace assets) are separate
+  `subPath` mounts, so a workload can read approved inputs but cannot reach a
+  sibling run's directory.
+
+Status and index reads bind the on-disk evidence to the run id:
+
+- `services/workflow-api/app/run_artifacts.py` rejects a `status.json` or
+  `artifacts_index.json` whose embedded `run_id` is missing or names a different
+  run (`load_status_from_disk`, `load_artifacts_from_disk`), matching the check
+  already present in `load_terminal_bundle`.
+
+### Same-run forgery: scope decision
+
+Cross-run forgery is eliminated: a workload cannot write another run's evidence.
+Same-run forgery — a workload writing a forged `status.json`/`metrics.json` for
+its **own** run — remains possible and is **out of scope for this change**, as a
+deliberate, documented decision.
+
+Rationale and tradeoff:
+
+- The run directory is the workload's own output area by design; the workload is
+  the evidence producer. Closing same-run forgery requires separating the
+  evidence writer from the workload (a trusted sidecar or an evidence-writer uid
+  the workload cannot impersonate), plus filesystem ownership changes. That is a
+  project-level architecture change, not a mount-scope fix.
+- The controls that already bound same-run trust are the immutable evaluation
+  contract and its digest verification, the authoritative durable run/artifact
+  records in Postgres, and the orchestrator's reconciliation of live Kubernetes
+  status. A forged status cannot mint a passing evaluation.
+- Putting evidence-writer/uid separation in scope here would have broadened the
+  change well beyond the flagged cross-run escalation and risked breaking how
+  every runner writes its own terminal status.
+
+Follow-up: track evidence-writer/container separation as its own issue. Until
+then, same-run integrity is an evaluation-contract responsibility, not a
+filesystem-permission guarantee.
+
+## Object-Store Credential Scoping
+
+The root object-store credential is administrative. It is consumed only by the
+MinIO server and the one-shot provisioning Job, and every other service uses a
+bucket-scoped user. This preserves per-caller attribution and bounds a pod
+compromise to that caller's buckets rather than the whole store.
+
 ## Explicit Non-Goals
 
 Do not:
@@ -152,7 +204,10 @@ Do not:
 
 ### Phase 1: Source Documents To MinIO
 
-Wire `workflow-api` with MinIO credentials from the existing MinIO Secret.
+Wire `workflow-api` with a bucket-scoped MinIO identity, not the root identity.
+The scoped user lives in its own Secret (`glasslab-v2-workflow-api-minio`) and
+is created by the one-shot provisioning Job; see
+[Provision MinIO scoped users](runbooks/provision-minio-scoped-users.md).
 
 Set:
 
@@ -169,7 +224,9 @@ GLASSLAB_WORKFLOW_API_MINIO_ACCESS_KEY
 GLASSLAB_WORKFLOW_API_MINIO_SECRET_KEY
 ```
 
-Validate source intake before changing run artifacts.
+The scoped policy grants the source-document bucket only; the root credential is
+never mounted into workflow-api or the GPU runner. Validate source intake before
+changing run artifacts.
 
 ### Phase 2: Artifact Ingest
 

@@ -86,6 +86,15 @@ misnamed key fails before the deployment changes rather than later as a
 The retired `research-command-router` caller Secret and its workflow-api policy
 were removed with the #159/#289 retirement; do not recreate them.
 
+If `GLASSLAB_WORKFLOW_API_SOURCE_DOCUMENT_STORAGE_MODE` is `minio`, workflow-api
+also reads its bucket-scoped object-store user from the Secret
+`glasslab-v2-workflow-api-minio` (keys `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`).
+It is `optional: true` in the deployment, so a missing Secret does not block the
+rollout, but MinIO-backed source-document storage will fail closed until the
+scoped user exists. Provision it with the one-shot Job and rotate it using
+`runbooks/provision-minio-scoped-users.md`; never wire the root MinIO Secret into
+workflow-api or the GPU runner.
+
 7. For initial infrastructure creation, apply the v2 core manifest tree.
 
 ```bash
