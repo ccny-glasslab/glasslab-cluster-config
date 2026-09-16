@@ -4064,6 +4064,24 @@ class ResearchOrchestrator:
         except ValueError:
             installed = None
         if installed is not None:
+            if installed.digest != artifact.sha256:
+                # The trusted root already holds a DIFFERENT immutable contract
+                # under this contract_id@version. The approved candidate was
+                # sealed from a different bundle, so the installed contract is
+                # not the artifact a human approved: binding it checks the
+                # approved proposal against an unrelated manifest and re-enters
+                # "installed contract remains incompatible with the protocol"
+                # on every resume (issue #490). A promoted id@version is
+                # immutable, so the candidate cannot be promoted there either.
+                # Fail closed once, naming both digests.
+                self._fail_closed_on_contract_version_collision(
+                    run_id=action.run_id,
+                    contract_id=descriptor.contract_id,
+                    contract_version=descriptor.version,
+                    candidate_digest=artifact.sha256,
+                    installed_digest=installed.digest,
+                )
+                return
             run = self.store.get_run(action.run_id)
             conflict = self._resource_authority_conflict_message(
                 run=run,
@@ -4090,9 +4108,18 @@ class ResearchOrchestrator:
                 contract_digest=installed.digest,
             )
             if not self._contract_binding_compatible(action.run_id):
-                raise WorkflowError(
-                    'installed contract remains incompatible with the protocol'
+                # The installed contract is byte-identical to the approved
+                # candidate yet the run's stored proposal no longer matches it
+                # (for example a protocol revision landed after promotion). A
+                # bare raise here pauses and re-enters this same branch on
+                # every resume, so fail closed once instead of looping (#490).
+                self._fail_closed_on_installed_contract_incompatibility(
+                    run_id=action.run_id,
+                    contract_id=installed.descriptor.contract_id,
+                    contract_version=installed.descriptor.version,
+                    contract_digest=installed.digest,
                 )
+                return
             self._transition(action.run_id, RunState.BEAKER_PLANNING)
             self._beaker_plan(action.run_id)
             return
@@ -4194,6 +4221,82 @@ class ResearchOrchestrator:
             payload={
                 'reason': reason,
                 'origin': origin,
+                'contract_id': contract_id,
+                'version': contract_version,
+                'digest': contract_digest,
+            },
+        )
+        self._fail_run(run_id, WorkflowError(reason))
+
+    def _fail_closed_on_contract_version_collision(
+        self,
+        *,
+        run_id: str,
+        contract_id: str,
+        contract_version: str,
+        candidate_digest: str,
+        installed_digest: str,
+    ) -> None:
+        # A promoted contract_id@version is an immutable namespace key: a
+        # different digest already holds it, so the approved candidate can
+        # never be promoted there and the installed bundle is not the artifact
+        # a human approved. Binding the foreign bundle would evaluate the
+        # approved protocol against an unrelated manifest and re-enter this
+        # branch on every resume, so fail closed once and name the collision.
+        reason = (
+            f'the approved evaluation-contract candidate {contract_id} '
+            f'{contract_version} (digest {candidate_digest}) cannot be '
+            'promoted because a different contract is already installed at '
+            f'the same id and version (digest {installed_digest}). Promoted '
+            'contract id@version bindings are immutable and are never silently '
+            'superseded, so this run cannot bind the installed contract and '
+            'progress. Resolve the collision by re-sealing the candidate under '
+            'a new contract version, or by invalidating or replacing the stale '
+            'promoted contract, then start a new run.'
+        )
+        self._event(
+            run_id,
+            source='orchestrator',
+            event_type='contract.version_conflict',
+            payload={
+                'reason': reason,
+                'origin': 'installed_contract_binding',
+                'contract_id': contract_id,
+                'version': contract_version,
+                'candidate_digest': candidate_digest,
+                'installed_digest': installed_digest,
+            },
+        )
+        self._fail_run(run_id, WorkflowError(reason))
+
+    def _fail_closed_on_installed_contract_incompatibility(
+        self,
+        *,
+        run_id: str,
+        contract_id: str,
+        contract_version: str,
+        contract_digest: str,
+    ) -> None:
+        # The installed contract is the approved artifact, but the run's
+        # stored proposal no longer implements it. There is no deterministic
+        # recovery that both consumes no agent turn and converges, and the
+        # previous bare raise paused and re-entered this branch on every
+        # resume, so fail closed once instead of looping.
+        reason = (
+            f'the installed evaluation contract {contract_id} '
+            f'{contract_version} (digest {contract_digest}) is the approved '
+            'candidate but no longer implements the run\'s stored protocol '
+            'proposal. Re-approve the protocol so a matching contract is '
+            'drafted, or start a new run; resuming this run cannot reconcile '
+            'them.'
+        )
+        self._event(
+            run_id,
+            source='orchestrator',
+            event_type='methodology.resource_authority_conflict',
+            payload={
+                'reason': reason,
+                'origin': 'installed_contract_binding',
                 'contract_id': contract_id,
                 'version': contract_version,
                 'digest': contract_digest,
