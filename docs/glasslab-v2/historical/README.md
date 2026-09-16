@@ -26,10 +26,6 @@ For current architecture read `AGENTS.md` and `docs/glasslab-v2/current/README.m
 - [autonomous-research-lane.md](autonomous-research-lane.md) — autonomous research lane planning
 - [autoresearch-orchestration-plan.md](autoresearch-orchestration-plan.md) — orchestration plan predating the current research orchestrator
 
-## Titanic (legacy v1 stack)
-
-- [titanic-agent-stack.md](titanic-agent-stack.md) — legacy v1 FastAPI agent stack, preserved as reference
-
 ## Dated Audit And Reference Docs (2026-03 to 2026-04)
 
 These were moved here from the top level of `docs/glasslab-v2/` as part of the

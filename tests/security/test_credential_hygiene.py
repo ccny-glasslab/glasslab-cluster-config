@@ -533,7 +533,6 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
     """Repository deployment artifacts must fail closed around live credentials."""
 
     SECRET_EXAMPLES = (
-        REPOSITORY_ROOT / "kubeadm" / "agent-stack" / "12-agent-secrets.example.yaml",
         REPOSITORY_ROOT / "kubeadm" / "glasslab-v2" / "minio" / "10-secret.example.yaml",
         REPOSITORY_ROOT / "kubeadm" / "glasslab-v2" / "postgres" / "10-secret.example.yaml",
         REPOSITORY_ROOT / "kubeadm" / "glasslab-v2" / "workflow-api" / "10-secret.example",
@@ -624,6 +623,11 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
                 environment["GLASSLAB_VLLM_SECRET_FILE"] = str(secret_file)
 
             script = str(deploy_script or self.VLLM_DEPLOY_SCRIPT)
+            if not Path(script).exists():
+                self.skipTest(
+                    "legacy Titanic v1 agent-stack deploy script is not present "
+                    f"({script})"
+                )
             if source_wrapper:
                 command = [
                     "bash",
@@ -653,6 +657,11 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
         xtrace: bool = False,
         source_wrapper: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], str, str, list[str], list[str]]:
+        if not self.VLLM_TEST_SCRIPT.exists():
+            self.skipTest(
+                "legacy Titanic v1 vLLM smoke script is not present "
+                f"({self.VLLM_TEST_SCRIPT})"
+            )
         with tempfile.TemporaryDirectory() as directory:
             fixture_root = Path(directory)
             bin_dir = fixture_root / "bin"

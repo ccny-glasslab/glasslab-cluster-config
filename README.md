@@ -58,8 +58,9 @@ pending confirmation on the #173 workflow-api auth work.
 The current bounded Honeydew/Beaker research workflow is documented in
 [`docs/research-orchestrator.md`](docs/research-orchestrator.md). It adds a
 durable research workflow around isolated OpenCode-backed runtimes and the
-existing bounded cluster-execution service. The Titanic stack remains legacy
-v1 reference material; see [`docs/glasslab-v2/historical/titanic-agent-stack.md`](docs/glasslab-v2/historical/titanic-agent-stack.md).
+existing bounded cluster-execution service. The legacy Titanic v1 stack
+(`services/agent-api`, `services/runner`, and `kubeadm/agent-stack`) has been
+removed from this repository.
 
 The current Discord and operator commands, arbitrary-task intake limits, and
 live progress are summarized in

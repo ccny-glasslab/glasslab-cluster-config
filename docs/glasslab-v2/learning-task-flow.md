@@ -210,11 +210,11 @@ Primary files for cluster execution:
 These paths may still exist, but they should not be the default route for new
 learning tasks.
 
-### Titanic v1 agent stack
+### Titanic v1 agent stack (removed)
 
-Keep as historical compatibility and early runner reference.
-
-Do not use it as the template for new learning tasks.
+The v1 agent stack, fixed Titanic runner, and its manifests have been removed
+from this repository (issues #157/#158). Do not use it as the template for new
+learning tasks.
 
 ### Direct Kubernetes Jobs
 

@@ -36,6 +36,11 @@ RESEARCH_POSTGRES_IMPORTER = (
 RESEARCH_POSTGRES_DSN_ENV = "GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN"
 
 
+@unittest.skipUnless(
+    VLLM_DEPLOYMENT.exists(),
+    "legacy Titanic v1 agent-stack vLLM deployment is not present "
+    f"({VLLM_DEPLOYMENT})",
+)
 class VllmPodBoundaryTests(unittest.TestCase):
     """The vLLM key is inherited from the Secret environment, never Python argv."""
 

@@ -120,7 +120,6 @@ These should stay callable for now, but new work should not build on them.
 | paper intake queues | source intake plus bounded run specs |
 | OpenClaw-era tool callers | `scripts/glasslab-opencode.sh` and repo-owned run scripts |
 | `latest` as the main operator story | explicit session/run IDs |
-| v1 Titanic agent stack | generic experiment workflow records |
 
 ### Historical
 
@@ -203,8 +202,8 @@ docs/glasslab-v2/ci-policy-2026-07.md
   research-command-router is held pending confirmation on the #173
   workflow-api auth work.
 - Keep bounded agents only if they consume/produce workflow-api records.
-- Archive v1 Titanic manifests after the generic experiment path covers the same
-  demonstration value.
+- Done: the v1 Titanic agent stack and manifests were removed (issues
+  #157/#158); the generic experiment path covers the same demonstration value.
 
 ### Phase 4: Simplify deployment
 

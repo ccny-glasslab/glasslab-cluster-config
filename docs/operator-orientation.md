@@ -38,33 +38,15 @@ There are really two generations of application stack in this repo.
 
 ## The Two Stacks
 
-### v1: Titanic Agent Stack
+### v1: Titanic Agent Stack (removed)
 
-This was the first narrow proof-of-concept.
-It should now be treated as legacy/reference material, not the main future direction.
+The first narrow proof-of-concept lived in `services/agent-api`,
+`services/runner`, and `kubeadm/agent-stack`. It accepted a plain-English
+Titanic request, normalized it into a strict schema, validated it against an
+approved small registry, submitted a Kubernetes Job, and summarized the result.
 
-Purpose:
-
-- accept a plain-English Titanic request
-- normalize it into a strict schema
-- validate against an approved small registry
-- submit a Kubernetes Job
-- collect artifacts and summarize the result
-
-Main pieces:
-
-- `services/agent-api`
-- `services/runner`
-- `kubeadm/agent-stack`
-- `docs/titanic-agent-stack.md`
-- `docs/model-serving.md`
-
-Mental model:
-
-- this is a tightly scoped vertical slice
-- it proves that request -> validation -> job -> artifacts works
-- it is still useful as a worked example and compatibility path
-- it is not the long-term architecture for a broader autonomous research platform
+That stack has been removed from this repository (issues #157/#158); it is no
+longer an available or compatibility path.
 
 ### v2: Workflow Platform
 
@@ -89,9 +71,8 @@ Main pieces:
 
 Mental model:
 
-- `v1` proved the loop
-- `v1` is now mostly useful as reference material for what the platform evolved out of
-- `v2` is the attempt to cleanly generalize it
+- `v1` proved the loop and has since been removed
+- `v2` is the attempt to generalize it cleanly
 
 ## The Current Architecture In Plain English
 
@@ -131,14 +112,13 @@ Includes:
 
 - Kubernetes Jobs
 - runner containers
-- vLLM
+- configured local model serving
 - persistent or semi-persistent state paths
 - artifact storage
 
 Repo areas:
 
-- `services/runner`
-- `kubeadm/agent-stack`
+- `services/research-workspace-runner`
 - `kubeadm/glasslab-v2`
 - `docs/model-serving.md`
 - `docs/glasslab-v2/storage-and-state.md`
@@ -265,14 +245,12 @@ Likely live or at least validated recently:
 
 - the base cluster
 - GPU enablement on `node01`, `node02`, and `node04`
-- the original Titanic stack
 - `glasslab-v2` core services:
   - `workflow-api`
   - `Postgres`
   - `MinIO`
   - `NATS`
 - OpenClaw internal validation
-- local vLLM-backed operator flow
 
 Not yet “done” in the durable, production-like sense:
 
@@ -335,8 +313,7 @@ If you want the shortest useful reread path, use this order:
 4. `docs/glasslab-v2/cluster-primitives-gap-audit.md`
 5. `docs/glasslab-v2/openclaw-gateway.md`
 6. `docs/glasslab-v2/tool-calling-reliability.md`
-7. `docs/titanic-agent-stack.md`
-8. `docs/gpu-workers.md`
+7. `docs/gpu-workers.md`
 
 ## Suggested GitHub Structure
 
@@ -350,7 +327,6 @@ Suggested labels:
 - `area:pxe`
 - `area:k8s`
 - `area:gpu`
-- `area:v1-agent-stack`
 - `area:v2-core`
 - `area:workflow-api`
 - `area:workflow-registry`

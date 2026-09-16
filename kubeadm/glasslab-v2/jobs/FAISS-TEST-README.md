@@ -183,7 +183,7 @@ This test validates the FAISS usage pattern in:
 
 ## References
 
-- Job Template: `/Users/glasslab/cluster-config/kubeadm/glasslab-v2/jobs/10-titanic-job.yaml`
+- Job Template: `/Users/glasslab/cluster-config/kubeadm/glasslab-v2/jobs/11-faiss-integration-test.yaml`
 - Workflow API: `/Users/glasslab/cluster-config/services/workflow-api/app/job_submission.py`
 - Run Script: `/Users/glasslab/dml-project/scripts/run_experiment.py`
 - Metrics Module: `/Users/glasslab/dml-project/src/metrics/metrics.py`

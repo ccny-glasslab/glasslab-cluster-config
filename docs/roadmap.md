@@ -19,7 +19,7 @@ Based on committed docs, the current baseline is:
 
 - the cluster exists and is usable
 - GPUs are enabled on `node01`, `node02`, and `node04`
-- the v1 Titanic stack exists and remains a useful vertical slice
+- the v1 Titanic stack has been removed (issues #157/#158)
 - `glasslab-v2` core services have been designed and documented as live-validated
 - OpenClaw has been validated as an internal operator path
 
