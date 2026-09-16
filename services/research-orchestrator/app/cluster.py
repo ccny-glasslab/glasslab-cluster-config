@@ -267,7 +267,15 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
                 ),
             },
             'dataset_bindings': spec.dataset_bindings,
-            'resources': spec.resources.model_dump(mode='json'),
+            # No top-level 'resources' field: workflow-api's
+            # GenericExperimentRunRequest forbids unknown fields and derives the
+            # Job's cpu/memory/gpu requests and limits from the workflow
+            # registry's resource_profile (workspace-cpu-ml-v1), which is the
+            # authority for what actually runs. The matrix's resource request is
+            # already enforced orchestrator-side against the evaluation
+            # contract's resource_constraints during matrix expansion; only the
+            # wallclock hint travels on, inside budget, where workflow-api reads
+            # and validates it against the registry ceiling (issue #491).
             'budget': {
                 'max_wallclock_minutes': spec.resources.wallclock_minutes,
             },

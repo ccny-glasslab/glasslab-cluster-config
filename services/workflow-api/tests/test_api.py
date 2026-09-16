@@ -282,6 +282,36 @@ def test_generic_workspace_submission_persists_normalized_workspace() -> None:
     assert workspace['network_policy'] == 'none'
 
 
+def test_generic_workspace_submission_binds_registry_resource_profile() -> None:
+    # Issue #491: the request body carries no resource fields at all
+    # (GenericExperimentRunRequest forbids them); the Job's cpu/memory requests
+    # and limits come from the workflow registry definition, which is the
+    # authority for what actually runs.
+    definition = json.loads(
+        (
+            REPO_ROOT
+            / 'services'
+            / 'workflow-registry'
+            / 'definitions'
+            / 'workspace-cpu-ml-v1.json'
+        ).read_text()
+    )
+    profile = definition['resource_profile']
+
+    response = build_client().post(
+        '/experiments/runs',
+        json=_workspace_run_payload(['python3', 'run.py']),
+    )
+
+    assert response.status_code == 201
+    manifest = response.json()['manifest']
+    assert manifest['resource_profile'] == profile['profile_name']
+    assert manifest['resource_requests'] == profile['requests']
+    assert manifest['resource_limits'] == profile['limits']
+    assert manifest['node_selector'] == profile['node_selector']
+    assert manifest['budget'] == {'max_wallclock_minutes': 5}
+
+
 def test_unpinned_metric_search_definition_is_discoverable_but_cannot_submit() -> None:
     client = build_client()
     response = client.post(
