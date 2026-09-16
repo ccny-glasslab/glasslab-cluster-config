@@ -31,7 +31,27 @@ fields — and it is instructed to put anything it cannot resolve into
 **Therefore: every requirement your run depends on must be written in
 `problem.md`. If it is not there, the compile will not guess it.**
 
-## Mandatory sections
+## Required sections (validated at import)
+
+The importer validates these section headings deterministically, before the
+compiler model runs (`app/problem_schema.py`): a `problem.md` that is missing
+a required section, or has one with no content under its heading, is rejected
+with the offending section named. Matching is order-insensitive and tolerant
+of formatting - any ATX heading level, any case, an optional trailing colon,
+and qualifiers such as " (exact)".
+
+This table is the authoritative list of what the validator enforces;
+everything a section must *say* is still interpreted by the compiler model
+from the prose.
+
+| Section heading | Enforced by |
+|---|---|
+| `## Objective` | Import: structural check; the prose is compiled into the run objective and `display_name`/`rationale` |
+| `## Inputs` | Import: structural check; the compiler maps dataset declarations onto `assets[]` |
+| `## Method and architecture` | Import: structural check; the prose steers the protocol and implementation |
+| `## Hyperparameter search space (exact)` | Import: structural check; materialized later as `base_config` plus contract `methodology_requirements` |
+| `## Evaluation rubric (exact)` | Import: structural check; exact metric keys become `required_metric_keys`, checked statically at matrix preflight |
+| `## Evidence artifacts (required)` | Import: structural check; the named paths are compiled into `required_artifacts` |
 
 ### 1. Objective
 

@@ -30,19 +30,20 @@ and a model change silently changes behavior.
 ## 1. How to author a `problem.md`
 
 **The one thing to internalize:** the orchestrator never parses your
-`problem.md` for sections or fields. It only checks that the ZIP contains
-**exactly one file named `problem.md`** (`services/research-orchestrator/app/task_bundles.py:411-425`)
-and that it decodes as UTF-8 (`task_bundles.py:445-452`). Everything else in the
-document is read by a model (Honeydew) and compiled into a typed
+`problem.md` for *fields*. Its structural checks are: the ZIP contains
+**exactly one file named `problem.md`**
+(`services/research-orchestrator/app/task_bundles.py:411-425`), it decodes as
+UTF-8 (`task_bundles.py:445-458`), and the six required section headings are
+present and non-empty (`app/problem_schema.py`, #496). Everything the sections
+*say* is read by a model (Honeydew) and compiled into a typed
 `glasslab-task-spec-v1` proposal; the typed proposal is what validators check.
-There is no markdown/frontmatter parser and no heading schema anywhere in the
-service (no markdown parser is even a dependency).
+There is no markdown/frontmatter parser for field values.
 
-Consequently the guide's "mandatory sections" are **conventions the compiler
-prompt relies on**, not structural requirements. A `problem.md` with the right
-prose in unlabeled paragraphs can compile; a `problem.md` with perfect headings
-but vague numbers will be parked in `missing_inputs`. The hard gates start after
-compilation, on the task spec, the contract, and the matrix.
+Consequently the guide's "mandatory sections" are now enforced *structurally*
+(headings present and non-empty), but what each section must *say* is still a
+convention the compiler prompt relies on. A `problem.md` with perfect headings
+but vague numbers will be parked in `missing_inputs`. The hard gates start
+after compilation, on the task spec, the contract, and the matrix.
 
 Practical rules that actually gate a run:
 
@@ -79,21 +80,22 @@ See [section 7](#7-minimal-viable-problemmd) for a complete worked example.
 | Field / rule | Purpose | Required | Validated where | Consumes it | Failure mode |
 |---|---|---|---|---|---|
 | File named `problem.md` | The task specification | Yes | compile: `task_bundles.py:411-415`, `421-425` | compiler session workspace (`task_bundles.py:429-437`) | `TaskBundleError: task archive requires one problem.md and at most one eval_agent_prompt.md`. Non-retryable, fail-closed. |
-| UTF-8 decodability | Text input | Yes | compile: `task_bundles.py:445-452` | compiler | `TaskBundleError: problem and evaluator prompt must be UTF-8 text`. Fail-closed. |
+| UTF-8 decodability | Text input | Yes | compile: `task_bundles.py:445-458` | compiler | `TaskBundleError: problem and evaluator prompt must be UTF-8 text`. Fail-closed. |
+| Required section headings | The guide's six mandatory sections | Yes | import: `task_bundles.stage_archive` via `problem_schema.problem_section_errors` | compiler workspace; the compiler maps the prose | `TaskBundleError: task problem.md does not satisfy the required structure: problem.md is missing the required section "Evaluation rubric"; add a heading such as "## Evaluation rubric"`. Fail-closed; matching is order-insensitive and formatting-tolerant (any ATX level, case, trailing colon, " (exact)" qualifier). |
 | Archive size / file count / path safety | Bound the upload | Yes | compile: `task_bundles.py:346-348`, `377-425` | importer | `task archive has an invalid size` / `file count is invalid` / `unsafe task archive member` / `expands too large`. Fail-closed. |
 
-**There are no other structural fields.** No heading, key, or YAML/JSON block in
-`problem.md` is parsed. The guide's six "mandatory sections"
-(`docs/research-orchestrator-task-bundle-guide.md:30-96`) are not enforced by any
-validator.
+The required headings are the only structural field besides the file itself:
+no key or YAML/JSON block in `problem.md` is parsed, and the *content* under
+each heading is still read by the compiler model.
 
 ### 2.2 What is agent-interpreted
 
 All of the following are read by the compiler model and mapped into
-`TaskSpecProposal` fields. The mapping is specified **only in the compile prompt**
-(`engine.py:701-718`) and the guide; the JSON-schema-forced structured output of
-the model is `AgentTurnResult` (`schemas.py:313-327`). There is no deterministic
-check that a given problem.md section exists.
+`TaskSpecProposal` fields. Section *presence* is deterministic now (see 2.1),
+but the mapping from section content to a field is specified only in the
+compile prompt (`engine.py:701-718`) and the guide, and the JSON-schema-forced
+structured output of the model is `AgentTurnResult` (`schemas.py:313-327`).
+There is no deterministic check of what a section *contains*.
 
 | Guide section (guide lines) | Feeds task-spec field | Where the rule lives | Failure mode if absent/vague |
 |---|---|---|---|
@@ -467,6 +469,7 @@ no model retry.
 |---|---|---|---|---|
 | `problem.md` present exactly once | compile | `task_bundles.stage_archive` | fail-closed | `task archive requires one problem.md and at most one eval_agent_prompt.md` |
 | `problem.md` UTF-8 | compile | `task_bundles.stage_archive` | fail-closed | `problem and evaluator prompt must be UTF-8 text` |
+| `problem.md` required sections present + non-empty | import/compile | `task_bundles.stage_archive` + `problem_schema.py` | fail-closed | `task problem.md does not satisfy the required structure: problem.md is missing the required section "Evaluation rubric"; add a heading such as "## Evaluation rubric"` |
 | ZIP size/count/paths | compile | `task_bundles.stage_archive` | fail-closed | `task archive has an invalid size` / `unsafe task archive member` / ... |
 | `TaskSpecProposal` shape (`display_name`, `runtime_profile`, `rationale`, patterns) | compile | Pydantic `schemas.py:279-310` via `AgentTurnResult` | retryable | Pydantic errors surfaced; compiler turn retried (`engine.py:721-728`) |
 | `source_url` needs `expected_sha256` | compile (preparer) | `engine._establish_source_url_asset_checksums` `engine.py:297-342` | fail-closed (fetch failure) | `source_url asset ... could not be fetched and verified: ...` |
@@ -545,13 +548,14 @@ source reading: one UTF-8 `problem.md`, a resolvable asset declaration, exact
 metric keys, and evidence artifacts that the compiled source can statically
 reference. **Firm vs inferred:**
 
-- **Firm** (enforced by code read): file/count/UTF-8; the `glasslab-dataset://`
-  URI shape (`schemas.py:237-240`); metric-key pattern
+- **Firm** (enforced by code read): file/count/UTF-8; the six required
+  section headings present and non-empty (`problem_schema.py`, #496); the
+  `glasslab-dataset://` URI shape (`schemas.py:237-240`); metric-key pattern
   (`schemas.py:289-291`); artifact path safety (`schemas.py:295-310`); that the
   runtime profile, image, command, resources, and workload are policy-selected
   and cannot be written here.
 - **Inferred** (guide/prompt conventions only, no validator): the section
-  headings, and the exact wording that steers the compiler toward a particular
+  *content* - the exact wording that steers the compiler toward a particular
   profile and asset list. The compile step is model-driven, so this document is
   *designed* to pass, not *proven* to pass without a live run.
 
@@ -629,7 +633,7 @@ were created by this audit.
 
 | # | Finding | Status | One-line justification (evidence) |
 |---|---|---|---|
-| F1 | `problem.md` has **no structural schema**; the guide's "mandatory sections" are unenforced conventions, and the parser-free design means a well-written but oddly-structured document can compile while a well-structured but vague one silently lands in `missing_inputs`. | **NEW - needs an issue** | `task_bundles.py:411-425` checks only filename/count; no markdown parser is a dependency; guide `task-bundle-guide.md:28-96` is prompt-only. |
+| F1 | `problem.md` had **no structural schema**; the guide's "mandatory sections" were unenforced conventions, so a well-written but oddly-structured document could compile while a well-structured but vague one silently landed in `missing_inputs`. | **fixed by #496** | Required headings are now validated at import (`task_bundles.stage_archive` via `problem_schema.problem_section_errors`); a missing or empty section is rejected with the section named. Section *content* remains compiler-interpreted. |
 | F2 | A value the model cannot compute (`expected_sha256` for a URL) was required at proposal time, making URL-declared tasks uncreatable (`POST /runs` 500). Now fixed by an orchestrator preparer. | already filed (#487) | `engine.py:297-342`; issue #487. |
 | F3 | A write-time rule was enforced on read, making historical turns unreadable and breaking resume. Now fixed by `STORED_PAYLOAD_CONTEXT`. | already filed (#480) | `schemas.py:36`, `263-275`; issue #480. |
 | F4 | Two independent resource ceilings made a requirement unsatisfiable; now converted to a non-retryable human pause, but the contract remains a second, independent ceiling (root cause only detected, not removed). | already filed (#483) | `matrix.py:47-55` vs `engine.py:5046-5050`; `engine.py:4956-4991`; issue #483. |
@@ -647,7 +651,7 @@ were created by this audit.
 ## Appendix A: Authority map (single reference)
 
 ```text
-problem.md (agent-read, no schema)
+problem.md (agent-read, required headings only)  [app/problem_schema.py]
   -> TaskSpecProposal (glasslab-task-spec-v1)        [engine.py:701-718, schemas.py:279-310]
        -> TaskBundleRecord (compiled, policy-owned)  [task_bundles.py:476-582]
             resources = RUNTIME_PROFILES[profile]     [task_bundles.py:96-125, 571]
