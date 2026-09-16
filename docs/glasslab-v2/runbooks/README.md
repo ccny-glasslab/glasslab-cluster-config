@@ -12,3 +12,4 @@ Key runbooks:
 - `restore-v2-secrets.md`
 - `purge-temporary-provisioning-debug.md`
 - `knowledge-corpus.md`
+- `drive-a-real-run.md`

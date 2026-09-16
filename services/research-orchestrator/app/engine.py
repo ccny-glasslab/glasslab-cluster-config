@@ -37,7 +37,12 @@ from .methodology_config import (
 )
 import httpx
 
-from .opencode_runtime import AgentRuntime, OpenCodeRuntimeError, ResultPreparer
+from .opencode_runtime import (
+    AgentRuntime,
+    OpenCodeRuntimeError,
+    RUNTIME_DEPENDENCY_UNAVAILABLE_CLASS,
+    ResultPreparer,
+)
 from .policy import ActionPolicy
 from .preflight import (
     MatrixPreflightReport,
@@ -111,6 +116,11 @@ NON_RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
         # fresh session repeats the explore loop, so it pauses for corrective
         # recovery instead.
         'step_budget_exceeded',
+        # Issue #482: an unresolvable worktree .opencode dependency tree is an
+        # infrastructure/runtime-availability failure -- a fresh session with
+        # the same prompt hits the same broken tree, so it must never rotate
+        # and retry like a model failure.
+        RUNTIME_DEPENDENCY_UNAVAILABLE_CLASS,
     }
 )
 _RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
@@ -186,6 +196,8 @@ def _is_retryable_turn_failure(exc: Exception) -> bool:
     if isinstance(exc, (httpx.HTTPError, TimeoutError)):
         return True
     if isinstance(exc, OpenCodeRuntimeError):
+        if exc.failure_class in NON_RETRYABLE_TURN_FAILURE_CLASSES:
+            return False
         return (
             exc.failure_class in _RETRYABLE_TURN_FAILURE_CLASSES
             or exc.failure_class is None
@@ -1702,6 +1714,7 @@ class ResearchOrchestrator:
         prompt: str,
         expected_kind: TurnKind,
         input_event: dict[str, Any],
+        dependency_repair_attempted: bool = False,
     ) -> tuple[TurnRecord, AgentTurnResult]:
         # The failed attempt already consumed a turn number; roll it back so
         # the bounded retry does not double-count against the turn budget.
@@ -1726,6 +1739,110 @@ class ResearchOrchestrator:
             prompt=prompt,
             expected_kind=expected_kind,
             input_event=input_event,
+            dependency_repair_attempted=dependency_repair_attempted,
+        )
+
+    def _recover_runtime_dependency_failure(
+        self,
+        *,
+        run_id: str,
+        agent: AgentName,
+        workspace: Path,
+        prompt: str,
+        expected_kind: TurnKind,
+        input_event: dict[str, Any],
+        failure_details: dict[str, Any] | None,
+        dependency_repair_attempted: bool,
+    ) -> tuple[TurnRecord, AgentTurnResult] | None:
+        """Bounded self-heal for a broken worktree dependency tree (#482).
+
+        Chosen behaviour (a) from the issue: attempt exactly one repair from
+        the shared OpenCode cache and, when it resolved the tree, retry the
+        turn exactly once. The class is non-retryable, so nothing here ever
+        loops; a failed repair or a failed retry returns None and the caller
+        fails closed with the runtime's actionable error. The failed attempt's
+        turn number is rolled back in every path, so infrastructure failures
+        never advance a run toward maximum_turns -- unlike a genuine model
+        failure, whose turn was really spent and stays counted.
+        """
+        # The running OpenCode process holds the failed module-resolution
+        # state; releasing it makes the next attempt re-resolve dependencies
+        # from the (possibly repaired) worktree.
+        release_error: str | None = None
+        try:
+            self.runtime.release(run_id=run_id, agent=agent)
+        except Exception as exc:
+            release_error = str(exc)
+        repair = None
+        if not dependency_repair_attempted:
+            repair = self.runtime.repair_workspace_dependencies(
+                workspace=workspace
+            )
+            self._event(
+                run_id,
+                source='orchestrator',
+                event_type='agent.runtime_dependency_repair_attempted',
+                payload={
+                    'agent': agent.value,
+                    'worktree': str(workspace),
+                    'status': repair.status,
+                    'source': repair.source,
+                    'detail': repair.detail,
+                    'runtime_release_error': release_error,
+                },
+            )
+            if repair.resolved:
+                return self._retry_agent_turn(
+                    run_id=run_id,
+                    agent=agent,
+                    prompt=prompt,
+                    expected_kind=expected_kind,
+                    input_event=input_event,
+                    dependency_repair_attempted=True,
+                )
+        payload: dict[str, Any] = {
+            'agent': agent.value,
+            'worktree': str(workspace),
+            'turn_budget_consumed': False,
+            'repair_attempted': (
+                dependency_repair_attempted or repair is not None
+            ),
+            'repair_status': repair.status if repair is not None else None,
+            'runtime_release_error': release_error,
+            'next_step': (
+                'Reinstall the worktree .opencode dependencies from the '
+                'shared OpenCode cache, then resume the run. The failed '
+                'attempt did not consume the turn budget and was not retried '
+                'in a loop.'
+            ),
+        }
+        if isinstance(failure_details, dict):
+            for key in ('module', 'cache_root', 'detail'):
+                value = failure_details.get(key)
+                if isinstance(value, str):
+                    payload[key] = value
+        self._event(
+            run_id,
+            source='orchestrator',
+            event_type='agent.runtime_dependency_unavailable',
+            payload=payload,
+        )
+        self._rollback_unconsumed_turn_number(run_id)
+        return None
+
+    def _rollback_unconsumed_turn_number(self, run_id: str) -> None:
+        # Infrastructure failures do not consume the turn budget. A run that
+        # paused or terminated concurrently has nothing left to roll back.
+        current = self.store.get_run(run_id)
+        if current.state == RunState.PAUSED or current.state in TERMINAL_STATES:
+            return
+        if current.turn_number <= 0:
+            return
+        self.store.replace_run(
+            current.model_copy(
+                update={'turn_number': current.turn_number - 1}
+            ),
+            expected_version=current.version,
         )
 
     def _run_agent_turn(
@@ -1737,6 +1854,7 @@ class ResearchOrchestrator:
         expected_kind: TurnKind,
         input_event: dict[str, Any],
         retrieval_query: str | None = None,
+        dependency_repair_attempted: bool = False,
     ) -> tuple[TurnRecord, AgentTurnResult]:
         if agent == AgentName.HONEYDEW:
             model_override, base_url_override = (
@@ -2043,6 +2161,24 @@ class ResearchOrchestrator:
                     'failure_class': failure_class,
                 },
             )
+            if failure_class == RUNTIME_DEPENDENCY_UNAVAILABLE_CLASS:
+                # Issue #482: neither model failure nor retryable transport
+                # error. One bounded repair, at most one retry, no session
+                # rotation, no turn-budget consumption; see
+                # _recover_runtime_dependency_failure.
+                retried = self._recover_runtime_dependency_failure(
+                    run_id=run_id,
+                    agent=agent,
+                    workspace=workspace,
+                    prompt=prompt,
+                    expected_kind=expected_kind,
+                    input_event=input_event,
+                    failure_details=recovery_details,
+                    dependency_repair_attempted=dependency_repair_attempted,
+                )
+                if retried is not None:
+                    return retried
+                raise
             self._rotate_agent_session(
                 run_id=run_id,
                 agent=agent,

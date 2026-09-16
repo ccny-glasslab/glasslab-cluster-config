@@ -11,6 +11,9 @@ synthetic task; a complete arbitrary-dataset run remains outstanding.
 
 For the concise operator surface, read
 [`research-orchestrator-command-surface.md`](research-orchestrator-command-surface.md).
+To drive a real (non-rehearsal) run end to end, including the four human gates
+and the observed failure taxonomy, read
+[`glasslab-v2/runbooks/drive-a-real-run.md`](glasslab-v2/runbooks/drive-a-real-run.md).
 
 ## Terminal-run retry checkpoints
 

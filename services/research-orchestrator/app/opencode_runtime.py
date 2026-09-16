@@ -17,13 +17,15 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import secrets
+import shutil
 import socket
 import subprocess
 import threading
 import time
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 from uuid import uuid4
 
 import httpx
@@ -62,6 +64,131 @@ class OpenCodeRuntimeError(RuntimeError):
         super().__init__(message)
         self.failure_class = failure_class
         self.details = details
+
+
+# Issue #482: a worktree whose .opencode dependency tree cannot resolve is an
+# infrastructure condition, not a model failure. OpenCode surfaces it either
+# as a module-resolution failure ("ResolveMessage: Cannot find module
+# '@opencode-ai/plugin'") on the message endpoint or as a failed background
+# dependency install in its own log. Such a turn cannot succeed in a fresh
+# session, so the class is reported distinctly and the engine keeps it out of
+# the model-failure retry/rotation machinery and the turn budget.
+RUNTIME_DEPENDENCY_UNAVAILABLE_CLASS = 'runtime_dependency_unavailable'
+OPENCODE_PLUGIN_MODULE = '@opencode-ai/plugin'
+_DEPENDENCY_INSTALL_FAILURE_MARKERS = (
+    'background dependency install failed',
+)
+_MODULE_RESOLUTION_FAILURE_MARKERS = (
+    'cannot find module',
+    'module not found',
+    'resolvemessage',
+)
+_RUNTIME_LOG_TAIL_BYTES = 64 * 1024
+_DEPENDENCY_CACHE_SEARCH_MAX_DIRS = 4000
+_DEPENDENCY_CACHE_SEARCH_MAX_DEPTH = 12
+
+
+def dependency_resolution_failure(text: str) -> bool:
+    """True when OpenCode text describes the worktree dependency failure."""
+    if not text:
+        return False
+    normalized = ' '.join(text.lower().split())
+    if any(
+        marker in normalized for marker in _DEPENDENCY_INSTALL_FAILURE_MARKERS
+    ):
+        return True
+    if not any(
+        marker in normalized for marker in _MODULE_RESOLUTION_FAILURE_MARKERS
+    ):
+        return False
+    # Only a resolution failure that names the worktree plugin surface is the
+    # infrastructure condition; an unrelated "Cannot find module 'x'" 500 must
+    # keep its existing failure classification.
+    return OPENCODE_PLUGIN_MODULE in normalized or '.opencode' in normalized
+
+
+@dataclass(frozen=True)
+class DependencyRepairResult:
+    """Outcome of one bounded .opencode dependency repair attempt."""
+
+    status: Literal['repaired', 'already_resolved', 'unavailable']
+    source: str | None
+    detail: str
+
+    @property
+    def resolved(self) -> bool:
+        return self.status in {'repaired', 'already_resolved'}
+
+
+def find_cached_plugin_package(cache_root: Path) -> Path | None:
+    """Locate @opencode-ai/plugin in the shared OpenCode cache.
+
+    Bounded search: the cache is a regenerable download store, not an index,
+    so a miss returns None instead of walking without limit. Handles both a
+    materialized node_modules layout and bun's hashed ``plugin@<version>``
+    cache entries.
+    """
+    if not cache_root.is_dir():
+        return None
+    pending: list[tuple[Path, int]] = [(cache_root, 0)]
+    visited = 0
+    while pending:
+        directory, depth = pending.pop()
+        visited += 1
+        if (
+            visited > _DEPENDENCY_CACHE_SEARCH_MAX_DIRS
+            or depth > _DEPENDENCY_CACHE_SEARCH_MAX_DEPTH
+        ):
+            continue
+        scope = directory / '@opencode-ai'
+        if scope.is_dir():
+            exact = scope / 'plugin'
+            if (exact / 'package.json').is_file():
+                return exact
+            for candidate in sorted(scope.glob('plugin@*')):
+                if (candidate / 'package.json').is_file():
+                    return candidate
+        try:
+            children = sorted(
+                (child for child in directory.iterdir() if child.is_dir()),
+                key=lambda path: path.name,
+            )
+        except OSError:
+            continue
+        pending.extend((child, depth + 1) for child in children)
+    return None
+
+
+def dependency_unavailable_error(
+    *,
+    worktree: Path,
+    module: str,
+    cache_root: Path,
+    detail: str,
+) -> OpenCodeRuntimeError:
+    """Build the actionable infrastructure error for issue #482."""
+    opencode_root = worktree / '.opencode'
+    message = (
+        'OpenCode cannot resolve the worktree plugin dependency '
+        f"'{module}' from {opencode_root} ({detail}). This is an "
+        'infrastructure/runtime-availability failure, not a model failure: '
+        "the attempt does not consume the run's turn budget and is not "
+        'retried in a loop. Repair the worktree dependency tree by '
+        f'reinstalling from the shared OpenCode cache root {cache_root}, '
+        f'for example: cd {opencode_root} && bun install --offline '
+        f'(or re-link node_modules/{module} from that cache), then resume '
+        'the run.'
+    )
+    return OpenCodeRuntimeError(
+        message,
+        failure_class=RUNTIME_DEPENDENCY_UNAVAILABLE_CLASS,
+        details={
+            'worktree': str(worktree),
+            'module': module,
+            'cache_root': str(cache_root),
+            'detail': detail,
+        },
+    )
 
 
 @dataclass
@@ -117,6 +244,23 @@ class AgentRuntime(ABC):
 
     def release(self, *, run_id: str, agent: AgentName) -> None:
         return None
+
+    def repair_workspace_dependencies(
+        self,
+        *,
+        workspace: Path,
+    ) -> DependencyRepairResult:
+        """One bounded attempt to restore the worktree dependency tree.
+
+        Runtimes without a local .opencode tree report ``unavailable`` and the
+        engine then fails closed with the runtime's actionable error.
+        """
+        del workspace
+        return DependencyRepairResult(
+            status='unavailable',
+            source=None,
+            detail='this agent runtime manages no workspace dependency tree',
+        )
 
 
 NORMALIZED_EVENT_TYPES = {
@@ -635,6 +779,63 @@ class OpenCodeProcessRuntime(AgentRuntime):
         )
         return config_root, data_root, cache_root, state_root, home_root
 
+    def repair_workspace_dependencies(
+        self,
+        *,
+        workspace: Path,
+    ) -> DependencyRepairResult:
+        """Re-link the pinned plugin from the shared cache (issue #482).
+
+        The per-run worktree is materialized once; a later resume in a newer
+        image can leave it with a .opencode tree whose background dependency
+        install failed, which makes every turn 500. This is a single bounded
+        filesystem repair with no network access and no loop: the engine
+        attempts it at most once per failed turn and fails closed when the
+        package cannot be resolved from the shared cache.
+        """
+        target = (
+            workspace
+            / '.opencode'
+            / 'node_modules'
+            / '@opencode-ai'
+            / 'plugin'
+        )
+        if (target / 'package.json').is_file():
+            return DependencyRepairResult(
+                status='already_resolved',
+                source=str(target),
+                detail='the worktree already resolves the OpenCode plugin',
+            )
+        cache_root = Path(self.settings.opencode_shared_cache_root)
+        source = find_cached_plugin_package(cache_root)
+        if source is None:
+            return DependencyRepairResult(
+                status='unavailable',
+                source=None,
+                detail=(
+                    'no @opencode-ai/plugin package was found under the '
+                    f'shared OpenCode cache root {cache_root}'
+                ),
+            )
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            elif target.is_dir():
+                shutil.rmtree(target)
+            target.symlink_to(source, target_is_directory=True)
+        except OSError as exc:
+            return DependencyRepairResult(
+                status='unavailable',
+                source=str(source),
+                detail=f'could not link {source} into {target}: {exc}',
+            )
+        return DependencyRepairResult(
+            status='repaired',
+            source=str(source),
+            detail=f'linked {source} into {target}',
+        )
+
     def _start_process(
         self,
         *,
@@ -943,6 +1144,25 @@ class OpenCodeProcessRuntime(AgentRuntime):
                         params={'directory': str(workspace)},
                         json=payload,
                     )
+                    if response.status_code >= 500:
+                        # Issue #482: a worktree whose .opencode dependency
+                        # tree cannot resolve makes every turn 500; surface it
+                        # as infrastructure instead of a retryable transport
+                        # error that rotates and burns the turn budget.
+                        detail = self._dependency_failure_detail(
+                            response=response,
+                            workspace=workspace,
+                            agent=agent,
+                        )
+                        if detail is not None:
+                            raise dependency_unavailable_error(
+                                worktree=workspace,
+                                module=OPENCODE_PLUGIN_MODULE,
+                                cache_root=Path(
+                                    self.settings.opencode_shared_cache_root
+                                ),
+                                detail=detail,
+                            )
                     response.raise_for_status()
                     body = response.json()
                     provider_error = provider_error_message(body)
@@ -1033,6 +1253,54 @@ class OpenCodeProcessRuntime(AgentRuntime):
             'OpenCode turn ended without a result',
             failure_class='validation',
         )
+
+    @staticmethod
+    def _dependency_marker_line(text: str) -> str:
+        for line in text.splitlines():
+            normalized = line.lower()
+            if (
+                'background dependency install failed' in normalized
+                or 'cannot find module' in normalized
+                or 'module not found' in normalized
+                or 'resolvemessage' in normalized
+            ):
+                return ' '.join(line.split())[:300]
+        return 'the OpenCode runtime reports an unresolvable plugin dependency'
+
+    def _dependency_failure_detail(
+        self,
+        *,
+        response: httpx.Response,
+        workspace: Path,
+        agent: AgentName,
+    ) -> str | None:
+        # The HTTP body carries the ResolveMessage; OpenCode's own log holds
+        # the failed background install when the body is generic.
+        if dependency_resolution_failure(response.text):
+            return self._dependency_marker_line(response.text)
+        log_text = self._runtime_log_tail(workspace=workspace, agent=agent)
+        if dependency_resolution_failure(log_text):
+            return self._dependency_marker_line(log_text)
+        return None
+
+    @staticmethod
+    def _runtime_log_tail(*, workspace: Path, agent: AgentName) -> str:
+        runtime_root = workspace.parent / 'runtime' / agent.value
+        candidates = (
+            runtime_root / 'opencode.log',
+            runtime_root / 'data' / 'opencode' / 'log' / 'opencode.log',
+        )
+        chunks: list[str] = []
+        for path in candidates:
+            try:
+                with path.open('rb') as handle:
+                    handle.seek(0, os.SEEK_END)
+                    size = handle.tell()
+                    handle.seek(max(0, size - _RUNTIME_LOG_TAIL_BYTES))
+                    chunks.append(handle.read().decode('utf-8', 'replace'))
+            except OSError:
+                continue
+        return '\n'.join(chunks)
 
     @staticmethod
     def _terminal_tool_signatures(messages: list[dict[str, Any]]) -> list[str]:
