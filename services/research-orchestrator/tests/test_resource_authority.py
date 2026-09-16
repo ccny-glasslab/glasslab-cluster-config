@@ -24,7 +24,7 @@ import pytest
 
 from app.contracts import compute_contract_digest
 from app.discord_adapter import DisabledDiscordAdapter
-from app.engine import ResearchOrchestrator
+from app.engine import ResearchOrchestrator, WorkflowError
 from app.mock_runtime import ScriptedMockRuntime
 from app.preflight import profile_contract_resource_conflicts
 from app.schemas import (
@@ -32,6 +32,7 @@ from app.schemas import (
     AgentName,
     AgentTurnResult,
     ApprovalStatus,
+    ArtifactRecord,
     PolicyClassification,
     RequestedAction,
     ResourceRequest,
@@ -577,3 +578,418 @@ def test_contract_seal_below_profile_parks_without_redraft(
     pause = _events(store, run.run_id, 'run.paused')
     assert len(pause) == 1
     assert 'wallclock_minutes' in str(pause[0].payload['reason'])
+
+
+# ---------------------------------------------------------------------------
+# Installed-contract binding path: stale promoted contract (issue #490)
+#
+# A run that binds an already-promoted contract used to park at
+# AWAITING_CONTRACT_PROMOTION and re-enter the same failing binding call on
+# every resume (HTTP 409 "installed contract remains incompatible with the
+# protocol"), forever. These tests pin the replacement behavior: the stale
+# contract is never bound, the run fails closed exactly once with the
+# #484-style actionable message, and a second resume is refused before any
+# workflow recovery runs.
+# ---------------------------------------------------------------------------
+
+
+class _ProfileProtocolRuntime(ScriptedMockRuntime):
+    """Drafts the protocol proposal with the authoritative task profile.
+
+    Post-#484 the stored protocol proposal carries the compiled task's
+    resource profile in ``resource_constraints``; that is what makes
+    ``_contract_binding_compatible`` reject a stale installed contract.
+    """
+
+    def run_turn(self, **kwargs):
+        if (
+            kwargs['agent'] == AgentName.HONEYDEW
+            and 'Draft a concrete program.md' in kwargs['prompt']
+        ):
+            result, message_id = super().run_turn(**kwargs)
+            assert result.evaluation_contract_proposal is not None
+            result.evaluation_contract_proposal.resource_constraints = (
+                ResourceRequest(**CPU_PROFILE)
+            )
+            return result, message_id
+        return super().run_turn(**kwargs)
+
+
+def _bind_profile_task_and_park_for_promotion(
+    tmp_path: Path,
+    store,
+    engine: ResearchOrchestrator,
+    run,
+    *,
+    resource_constraints: dict[str, object],
+):
+    """Rebind a run to an installed contract and park it awaiting promotion.
+
+    Mirrors the live run's durable state: a compiled task profile, a binding
+    to the (stale) already-promoted contract, and an approved promotion
+    action waiting at AWAITING_CONTRACT_PROMOTION.
+    """
+
+    contract = _install_contract(
+        tmp_path,
+        engine,
+        resource_constraints=resource_constraints,
+    )
+    current = store.get_run(run.run_id)
+    store.replace_run(
+        current.model_copy(
+            update={
+                'task_definition': dict(CPU_PROFILE_TASK_DEFINITION),
+                'evaluation_contract_id': contract.descriptor.contract_id,
+                'evaluation_contract_version': contract.descriptor.version,
+                'evaluation_contract_digest': contract.digest,
+                'state': RunState.PAUSED,
+                'resume_state': RunState.AWAITING_CONTRACT_PROMOTION,
+                'active_since': None,
+            }
+        ),
+        expected_version=current.version,
+    )
+    return contract
+
+
+def _save_approved_promotion_action(
+    store,
+    *,
+    run_id: str,
+    descriptor: dict[str, object],
+    digest: str,
+    sealed_path: str = '/sealed/not-used',
+) -> ActionRecord:
+    # A human-approved promotion action plus its sealed candidate artifact,
+    # exactly what _promote_contract_candidate consumes when the destination
+    # contract turns out to be already installed.
+    action = store.save_action(
+        ActionRecord(
+            run_id=run_id,
+            proposed_by=AgentName.BEAKER,
+            type='propose_evaluation_contract',
+            arguments={
+                'contract_id': str(descriptor['contract_id']),
+                'version': str(descriptor['version']),
+                'candidate_path': (
+                    f"contract-candidate/{descriptor['contract_id']}/"
+                    f"{descriptor['version']}"
+                ),
+                'rationale': 'Promote the reviewed contract.',
+            },
+            policy_classification=(
+                PolicyClassification.HONEYDEW_AND_HUMAN_APPROVAL
+            ),
+            approval_status=ApprovalStatus.APPROVED,
+            honeydew_approved=True,
+            reviewer='test-human',
+            reason='Promote the reviewed contract.',
+            idempotency_key=f'promote-contract-{run_id}',
+        )
+    )
+    store.save_artifact(
+        ArtifactRecord(
+            run_id=run_id,
+            type='evaluation_contract_candidate',
+            uri=(
+                f"artifact://{run_id}/contract-candidate/"
+                f"{descriptor['contract_id']}/{descriptor['version']}"
+            ),
+            sha256=digest,
+            metadata={
+                'action_id': action.action_id,
+                'descriptor': descriptor,
+                'sealed_path': sealed_path,
+            },
+        )
+    )
+    return action
+
+
+def _write_sealed_candidate_source(
+    root: Path,
+    *,
+    contract_id: str,
+    version: str,
+    resource_constraints: dict[str, object],
+) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    descriptor = {
+        'contract_id': contract_id,
+        'version': version,
+        'manifest': {
+            'primary_metric': 'score',
+            'primary_metric_direction': 'maximize',
+        },
+        'execution_wrapper': 'run_contract.py',
+        'evaluation_entry_point': 'evaluator.py',
+        'expected_input_schema': 'input.schema.json',
+        'expected_output_schema': 'output.schema.json',
+        'required_artifacts': ['metrics.json', 'evaluation.json'],
+        'resource_constraints': resource_constraints,
+        'container_image_digest': None,
+    }
+    (root / 'contract.json').write_text(json.dumps(descriptor, indent=2))
+    (root / 'run_contract.py').write_text('# wrapper\n')
+    (root / 'evaluator.py').write_text('# evaluator\n')
+    (root / 'input.schema.json').write_text('{"type": "object"}\n')
+    (root / 'output.schema.json').write_text('{"type": "object"}\n')
+
+
+def test_installed_contract_below_profile_fails_closed_once(
+    tmp_path: Path,
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    settings, store, cluster, _, original = orchestrator_bundle
+    engine = ResearchOrchestrator(
+        settings=settings,
+        store=store,
+        runtime=_ProfileProtocolRuntime(runner_image=RUNNER_IMAGE),
+        workspaces=original.workspaces,
+        contracts=original.contracts,
+        contract_candidates=original.contract_candidates,
+        policy=original.policy,
+        cluster=cluster,
+        discord=DisabledDiscordAdapter(),
+    )
+    run = engine.create_run(
+        RunCreateRequest(
+            objective='Never loop on a stale installed contract (#490).'
+        )
+    )
+    contract = _bind_profile_task_and_park_for_promotion(
+        tmp_path,
+        store,
+        engine,
+        run,
+        resource_constraints=CONTRACT_CONSTRAINTS,
+    )
+    action = _save_approved_promotion_action(
+        store,
+        run_id=run.run_id,
+        descriptor=contract.descriptor.model_dump(mode='json'),
+        digest=contract.digest,
+    )
+    promotion_calls: list[str] = []
+    original_promote = engine._promote_contract_candidate
+
+    def spy_promote(action_record):
+        promotion_calls.append(action_record.action_id)
+        return original_promote(action_record)
+
+    monkeypatch.setattr(engine, '_promote_contract_candidate', spy_promote)
+    turn_before = store.get_run(run.run_id).turn_number
+
+    engine.resume_run(run.run_id, requested_by='test-human')
+
+    failed = store.get_run(run.run_id)
+    assert failed.state == RunState.FAILED
+    assert promotion_calls == [action.action_id]
+    # Configuration contradiction, not a model failure: no agent turn, no
+    # methodology revision, no retry is consumed.
+    assert failed.turn_number == turn_before
+    assert failed.methodology_revision_count == 0
+    # The stale contract is never bound and never silently reused.
+    assert _events(store, run.run_id, 'contract.bound_installed') == []
+    pause_reasons = [
+        str(event.payload.get('reason'))
+        for event in _events(store, run.run_id, 'run.paused')
+    ]
+    assert not any(
+        'installed contract remains incompatible' in reason
+        for reason in pause_reasons
+    )
+
+    conflicts = _events(
+        store,
+        run.run_id,
+        'methodology.resource_authority_conflict',
+    )
+    assert len(conflicts) == 1
+    assert conflicts[0].payload['origin'] == 'installed_contract_binding'
+    reason = str(conflicts[0].payload['reason'])
+    assert 'wallclock_minutes' in reason
+    assert '60' in reason
+    assert '30' in reason
+
+    failures = _events(store, run.run_id, 'run.failed')
+    assert len(failures) == 1
+    failure = str(failures[0].payload['error'])
+    assert 'wallclock_minutes' in failure
+    assert '60' in failure
+    assert '30' in failure
+
+    # A second resume must not re-enter the failing binding call: the run is
+    # terminal, so resume is refused before any workflow recovery starts and
+    # the one-shot rejection is not re-emitted.
+    with pytest.raises(WorkflowError, match='not resumable'):
+        engine.resume_run(run.run_id, requested_by='test-human')
+    assert promotion_calls == [action.action_id]
+    assert (
+        len(
+            _events(
+                store,
+                run.run_id,
+                'methodology.resource_authority_conflict',
+            )
+        )
+        == 1
+    )
+    assert len(_events(store, run.run_id, 'run.failed')) == 1
+
+
+def test_installed_contract_accommodating_profile_binds_as_before(
+    tmp_path: Path,
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    settings, store, cluster, _, original = orchestrator_bundle
+    engine = ResearchOrchestrator(
+        settings=settings,
+        store=store,
+        runtime=_ProfileProtocolRuntime(runner_image=RUNNER_IMAGE),
+        workspaces=original.workspaces,
+        contracts=original.contracts,
+        contract_candidates=original.contract_candidates,
+        policy=original.policy,
+        cluster=cluster,
+        discord=DisabledDiscordAdapter(),
+    )
+    run = engine.create_run(
+        RunCreateRequest(objective='Bind a contract that fits the profile.')
+    )
+    contract = _bind_profile_task_and_park_for_promotion(
+        tmp_path,
+        store,
+        engine,
+        run,
+        resource_constraints=ACCOMMODATING_CONSTRAINTS,
+    )
+    _save_approved_promotion_action(
+        store,
+        run_id=run.run_id,
+        descriptor=contract.descriptor.model_dump(mode='json'),
+        digest=contract.digest,
+    )
+    planned: list[str] = []
+    monkeypatch.setattr(
+        engine,
+        '_beaker_plan',
+        lambda run_id: planned.append(run_id),
+    )
+
+    engine.resume_run(run.run_id, requested_by='test-human')
+
+    bound = store.get_run(run.run_id)
+    assert bound.state == RunState.BEAKER_PLANNING
+    assert bound.evaluation_contract_id == contract.descriptor.contract_id
+    assert bound.evaluation_contract_digest == contract.digest
+    assert planned == [run.run_id]
+    bound_events = _events(store, run.run_id, 'contract.bound_installed')
+    assert len(bound_events) == 1
+    assert bound_events[0].payload['digest'] == contract.digest
+    assert _events(
+        store, run.run_id, 'methodology.resource_authority_conflict'
+    ) == []
+    assert _events(store, run.run_id, 'run.failed') == []
+
+
+def test_stale_sealed_candidate_below_profile_fails_closed_once(
+    tmp_path: Path,
+    orchestrator_bundle,
+) -> None:
+    # The other half of the stale-promotion lifecycle (issue #490 direction
+    # 3): a sealed candidate drafted before the profile became authoritative
+    # must not be promoted at all. Promoting it would install an unusable
+    # immutable contract and then loop on "promoted contract remains
+    # incompatible with the protocol", so the run fails closed instead.
+    settings, store, cluster, _, original = orchestrator_bundle
+    engine = ResearchOrchestrator(
+        settings=settings,
+        store=store,
+        runtime=_ProfileProtocolRuntime(runner_image=RUNNER_IMAGE),
+        workspaces=original.workspaces,
+        contracts=original.contracts,
+        contract_candidates=original.contract_candidates,
+        policy=original.policy,
+        cluster=cluster,
+        discord=DisabledDiscordAdapter(),
+    )
+    run = engine.create_run(
+        RunCreateRequest(objective='Fail closed on a stale sealed candidate.')
+    )
+    source = tmp_path / 'candidate-source'
+    _write_sealed_candidate_source(
+        source,
+        contract_id='example-research-v1',
+        version='2.0.0',
+        resource_constraints=CONTRACT_CONSTRAINTS,
+    )
+    sealed = engine.contract_candidates.seal(
+        source=source,
+        contract_id='example-research-v1',
+        version='2.0.0',
+    )
+    current = store.get_run(run.run_id)
+    store.replace_run(
+        current.model_copy(
+            update={
+                'task_definition': dict(CPU_PROFILE_TASK_DEFINITION),
+                'state': RunState.PAUSED,
+                'resume_state': RunState.AWAITING_CONTRACT_PROMOTION,
+                'active_since': None,
+            }
+        ),
+        expected_version=current.version,
+    )
+    _save_approved_promotion_action(
+        store,
+        run_id=run.run_id,
+        descriptor=sealed.descriptor.model_dump(mode='json'),
+        digest=sealed.digest,
+        sealed_path=str(sealed.sealed_path),
+    )
+    turn_before = store.get_run(run.run_id).turn_number
+
+    engine.resume_run(run.run_id, requested_by='test-human')
+
+    failed = store.get_run(run.run_id)
+    assert failed.state == RunState.FAILED
+    assert failed.turn_number == turn_before
+    promotion_pauses = [
+        str(event.payload.get('reason'))
+        for event in _events(store, run.run_id, 'run.paused')
+        if 'promoted contract remains incompatible'
+        in str(event.payload.get('reason'))
+    ]
+    assert promotion_pauses == []
+    conflicts = _events(
+        store,
+        run.run_id,
+        'methodology.resource_authority_conflict',
+    )
+    assert len(conflicts) == 1
+    assert conflicts[0].payload['origin'] == 'candidate_promotion'
+    reason = str(conflicts[0].payload['reason'])
+    assert 'wallclock_minutes' in reason
+    assert '60' in reason
+    assert '30' in reason
+    # The stale candidate was rejected before promotion: nothing unusable was
+    # installed into the trusted contract root.
+    assert not (
+        tmp_path / 'trusted-contracts' / 'example-research-v1' / '2.0.0'
+    ).exists()
+    with pytest.raises(WorkflowError, match='not resumable'):
+        engine.resume_run(run.run_id, requested_by='test-human')
+    assert (
+        len(
+            _events(
+                store,
+                run.run_id,
+                'methodology.resource_authority_conflict',
+            )
+        )
+        == 1
+    )
