@@ -47,6 +47,7 @@ from .policy import ActionPolicy
 from .preflight import (
     MatrixPreflightReport,
     MethodologyRequirement,
+    declared_budget_conflicts,
     preflight_matrix,
     profile_contract_resource_conflicts,
 )
@@ -3600,7 +3601,11 @@ class ResearchOrchestrator:
             'manifest.primary_metric_direction must be the plain STRING '
             '"maximize" or "minimize"; it may also hold '
             'methodology_requirements, budget, '
-            'and guardrails; never a filename reference), execution_wrapper '
+            'and guardrails; budget and guardrails are informational notes, '
+            'and manifest.budget.wallclock_minutes, when present, must be a '
+            'positive integer no larger than both resource_constraints.'
+            'wallclock_minutes and the task profile wall-clock; never a '
+            'filename reference), execution_wrapper '
             '(relative path string to the wrapper .py file inside the '
             'candidate directory), evaluation_entry_point (relative path '
             'string to the evaluator .py file), expected_input_schema '
@@ -3700,7 +3705,7 @@ class ResearchOrchestrator:
                 version=request.version,
             )
             descriptor = sealed.descriptor
-            conflict = self._profile_contract_conflict_message(
+            conflict = self._resource_authority_conflict_message(
                 run=run,
                 descriptor=descriptor,
             )
@@ -4060,7 +4065,7 @@ class ResearchOrchestrator:
             installed = None
         if installed is not None:
             run = self.store.get_run(action.run_id)
-            conflict = self._profile_contract_conflict_message(
+            conflict = self._resource_authority_conflict_message(
                 run=run,
                 descriptor=installed.descriptor,
             )
@@ -4091,7 +4096,7 @@ class ResearchOrchestrator:
             self._transition(action.run_id, RunState.BEAKER_PLANNING)
             self._beaker_plan(action.run_id)
             return
-        conflict = self._profile_contract_conflict_message(
+        conflict = self._resource_authority_conflict_message(
             run=self.store.get_run(action.run_id),
             descriptor=descriptor,
         )
@@ -5169,7 +5174,7 @@ class ResearchOrchestrator:
                 f'failed to create Honeydew review snapshot: {exc}'
             ) from exc
 
-    def _profile_contract_conflict_message(
+    def _resource_authority_conflict_message(
         self,
         *,
         run: RunRecord,
@@ -5185,10 +5190,40 @@ class ResearchOrchestrator:
         # offending dimension instead of letting the model chase two mutually
         # exclusive deterministic rules.
         profile = (run.task_definition or {}).get('resources')
-        if not isinstance(profile, Mapping) or not profile:
+        bound_profile = (
+            profile if isinstance(profile, Mapping) and profile else None
+        )
+        try:
+            budget_conflicts = declared_budget_conflicts(
+                manifest=descriptor.manifest,
+                constraints=descriptor.resource_constraints,
+                profile=bound_profile,
+            )
+        except ValueError as exc:
+            return (
+                f'evaluation contract `{descriptor.contract_id}` '
+                f'{descriptor.version} declares an invalid manifest.budget: '
+                f'{exc}. manifest.budget is informational and must not '
+                'contradict the contract resource_constraints or the task '
+                'resource profile; remove or lower the declaration.'
+            )
+        if budget_conflicts:
+            joined_budget = '; '.join(
+                conflict.describe() for conflict in budget_conflicts
+            )
+            return (
+                f'declared manifest.budget contradicts the deterministic '
+                f'resource envelope for evaluation contract '
+                f'`{descriptor.contract_id}` {descriptor.version}: '
+                f'{joined_budget}. manifest.budget is informational and does '
+                'not set the job wall-clock; the task resource profile does. '
+                'A declaration larger than the profile or the contract '
+                'resource_constraints claims time the run can never receive.'
+            )
+        if bound_profile is None:
             return None
         conflicts = profile_contract_resource_conflicts(
-            profile=profile,
+            profile=bound_profile,
             constraints=descriptor.resource_constraints,
         )
         if not conflicts:
@@ -5219,7 +5254,7 @@ class ResearchOrchestrator:
                 run.evaluation_contract_id,
                 run.evaluation_contract_version,
             )
-            conflict = self._profile_contract_conflict_message(
+            conflict = self._resource_authority_conflict_message(
                 run=run,
                 descriptor=contract.descriptor,
             )

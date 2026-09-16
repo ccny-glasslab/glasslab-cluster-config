@@ -26,7 +26,10 @@ from app.contracts import compute_contract_digest
 from app.discord_adapter import DisabledDiscordAdapter
 from app.engine import ResearchOrchestrator, WorkflowError
 from app.mock_runtime import ScriptedMockRuntime
-from app.preflight import profile_contract_resource_conflicts
+from app.preflight import (
+    declared_budget_conflicts,
+    profile_contract_resource_conflicts,
+)
 from app.schemas import (
     ActionRecord,
     AgentName,
@@ -79,6 +82,7 @@ def _install_contract(
     engine: ResearchOrchestrator,
     *,
     resource_constraints: dict[str, object],
+    manifest_budget: dict[str, object] | None = None,
     contract_id: str = 'example-research-v1',
     version: str = '9.9.9',
 ) -> object:
@@ -87,13 +91,16 @@ def _install_contract(
     # protocol proposal's evaluator_type so the binding stays compatible.
     root = tmp_path / 'trusted-contracts' / contract_id / version
     root.mkdir(parents=True, exist_ok=True)
+    manifest: dict[str, object] = {
+        'primary_metric': 'score',
+        'primary_metric_direction': 'maximize',
+    }
+    if manifest_budget is not None:
+        manifest['budget'] = manifest_budget
     descriptor = {
         'contract_id': contract_id,
         'version': version,
-        'manifest': {
-            'primary_metric': 'score',
-            'primary_metric_direction': 'maximize',
-        },
+        'manifest': manifest,
         'execution_wrapper': 'run_contract.py',
         'evaluation_entry_point': 'evaluator.py',
         'expected_input_schema': 'input.schema.json',
@@ -118,12 +125,14 @@ def _bind_task_profile_and_contract(
     run,
     *,
     resource_constraints: dict[str, object],
+    manifest_budget: dict[str, object] | None = None,
     task_definition: dict[str, object] | None = None,
 ):
     contract = _install_contract(
         tmp_path,
         engine,
         resource_constraints=resource_constraints,
+        manifest_budget=manifest_budget,
     )
     current = store.get_run(run.run_id)
     return (
@@ -377,6 +386,64 @@ def test_contract_accommodating_profile_converges_on_first_proposal(
     assert approved.methodology_revision_count == 0
 
 
+def test_contract_declared_budget_above_profile_parks_without_revision(
+    tmp_path: Path,
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # A declared manifest.budget is informational, but it must not claim more
+    # wall-clock than the authoritative profile grants: 90 minutes declared
+    # inside a 120-minute contract envelope still contradicts the 60-minute
+    # task profile, so the contradiction is caught before approval.
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Reject a declared budget over the profile.')
+    )
+    run, _ = _bind_task_profile_and_contract(
+        tmp_path,
+        store,
+        engine,
+        run,
+        resource_constraints=ACCOMMODATING_CONSTRAINTS,
+        manifest_budget={'wallclock_minutes': 90},
+    )
+    current = store.get_run(run.run_id)
+    store.replace_run(
+        current.model_copy(update={'state': RunState.HONEYDEW_REVIEWING}),
+        expected_version=current.version,
+    )
+    _save_pending_matrix(
+        store,
+        run_id=run.run_id,
+        resources=CPU_PROFILE,
+        ordinal='budget-1',
+    )
+    revised: list[str] = []
+    monkeypatch.setattr(
+        engine,
+        '_beaker_revise',
+        lambda run_id, *, feedback: revised.append(feedback),
+    )
+
+    engine._honeydew_review(run.run_id, implementation_turn_id='turn-1')
+
+    parked = store.get_run(run.run_id)
+    assert parked.state == RunState.PAUSED
+    assert revised == []
+    assert parked.methodology_revision_count == 0
+    assert _events(store, run.run_id, 'methodology.revision_requested') == []
+    conflicts = _events(
+        store,
+        run.run_id,
+        'methodology.resource_authority_conflict',
+    )
+    assert len(conflicts) == 1
+    reason = str(conflicts[0].payload['reason'])
+    assert 'manifest.budget' in reason
+    assert '90' in reason
+    assert '60' in reason
+
+
 def test_matrix_template_carries_profile_exact_resources(
     orchestrator_bundle,
 ) -> None:
@@ -451,6 +518,99 @@ def test_profile_conflicts_ignore_undeclared_dimensions() -> None:
         )
         == []
     )
+
+
+# ---------------------------------------------------------------------------
+# Declared manifest.budget contradictions (issue #500)
+# ---------------------------------------------------------------------------
+
+
+def test_declared_budget_above_contract_constraints_is_a_conflict() -> None:
+    conflicts = declared_budget_conflicts(
+        manifest={'budget': {'wallclock_minutes': 240}},
+        constraints=ResourceRequest(
+            cpu=4.0,
+            memory_gib=8.0,
+            gpus=0,
+            wallclock_minutes=60,
+        ),
+    )
+
+    assert [item.scope for item in conflicts] == ['contract resource_constraints']
+    described = conflicts[0].describe()
+    assert '240' in described
+    assert '60' in described
+
+
+def test_declared_budget_above_task_profile_is_a_conflict() -> None:
+    conflicts = declared_budget_conflicts(
+        manifest={'budget': {'wallclock_minutes': 90}},
+        constraints=ResourceRequest(
+            cpu=8.0,
+            memory_gib=32.0,
+            gpus=0,
+            wallclock_minutes=120,
+        ),
+        profile={'wallclock_minutes': 60},
+    )
+
+    assert [item.scope for item in conflicts] == ['task resource profile']
+
+
+def test_declared_budget_within_envelope_has_no_conflicts() -> None:
+    assert (
+        declared_budget_conflicts(
+            manifest={'budget': {'wallclock_minutes': 60}},
+            constraints=ResourceRequest(
+                cpu=8.0,
+                memory_gib=32.0,
+                gpus=0,
+                wallclock_minutes=120,
+            ),
+            profile={'wallclock_minutes': 60},
+        )
+        == []
+    )
+
+
+def test_declared_budget_absent_has_no_conflicts() -> None:
+    assert (
+        declared_budget_conflicts(
+            manifest={'primary_metric': 'score'},
+            constraints=ResourceRequest(
+                cpu=8.0,
+                memory_gib=32.0,
+                gpus=0,
+                wallclock_minutes=120,
+            ),
+        )
+        == []
+    )
+
+
+def test_declared_budget_malformed_shape_raises() -> None:
+    constraints = ResourceRequest(
+        cpu=8.0,
+        memory_gib=32.0,
+        gpus=0,
+        wallclock_minutes=120,
+    )
+
+    with pytest.raises(ValueError, match='wallclock_minutes'):
+        declared_budget_conflicts(
+            manifest={'budget': {'wallclock_minutes': 0}},
+            constraints=constraints,
+        )
+    with pytest.raises(ValueError, match='wallclock_minutes'):
+        declared_budget_conflicts(
+            manifest={'budget': {'wallclock_minutes': 60.5}},
+            constraints=constraints,
+        )
+    with pytest.raises(ValueError, match='JSON object'):
+        declared_budget_conflicts(
+            manifest={'budget': 'sixty minutes'},
+            constraints=constraints,
+        )
 
 
 # ---------------------------------------------------------------------------
