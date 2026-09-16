@@ -1,11 +1,11 @@
 # Research Orchestrator Command Surface
 
-> **STALE** — this document's runtime claims are falsified by the live
-> orchestrator configmap, which selects `opencode` (verified 2026-09-02).
-> Hermes is an opt-in rollback backend, not the active runtime. See
+> **Runtime note** — the deployment runs the OpenCode agent runtime, selected
+> by the live orchestrator configmap (verified 2026-09-02). Hermes is an
+> explicit opt-in rollback backend only, not the active runtime. See
 > `AGENTS.md` and `HANDOFF.md` for current state.
 
-Last verified: 2026-08-06
+Last verified: 2026-09-16
 
 This is the concise operator and contributor reference for the Honeydew/Beaker
 research workflow. The database and append-only event log are authoritative.
@@ -26,7 +26,7 @@ and approval role or explicit administrator allowlist.
 | `/research-turns [run_id:<id>] [limit:<int>]` | Run thread, or main channel with `run_id` | Shows the run's most recent redacted agent turns (default 5, max 20) with agent identity, status, and timestamps. |
 | `/research-pause [run_id:<id>] [reason:<text>]` | Run thread, or main channel with `run_id` | Aborts an active model turn, preserves state, and records where to resume. |
 | `/research-resume [run_id:<id>] [reason:<text>]` | Run thread, or main channel with `run_id` | Restores a paused run to its prior state and restarts workflow recovery. |
-| `/research-cancel [run_id:<id>] [reason:<text>]` | Run thread, or main channel with `run_id` | Cancels the run, aborts active Hermes turns, requests cancellation of active jobs, and records the Discord actor and reason. |
+| `/research-cancel [run_id:<id>] [reason:<text>]` | Run thread, or main channel with `run_id` | Cancels the run, aborts active model turns, requests cancellation of active jobs, and records the Discord actor and reason. |
 | `/research-status [run_id:<id>]` | Run thread, or main channel with `run_id` | Shows a durable-derived snapshot of the run: state, phase, pending approval, job counts by status, and next required action. |
 | `/research-list` | Main Glasslab channel | Lists active runs first, then the most recently updated terminal runs, up to 10 total. |
 
@@ -226,7 +226,7 @@ When structural validation is insufficient:
 4. Honeydew reviews the read-only sealed copy.
 5. A human approves promotion into the trusted contract catalog.
 
-Neither Hermes agent can edit a promoted contract or substitute an evaluator
+Neither agent can edit a promoted contract or substitute an evaluator
 entry point in a job request.
 
 ## HTTP Operator API
@@ -375,7 +375,7 @@ Validated:
 - 98 research-orchestrator tests
 - 159 workflow-api tests
 - mocked complete research workflow
-- live Hermes/Qwen structured task compilation
+- live OpenCode/Qwen structured task compilation
 - live Discord threads, identities, approvals, rejection feedback, and
   cancellation projection
 - live Discord registration of dataset upload, pause, and resume commands
@@ -411,7 +411,7 @@ path is `/task-start`, not another hardcoded task entry.
   broadened
 - fixed approved repository and runtime profiles
 - no authenticated remote dataset download or private object-store browser
-- no Discord list or status commands
+- no Discord command to retry or clone a terminal run (use `POST /runs/{run_id}/retry`)
 - no first-class HTTP endpoint for complete structured turn inspection
 - terminal retries are limited to verified `FAILED`/`TIMED_OUT` protocol
   checkpoints and always require fresh approvals; a terminal retry child is

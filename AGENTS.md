@@ -115,8 +115,12 @@ Start an attached research task in the configured Glasslab channel:
 Start a question-driven run without a task archive:
 
 ```text
-/research-start objective:<research objective>
+/task-start objective:<research objective>
 ```
+
+`/task-start` is the only registered start command. `/research-start` and
+`/benchmark-start` are retired and are not registered
+(`services/research-orchestrator/app/discord_controls.py:679-910`).
 
 Upload local data before starting a task:
 
