@@ -235,6 +235,22 @@ class AgentRuntime(ABC):
     ) -> tuple[AgentTurnResult, str | None]:
         raise NotImplementedError
 
+    def session_context_tokens(
+        self,
+        *,
+        run_id: str,
+        agent: AgentName,
+        session_id: str,
+    ) -> int | None:
+        """Real cumulative context tokens observed for a live session.
+
+        Backends that receive provider usage (OpenCode) override this so
+        rotation bounds the real prompt rather than an estimate over the
+        orchestrator's stored turns. ``None`` keeps the estimation fallback.
+        """
+        del run_id, agent, session_id
+        return None
+
     @abstractmethod
     def abort(self, *, run_id: str, agent: AgentName, session_id: str) -> None:
         raise NotImplementedError
@@ -311,6 +327,44 @@ def extract_structured_output(body: dict[str, Any]) -> Any | None:
     if structured is not None:
         return structured
     return info.get('structured_output')
+
+
+def message_context_tokens(body: Any) -> int | None:
+    """Real context size the next turn must resend, from an assistant message.
+
+    The AI SDK normalizes ``info.tokens.input`` to exclude cached tokens, so the
+    full prompt processed is ``input + cache.read + cache.write`` and generated
+    tokens (``output + reasoning``) re-enter the next prompt; their sum is the
+    cumulative context. Returns ``None`` when no usage is reported.
+    """
+    if not isinstance(body, dict):
+        return None
+    info = body.get('info')
+    if not isinstance(info, dict):
+        return None
+    tokens = info.get('tokens')
+    if not isinstance(tokens, dict):
+        return None
+
+    cache = tokens.get('cache')
+    cache = cache if isinstance(cache, dict) else {}
+
+    def _count(value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 0
+        return max(0, int(value))
+
+    measured = (
+        _count(tokens.get('input'))
+        + _count(cache.get('read'))
+        + _count(cache.get('write'))
+        + _count(tokens.get('output'))
+        + _count(tokens.get('reasoning'))
+    )
+    if measured > 0:
+        return measured
+    # Some providers only publish the aggregate total.
+    return _count(tokens.get('total')) or None
 
 
 def parse_json_text(raw: str) -> Any:
@@ -515,6 +569,14 @@ class OpenCodeProcessRuntime(AgentRuntime):
         # (recover racing an approval-driven start) cannot pick the same port.
         self._port_lock = threading.Lock()
         self._reserved_ports: set[int] = set()
+        # Last real context size observed for a (run, agent) session, captured
+        # from each message response so rotation bounds the real prompt even
+        # though the engine stores none of OpenCode's own context. The session
+        # id is kept alongside so a stale value from a rotated session is never
+        # reused; release() drops the entry entirely.
+        self._observed_session_tokens: dict[
+            tuple[str, AgentName], tuple[str, int]
+        ] = {}
         prompt_root = Path(__file__).resolve().parents[1] / 'prompts'
         self._system_prompts = {
             AgentName.HONEYDEW: (prompt_root / 'honeydew.md').read_text(),
@@ -1165,6 +1227,12 @@ class OpenCodeProcessRuntime(AgentRuntime):
                             )
                     response.raise_for_status()
                     body = response.json()
+                    measured_context = message_context_tokens(body)
+                    if measured_context is not None:
+                        self._observed_session_tokens[(run_id, agent)] = (
+                            session_id,
+                            measured_context,
+                        )
                     provider_error = provider_error_message(body)
                     if provider_error:
                         raise OpenCodeRuntimeError(
@@ -1478,6 +1546,18 @@ class OpenCodeProcessRuntime(AgentRuntime):
                 pass
             return
 
+    def session_context_tokens(
+        self,
+        *,
+        run_id: str,
+        agent: AgentName,
+        session_id: str,
+    ) -> int | None:
+        observed = self._observed_session_tokens.get((run_id, agent))
+        if observed is None or observed[0] != session_id:
+            return None
+        return observed[1]
+
     def abort(self, *, run_id: str, agent: AgentName, session_id: str) -> None:
         handle = self._handles.get((run_id, agent))
         if handle is None or handle.process.poll() is not None:
@@ -1525,6 +1605,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
         for handle in list(self._handles.values()):
             self._stop_handle(handle)
         self._handles.clear()
+        self._observed_session_tokens.clear()
         with self._port_lock:
             self._reserved_ports.clear()
 
@@ -1532,6 +1613,7 @@ class OpenCodeProcessRuntime(AgentRuntime):
         # Used for short-lived compiler sessions; terminating the process also
         # drops the isolated session state so no half-finished agent context
         # survives.
+        self._observed_session_tokens.pop((run_id, agent), None)
         handle = self._handles.pop((run_id, agent), None)
         if handle is not None:
             self._stop_handle(handle)

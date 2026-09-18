@@ -88,10 +88,12 @@ data:
   GLASSLAB_ORCHESTRATOR_PERMITTED_JOB_IMAGES: ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:dae5bc4967f5ac54edb6c6d63d8d3db9e4652cc46e035118b0c456eb70121061,ghcr.io/ccny-glasslab/glasslab-research-workspace-runner@sha256:9e7c18d186108847a485ab955194ced2dceee3ed8c8a624a2b0f3ee0e7628b60
   GLASSLAB_ORCHESTRATOR_MAXIMUM_TURNS: "20"
   # Rotate an agent's live session (through the recovery-checkpoint path) once
-  # its accumulated turn history crosses this many estimated tokens; 0 disables
-  # threshold rotation. Bounds history growth that competes with page cache on
-  # the 64 GB Coder host.
-  GLASSLAB_ORCHESTRATOR_TURN_HISTORY_ROTATION_TOKEN_THRESHOLD: "128000"
+  # its real OpenCode-reported context crosses this many tokens; 0 disables
+  # threshold rotation. 24000 is 40% of the 60333-token prompt that deadlocked
+  # the .17 Coder host on run 295bc0ce (2026-09-16); the orchestrator also
+  # clamps any positive value to 32000 so this manifest cannot re-admit the
+  # fatal range.
+  GLASSLAB_ORCHESTRATOR_TURN_HISTORY_ROTATION_TOKEN_THRESHOLD: "24000"
   GLASSLAB_ORCHESTRATOR_MAXIMUM_METHODOLOGY_REVISIONS: "2"
   GLASSLAB_ORCHESTRATOR_MAXIMUM_RUNTIME_SECONDS: "86400"
   GLASSLAB_ORCHESTRATOR_MAXIMUM_CPU: "8"

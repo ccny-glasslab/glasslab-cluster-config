@@ -92,7 +92,8 @@ from .task_bundles import (
     TaskPreflight,
 )
 from .workspaces import WorkspaceManager
-from .knowledge_manager import KnowledgeManager, estimate_tokens
+from .knowledge_manager import KnowledgeManager
+from .prompt_tokens import estimate_prompt_tokens
 from .knowledge_tool import (
     BoundRetrieveEvidenceTool,
     KnowledgeToolRegistry,
@@ -1036,17 +1037,39 @@ class ResearchOrchestrator:
     ) -> int:
         # A continuing session carries exactly the turns recorded against its
         # own session id; after a rotation the fresh session starts at zero.
-        total = 0
-        for turn in self.store.list_turns(run_id):
-            if turn.agent != agent or turn.opencode_session_id != session_id:
-                continue
-            if turn.structured_output is None:
-                continue
-            total += estimate_tokens(
+        turns = [
+            turn
+            for turn in self.store.list_turns(run_id)
+            if turn.agent == agent
+            and turn.opencode_session_id == session_id
+            and turn.structured_output is not None
+        ]
+        # The fallback estimate sees only the orchestrator's stored turn data,
+        # never OpenCode's own session contents, so it is a floor -- not a
+        # bound (run 295bc0ce: 6,541 estimated vs a 60,333-token real prompt).
+        estimate = 0
+        for turn in turns:
+            estimate += estimate_prompt_tokens(
                 json.dumps(turn.input_event, sort_keys=True, default=str)
             )
-            total += estimate_tokens(turn.structured_output.model_dump_json())
-        return total
+            estimate += estimate_prompt_tokens(
+                turn.structured_output.model_dump_json()
+            )
+        if not turns:
+            return estimate
+        # Prefer the real per-message token usage OpenCode reports; the
+        # capability probe tolerates runtimes that cannot report it.
+        resolver = getattr(self.runtime, 'session_context_tokens', None)
+        if not callable(resolver):
+            return estimate
+        real = resolver(
+            run_id=run_id,
+            agent=agent,
+            session_id=session_id,
+        )
+        if real is None or real <= 0:
+            return estimate
+        return max(real, estimate)
 
     def _maybe_rotate_turn_history(
         self,
@@ -1056,7 +1079,9 @@ class ResearchOrchestrator:
         expected_kind: TurnKind,
         run: RunRecord,
     ) -> RunRecord:
-        threshold = self.settings.turn_history_rotation_token_threshold
+        threshold = (
+            self.settings.effective_turn_history_rotation_token_threshold
+        )
         if threshold <= 0:
             return run
         session_id = (
@@ -1080,7 +1105,7 @@ class ResearchOrchestrator:
             agent=agent,
             expected_kind=expected_kind,
             error=(
-                f'session context of {tokens} estimated tokens reached the '
+                f'session context of {tokens} tokens reached the '
                 f'turn-history rotation threshold of {threshold}'
             ),
         )

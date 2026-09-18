@@ -635,14 +635,19 @@ the orchestrator does not record requested actions or start another turn.
 
 Long sessions also rotate proactively. A continuing session carries its whole
 turn history, which on the shared Coder endpoint competes with page cache.
-Before a turn starts, the orchestrator estimates the tokens accumulated by the
-agent's live session; when that estimate crosses
-`GLASSLAB_ORCHESTRATOR_TURN_HISTORY_ROTATION_TOKEN_THRESHOLD` (128000 by
-default, `0` disables), it rotates the session through the same
+Before a turn starts, the orchestrator measures the agent's live session using
+the real per-message token usage OpenCode reports (the cumulative prompt plus
+generated tokens the next turn must resend). When that crosses
+`GLASSLAB_ORCHESTRATOR_TURN_HISTORY_ROTATION_TOKEN_THRESHOLD` (24000 real
+tokens by default, `0` disables; positive values are clamped to a 32000-token
+host-safety ceiling), it rotates the session through the same
 recovery-checkpoint path a failed turn uses: the session is released, a compact
 checkpoint is written, and the next turn starts fresh from that checkpoint so
-the run continues rather than restarts. This is bounded history, not a second
-state format; failure-driven recovery is unchanged.
+the run continues rather than restarts. A runtime that cannot report usage (for
+example the Hermes rollback backend) falls back to a conservative
+character-based estimate over the orchestrator's stored turns; that fallback
+cannot see OpenCode's own context and is only a lower bound. This is bounded
+history, not a second state format; failure-driven recovery is unchanged.
 
 The run-level runtime ceiling measures active workflow time. The orchestrator
 accumulates elapsed active seconds when a run is paused, stops the clock while
