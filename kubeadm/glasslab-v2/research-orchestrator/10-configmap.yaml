@@ -49,7 +49,11 @@ data:
   GLASSLAB_ORCHESTRATOR_AGENT_RUNTIME_BACKEND: opencode
   GLASSLAB_ORCHESTRATOR_OPENCODE_EXECUTABLE: /usr/local/bin/opencode
   GLASSLAB_ORCHESTRATOR_OPENCODE_START_PORT: "4210"
-  GLASSLAB_ORCHESTRATOR_OPENCODE_TURN_TIMEOUT_SECONDS: "1800"
+  # Must never be lower than the code default in app/config.py: the env entry
+  # overrides it, so a stale value here silently narrows the wall clock the
+  # Thinking-model widening in config.py exists to guarantee. Guarded by
+  # services/research-orchestrator/tests/test_configmap_parity.py.
+  GLASSLAB_ORCHESTRATOR_OPENCODE_TURN_TIMEOUT_SECONDS: "3600"
   GLASSLAB_ORCHESTRATOR_OPENCODE_REPEATED_TOOL_LIMIT: "6"
   GLASSLAB_ORCHESTRATOR_OPENCODE_STRUCTURED_REPAIR_ATTEMPTS: "1"
   GLASSLAB_ORCHESTRATOR_OPENCODE_STRUCTURED_OUTPUT_MODE: prompt

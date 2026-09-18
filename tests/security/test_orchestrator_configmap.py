@@ -93,10 +93,13 @@ class OrchestratorConfigmapSplitServingTests(unittest.TestCase):
         self.assertTrue(value.endswith(FALLBACK_ENDPOINT_SUFFIX), value)
         self.assertNotIn(STALE_PORT, value)
 
-    def test_opencode_turn_timeout_stays_1800(self):
-        self.assertEqual(
-            configmap_data()[f"{PREFIX}OPENCODE_TURN_TIMEOUT_SECONDS"], "1800"
-        )
+    # The former test_opencode_turn_timeout_stays_1800 pinned the then-live
+    # literal and became a stale lock: the code default widened 1800 -> 2400
+    # -> 3600 while this assertion kept demanding 1800. The invariant now
+    # lives in
+    # services/research-orchestrator/tests/test_configmap_parity.py, which
+    # fails when the tracked configmap narrows the code default instead of
+    # freezing a literal.
 
     def test_env_example_mirrors_per_agent_routing(self):
         values = env_example_values()
