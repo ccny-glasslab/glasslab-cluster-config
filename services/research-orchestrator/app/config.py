@@ -299,9 +299,11 @@ class Settings(BaseSettings):
     # that immediately re-accumulates cannot rotate on every single turn. 0
     # disables the floor.
     minimum_turns_between_session_rotations: int = 2
-    # Anti-thrash cap: after this many threshold rotations in one run, pause
-    # the run for operator review instead of rotating forever. 0 disables the
-    # cap (not recommended).
+    # Anti-thrash cap: after this many *consecutive* threshold rotations with
+    # no below-threshold (productive) observation in between, pause the run for
+    # operator review instead of rotating forever. The counter resets on
+    # progress and on an operator resume, so a healthy long run is not capped
+    # on its lifetime rotation count. 0 disables the cap (not recommended).
     maximum_session_rotations: int = 4
     maximum_methodology_revisions: int = 2
     # Hard cap on deterministic matrix-preflight failures before the run fails.

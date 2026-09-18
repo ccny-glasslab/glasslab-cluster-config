@@ -1106,8 +1106,15 @@ class ResearchOrchestrator:
             session_id=session_id,
         )
         if tokens < threshold:
-            # Nothing to rotate; the cap/floor never apply below the threshold,
-            # so a resumed run on a fresh session can still make progress.
+            # Below-threshold headroom is proof the last rotation worked: the
+            # fresh session is making progress, not thrashing. Clear the
+            # consecutive-churn counter so a long productive run is never
+            # capped on its lifetime rotation count.
+            if run.session_rotation_count > 0:
+                return self.store.replace_run(
+                    run.model_copy(update={'session_rotation_count': 0}),
+                    expected_version=run.version,
+                )
             return run
         maximum_rotations = self.settings.maximum_session_rotations
         if maximum_rotations > 0 and (
@@ -1121,22 +1128,23 @@ class ResearchOrchestrator:
                 expected_kind=expected_kind,
                 error=(
                     'session context reached the rotation threshold '
-                    f'{run.session_rotation_count} times without '
-                    'converging; escalating for operator review'
+                    f'{run.session_rotation_count} consecutive times without '
+                    'progress; escalating for operator review'
                 ),
             )
             self.pause_run(
                 run_id,
                 requested_by='orchestrator',
                 reason=(
-                    'session rotation limit reached '
-                    f'({run.session_rotation_count}/{maximum_rotations})'
+                    'session rotation churn limit reached '
+                    f'({run.session_rotation_count}/{maximum_rotations} '
+                    'consecutive)'
                 ),
             )
             raise WorkflowError(
-                'session rotation limit reached '
-                f'({run.session_rotation_count}/{maximum_rotations}); '
-                'run paused for operator review'
+                'session rotation churn limit reached '
+                f'({run.session_rotation_count}/{maximum_rotations} '
+                'consecutive); run paused for operator review'
             )
         minimum_turns = self.settings.minimum_turns_between_session_rotations
         if (
@@ -6767,6 +6775,11 @@ class ResearchOrchestrator:
                 updates={
                     'resume_state': None,
                     'active_since': utc_now(),
+                    # An explicit operator resume grants a fresh churn budget:
+                    # without this the counter (which escalated the pause) would
+                    # re-pause on the very next threshold crossing. If the run
+                    # is genuinely thrashing it still caps after this budget.
+                    'session_rotation_count': 0,
                 },
             )
             self.workspaces.seed_agent_context(run_id)
