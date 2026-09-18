@@ -30,9 +30,11 @@ word count over stored turns (issue #517: the live 60,333-token prompt was
 estimated at 2,014 words). When no usage is observable the fallback is
 deterministic and is a floor -- never a host-safe bound.
 
-These tests are the T7 specification. They are marked ``xfail(strict=True)``
-until T7 implements the behavior; T7 removes the markers when the engine
-passes them. T7 must not need to change these assertions.
+These tests are the T7 specification. Tests 4 and 5 are live: they pass
+against the merged real-token rotation (PR #518) and carry no xfail marker.
+Tests 1-3 and 6 are still marked ``xfail(strict=True)`` until T7 implements
+the bounded auto-resume and removes their markers. T7 must not need to
+change any assertion.
 """
 
 from __future__ import annotations
@@ -253,10 +255,6 @@ def test_auto_resumed_turn_does_not_consume_budget(orchestrator_bundle) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason='L1: bounded turn-timeout auto-resume is implemented in T7',
-)
 def test_rotation_uses_runtime_reported_tokens(orchestrator_bundle) -> None:
     """Rotation consumes the real observed context, not a word count."""
     settings, store, cluster, runtime, engine = orchestrator_bundle
@@ -296,10 +294,6 @@ def test_rotation_uses_runtime_reported_tokens(orchestrator_bundle) -> None:
     assert '24000' in reason
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason='L1: bounded turn-timeout auto-resume is implemented in T7',
-)
 def test_rotation_falls_back_to_turn_count_when_usage_absent(
     orchestrator_bundle,
 ) -> None:
