@@ -91,6 +91,13 @@ class WorkspaceManager:
         'todowrite, write. There is no `run` tool and no `list` tool. '
         'Execute every command or script with bash; enumerate files with '
         'glob or `ls` through bash.\n'
+        '\n## Real files only\n\n'
+        'Write every deliverable as a real regular file inside your own '
+        'workspace with the write tool. Never satisfy a produced-file entry '
+        'with a symlink, a directory, or a path outside your workspace: the '
+        'orchestrator refuses any hand-off that is not a real file you '
+        'produced and will repair or pause the run. The final report must be '
+        'a real file such as `reports/report.md`.\n'
     )
 
     def seed_agent_context(self, run_id: str) -> None:
