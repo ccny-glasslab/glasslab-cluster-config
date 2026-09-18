@@ -30,11 +30,10 @@ word count over stored turns (issue #517: the live 60,333-token prompt was
 estimated at 2,014 words). When no usage is observable the fallback is
 deterministic and is a floor -- never a host-safe bound.
 
-These tests are the T7 specification. Tests 4 and 5 are live: they pass
-against the merged real-token rotation (PR #518) and carry no xfail marker.
-Tests 1-3 and 6 are still marked ``xfail(strict=True)`` until T7 implements
-the bounded auto-resume and removes their markers. T7 must not need to
-change any assertion.
+These tests are the T7 specification. Tests 4 and 5 are live against the
+merged real-token rotation (PR #518). T7 implemented the bounded auto-resume
+in the engine's turn-failure handler and removed the remaining
+``xfail(strict=True)`` markers; the assertions are unchanged.
 """
 
 from __future__ import annotations
@@ -147,10 +146,6 @@ def _dense_blob(entries: int) -> str:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason='L1: bounded turn-timeout auto-resume is implemented in T7',
-)
 def test_turn_timeout_auto_resumes_within_bound(orchestrator_bundle) -> None:
     """A wall-clock abort resumes automatically and advances the run."""
     settings, store, cluster, runtime, engine = orchestrator_bundle
@@ -186,10 +181,6 @@ def test_turn_timeout_auto_resumes_within_bound(orchestrator_bundle) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason='L1: bounded turn-timeout auto-resume is implemented in T7',
-)
 def test_turn_timeout_pauses_after_bound_exhausted(orchestrator_bundle) -> None:
     """After the bound the run parks in a clean, resumable PAUSED."""
     settings, store, cluster, runtime, engine = orchestrator_bundle
@@ -215,10 +206,6 @@ def test_turn_timeout_pauses_after_bound_exhausted(orchestrator_bundle) -> None:
     assert final.resume_state is not None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason='L1: bounded turn-timeout auto-resume is implemented in T7',
-)
 def test_auto_resumed_turn_does_not_consume_budget(orchestrator_bundle) -> None:
     """An auto-resumed turn must not consume maximum_turns."""
     settings, store, cluster, runtime, engine = orchestrator_bundle
@@ -348,10 +335,6 @@ def test_rotation_falls_back_to_turn_count_when_usage_absent(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason='L1: bounded turn-timeout auto-resume is implemented in T7',
-)
 def test_human_resolution_pause_is_not_auto_resumed(
     orchestrator_bundle,
 ) -> None:
