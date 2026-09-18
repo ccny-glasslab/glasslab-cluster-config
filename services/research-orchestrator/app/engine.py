@@ -91,8 +91,9 @@ from .task_bundles import (
     TaskBundleRecord,
     TaskPreflight,
 )
-from .workspaces import WorkspaceManager
-from .knowledge_manager import KnowledgeManager, estimate_tokens
+from .workspaces import WorkspaceError, WorkspaceManager
+from .knowledge_manager import KnowledgeManager
+from .prompt_tokens import estimate_prompt_tokens
 from .knowledge_tool import (
     BoundRetrieveEvidenceTool,
     KnowledgeToolRegistry,
@@ -131,6 +132,13 @@ NON_RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
 _RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
     {'startup', 'provider', 'network'}
 )
+# Wall-clock turn aborts are not retryable through agent_turn_max_retries, but
+# they are recoverable by a bounded, automatic resume: live run df9995aa's
+# rotated retry completed the work, and only a human was there to trigger it.
+# The bound lives in Settings.agent_turn_timeout_auto_resume_limit. A
+# methodology.human_resolution_requested pause is deliberately excluded: never
+# auto-resume into a non-convergent loop.
+_AUTO_RESUMABLE_TURN_FAILURE_CLASSES = frozenset({'turn_timeout'})
 
 
 @dataclass(frozen=True)
@@ -1036,17 +1044,39 @@ class ResearchOrchestrator:
     ) -> int:
         # A continuing session carries exactly the turns recorded against its
         # own session id; after a rotation the fresh session starts at zero.
-        total = 0
-        for turn in self.store.list_turns(run_id):
-            if turn.agent != agent or turn.opencode_session_id != session_id:
-                continue
-            if turn.structured_output is None:
-                continue
-            total += estimate_tokens(
+        turns = [
+            turn
+            for turn in self.store.list_turns(run_id)
+            if turn.agent == agent
+            and turn.opencode_session_id == session_id
+            and turn.structured_output is not None
+        ]
+        # The fallback estimate sees only the orchestrator's stored turn data,
+        # never OpenCode's own session contents, so it is a floor -- not a
+        # bound (run 295bc0ce: 6,541 estimated vs a 60,333-token real prompt).
+        estimate = 0
+        for turn in turns:
+            estimate += estimate_prompt_tokens(
                 json.dumps(turn.input_event, sort_keys=True, default=str)
             )
-            total += estimate_tokens(turn.structured_output.model_dump_json())
-        return total
+            estimate += estimate_prompt_tokens(
+                turn.structured_output.model_dump_json()
+            )
+        # The real per-message token usage OpenCode reports is authoritative
+        # and is consulted even when no completed turn is recorded: a session
+        # whose prior turns all failed still carries a real context. The
+        # capability probe tolerates runtimes that cannot report it, and only
+        # then does the estimate apply.
+        resolver = getattr(self.runtime, 'session_context_tokens', None)
+        if callable(resolver):
+            real = resolver(
+                run_id=run_id,
+                agent=agent,
+                session_id=session_id,
+            )
+            if real is not None and real > 0:
+                return max(real, estimate)
+        return estimate
 
     def _maybe_rotate_turn_history(
         self,
@@ -1056,7 +1086,9 @@ class ResearchOrchestrator:
         expected_kind: TurnKind,
         run: RunRecord,
     ) -> RunRecord:
-        threshold = self.settings.turn_history_rotation_token_threshold
+        threshold = (
+            self.settings.effective_turn_history_rotation_token_threshold
+        )
         if threshold <= 0:
             return run
         session_id = (
@@ -1074,15 +1106,73 @@ class ResearchOrchestrator:
             session_id=session_id,
         )
         if tokens < threshold:
+            # Below-threshold headroom is proof the last rotation worked: the
+            # fresh session is making progress, not thrashing. Clear the
+            # consecutive-churn counter so a long productive run is never
+            # capped on its lifetime rotation count.
+            if run.session_rotation_count > 0:
+                return self.store.replace_run(
+                    run.model_copy(update={'session_rotation_count': 0}),
+                    expected_version=run.version,
+                )
+            return run
+        maximum_rotations = self.settings.maximum_session_rotations
+        if maximum_rotations > 0 and (
+            run.session_rotation_count >= maximum_rotations
+        ):
+            # Release the oversized session first so an operator resume starts
+            # from the checkpoint instead of immediately re-pausing on it.
+            self._rotate_agent_session(
+                run_id=run_id,
+                agent=agent,
+                expected_kind=expected_kind,
+                error=(
+                    'session context reached the rotation threshold '
+                    f'{run.session_rotation_count} consecutive times without '
+                    'progress; escalating for operator review'
+                ),
+            )
+            self.pause_run(
+                run_id,
+                requested_by='orchestrator',
+                reason=(
+                    'session rotation churn limit reached '
+                    f'({run.session_rotation_count}/{maximum_rotations} '
+                    'consecutive)'
+                ),
+            )
+            raise WorkflowError(
+                'session rotation churn limit reached '
+                f'({run.session_rotation_count}/{maximum_rotations} '
+                'consecutive); run paused for operator review'
+            )
+        minimum_turns = self.settings.minimum_turns_between_session_rotations
+        if (
+            run.session_rotation_count > 0
+            and minimum_turns > 0
+            and run.turn_number - run.last_rotation_turn < minimum_turns
+        ):
             return run
         self._rotate_agent_session(
             run_id=run_id,
             agent=agent,
             expected_kind=expected_kind,
             error=(
-                f'session context of {tokens} estimated tokens reached the '
+                f'session context of {tokens} tokens reached the '
                 f'turn-history rotation threshold of {threshold}'
             ),
+        )
+        rotated = self.store.get_run(run_id)
+        self.store.replace_run(
+            rotated.model_copy(
+                update={
+                    'session_rotation_count': (
+                        rotated.session_rotation_count + 1
+                    ),
+                    'last_rotation_turn': rotated.turn_number,
+                }
+            ),
+            expected_version=rotated.version,
         )
         return self.store.get_run(run_id)
 
@@ -1696,6 +1786,7 @@ class ResearchOrchestrator:
         expected_kind: TurnKind,
         input_event: dict[str, Any],
         dependency_repair_attempted: bool = False,
+        auto_resume_attempts: int = 0,
     ) -> tuple[TurnRecord, AgentTurnResult]:
         # The failed attempt already consumed a turn number; roll it back so
         # the bounded retry does not double-count against the turn budget.
@@ -1721,6 +1812,68 @@ class ResearchOrchestrator:
             expected_kind=expected_kind,
             input_event=input_event,
             dependency_repair_attempted=dependency_repair_attempted,
+            auto_resume_attempts=auto_resume_attempts,
+        )
+
+    def _should_auto_resume_turn(
+        self,
+        exc: Exception,
+        auto_resume_attempts: int,
+    ) -> bool:
+        limit = self.settings.agent_turn_timeout_auto_resume_limit
+        if limit <= 0 or auto_resume_attempts >= limit:
+            return False
+        return (
+            isinstance(exc, OpenCodeRuntimeError)
+            and exc.failure_class in _AUTO_RESUMABLE_TURN_FAILURE_CLASSES
+        )
+
+    def _auto_resume_turn(
+        self,
+        *,
+        run_id: str,
+        agent: AgentName,
+        prompt: str,
+        expected_kind: TurnKind,
+        input_event: dict[str, Any],
+        failure_class: str | None,
+        auto_resume_attempts: int,
+    ) -> tuple[TurnRecord, AgentTurnResult]:
+        # The just-incremented turn number belongs to the aborted attempt; roll
+        # it back so the auto-resumed turn never spends maximum_turns. The
+        # caller already rotated the session through the recovery-checkpoint
+        # path, so the re-entry sees a fresh session and the preserved worktree.
+        current = self.store.get_run(run_id)
+        if current.state == RunState.PAUSED or current.state in TERMINAL_STATES:
+            raise WorkflowError(
+                'workflow advancement stopped after agent turn because run is '
+                f'{current.state.value}'
+            )
+        self.store.replace_run(
+            current.model_copy(
+                update={'turn_number': max(0, current.turn_number - 1)}
+            ),
+            expected_version=current.version,
+        )
+        self._event(
+            run_id,
+            source='orchestrator',
+            event_type='run.auto_resumed',
+            payload={
+                'agent': agent.value,
+                'kind': expected_kind.value,
+                'failure_class': failure_class,
+                'attempt': auto_resume_attempts + 1,
+                'limit': self.settings.agent_turn_timeout_auto_resume_limit,
+            },
+        )
+        return self._run_agent_turn(
+            run_id=run_id,
+            agent=agent,
+            prompt=prompt,
+            expected_kind=expected_kind,
+            input_event=input_event,
+            auto_resume_attempts=auto_resume_attempts + 1,
         )
 
     def _recover_runtime_dependency_failure(
@@ -1836,6 +1989,7 @@ class ResearchOrchestrator:
         input_event: dict[str, Any],
         retrieval_query: str | None = None,
         dependency_repair_attempted: bool = False,
+        auto_resume_attempts: int = 0,
     ) -> tuple[TurnRecord, AgentTurnResult]:
         if agent == AgentName.HONEYDEW:
             model_override, base_url_override = (
@@ -2174,6 +2328,16 @@ class ResearchOrchestrator:
                     else None
                 ),
             )
+            if self._should_auto_resume_turn(exc, auto_resume_attempts):
+                return self._auto_resume_turn(
+                    run_id=run_id,
+                    agent=agent,
+                    prompt=prompt,
+                    expected_kind=expected_kind,
+                    input_event=input_event,
+                    failure_class=failure_class,
+                    auto_resume_attempts=auto_resume_attempts,
+                )
             if self._should_retry_turn(exc, run_id, agent):
                 return self._retry_agent_turn(
                     run_id=run_id,
@@ -2181,6 +2345,7 @@ class ResearchOrchestrator:
                     prompt=prompt,
                     expected_kind=expected_kind,
                     input_event=input_event,
+                    auto_resume_attempts=auto_resume_attempts,
                 )
             raise
         current = self.store.get_run(run_id)
@@ -6430,13 +6595,14 @@ class ResearchOrchestrator:
             'Write report.md for the human. Separate observations from '
             'inferences, cite authoritative evidence URIs, include failed runs '
             'and limitations, and do not overstate single-run results. Create '
-            'report.md yourself as a new file at the top level of your own '
-            'workspace using the workspace file tool before returning the '
-            'structured result. The produced_files entry with purpose '
-            '"report" must name that newly created file, which must exist as '
-            'a real file in your own workspace when the turn ends; do not '
-            'reference job artifacts or files from other locations as your '
-            'produced file.\n\n'
+            'report.md yourself as a new real file in your own workspace using '
+            'the workspace file tool, then read it back, before returning the '
+            'structured result. Write it as a regular file such as '
+            'reports/report.md; never a symlink, never a directory. The '
+            'produced_files entry with purpose "report" must name that newly '
+            'created file, which must exist as a real file in your own '
+            'workspace when the turn ends; do not reference job artifacts or '
+            'files from other locations as your produced file.\n\n'
             + self._evidence_prompt_block(evidence)
         )
         verdict = self._corpus_verification_verdict(run_id)
@@ -6452,24 +6618,92 @@ class ResearchOrchestrator:
             )
         if feedback:
             prompt += f'\n\nHuman rejection feedback:\n{feedback}'
-        turn, result = self._run_agent_turn(
-            run_id=run_id,
-            agent=AgentName.HONEYDEW,
-            prompt=prompt,
-            expected_kind=TurnKind.FINAL_REPORT,
-            input_event={'evidence': evidence, 'feedback': feedback},
-        )
-        report_files = [
-            item for item in result.produced_files if item.purpose == 'report'
-        ]
-        if len(report_files) != 1:
-            raise WorkflowError('Honeydew must produce exactly one report file')
-        destination, digest = self.workspaces.copy_agent_output(
-            run_id=run_id,
-            agent=AgentName.HONEYDEW,
-            relative_path=report_files[0].path,
-            destination_kind='report',
-        )
+        # L2/T9: a report turn can declare purpose='report' without handing
+        # over a real file (missing, a directory, or a symlink). That used to
+        # raise WorkspaceError through the caller and strand the run in
+        # HONEYDEW_WRITING_REPORT until the turn cap. Spend a bounded
+        # corrective retry carrying the deterministic reason, then pause the
+        # run resumably. WorkspaceManager.copy_agent_output keeps its
+        # anti-escape invariant exactly as-is.
+        repair_attempts = self.settings.report_materialisation_repair_attempts
+        attempt = 0
+        while True:
+            turn, result = self._run_agent_turn(
+                run_id=run_id,
+                agent=AgentName.HONEYDEW,
+                prompt=prompt,
+                expected_kind=TurnKind.FINAL_REPORT,
+                input_event={
+                    'evidence': evidence,
+                    'feedback': feedback,
+                    'materialisation_repair_attempt': attempt,
+                },
+            )
+            report_files = [
+                item
+                for item in result.produced_files
+                if item.purpose == 'report'
+            ]
+            if len(report_files) != 1:
+                raise WorkflowError(
+                    'Honeydew must produce exactly one report file'
+                )
+            try:
+                destination, digest = self.workspaces.copy_agent_output(
+                    run_id=run_id,
+                    agent=AgentName.HONEYDEW,
+                    relative_path=report_files[0].path,
+                    destination_kind='report',
+                )
+            except WorkspaceError as exc:
+                reason = str(exc)
+                if attempt >= repair_attempts:
+                    self._event(
+                        run_id,
+                        source='orchestrator',
+                        event_type='report.materialisation_failed',
+                        payload={
+                            'reason': reason,
+                            'report_path': report_files[0].path,
+                            'attempts': attempt + 1,
+                        },
+                    )
+                    self.pause_run(
+                        run_id,
+                        requested_by='orchestrator',
+                        reason=(
+                            'Honeydew did not materialise a real report '
+                            f'file: {reason}'
+                        ),
+                    )
+                    return
+                self._event(
+                    run_id,
+                    source='orchestrator',
+                    event_type='report.materialisation_repair_requested',
+                    payload={
+                        'reason': reason,
+                        'report_path': report_files[0].path,
+                        'attempt': attempt + 1,
+                    },
+                )
+                prompt = (
+                    'Focused report materialisation repair. Your previous '
+                    'structured result declared '
+                    f'`{report_files[0].path}` with purpose "report", but the '
+                    'orchestrator rejected the hand-off with this exact '
+                    f'reason: {reason}. Write report.md now as a real regular '
+                    'file in your own workspace using the workspace write '
+                    'tool, read it back to confirm it exists, and declare that '
+                    'real file with purpose "report". Never declare a symlink, '
+                    'a directory, or a path outside your workspace.\n\n'
+                    + self._evidence_prompt_block(evidence)
+                )
+                if feedback:
+                    prompt += f'\n\nHuman rejection feedback:\n{feedback}'
+                attempt += 1
+                continue
+            break
         uri = f'artifact://{run_id}/reports/report.md'
         self._save_local_artifact(
             run_id=run_id,
@@ -6610,6 +6844,11 @@ class ResearchOrchestrator:
                 updates={
                     'resume_state': None,
                     'active_since': utc_now(),
+                    # An explicit operator resume grants a fresh churn budget:
+                    # without this the counter (which escalated the pause) would
+                    # re-pause on the very next threshold crossing. If the run
+                    # is genuinely thrashing it still caps after this budget.
+                    'session_rotation_count': 0,
                 },
             )
             self.workspaces.seed_agent_context(run_id)

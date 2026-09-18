@@ -27,6 +27,11 @@ class JobWatcher:
         self.engine = engine
         self.poll_interval_seconds = poll_interval_seconds
         self._stop = asyncio.Event()
+        # Consecutive (not lifetime) reconcile failures per run. A success
+        # clears the run's counter, so a transient blip never accumulates into
+        # a pause. At the threshold the run is paused resumably instead of
+        # logging and looping forever (L2/T9).
+        self._reconciliation_failures: dict[str, int] = {}
 
     async def run(self) -> None:
         while not self._stop.is_set():
@@ -80,6 +85,29 @@ class JobWatcher:
                         event_type='job.reconciliation_failed',
                         payload={'error': str(exc)},
                     )
+                    failures = (
+                        self._reconciliation_failures.get(run.run_id, 0) + 1
+                    )
+                    self._reconciliation_failures[run.run_id] = failures
+                    if failures >= (
+                        self.engine.settings.max_consecutive_reconciliation_failures
+                    ):
+                        # A persistent reconcile failure means no further poll
+                        # can advance the run; pause it recoverably so a human
+                        # or the resume path can intervene instead of the loop
+                        # hammering the cluster until the turn cap.
+                        self._reconciliation_failures.pop(run.run_id, None)
+                        await asyncio.to_thread(
+                            self.engine.pause_run,
+                            run.run_id,
+                            requested_by='orchestrator',
+                            reason=(
+                                'job reconciliation failed '
+                                f'{failures} consecutive times: {exc}'
+                            ),
+                        )
+                    continue
+                self._reconciliation_failures.pop(run.run_id, None)
             try:
                 # Sleeping on the stop event instead of asyncio.sleep makes
                 # stop() preempt the current poll interval immediately.

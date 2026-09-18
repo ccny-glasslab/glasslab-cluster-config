@@ -215,11 +215,11 @@ Confirm the action actually moved (`approval_status`) and look for the resulting
 (`engine.py:6348-6349`). On resume it rotates a session left attached to a failed
 turn (`engine.py:6350`, `:6384-6457`), transitions back to the recorded state,
 re-seeds agent context, emits `run.resumed`, and runs recovery
-(`engine.py:6352-6382`). Use it for the three transient turn aborts - the 1800s
+(`engine.py:6352-6382`). Use it for the three transient turn aborts - the 3600s
 wall clock, the 250-step budget, and the doom-loop guard - because the engine
 rotates the session and the retry usually completes. The engine also auto-retries
 retryable failures up to `agent_turn_max_retries` (default 2,
-`config.py:143`; `engine.py:1682-1695`) before it pauses, so a paused run has
+`config.py:155`; `engine.py:1682-1695`) before it pauses, so a paused run has
 already exhausted the automatic retries.
 
 ### 5.3 Never auto-resume a `methodology.human_resolution_requested` pause
@@ -269,7 +269,7 @@ resuming and open an issue; do not keep spending turns.
 | --- | --- | --- | --- |
 | `OpenCode turn aborted after 6 identical terminal tool calls` | doom-loop watchdog, `services/research-orchestrator/app/opencode_runtime.py:1164-1167`; limit 6 at `config.py:136` | No (non-retryable, `engine.py:109`) | Resume once. The engine rotates the session, emits `agent.doom_loop_detected`, and injects a corrective instruction (`engine.py:960-972`, `:1000-1014`). If it recurs, the prompt/tool is the problem - change it or start fresh. |
 | `OpenCode turn exceeded the step budget of 250 steps (...)` | step watchdog, `opencode_runtime.py:1176-1180`; limit 250 at `config.py:142` | No (non-retryable, `engine.py:110-113`) | Resume. Engine emits `agent.turn_step_budget_exceeded` and injects a "stop exploring" correction (`engine.py:973-984`, `:1015-1026`). |
-| `OpenCode turn exceeded the hard wall-clock limit of 1800 seconds` | wall watchdog, `opencode_runtime.py:1138-1142` | No (non-retryable, `engine.py:103-108`) | Resume; the fresh session retries. Live value is 1800s from the configmap (`kubeadm/glasslab-v2/research-orchestrator/10-configmap.yaml:52`); the code default is 3600s (`config.py:135`). |
+| `OpenCode turn exceeded the hard wall-clock limit of 3600 seconds` | wall watchdog, `opencode_runtime.py:1408-1410` | No (non-retryable, `engine.py:103-108`) | Resume; the fresh session retries. The tracked configmap (`kubeadm/glasslab-v2/research-orchestrator/10-configmap.yaml:52`) and the code default (`config.py:147`) are both 3600s, and `tests/test_configmap_parity.py` fails if the configmap ever narrows the code default. A cluster deployed before that parity fix still enforces the old 1800s, so confirm the live configmap before quoting the number. |
 | `Server error '500 Internal Server Error' for url '.../session/.../message'` | OpenCode message POST, `opencode_runtime.py:941-946` | Usually transient (`httpx.HTTPError` is retryable, `engine.py:184-193`) | The engine auto-retries twice with a fresh session. If a soft pause results, resume. If it recurs on every turn, treat it as stale worktree deps (next row). |
 | `Cannot find module '@opencode-ai/plugin'` and session 500 on every turn | OpenCode-native log (see [Section 7](#7-where-to-look-while-debugging)); imported by the generated tool at `opencode_runtime.py:445` | No | Stale per-run `.opencode` dependencies (#482). Do **not** keep resuming; every turn 500s and burns turns to `TIMED_OUT`. Start a **fresh run** (fresh worktrees avoid #482). |
 | Provider / connect errors returned by the model endpoint | decoded at `opencode_runtime.py:182-194`; classified `provider` | Usually transient (`engine.py:116-118`, `:184-193`) | Let the engine retry; resume if it paused. Persisting errors point at the exo endpoint, not the orchestrator. |
@@ -286,7 +286,7 @@ All three abort a single turn and pause the run, but they mean different things:
 - **Step budget** (`step_budget_exceeded`): the model kept taking *different*
   steps for 250 loop steps without returning a result. The corrective prompt
   tells it to stop exploring and return what it has.
-- **Wall clock** (`turn_timeout`): the turn exceeded 1800s of wall time. On the
+- **Wall clock** (`turn_timeout`): the turn exceeded 3600s of wall time. On the
   Thinking model this is often legitimate long reasoning; a fresh session with
   the checkpoint usually finishes.
 
@@ -462,10 +462,12 @@ relying on them.
    (`main.py:1211-1229`, `:1251-1279`), so long work blocks the response. The
    specific `>60s` threshold and the "still takes effect" guarantee are operator
    observations, not asserted in code.
-5. **Live wall-clock value.** 1800 seconds is the deployed configmap value
-   (`kubeadm/glasslab-v2/research-orchestrator/10-configmap.yaml:52`); the code
-   default is 3600 (`config.py:135`). Confirm the live configmap before quoting
-   the number.
+5. **Live wall-clock value.** 3600 seconds is the tracked configmap value
+   (`kubeadm/glasslab-v2/research-orchestrator/10-configmap.yaml:52`) and the
+   code default (`config.py:147`), guarded against narrowing by
+   `services/research-orchestrator/tests/test_configmap_parity.py`. A cluster
+   deployed before that parity fix still enforces 1800 seconds, so confirm the
+   live configmap before quoting the number.
 6. **Exact live error strings for #482/#491.** The Node error
    (`Cannot find module '@opencode-ai/plugin'`), the httpx 500 text, and the 422
    submission rejection are taken from the GitHub issue evidence, not from source

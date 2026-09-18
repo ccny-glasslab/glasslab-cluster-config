@@ -41,6 +41,10 @@ rebuilds. It is not the normal release path.
 
 ## Deployment
 
+Before deploying, run the read-only rollout-freeze check in
+[`runbooks/rollout-freeze-preflight.md`](runbooks/rollout-freeze-preflight.md).
+Never restart the orchestrator while a run is non-terminal.
+
 The canonical `.44` checkout deploys an already-published commit:
 
 ```bash

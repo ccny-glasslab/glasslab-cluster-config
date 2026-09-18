@@ -420,7 +420,7 @@ path is `/task-start`, not another hardcoded task entry.
 - no arbitrary SSH, `kubectl`, secret access, or container publication for
   either agent
 - no completed live end-to-end arbitrary-dataset task yet
-- the two-node 70B runtime is slow enough that agent turns use a 30-minute
+- the two-node 70B runtime is slow enough that agent turns use a 60-minute
   deadline; cluster jobs do not hold an agent turn open
 
 For architecture and trust-boundary details, read

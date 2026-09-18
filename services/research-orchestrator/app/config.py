@@ -29,6 +29,12 @@ SERVICE_ROOT = Path(__file__).resolve().parents[1]
 # over the measured floor while still allowing tight test caps.
 EVIDENCE_SNAPSHOT_MIN_BYTES = 1024
 
+# Hard cap on a live agent session's real context before rotation fires. Run
+# 295bc0ce deadlocked the shared .17 MLX Coder host on a 60,333-token prompt
+# (2026-09-16), so any configured rotation threshold is clamped here to keep a
+# stale manifest value from re-admitting the fatal range.
+SAFE_SESSION_CONTEXT_TOKEN_CEILING = 32_000
+
 
 def _default_permitted_job_images() -> list[str]:
     # A default deployment must be able to compile every runtime profile, so
@@ -153,10 +159,36 @@ class Settings(BaseSettings):
     # disables the budget; the wall-clock and repeated-tool guards stay active.
     opencode_turn_step_limit: int = 250
     agent_turn_max_retries: int = 2
+    # Bounded auto-resume of a single turn after a wall-clock abort
+    # (failure_class='turn_timeout'). A turn_timeout is deliberately
+    # non-retryable through agent_turn_max_retries -- a fresh session with the
+    # same prompt re-enters the same work -- but live run df9995aa showed the
+    # rotated retry completed the work; only a human was there to resume it,
+    # permanently spending one of maximum_turns (run.auto_resumed count = 0).
+    # This bounds that resume: the failed attempt's turn_number is rolled back,
+    # the session is rotated through the existing recovery-checkpoint path, a
+    # distinct run.auto_resumed event is emitted, and the turn is re-entered up
+    # to this many times before falling through to the clean, resumable PAUSED.
+    # This never applies to a methodology.human_resolution_requested pause.
+    # 0 disables auto-resume.
+    agent_turn_timeout_auto_resume_limit: int = 2
     # Max deterministic redrafts of a contract candidate that fails
     # validation. Real-model candidates can repeatedly fail the same check;
     # cap the loop so the run fails fast instead of burning its turn budget.
     max_contract_redrafts: int = 3
+    # L2/T9: how many bounded corrective retries a final-report turn gets when
+    # Honeydew declares purpose='report' but hands over no real file (missing,
+    # a directory, or a symlink). One repair is spent with the deterministic
+    # reason, then the run pauses resumably in HONEYDEW_WRITING_REPORT instead
+    # of stranding until the turn cap. The WorkspaceManager anti-escape
+    # invariant is never relaxed.
+    report_materialisation_repair_attempts: int = 1
+    # L2/T9: consecutive job.reconciliation_failed events for one run before
+    # the watcher pauses it (recoverably, preserving resume_state). A
+    # transient cluster error must not pause on the first poll, but a
+    # persistent failure must not log-and-loop forever: 3 consecutive
+    # failures is the minimal count that rides out a single retryable blip.
+    max_consecutive_reconciliation_failures: int = 3
     opencode_structured_repair_attempts: int = 1
     opencode_structured_output_mode: Literal['json_schema', 'prompt'] = (
         'json_schema'
@@ -260,13 +292,32 @@ class Settings(BaseSettings):
     # Threshold-triggered turn-history rotation (#431). A continuing OpenCode
     # session carries its whole turn history; on the shared Coder endpoint that
     # unbounded history competes with page cache (the model wires ~48 of 64
-    # GB). Once the estimated tokens accumulated by one agent's live session
-    # cross this ceiling, the engine rotates the session through the same
-    # recovery-checkpoint path it uses after a failed turn: the session is
-    # released, a compact checkpoint records recent context, and the run
-    # continues from that checkpoint instead of restarting. 0 disables
-    # threshold rotation; failure-driven recovery still applies.
-    turn_history_rotation_token_threshold: int = 128_000
+    # GB). Before a turn starts the engine measures the live session with the
+    # real per-message token usage OpenCode reports; once that reaches this
+    # ceiling it rotates through the same recovery-checkpoint path it uses
+    # after a failed turn: the session is released, a compact checkpoint
+    # records recent context, and the run continues from that checkpoint
+    # instead of restarting. 0 disables threshold rotation; failure-driven
+    # recovery still applies.
+    #
+    # The default was 128_000 when the measure was a whitespace word count
+    # over stored turns; on run 295bc0ce that summed to 2,014 while the real
+    # prompt reached 60,333 tokens, so rotation never fired. 24_000 real tokens
+    # is 40% of the observed fatal request, leaving room for one further turn's
+    # added context and KV growth. Positive values are clamped to
+    # SAFE_SESSION_CONTEXT_TOKEN_CEILING.
+    turn_history_rotation_token_threshold: int = 24_000
+    # Anti-thrash floor: after a threshold rotation, ignore the threshold on
+    # this session for at least this many further completed turns so a session
+    # that immediately re-accumulates cannot rotate on every single turn. 0
+    # disables the floor.
+    minimum_turns_between_session_rotations: int = 2
+    # Anti-thrash cap: after this many *consecutive* threshold rotations with
+    # no below-threshold (productive) observation in between, pause the run for
+    # operator review instead of rotating forever. The counter resets on
+    # progress and on an operator resume, so a healthy long run is not capped
+    # on its lifetime rotation count. 0 disables the cap (not recommended).
+    maximum_session_rotations: int = 4
     maximum_methodology_revisions: int = 2
     # Hard cap on deterministic matrix-preflight failures before the run fails.
     # Without it, Beaker can re-propose an invalid matrix in an unbounded
@@ -302,6 +353,19 @@ class Settings(BaseSettings):
     @property
     def effective_agent_model_name(self) -> str:
         return self.agent_model_name or self.qwen_model_name
+
+    @property
+    def effective_turn_history_rotation_token_threshold(self) -> int:
+        """Rotation ceiling after the host-safety clamp.
+
+        ``0`` still disables rotation explicitly; any positive value is capped
+        at ``SAFE_SESSION_CONTEXT_TOKEN_CEILING`` so a deployed manifest that
+        pins a larger value cannot re-admit the fatal prompt range.
+        """
+        configured = self.turn_history_rotation_token_threshold
+        if configured <= 0:
+            return 0
+        return min(configured, SAFE_SESSION_CONTEXT_TOKEN_CEILING)
 
     def agent_model_for(self, agent: AgentName) -> str:
         override = (
@@ -434,6 +498,16 @@ class Settings(BaseSettings):
             raise ValueError(
                 'turn_history_rotation_token_threshold must be >= 0'
             )
+        return value
+
+    @field_validator(
+        'minimum_turns_between_session_rotations',
+        'maximum_session_rotations',
+    )
+    @classmethod
+    def enforce_session_rotation_limits_nonnegative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError('session rotation limits must be >= 0')
         return value
 
     @field_validator('discord_rest_circuit_max_failures')

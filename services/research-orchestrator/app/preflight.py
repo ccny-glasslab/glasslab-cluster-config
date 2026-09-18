@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 from collections.abc import Mapping
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any, Literal
 
@@ -521,6 +522,91 @@ def _task_spec_required_metric_keys(
     return [key for key in keys if isinstance(key, str) and key]
 
 
+def _as_metric_keys(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [key for key in value if isinstance(key, str) and key]
+
+
+def _contract_output_schema_metric_keys(
+    contract: ResolvedEvaluationContract,
+) -> list[str]:
+    """Metric roots the contract's sealed evaluator derives from ``metrics.json``.
+
+    A task-specific contract expresses its metric contract in the sealed
+    ``expected_output_schema`` rather than in ``manifest.required_metric_keys``
+    (the promoted ``titanic-survival-methodology-v1`` is the live example): its
+    evaluator reads a fixed set of metric roots from ``metrics.json`` and echoes
+    them under the output's ``metrics`` object, so the schema's ``metrics`` keys
+    are exactly the roots the workload must serialize. The task spec's keys, by
+    contrast, are written once by the compiler model from ``problem.md`` and are
+    only enforced by the generic evaluator, so they can drift from the bound
+    contract (issue #492, finding A.5). The sealed schema is authoritative.
+    """
+    root = Path(contract.root_path).resolve()
+    try:
+        schema_path = (
+            root / contract.descriptor.expected_output_schema
+        ).resolve()
+        if not schema_path.is_relative_to(root):
+            return []
+        schema = json.loads(schema_path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, ValueError):
+        return []
+    if not isinstance(schema, dict):
+        return []
+    properties = schema.get('properties')
+    metrics = (
+        properties.get('metrics') if isinstance(properties, dict) else None
+    )
+    if not isinstance(metrics, dict):
+        return []
+    keys = _as_metric_keys(metrics.get('required'))
+    metric_properties = metrics.get('properties')
+    if isinstance(metric_properties, dict):
+        keys.extend(
+            key for key in metric_properties if isinstance(key, str) and key
+        )
+    return list(dict.fromkeys(keys))
+
+
+def _reconcile_required_metric_keys(
+    *,
+    contract: ResolvedEvaluationContract,
+    task_definition: Mapping[str, Any] | None,
+) -> tuple[list[str], list[str]]:
+    """Return ``(required, superseded)`` metric roots for the static scan.
+
+    The bound contract's sealed evaluator owns which roots must exist in
+    ``metrics.json``, so its keys - ``manifest.required_metric_keys`` plus the
+    sealed ``expected_output_schema`` - are authoritative whenever it declares
+    any. The compiled task spec's keys remain the fallback for a contract that
+    declares none (``generic-task-integrity-v1``), whose evaluator reads
+    ``task_spec.required_metric_keys`` from the job payload (issue #497).
+
+    A task-spec key that is absent from the contract is a stale compiled value:
+    it is returned as ``superseded`` so preflight can surface the cross-layer
+    disagreement in its checks, but it is not required - the bound evaluator
+    never reads it, and enforcing it is what produced the byte-identical,
+    non-converging matrix rejection in issue #492 (finding A.5).
+    """
+    contract_keys = list(
+        dict.fromkeys(
+            [
+                *_as_metric_keys(
+                    contract.descriptor.manifest.get('required_metric_keys')
+                ),
+                *_contract_output_schema_metric_keys(contract),
+            ]
+        )
+    )
+    task_spec_keys = _task_spec_required_metric_keys(task_definition)
+    if not contract_keys:
+        return task_spec_keys, []
+    superseded = sorted(set(task_spec_keys) - set(contract_keys))
+    return contract_keys, superseded
+
+
 def preflight_matrix(
     *,
     run: RunRecord,
@@ -612,17 +698,21 @@ def preflight_matrix(
         if not source.is_relative_to(workspace):
             errors.append('imported task source directory escapes the workspace')
         else:
-            required_metric_keys = list(
-                dict.fromkeys(
-                    [
-                        *contract.descriptor.manifest.get(
-                            'required_metric_keys',
-                            [],
-                        ),
-                        *_task_spec_required_metric_keys(run.task_definition),
-                    ]
+            required_metric_keys, superseded_metric_keys = (
+                _reconcile_required_metric_keys(
+                    contract=contract,
+                    task_definition=run.task_definition,
                 )
             )
+            if superseded_metric_keys:
+                # Surface the cross-layer disagreement without making the
+                # matrix unsatisfiable: the bound evaluator never reads these
+                # roots, so requiring them is the #492 non-convergence bug.
+                checks.append(
+                    'bound contract owns metrics.json roots; stale compiled '
+                    'task-spec key(s) superseded: '
+                    + ', '.join(superseded_metric_keys)
+                )
             source_findings = _source_errors(
                 source,
                 required_metric_keys=required_metric_keys,

@@ -72,8 +72,12 @@ def _drive_full_workflow(engine, store, cluster, objective: str):
 
 def test_rotation_threshold_default_is_configured() -> None:
     # The knob is enabled with a bounded default so long sessions rotate
-    # without operator configuration; 0 is the documented off switch.
-    assert Settings().turn_history_rotation_token_threshold == 128_000
+    # without operator configuration; 0 is the documented off switch. The
+    # default real-token ceiling sits well below the 60,333-token request that
+    # deadlocked the .17 host (run 295bc0ce).
+    settings = Settings()
+    assert settings.turn_history_rotation_token_threshold == 24_000
+    assert settings.effective_turn_history_rotation_token_threshold == 24_000
 
 
 def test_context_threshold_rotates_session_and_continues(
