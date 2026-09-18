@@ -36,6 +36,9 @@ class ScriptedMockRuntime(AgentRuntime):
 
     def __init__(self, *, runner_image: str) -> None:
         self.runner_image = runner_image
+        # Tests set this to the real token count OpenCode would report so the
+        # rotation path can be driven without a live model server.
+        self.session_context_tokens_override: int | None = None
         self.sessions: dict[tuple[str, AgentName], RuntimeSession] = {}
         self.turn_counts: defaultdict[AgentName, int] = defaultdict(int)
         self.aborted: list[tuple[str, AgentName, str]] = []
@@ -373,6 +376,16 @@ class ScriptedMockRuntime(AgentRuntime):
         raise AssertionError(
             f'unexpected mock turn for {agent.value}: {prompt[:120]}'
         )
+
+    def session_context_tokens(
+        self,
+        *,
+        run_id: str,
+        agent: AgentName,
+        session_id: str,
+    ) -> int | None:
+        del run_id, agent, session_id
+        return self.session_context_tokens_override
 
     def abort(self, *, run_id: str, agent: AgentName, session_id: str) -> None:
         self.aborted.append((run_id, agent, session_id))

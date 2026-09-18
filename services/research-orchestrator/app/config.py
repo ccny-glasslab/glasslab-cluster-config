@@ -29,6 +29,12 @@ SERVICE_ROOT = Path(__file__).resolve().parents[1]
 # over the measured floor while still allowing tight test caps.
 EVIDENCE_SNAPSHOT_MIN_BYTES = 1024
 
+# Hard cap on a live agent session's real context before rotation fires. Run
+# 295bc0ce deadlocked the shared .17 MLX Coder host on a 60,333-token prompt
+# (2026-09-16), so any configured rotation threshold is clamped here to keep a
+# stale manifest value from re-admitting the fatal range.
+SAFE_SESSION_CONTEXT_TOKEN_CEILING = 32_000
+
 
 def _default_permitted_job_images() -> list[str]:
     # A default deployment must be able to compile every runtime profile, so
@@ -260,13 +266,30 @@ class Settings(BaseSettings):
     # Threshold-triggered turn-history rotation (#431). A continuing OpenCode
     # session carries its whole turn history; on the shared Coder endpoint that
     # unbounded history competes with page cache (the model wires ~48 of 64
-    # GB). Once the estimated tokens accumulated by one agent's live session
-    # cross this ceiling, the engine rotates the session through the same
-    # recovery-checkpoint path it uses after a failed turn: the session is
-    # released, a compact checkpoint records recent context, and the run
-    # continues from that checkpoint instead of restarting. 0 disables
-    # threshold rotation; failure-driven recovery still applies.
-    turn_history_rotation_token_threshold: int = 128_000
+    # GB). Before a turn starts the engine measures the live session with the
+    # real per-message token usage OpenCode reports; once that reaches this
+    # ceiling it rotates through the same recovery-checkpoint path it uses
+    # after a failed turn: the session is released, a compact checkpoint
+    # records recent context, and the run continues from that checkpoint
+    # instead of restarting. 0 disables threshold rotation; failure-driven
+    # recovery still applies.
+    #
+    # The default was 128_000 when the measure was a whitespace word count
+    # over stored turns; on run 295bc0ce that summed to 2,014 while the real
+    # prompt reached 60,333 tokens, so rotation never fired. 24_000 real tokens
+    # is 40% of the observed fatal request, leaving room for one further turn's
+    # added context and KV growth. Positive values are clamped to
+    # SAFE_SESSION_CONTEXT_TOKEN_CEILING.
+    turn_history_rotation_token_threshold: int = 24_000
+    # Anti-thrash floor: after a threshold rotation, ignore the threshold on
+    # this session for at least this many further completed turns so a session
+    # that immediately re-accumulates cannot rotate on every single turn. 0
+    # disables the floor.
+    minimum_turns_between_session_rotations: int = 2
+    # Anti-thrash cap: after this many threshold rotations in one run, pause
+    # the run for operator review instead of rotating forever. 0 disables the
+    # cap (not recommended).
+    maximum_session_rotations: int = 4
     maximum_methodology_revisions: int = 2
     # Hard cap on deterministic matrix-preflight failures before the run fails.
     # Without it, Beaker can re-propose an invalid matrix in an unbounded
@@ -302,6 +325,19 @@ class Settings(BaseSettings):
     @property
     def effective_agent_model_name(self) -> str:
         return self.agent_model_name or self.qwen_model_name
+
+    @property
+    def effective_turn_history_rotation_token_threshold(self) -> int:
+        """Rotation ceiling after the host-safety clamp.
+
+        ``0`` still disables rotation explicitly; any positive value is capped
+        at ``SAFE_SESSION_CONTEXT_TOKEN_CEILING`` so a deployed manifest that
+        pins a larger value cannot re-admit the fatal prompt range.
+        """
+        configured = self.turn_history_rotation_token_threshold
+        if configured <= 0:
+            return 0
+        return min(configured, SAFE_SESSION_CONTEXT_TOKEN_CEILING)
 
     def agent_model_for(self, agent: AgentName) -> str:
         override = (
@@ -434,6 +470,16 @@ class Settings(BaseSettings):
             raise ValueError(
                 'turn_history_rotation_token_threshold must be >= 0'
             )
+        return value
+
+    @field_validator(
+        'minimum_turns_between_session_rotations',
+        'maximum_session_rotations',
+    )
+    @classmethod
+    def enforce_session_rotation_limits_nonnegative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError('session rotation limits must be >= 0')
         return value
 
     @field_validator('discord_rest_circuit_max_failures')

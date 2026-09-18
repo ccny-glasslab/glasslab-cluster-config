@@ -586,6 +586,12 @@ class RunRecord(BaseModel):
     current_agent: AgentName | None = None
     turn_number: int = 0
     methodology_revision_count: int = Field(default=0, ge=0)
+    # Threshold-triggered session rotations recorded for this run. A session
+    # that re-reaches the threshold immediately is thrashing -- the fresh
+    # session repeats the same work and loses its context each time -- so
+    # rotation is deferred by a minimum-turn floor and capped per run.
+    session_rotation_count: int = Field(default=0, ge=0)
+    last_rotation_turn: int = Field(default=0, ge=0)
     discord_thread_id: str | None = None
     discord_status_message_id: str | None = None
     # Research-chat promotion (Phase 4): seed context renders the promoted

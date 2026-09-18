@@ -92,7 +92,8 @@ from .task_bundles import (
     TaskPreflight,
 )
 from .workspaces import WorkspaceManager
-from .knowledge_manager import KnowledgeManager, estimate_tokens
+from .knowledge_manager import KnowledgeManager
+from .prompt_tokens import estimate_prompt_tokens
 from .knowledge_tool import (
     BoundRetrieveEvidenceTool,
     KnowledgeToolRegistry,
@@ -1036,17 +1037,39 @@ class ResearchOrchestrator:
     ) -> int:
         # A continuing session carries exactly the turns recorded against its
         # own session id; after a rotation the fresh session starts at zero.
-        total = 0
-        for turn in self.store.list_turns(run_id):
-            if turn.agent != agent or turn.opencode_session_id != session_id:
-                continue
-            if turn.structured_output is None:
-                continue
-            total += estimate_tokens(
+        turns = [
+            turn
+            for turn in self.store.list_turns(run_id)
+            if turn.agent == agent
+            and turn.opencode_session_id == session_id
+            and turn.structured_output is not None
+        ]
+        # The fallback estimate sees only the orchestrator's stored turn data,
+        # never OpenCode's own session contents, so it is a floor -- not a
+        # bound (run 295bc0ce: 6,541 estimated vs a 60,333-token real prompt).
+        estimate = 0
+        for turn in turns:
+            estimate += estimate_prompt_tokens(
                 json.dumps(turn.input_event, sort_keys=True, default=str)
             )
-            total += estimate_tokens(turn.structured_output.model_dump_json())
-        return total
+            estimate += estimate_prompt_tokens(
+                turn.structured_output.model_dump_json()
+            )
+        # The real per-message token usage OpenCode reports is authoritative
+        # and is consulted even when no completed turn is recorded: a session
+        # whose prior turns all failed still carries a real context. The
+        # capability probe tolerates runtimes that cannot report it, and only
+        # then does the estimate apply.
+        resolver = getattr(self.runtime, 'session_context_tokens', None)
+        if callable(resolver):
+            real = resolver(
+                run_id=run_id,
+                agent=agent,
+                session_id=session_id,
+            )
+            if real is not None and real > 0:
+                return max(real, estimate)
+        return estimate
 
     def _maybe_rotate_turn_history(
         self,
@@ -1056,7 +1079,9 @@ class ResearchOrchestrator:
         expected_kind: TurnKind,
         run: RunRecord,
     ) -> RunRecord:
-        threshold = self.settings.turn_history_rotation_token_threshold
+        threshold = (
+            self.settings.effective_turn_history_rotation_token_threshold
+        )
         if threshold <= 0:
             return run
         session_id = (
@@ -1074,15 +1099,65 @@ class ResearchOrchestrator:
             session_id=session_id,
         )
         if tokens < threshold:
+            # Nothing to rotate; the cap/floor never apply below the threshold,
+            # so a resumed run on a fresh session can still make progress.
+            return run
+        maximum_rotations = self.settings.maximum_session_rotations
+        if maximum_rotations > 0 and (
+            run.session_rotation_count >= maximum_rotations
+        ):
+            # Release the oversized session first so an operator resume starts
+            # from the checkpoint instead of immediately re-pausing on it.
+            self._rotate_agent_session(
+                run_id=run_id,
+                agent=agent,
+                expected_kind=expected_kind,
+                error=(
+                    'session context reached the rotation threshold '
+                    f'{run.session_rotation_count} times without '
+                    'converging; escalating for operator review'
+                ),
+            )
+            self.pause_run(
+                run_id,
+                requested_by='orchestrator',
+                reason=(
+                    'session rotation limit reached '
+                    f'({run.session_rotation_count}/{maximum_rotations})'
+                ),
+            )
+            raise WorkflowError(
+                'session rotation limit reached '
+                f'({run.session_rotation_count}/{maximum_rotations}); '
+                'run paused for operator review'
+            )
+        minimum_turns = self.settings.minimum_turns_between_session_rotations
+        if (
+            run.session_rotation_count > 0
+            and minimum_turns > 0
+            and run.turn_number - run.last_rotation_turn < minimum_turns
+        ):
             return run
         self._rotate_agent_session(
             run_id=run_id,
             agent=agent,
             expected_kind=expected_kind,
             error=(
-                f'session context of {tokens} estimated tokens reached the '
+                f'session context of {tokens} tokens reached the '
                 f'turn-history rotation threshold of {threshold}'
             ),
+        )
+        rotated = self.store.get_run(run_id)
+        self.store.replace_run(
+            rotated.model_copy(
+                update={
+                    'session_rotation_count': (
+                        rotated.session_rotation_count + 1
+                    ),
+                    'last_rotation_turn': rotated.turn_number,
+                }
+            ),
+            expected_version=rotated.version,
         )
         return self.store.get_run(run_id)
 
