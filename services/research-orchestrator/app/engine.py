@@ -1055,21 +1055,21 @@ class ResearchOrchestrator:
             estimate += estimate_prompt_tokens(
                 turn.structured_output.model_dump_json()
             )
-        if not turns:
-            return estimate
-        # Prefer the real per-message token usage OpenCode reports; the
-        # capability probe tolerates runtimes that cannot report it.
+        # The real per-message token usage OpenCode reports is authoritative
+        # and is consulted even when no completed turn is recorded: a session
+        # whose prior turns all failed still carries a real context. The
+        # capability probe tolerates runtimes that cannot report it, and only
+        # then does the estimate apply.
         resolver = getattr(self.runtime, 'session_context_tokens', None)
-        if not callable(resolver):
-            return estimate
-        real = resolver(
-            run_id=run_id,
-            agent=agent,
-            session_id=session_id,
-        )
-        if real is None or real <= 0:
-            return estimate
-        return max(real, estimate)
+        if callable(resolver):
+            real = resolver(
+                run_id=run_id,
+                agent=agent,
+                session_id=session_id,
+            )
+            if real is not None and real > 0:
+                return max(real, estimate)
+        return estimate
 
     def _maybe_rotate_turn_history(
         self,
@@ -1099,6 +1099,44 @@ class ResearchOrchestrator:
             session_id=session_id,
         )
         if tokens < threshold:
+            # Nothing to rotate; the cap/floor never apply below the threshold,
+            # so a resumed run on a fresh session can still make progress.
+            return run
+        maximum_rotations = self.settings.maximum_session_rotations
+        if maximum_rotations > 0 and (
+            run.session_rotation_count >= maximum_rotations
+        ):
+            # Release the oversized session first so an operator resume starts
+            # from the checkpoint instead of immediately re-pausing on it.
+            self._rotate_agent_session(
+                run_id=run_id,
+                agent=agent,
+                expected_kind=expected_kind,
+                error=(
+                    'session context reached the rotation threshold '
+                    f'{run.session_rotation_count} times without '
+                    'converging; escalating for operator review'
+                ),
+            )
+            self.pause_run(
+                run_id,
+                requested_by='orchestrator',
+                reason=(
+                    'session rotation limit reached '
+                    f'({run.session_rotation_count}/{maximum_rotations})'
+                ),
+            )
+            raise WorkflowError(
+                'session rotation limit reached '
+                f'({run.session_rotation_count}/{maximum_rotations}); '
+                'run paused for operator review'
+            )
+        minimum_turns = self.settings.minimum_turns_between_session_rotations
+        if (
+            run.session_rotation_count > 0
+            and minimum_turns > 0
+            and run.turn_number - run.last_rotation_turn < minimum_turns
+        ):
             return run
         self._rotate_agent_session(
             run_id=run_id,
@@ -1108,6 +1146,18 @@ class ResearchOrchestrator:
                 f'session context of {tokens} tokens reached the '
                 f'turn-history rotation threshold of {threshold}'
             ),
+        )
+        rotated = self.store.get_run(run_id)
+        self.store.replace_run(
+            rotated.model_copy(
+                update={
+                    'session_rotation_count': (
+                        rotated.session_rotation_count + 1
+                    ),
+                    'last_rotation_turn': rotated.turn_number,
+                }
+            ),
+            expected_version=rotated.version,
         )
         return self.store.get_run(run_id)
 

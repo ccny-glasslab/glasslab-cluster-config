@@ -1229,7 +1229,9 @@ class OpenCodeProcessRuntime(AgentRuntime):
                     body = response.json()
                     measured_context = message_context_tokens(body)
                     if measured_context is not None:
-                        self._observed_session_tokens[(run_id, agent)] = (
+                        # _run_turn_request_loop has no run_id parameter; the
+                        # handle owns it (set by _start_process from run_turn).
+                        self._observed_session_tokens[(handle.run_id, agent)] = (
                             session_id,
                             measured_context,
                         )

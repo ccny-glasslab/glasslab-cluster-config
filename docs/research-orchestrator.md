@@ -643,11 +643,20 @@ tokens by default, `0` disables; positive values are clamped to a 32000-token
 host-safety ceiling), it rotates the session through the same
 recovery-checkpoint path a failed turn uses: the session is released, a compact
 checkpoint is written, and the next turn starts fresh from that checkpoint so
-the run continues rather than restarts. A runtime that cannot report usage (for
-example the Hermes rollback backend) falls back to a conservative
-character-based estimate over the orchestrator's stored turns; that fallback
-cannot see OpenCode's own context and is only a lower bound. This is bounded
-history, not a second state format; failure-driven recovery is unchanged.
+the run continues rather than restarts. To stop a session that immediately
+re-accumulates from rotating on every turn, rotation is deferred for at least
+`GLASSLAB_ORCHESTRATOR_MINIMUM_TURNS_BETWEEN_SESSION_ROTATIONS` completed
+turns (default 2) and capped at
+`GLASSLAB_ORCHESTRATOR_MAXIMUM_SESSION_ROTATIONS` rotations per run (default
+4); when the cap is reached the run is paused for operator review rather than
+rotating indefinitely. A runtime that cannot report usage (for example the
+Hermes rollback backend) falls back to a character-based estimate over the
+orchestrator's stored turns. That fallback is **advisory only -- a floor, never
+a bound**: it cannot see the system prompt, tool schemas, file reads, or tool
+output, and it understates the real prompt by up to an order of magnitude
+(measured 6,541 vs the fatal 60,333). It does not bound the fatal range; the
+real protection is the captured usage. This is bounded history, not a second
+state format; failure-driven recovery is unchanged.
 
 The run-level runtime ceiling measures active workflow time. The orchestrator
 accumulates elapsed active seconds when a run is paused, stops the clock while

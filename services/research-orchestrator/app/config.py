@@ -281,6 +281,15 @@ class Settings(BaseSettings):
     # added context and KV growth. Positive values are clamped to
     # SAFE_SESSION_CONTEXT_TOKEN_CEILING.
     turn_history_rotation_token_threshold: int = 24_000
+    # Anti-thrash floor: after a threshold rotation, ignore the threshold on
+    # this session for at least this many further completed turns so a session
+    # that immediately re-accumulates cannot rotate on every single turn. 0
+    # disables the floor.
+    minimum_turns_between_session_rotations: int = 2
+    # Anti-thrash cap: after this many threshold rotations in one run, pause
+    # the run for operator review instead of rotating forever. 0 disables the
+    # cap (not recommended).
+    maximum_session_rotations: int = 4
     maximum_methodology_revisions: int = 2
     # Hard cap on deterministic matrix-preflight failures before the run fails.
     # Without it, Beaker can re-propose an invalid matrix in an unbounded
@@ -461,6 +470,16 @@ class Settings(BaseSettings):
             raise ValueError(
                 'turn_history_rotation_token_threshold must be >= 0'
             )
+        return value
+
+    @field_validator(
+        'minimum_turns_between_session_rotations',
+        'maximum_session_rotations',
+    )
+    @classmethod
+    def enforce_session_rotation_limits_nonnegative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError('session rotation limits must be >= 0')
         return value
 
     @field_validator('discord_rest_circuit_max_failures')

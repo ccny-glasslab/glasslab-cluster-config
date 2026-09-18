@@ -14,8 +14,14 @@ Measured on run ``295bc0ce`` (2026-09-16): the ``.17`` MLX host deadlocked on a
 tokens (1.6% of the then-threshold of 128,000), while ``len(chars) // 4`` over
 the orchestrator's stored turn data reached only 6,541 -- proof that no estimate
 over stored turn data can observe OpenCode's own session contents (tool
-schemas, file reads, command output). The real signal is therefore
-authoritative; this fallback is only a lower bound.
+schemas, file reads, command output).
+
+ADVISORY ONLY. This estimate is a FLOOR, never a BOUND. It cannot see the
+system prompt, tool schemas, file reads, or tool output, so it understates the
+real prompt by up to an order of magnitude (6,541 vs 60,333 above). It does not
+bound the fatal range. The protection is the captured real value
+(``AgentRuntime.session_context_tokens``); this estimate only makes a
+usage-less backend rotate earlier than nothing.
 """
 
 from __future__ import annotations
