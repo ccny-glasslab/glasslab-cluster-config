@@ -17,8 +17,8 @@ L2 (T9) must:
     resolving to a real file INSIDE the agent workspace is accepted (resolve
     semantics), while an escaping symlink stays rejected.
 
-All four tests are RED at the deployed revision and marked xfail(strict=True);
-T9 implements the behavior and removes the markers.
+All four tests were RED at the deployed revision, marked xfail(strict=True);
+T9 implemented the behavior and removed the markers, so they now pass.
 """
 
 from __future__ import annotations
@@ -172,13 +172,6 @@ def _complete_jobs(engine, store, cluster, run_id: str):
 
 
 @pytest.mark.parametrize('shape', ['missing', 'directory', 'symlink'])
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        'L2/T9: a non-file final report must trigger one bounded corrective '
-        'retry carrying the deterministic reason, then a resumable PAUSED'
-    ),
-)
 def test_final_report_non_file_triggers_bounded_corrective_retry_then_pause(
     orchestrator_bundle, shape: str
 ) -> None:
@@ -212,13 +205,6 @@ def test_final_report_non_file_triggers_bounded_corrective_retry_then_pause(
     ]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        'L2/T9: after 3 consecutive job.reconciliation_failed events the '
-        'watcher must pause the run (recoverable) instead of looping'
-    ),
-)
 def test_repeated_reconciliation_failure_pauses_run(orchestrator_bundle) -> None:
     _, store, _, _, engine = orchestrator_bundle
     run = engine.create_run(
@@ -277,13 +263,6 @@ def test_repeated_reconciliation_failure_pauses_run(orchestrator_bundle) -> None
     assert len(failure_events) == 3
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        'L2/T9: the incident report hand-off must be repaired by one bounded '
-        'retry before the accepted run registers the md/pdf/docx bundle'
-    ),
-)
 def test_completed_run_registers_pdf_and_docx_artifacts(
     orchestrator_bundle,
 ) -> None:
@@ -324,13 +303,6 @@ def test_completed_run_registers_pdf_and_docx_artifacts(
         assert artifact.sha256 == sha256(path.read_bytes()).hexdigest()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        'L2/T9: a report symlink that resolves inside the workspace must be '
-        'accepted through the bounded retry, without weakening the invariant'
-    ),
-)
 def test_report_symlink_resolving_inside_workspace_is_accepted(
     orchestrator_bundle, tmp_path
 ) -> None:

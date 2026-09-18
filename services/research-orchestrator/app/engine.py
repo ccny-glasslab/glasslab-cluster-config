@@ -91,7 +91,7 @@ from .task_bundles import (
     TaskBundleRecord,
     TaskPreflight,
 )
-from .workspaces import WorkspaceManager
+from .workspaces import WorkspaceError, WorkspaceManager
 from .knowledge_manager import KnowledgeManager
 from .prompt_tokens import estimate_prompt_tokens
 from .knowledge_tool import (
@@ -6595,13 +6595,14 @@ class ResearchOrchestrator:
             'Write report.md for the human. Separate observations from '
             'inferences, cite authoritative evidence URIs, include failed runs '
             'and limitations, and do not overstate single-run results. Create '
-            'report.md yourself as a new file at the top level of your own '
-            'workspace using the workspace file tool before returning the '
-            'structured result. The produced_files entry with purpose '
-            '"report" must name that newly created file, which must exist as '
-            'a real file in your own workspace when the turn ends; do not '
-            'reference job artifacts or files from other locations as your '
-            'produced file.\n\n'
+            'report.md yourself as a new real file in your own workspace using '
+            'the workspace file tool, then read it back, before returning the '
+            'structured result. Write it as a regular file such as '
+            'reports/report.md; never a symlink, never a directory. The '
+            'produced_files entry with purpose "report" must name that newly '
+            'created file, which must exist as a real file in your own '
+            'workspace when the turn ends; do not reference job artifacts or '
+            'files from other locations as your produced file.\n\n'
             + self._evidence_prompt_block(evidence)
         )
         verdict = self._corpus_verification_verdict(run_id)
@@ -6617,24 +6618,92 @@ class ResearchOrchestrator:
             )
         if feedback:
             prompt += f'\n\nHuman rejection feedback:\n{feedback}'
-        turn, result = self._run_agent_turn(
-            run_id=run_id,
-            agent=AgentName.HONEYDEW,
-            prompt=prompt,
-            expected_kind=TurnKind.FINAL_REPORT,
-            input_event={'evidence': evidence, 'feedback': feedback},
-        )
-        report_files = [
-            item for item in result.produced_files if item.purpose == 'report'
-        ]
-        if len(report_files) != 1:
-            raise WorkflowError('Honeydew must produce exactly one report file')
-        destination, digest = self.workspaces.copy_agent_output(
-            run_id=run_id,
-            agent=AgentName.HONEYDEW,
-            relative_path=report_files[0].path,
-            destination_kind='report',
-        )
+        # L2/T9: a report turn can declare purpose='report' without handing
+        # over a real file (missing, a directory, or a symlink). That used to
+        # raise WorkspaceError through the caller and strand the run in
+        # HONEYDEW_WRITING_REPORT until the turn cap. Spend a bounded
+        # corrective retry carrying the deterministic reason, then pause the
+        # run resumably. WorkspaceManager.copy_agent_output keeps its
+        # anti-escape invariant exactly as-is.
+        repair_attempts = self.settings.report_materialisation_repair_attempts
+        attempt = 0
+        while True:
+            turn, result = self._run_agent_turn(
+                run_id=run_id,
+                agent=AgentName.HONEYDEW,
+                prompt=prompt,
+                expected_kind=TurnKind.FINAL_REPORT,
+                input_event={
+                    'evidence': evidence,
+                    'feedback': feedback,
+                    'materialisation_repair_attempt': attempt,
+                },
+            )
+            report_files = [
+                item
+                for item in result.produced_files
+                if item.purpose == 'report'
+            ]
+            if len(report_files) != 1:
+                raise WorkflowError(
+                    'Honeydew must produce exactly one report file'
+                )
+            try:
+                destination, digest = self.workspaces.copy_agent_output(
+                    run_id=run_id,
+                    agent=AgentName.HONEYDEW,
+                    relative_path=report_files[0].path,
+                    destination_kind='report',
+                )
+            except WorkspaceError as exc:
+                reason = str(exc)
+                if attempt >= repair_attempts:
+                    self._event(
+                        run_id,
+                        source='orchestrator',
+                        event_type='report.materialisation_failed',
+                        payload={
+                            'reason': reason,
+                            'report_path': report_files[0].path,
+                            'attempts': attempt + 1,
+                        },
+                    )
+                    self.pause_run(
+                        run_id,
+                        requested_by='orchestrator',
+                        reason=(
+                            'Honeydew did not materialise a real report '
+                            f'file: {reason}'
+                        ),
+                    )
+                    return
+                self._event(
+                    run_id,
+                    source='orchestrator',
+                    event_type='report.materialisation_repair_requested',
+                    payload={
+                        'reason': reason,
+                        'report_path': report_files[0].path,
+                        'attempt': attempt + 1,
+                    },
+                )
+                prompt = (
+                    'Focused report materialisation repair. Your previous '
+                    'structured result declared '
+                    f'`{report_files[0].path}` with purpose "report", but the '
+                    'orchestrator rejected the hand-off with this exact '
+                    f'reason: {reason}. Write report.md now as a real regular '
+                    'file in your own workspace using the workspace write '
+                    'tool, read it back to confirm it exists, and declare that '
+                    'real file with purpose "report". Never declare a symlink, '
+                    'a directory, or a path outside your workspace.\n\n'
+                    + self._evidence_prompt_block(evidence)
+                )
+                if feedback:
+                    prompt += f'\n\nHuman rejection feedback:\n{feedback}'
+                attempt += 1
+                continue
+            break
         uri = f'artifact://{run_id}/reports/report.md'
         self._save_local_artifact(
             run_id=run_id,

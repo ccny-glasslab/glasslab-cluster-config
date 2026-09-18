@@ -176,6 +176,19 @@ class Settings(BaseSettings):
     # validation. Real-model candidates can repeatedly fail the same check;
     # cap the loop so the run fails fast instead of burning its turn budget.
     max_contract_redrafts: int = 3
+    # L2/T9: how many bounded corrective retries a final-report turn gets when
+    # Honeydew declares purpose='report' but hands over no real file (missing,
+    # a directory, or a symlink). One repair is spent with the deterministic
+    # reason, then the run pauses resumably in HONEYDEW_WRITING_REPORT instead
+    # of stranding until the turn cap. The WorkspaceManager anti-escape
+    # invariant is never relaxed.
+    report_materialisation_repair_attempts: int = 1
+    # L2/T9: consecutive job.reconciliation_failed events for one run before
+    # the watcher pauses it (recoverably, preserving resume_state). A
+    # transient cluster error must not pause on the first poll, but a
+    # persistent failure must not log-and-loop forever: 3 consecutive
+    # failures is the minimal count that rides out a single retryable blip.
+    max_consecutive_reconciliation_failures: int = 3
     opencode_structured_repair_attempts: int = 1
     opencode_structured_output_mode: Literal['json_schema', 'prompt'] = (
         'json_schema'
