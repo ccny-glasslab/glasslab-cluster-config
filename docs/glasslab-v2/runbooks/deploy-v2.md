@@ -118,6 +118,10 @@ only deployment command required:
 ./scripts/rollout-research-services.sh --sync
 ```
 
+Before running it, complete the read-only
+[`rollout-freeze-preflight.md`](rollout-freeze-preflight.md) check. Never roll
+out the orchestrator while a run is non-terminal.
+
 Deploy one service with `--service workflow-api` or
 `--service research-orchestrator`. Roll back with
 `--tag <previous-full-commit-sha>`.

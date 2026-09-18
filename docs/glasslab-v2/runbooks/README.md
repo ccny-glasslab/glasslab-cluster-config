@@ -5,6 +5,7 @@ This directory holds operator-facing procedures for deployment, rollback, workfl
 Key runbooks:
 
 - `deploy-v2.md`
+- `rollout-freeze-preflight.md`
 - `deploy-bounded-agents.md`
 - `choose-operator-access-path.md`
 - `backup-restore-local-pv-services.md`
