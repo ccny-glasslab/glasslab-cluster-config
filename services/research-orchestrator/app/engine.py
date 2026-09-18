@@ -132,6 +132,13 @@ NON_RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
 _RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
     {'startup', 'provider', 'network'}
 )
+# Wall-clock turn aborts are not retryable through agent_turn_max_retries, but
+# they are recoverable by a bounded, automatic resume: live run df9995aa's
+# rotated retry completed the work, and only a human was there to trigger it.
+# The bound lives in Settings.agent_turn_timeout_auto_resume_limit. A
+# methodology.human_resolution_requested pause is deliberately excluded: never
+# auto-resume into a non-convergent loop.
+_AUTO_RESUMABLE_TURN_FAILURE_CLASSES = frozenset({'turn_timeout'})
 
 
 @dataclass(frozen=True)
@@ -1099,8 +1106,15 @@ class ResearchOrchestrator:
             session_id=session_id,
         )
         if tokens < threshold:
-            # Nothing to rotate; the cap/floor never apply below the threshold,
-            # so a resumed run on a fresh session can still make progress.
+            # Below-threshold headroom is proof the last rotation worked: the
+            # fresh session is making progress, not thrashing. Clear the
+            # consecutive-churn counter so a long productive run is never
+            # capped on its lifetime rotation count.
+            if run.session_rotation_count > 0:
+                return self.store.replace_run(
+                    run.model_copy(update={'session_rotation_count': 0}),
+                    expected_version=run.version,
+                )
             return run
         maximum_rotations = self.settings.maximum_session_rotations
         if maximum_rotations > 0 and (
@@ -1114,22 +1128,23 @@ class ResearchOrchestrator:
                 expected_kind=expected_kind,
                 error=(
                     'session context reached the rotation threshold '
-                    f'{run.session_rotation_count} times without '
-                    'converging; escalating for operator review'
+                    f'{run.session_rotation_count} consecutive times without '
+                    'progress; escalating for operator review'
                 ),
             )
             self.pause_run(
                 run_id,
                 requested_by='orchestrator',
                 reason=(
-                    'session rotation limit reached '
-                    f'({run.session_rotation_count}/{maximum_rotations})'
+                    'session rotation churn limit reached '
+                    f'({run.session_rotation_count}/{maximum_rotations} '
+                    'consecutive)'
                 ),
             )
             raise WorkflowError(
-                'session rotation limit reached '
-                f'({run.session_rotation_count}/{maximum_rotations}); '
-                'run paused for operator review'
+                'session rotation churn limit reached '
+                f'({run.session_rotation_count}/{maximum_rotations} '
+                'consecutive); run paused for operator review'
             )
         minimum_turns = self.settings.minimum_turns_between_session_rotations
         if (
@@ -1771,6 +1786,7 @@ class ResearchOrchestrator:
         expected_kind: TurnKind,
         input_event: dict[str, Any],
         dependency_repair_attempted: bool = False,
+        auto_resume_attempts: int = 0,
     ) -> tuple[TurnRecord, AgentTurnResult]:
         # The failed attempt already consumed a turn number; roll it back so
         # the bounded retry does not double-count against the turn budget.
@@ -1796,6 +1812,68 @@ class ResearchOrchestrator:
             expected_kind=expected_kind,
             input_event=input_event,
             dependency_repair_attempted=dependency_repair_attempted,
+            auto_resume_attempts=auto_resume_attempts,
+        )
+
+    def _should_auto_resume_turn(
+        self,
+        exc: Exception,
+        auto_resume_attempts: int,
+    ) -> bool:
+        limit = self.settings.agent_turn_timeout_auto_resume_limit
+        if limit <= 0 or auto_resume_attempts >= limit:
+            return False
+        return (
+            isinstance(exc, OpenCodeRuntimeError)
+            and exc.failure_class in _AUTO_RESUMABLE_TURN_FAILURE_CLASSES
+        )
+
+    def _auto_resume_turn(
+        self,
+        *,
+        run_id: str,
+        agent: AgentName,
+        prompt: str,
+        expected_kind: TurnKind,
+        input_event: dict[str, Any],
+        failure_class: str | None,
+        auto_resume_attempts: int,
+    ) -> tuple[TurnRecord, AgentTurnResult]:
+        # The just-incremented turn number belongs to the aborted attempt; roll
+        # it back so the auto-resumed turn never spends maximum_turns. The
+        # caller already rotated the session through the recovery-checkpoint
+        # path, so the re-entry sees a fresh session and the preserved worktree.
+        current = self.store.get_run(run_id)
+        if current.state == RunState.PAUSED or current.state in TERMINAL_STATES:
+            raise WorkflowError(
+                'workflow advancement stopped after agent turn because run is '
+                f'{current.state.value}'
+            )
+        self.store.replace_run(
+            current.model_copy(
+                update={'turn_number': max(0, current.turn_number - 1)}
+            ),
+            expected_version=current.version,
+        )
+        self._event(
+            run_id,
+            source='orchestrator',
+            event_type='run.auto_resumed',
+            payload={
+                'agent': agent.value,
+                'kind': expected_kind.value,
+                'failure_class': failure_class,
+                'attempt': auto_resume_attempts + 1,
+                'limit': self.settings.agent_turn_timeout_auto_resume_limit,
+            },
+        )
+        return self._run_agent_turn(
+            run_id=run_id,
+            agent=agent,
+            prompt=prompt,
+            expected_kind=expected_kind,
+            input_event=input_event,
+            auto_resume_attempts=auto_resume_attempts + 1,
         )
 
     def _recover_runtime_dependency_failure(
@@ -1911,6 +1989,7 @@ class ResearchOrchestrator:
         input_event: dict[str, Any],
         retrieval_query: str | None = None,
         dependency_repair_attempted: bool = False,
+        auto_resume_attempts: int = 0,
     ) -> tuple[TurnRecord, AgentTurnResult]:
         if agent == AgentName.HONEYDEW:
             model_override, base_url_override = (
@@ -2249,6 +2328,16 @@ class ResearchOrchestrator:
                     else None
                 ),
             )
+            if self._should_auto_resume_turn(exc, auto_resume_attempts):
+                return self._auto_resume_turn(
+                    run_id=run_id,
+                    agent=agent,
+                    prompt=prompt,
+                    expected_kind=expected_kind,
+                    input_event=input_event,
+                    failure_class=failure_class,
+                    auto_resume_attempts=auto_resume_attempts,
+                )
             if self._should_retry_turn(exc, run_id, agent):
                 return self._retry_agent_turn(
                     run_id=run_id,
@@ -2256,6 +2345,7 @@ class ResearchOrchestrator:
                     prompt=prompt,
                     expected_kind=expected_kind,
                     input_event=input_event,
+                    auto_resume_attempts=auto_resume_attempts,
                 )
             raise
         current = self.store.get_run(run_id)
@@ -6685,6 +6775,11 @@ class ResearchOrchestrator:
                 updates={
                     'resume_state': None,
                     'active_since': utc_now(),
+                    # An explicit operator resume grants a fresh churn budget:
+                    # without this the counter (which escalated the pause) would
+                    # re-pause on the very next threshold crossing. If the run
+                    # is genuinely thrashing it still caps after this budget.
+                    'session_rotation_count': 0,
                 },
             )
             self.workspaces.seed_agent_context(run_id)

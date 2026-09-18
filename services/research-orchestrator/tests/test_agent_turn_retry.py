@@ -164,13 +164,17 @@ def test_retry_bound_is_respected(orchestrator_bundle) -> None:
 
 
 def test_turn_timeout_failure_is_not_retried(orchestrator_bundle) -> None:
-    """A wall-clock abort pauses instead of burning retry budget.
+    """A wall-clock abort is not retried by the generic retry budget.
 
     A fresh session with the same prompt re-enters the same work and the same
-    wall; the run pauses and resumes with the worktree intact via resume_run()
-    (see engine._should_retry_turn classification).
+    wall, so ``turn_timeout`` is not in the retryable-failure set
+    (``_should_retry_turn``). Its separate, bounded automatic resume is covered
+    by ``test_l1_bounded_auto_resume.py``; with that bound disabled the failure
+    propagates unchanged and the run parks for a human resume with the worktree
+    intact.
     """
     settings, store, cluster, runtime, engine = orchestrator_bundle
+    settings.agent_turn_timeout_auto_resume_limit = 0
     run = _make_run(engine, "Turn timeout objective.")
     engine.runtime = FlakyTurnRuntime(
         runtime, fail_calls=10, failure_class="turn_timeout"

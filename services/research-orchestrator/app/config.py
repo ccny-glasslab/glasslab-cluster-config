@@ -159,6 +159,19 @@ class Settings(BaseSettings):
     # disables the budget; the wall-clock and repeated-tool guards stay active.
     opencode_turn_step_limit: int = 250
     agent_turn_max_retries: int = 2
+    # Bounded auto-resume of a single turn after a wall-clock abort
+    # (failure_class='turn_timeout'). A turn_timeout is deliberately
+    # non-retryable through agent_turn_max_retries -- a fresh session with the
+    # same prompt re-enters the same work -- but live run df9995aa showed the
+    # rotated retry completed the work; only a human was there to resume it,
+    # permanently spending one of maximum_turns (run.auto_resumed count = 0).
+    # This bounds that resume: the failed attempt's turn_number is rolled back,
+    # the session is rotated through the existing recovery-checkpoint path, a
+    # distinct run.auto_resumed event is emitted, and the turn is re-entered up
+    # to this many times before falling through to the clean, resumable PAUSED.
+    # This never applies to a methodology.human_resolution_requested pause.
+    # 0 disables auto-resume.
+    agent_turn_timeout_auto_resume_limit: int = 2
     # Max deterministic redrafts of a contract candidate that fails
     # validation. Real-model candidates can repeatedly fail the same check;
     # cap the loop so the run fails fast instead of burning its turn budget.
@@ -286,9 +299,11 @@ class Settings(BaseSettings):
     # that immediately re-accumulates cannot rotate on every single turn. 0
     # disables the floor.
     minimum_turns_between_session_rotations: int = 2
-    # Anti-thrash cap: after this many threshold rotations in one run, pause
-    # the run for operator review instead of rotating forever. 0 disables the
-    # cap (not recommended).
+    # Anti-thrash cap: after this many *consecutive* threshold rotations with
+    # no below-threshold (productive) observation in between, pause the run for
+    # operator review instead of rotating forever. The counter resets on
+    # progress and on an operator resume, so a healthy long run is not capped
+    # on its lifetime rotation count. 0 disables the cap (not recommended).
     maximum_session_rotations: int = 4
     maximum_methodology_revisions: int = 2
     # Hard cap on deterministic matrix-preflight failures before the run fails.
