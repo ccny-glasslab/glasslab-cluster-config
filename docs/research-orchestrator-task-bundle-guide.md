@@ -102,7 +102,12 @@ This is the section preflight enforces hardest. The exact metric keys you
 name here become the task spec's `required_metric_keys`, and deterministic
 matrix preflight statically checks that the implementation's `run.py`
 serializes every one of them at the root of `metrics.json` - a workload that
-omits a key is rejected **before** any cluster job runs. It must contain:
+omits a key is rejected **before** any cluster job runs. When a task-specific
+evaluation contract is bound, that contract's keys win: preflight uses
+`manifest.required_metric_keys` or, when it omits them, the roots in its sealed
+`expected_output_schema`, and a task-spec key the contract does not require is
+superseded rather than enforced (so naming a key here that the evaluator does
+not read cannot make the matrix unsatisfiable). It must contain:
 
 - **Exact metric keys** — the names the evaluator will check (e.g.
   `test_seen_accuracy`, `nmi`, `silhouette_score`).
