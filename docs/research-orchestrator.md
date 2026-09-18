@@ -647,9 +647,14 @@ the run continues rather than restarts. To stop a session that immediately
 re-accumulates from rotating on every turn, rotation is deferred for at least
 `GLASSLAB_ORCHESTRATOR_MINIMUM_TURNS_BETWEEN_SESSION_ROTATIONS` completed
 turns (default 2) and capped at
-`GLASSLAB_ORCHESTRATOR_MAXIMUM_SESSION_ROTATIONS` rotations per run (default
-4); when the cap is reached the run is paused for operator review rather than
-rotating indefinitely. A runtime that cannot report usage (for example the
+`GLASSLAB_ORCHESTRATOR_MAXIMUM_SESSION_ROTATIONS` *consecutive* threshold
+rotations (default 4). The count resets whenever a session is observed below
+the threshold (the previous rotation demonstrably bought headroom) and on an
+explicit operator resume, so a healthy long run is not capped on its lifetime
+rotation count; only a session that immediately re-reaches the ceiling without
+any below-threshold observation is treated as churn. When that many consecutive
+rotations occur without a below-threshold observation in between, the run is
+paused for operator review rather than rotating indefinitely. A runtime that cannot report usage (for example the
 Hermes rollback backend) falls back to a character-based estimate over the
 orchestrator's stored turns. That fallback is **advisory only -- a floor, never
 a bound**: it cannot see the system prompt, tool schemas, file reads, or tool
