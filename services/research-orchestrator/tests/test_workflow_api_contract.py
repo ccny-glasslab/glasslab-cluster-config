@@ -15,6 +15,7 @@ cannot be imported into one interpreter under the same name.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import importlib.util
 import json
 from pathlib import Path
@@ -296,3 +297,72 @@ def test_receiver_workspace_spec_rejects_non_python_command() -> None:
         INVESTIGATION_WORKSPACE_SPEC.model_validate(
             body['config_payload']['workspace']
         )
+
+
+JOB_SUBMISSION_RECEIPT = WORKFLOW_API_SCHEMAS.JobSubmissionReceipt
+
+
+def _submit_against_response(
+    spec: ExpandedJobSpec,
+    response_json: dict,
+):
+    # Drive the real submit() over an in-memory transport whose response is the
+    # exact JSON workflow-api's receipt model serializes, so the correlation
+    # value under test is the byte-level contract, not a hand-rolled dict.
+    executor = WorkflowApiClusterExecutor(
+        base_url='http://workflow-api.test',
+        workload_id='gpu-experiment',
+        experiment_type='gpu-training-job',
+        caller_name='research-orchestrator',
+        token='orchestrator-secret',
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(201, json=response_json)
+    )
+    executor._client = lambda: httpx.Client(  # type: ignore[method-assign]
+        base_url='http://workflow-api.test',
+        transport=transport,
+    )
+    return executor.submit(spec)
+
+
+def test_orchestrator_records_kubernetes_job_uid_from_receipt() -> None:
+    # H4: workflow-api's submission receipt must carry the Kubernetes Job's
+    # server-assigned metadata.uid so the orchestrator can correlate its durable
+    # job record to the live Job. The receipt is built with the receiver's own
+    # model, so a missing job_uid field fails here instead of the orchestrator
+    # silently recording None on a live run.
+    job_uid = '9f8e7d6c-5b4a-4321-9876-0123456789ab'
+    receipt = JOB_SUBMISSION_RECEIPT(
+        job_name='gpu-experiment-12345678',
+        namespace='glasslab-v2',
+        accepted_at=datetime(2026, 9, 23, tzinfo=timezone.utc),
+        status='submitted',
+        detail='Run submitted to Kubernetes Job API.',
+        job_uid=job_uid,
+    )
+
+    submission = _submit_against_response(
+        _spec(workspace=False),
+        {
+            'run_id': 'external-1',
+            'status': {'status': 'submitted'},
+            'job_submission': receipt.model_dump(mode='json'),
+        },
+    )
+
+    assert submission.kubernetes_uid is not None
+    assert submission.kubernetes_uid == job_uid
+
+
+def test_submission_body_carries_orchestrator_run_id_as_trace_id() -> None:
+    # L5: the orchestrator run id is the single correlation id. It must travel
+    # on the submit body as trace_id so the persisted workflow-api record, the
+    # Kubernetes Job label, and the runner env all resolve to the same run.
+    spec = _spec(workspace=False)
+
+    body = _submission_body(spec)
+    request = GENERIC_RUN_REQUEST.model_validate(body)
+
+    assert body['trace_id'] == spec.run_id
+    assert request.trace_id == spec.run_id

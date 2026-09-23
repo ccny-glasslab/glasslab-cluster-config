@@ -53,6 +53,7 @@ class RunManifest(BaseModel):
     dataset_bindings: dict[str, str] = Field(default_factory=dict)
     budget: dict[str, Any] = Field(default_factory=dict)
     metric_contract: dict[str, Any] = Field(default_factory=dict)
+    trace_id: str | None = None
 
     @field_validator('requested_models')
     @classmethod

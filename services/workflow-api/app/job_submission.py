@@ -636,6 +636,8 @@ class KubernetesJobSubmitter(JobSubmitter):
         }
         if manifest.workload_id:
             labels['glasslab.io/workload-id'] = _sanitize_label(manifest.workload_id)
+        if manifest.trace_id:
+            labels['glasslab.io/trace-id'] = _sanitize_label(manifest.trace_id)
         workspace_config = manifest.config_payload.get('workspace')
         network_policy = 'none'
         if isinstance(workspace_config, dict):
@@ -649,7 +651,10 @@ class KubernetesJobSubmitter(JobSubmitter):
             priority_class_name = self.settings.user_priority_class_name
         env = [
             self.client.V1EnvVar(name='GLASSLAB_RUNNER_EXPERIMENT_ID', value=manifest.run_id),
-            self.client.V1EnvVar(name='GLASSLAB_RUNNER_TRACE_ID', value=manifest.run_id),
+            self.client.V1EnvVar(
+                name='GLASSLAB_RUNNER_TRACE_ID',
+                value=manifest.trace_id or manifest.run_id,
+            ),
             self.client.V1EnvVar(name='GLASSLAB_RUNNER_MANIFEST_JSON', value=manifest.model_dump_json()),
             self.client.V1EnvVar(name='GLASSLAB_RUNNER_ARTIFACTS_ROOT', value=self.settings.artifacts_mount_path),
         ]
@@ -904,7 +909,10 @@ class KubernetesJobSubmitter(JobSubmitter):
         )
 
         try:
-            self.batch_api.create_namespaced_job(namespace=self.settings.runner_namespace, body=job)
+            created_job = self.batch_api.create_namespaced_job(
+                namespace=self.settings.runner_namespace,
+                body=job,
+            )
         except self.api_exception as exc:
             upstream_status = getattr(exc, 'status', None)
             if isinstance(upstream_status, int) and 400 <= upstream_status < 500:
@@ -916,12 +924,18 @@ class KubernetesJobSubmitter(JobSubmitter):
                 502,
                 'Kubernetes Job API failed during submission',
             ) from exc
+        # The create response is the server-materialized Job; its metadata.uid is
+        # assigned by the API server before the call returns, so the receipt can
+        # carry the real uid for orchestrator-to-Job correlation.
+        created_metadata = getattr(created_job, 'metadata', None)
+        job_uid = getattr(created_metadata, 'uid', None)
         return JobSubmissionReceipt(
             job_name=job_name,
             namespace=self.settings.runner_namespace,
             accepted_at=datetime.now(timezone.utc),
             status='submitted',
             detail='Run submitted to Kubernetes Job API.',
+            job_uid=str(job_uid) if job_uid else None,
         )
 
     def get_live_status(self, record: RunRecord) -> RunStatus | None:

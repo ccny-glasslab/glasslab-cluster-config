@@ -306,6 +306,7 @@ class GenericExperimentRunRequest(BaseModel):
     submitted_by: str | None = None
     run_priority: Literal['user', 'autonomous'] = 'user'
     session_id: str | None = None
+    trace_id: str | None = None
 
     @field_validator('dataset_bindings')
     @classmethod
@@ -960,6 +961,7 @@ class JobSubmissionReceipt(BaseModel):
     accepted_at: datetime
     status: str
     detail: str
+    job_uid: str | None = None
 
 
 class WorkflowFamilySummary(BaseModel):
