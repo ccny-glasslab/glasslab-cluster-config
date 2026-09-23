@@ -38,6 +38,9 @@ from services.common.configmap_parity import (  # noqa: E402
     validate_overrides,
 )
 
+# allow: SIZE_OK -- the bulk of this file is the reviewed override DATA table
+# (one entry per intentional deployment deviation with its reason); the audit
+# LOGIC lives in services/common/configmap_parity.py.
 CONFIGMAP_PATH = (
     REPOSITORY_ROOT
     / 'kubeadm'
