@@ -1,0 +1,278 @@
+{
+  "schema_version": "glasslab-runtime-replay-v1",
+  "provenance": {
+    "corpus_root": "/mnt/artifacts/research-orchestrator/evidence-freeze/20260923/artifacts",
+    "note": "Increment-1 engine replay fixture. The beaker:contract_candidate turn is the VERBATIM recorded agent_turn_result.json from the frozen evidence corpus. honeydew:protocol_draft embeds the VERBATIM recorded evaluation-contract-proposal.json from the corpus. The remaining standard-flow turns are hand-authored to the AgentTurnResult schema (validated by tests) because the raw opencode.db transcripts are not yet reduced by the full-corpus recorder.",
+    "recorded_turns": [
+      {
+        "key": "beaker:contract_candidate",
+        "run_id": "aea1a3ddd5574a5ca49bbd478983b349",
+        "recorded_at": "2026-09-16T15:03:00Z",
+        "source_path": "aea1a3ddd5574a5ca49bbd478983b349/runtime/beaker/data/opencode/tool-output/agent_turn_result.json",
+        "verbatim": true
+      },
+      {
+        "key": "honeydew:protocol_draft",
+        "run_id": "0f15c27f49014c7d966d4960f2f55551",
+        "recorded_at": "2026-09-23T04:34:00Z",
+        "source_path": "0f15c27f49014c7d966d4960f2f55551/shared-artifacts/evaluation-contract-proposal.json",
+        "verbatim": false,
+        "detail": "the evaluation_contract_proposal object is verbatim; surrounding turn fields are hand-authored"
+      }
+    ]
+  },
+  "turns": {
+    "honeydew:protocol_draft": [
+      {
+        "result": {
+          "kind": "protocol_draft",
+          "summary": "Drafted a bounded protocol.",
+          "evaluation_contract_proposal": {
+            "budget_mode": "wallclock",
+            "evaluator_type": "ml-benchmark-wine-clustering-v1",
+            "guardrails": [],
+            "max_optimizer_steps": null,
+            "max_samples_seen": null,
+            "max_wallclock_minutes": 45,
+            "primary_metric": {
+              "direction": "maximize",
+              "minimum_effect": 0.0,
+              "name": "rubric_score"
+            },
+            "rationale": "This imported task is bound to an immutable repository-controlled evaluation contract.",
+            "required_artifacts": [
+              "metrics.json",
+              "evaluation.json",
+              "report.md",
+              "plots/clusters.png",
+              "tables/comparison.csv"
+            ],
+            "resource_constraints": {
+              "cpu": 4.0,
+              "gpus": 0,
+              "memory_gib": 8.0,
+              "wallclock_minutes": 45
+            }
+          },
+          "claims": [],
+          "requested_actions": [],
+          "produced_files": [
+            {
+              "path": "program.md",
+              "purpose": "protocol"
+            }
+          ],
+          "recommended_next_state": "AWAITING_PROTOCOL_APPROVAL",
+          "done": true
+        },
+        "files": {
+          "program.md": "# Program\n\n## Hypothesis\n\nThe bounded candidate will pass the immutable evaluator.\n\n## Controls\n\n- Fixed evaluation contract\n- Fixed seed matrix\n- Required metrics and evaluation artifacts\n\n## Stopping condition\n\nStop after the approved matrix finishes.\n"
+        }
+      }
+    ],
+    "beaker:implementation_plan": [
+      {
+        "result": {
+          "kind": "implementation_plan",
+          "summary": "Planned a bounded task-specific implementation.",
+          "produced_files": [
+            {
+              "path": "implementation-plan.md",
+              "purpose": "implementation"
+            }
+          ],
+          "done": true
+        },
+        "files": {
+          "implementation-plan.md": "# Implementation Plan\n\n1. Inspect the task inputs and existing repository boundaries.\n2. Implement the smallest complete experiment runner.\n3. Run lightweight local checks and propose the bounded matrix.\n"
+        }
+      }
+    ],
+    "beaker:implementation_proposal": [
+      {
+        "result": {
+          "kind": "implementation_proposal",
+          "summary": "Implemented and locally checked the bounded candidate.",
+          "claims": [
+            {
+              "text": "The local implementation file exists.",
+              "evidence": [
+                "git://beaker/experiment.py"
+              ]
+            }
+          ],
+          "requested_actions": [
+            {
+              "type": "submit_experiment_matrix",
+              "reason": "Execute the reviewed bounded matrix.",
+              "arguments": {
+                "base_config": "configs/baseline.yaml",
+                "variants": [
+                  {
+                    "name": "baseline",
+                    "overrides": {
+                      "learning_rate": 0.0001
+                    }
+                  },
+                  {
+                    "name": "candidate",
+                    "overrides": {
+                      "learning_rate": 0.0003
+                    }
+                  }
+                ],
+                "seeds": [
+                  17
+                ],
+                "maximum_parallel_jobs": 2,
+                "runner_image": "ghcr.io/ccny-glasslab/glasslab-test-runner:test",
+                "resources": {
+                  "cpu": 1,
+                  "memory_gib": 1,
+                  "gpus": 0,
+                  "wallclock_minutes": 5
+                },
+                "required_artifacts": [
+                  "metrics.json"
+                ]
+              }
+            }
+          ],
+          "recommended_next_state": "HONEYDEW_REVIEWING",
+          "done": true
+        },
+        "files": {
+          "run.py": "print(\"bounded mock run.py\")\n",
+          "experiment.py": "print(\"bounded mock experiment\")\n",
+          "configs/baseline.yaml": "learning_rate: 0.0001\n"
+        }
+      }
+    ],
+    "honeydew:methodology_review": [
+      {
+        "result": {
+          "kind": "methodology_review",
+          "summary": "Controls and comparison are acceptable for the smoke test.",
+          "claims": [],
+          "message_to_other_agent": "Proceed with the reviewed matrix.",
+          "recommended_next_state": "AWAITING_EXECUTION_APPROVAL",
+          "done": true
+        }
+      }
+    ],
+    "beaker:experiment_analysis": [
+      {
+        "result": {
+          "kind": "experiment_analysis",
+          "summary": "The fake jobs completed and emitted metrics.",
+          "claims": [
+            {
+              "text": "The fake jobs emitted metrics.",
+              "evidence": [
+                "artifact://fake/metrics.json"
+              ]
+            }
+          ],
+          "recommended_next_state": "HONEYDEW_VERIFYING",
+          "done": true
+        }
+      }
+    ],
+    "honeydew:verification": [
+      {
+        "result": {
+          "kind": "verification",
+          "summary": "The authoritative fake artifacts support a report.",
+          "claims": [
+            {
+              "text": "The job evidence is internally consistent.",
+              "evidence": []
+            }
+          ],
+          "verification_verdict": {
+            "status": "consistent",
+            "summary": "The measured results are consistent with the retrieved corpus material.",
+            "citations": []
+          },
+          "recommended_next_state": "HONEYDEW_WRITING_REPORT",
+          "done": true
+        }
+      }
+    ],
+    "honeydew:final_report": [
+      {
+        "result": {
+          "kind": "final_report",
+          "summary": "Prepared the evidence-bounded report.",
+          "claims": [
+            {
+              "text": "The replay workflow reached report generation.",
+              "evidence": []
+            }
+          ],
+          "produced_files": [
+            {
+              "path": "report.md",
+              "purpose": "report"
+            }
+          ],
+          "recommended_next_state": "AWAITING_FINAL_ACCEPTANCE",
+          "done": true
+        },
+        "files": {
+          "report.md": "# Report\n\nThe deterministic replay workflow completed. This demonstrates orchestration behavior only and is not scientific evidence from a real GPU run.\n"
+        }
+      }
+    ],
+    "beaker:contract_candidate": [
+      {
+        "result": {
+          "kind": "contract_candidate",
+          "summary": "Drafted immutable evaluation-contract candidate for titanic-survival-methodology-v1 evaluator",
+          "requested_actions": [
+            {
+              "type": "propose_evaluation_contract",
+              "reason": "Create contract candidate matching approved evaluation-contract-proposal.json with evaluator_type=titanic-survival-methodology-v1",
+              "arguments": {
+                "contract_id": "titanic-survival-methodology-v1",
+                "version": "1.0.0",
+                "candidate_path": "contract-candidate/titanic-survival-methodology-v1/1.0.0",
+                "rationale": "Task-specific evaluator required to validate methodology-specific claims (hypotheses H1–H3), enforce leakage controls, verify identical fold usage across candidates, and ensure baseline comparison integrity. Generic integrity checks insufficient for scientific hypothesis testing."
+              }
+            }
+          ],
+          "produced_files": [
+            {
+              "path": "contract-candidate/titanic-survival-methodology-v1/1.0.0/contract.json",
+              "purpose": "protocol"
+            },
+            {
+              "path": "contract-candidate/titanic-survival-methodology-v1/1.0.0/scripts/evaluation_wrapper.py",
+              "purpose": "implementation"
+            },
+            {
+              "path": "contract-candidate/titanic-survival-methodology-v1/1.0.0/evaluator/titanic_survival_evaluator.py",
+              "purpose": "implementation"
+            },
+            {
+              "path": "contract-candidate/titanic-survival-methodology-v1/1.0.0/schemas/input_schema.json",
+              "purpose": "implementation"
+            },
+            {
+              "path": "contract-candidate/titanic-survival-methodology-v1/1.0.0/schemas/output_schema.json",
+              "purpose": "implementation"
+            },
+            {
+              "path": "contract-candidate/titanic-survival-methodology-v1/1.0.0/tests/test_evaluator.py",
+              "purpose": "analysis"
+            },
+            {
+              "path": "contract-candidate/titanic-survival-methodology-v1/1.0.0/tests/test_vectors.txt",
+              "purpose": "analysis"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
