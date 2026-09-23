@@ -52,7 +52,7 @@ class Settings(BaseSettings):
         env_file='.env',
         env_prefix='GLASSLAB_ORCHESTRATOR_',
         case_sensitive=False,
-        extra='ignore',
+        extra='forbid',
     )
 
     app_name: str = 'glasslab-research-orchestrator'
@@ -261,7 +261,7 @@ class Settings(BaseSettings):
     cluster_execution_api_url: str = (
         'http://glasslab-workflow-api.glasslab-v2.svc.cluster.local:8080'
     )
-    cluster_execution_mode: str = 'workflow-api'
+    cluster_execution_mode: Literal['workflow-api', 'fake'] = 'workflow-api'
     cluster_execution_workload_id: str = 'workspace-cpu-ml-v1'
     cluster_execution_experiment_type: str = 'research-workspace-job'
     # Durable record of idempotency_key -> external_run_id submissions so a
