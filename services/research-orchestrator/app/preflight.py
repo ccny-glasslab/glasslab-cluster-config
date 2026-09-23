@@ -189,6 +189,51 @@ def _references_metrics_json(
     return 'metrics.json' in ast.unparse(expression)
 
 
+def _opens_metrics_json_for_write(
+    expression: ast.expr,
+    assignments: dict[str, ast.expr],
+) -> bool:
+    """Whether ``expression`` is a call opening ``metrics.json`` for writing.
+
+    Covers the builtin ``open(<path>, ...)`` and the ``Path`` method
+    ``<path>.open(...)``, so both ``with open('metrics.json', 'w') as handle``
+    and ``handle = (output_dir / 'metrics.json').open('w')`` bind a handle the
+    later ``json.dump(<dict>, <handle>)`` scan can resolve.
+    """
+    if not isinstance(expression, ast.Call):
+        return False
+    if expression.args and _references_metrics_json(
+        expression.args[0],
+        assignments,
+    ):
+        return True
+    func = expression.func
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == 'open'
+        and _references_metrics_json(func.value, assignments)
+    )
+
+
+def _json_dumps_argument(expression: ast.expr) -> ast.Call | None:
+    """Return the ``json.dumps(...)`` call serializing ``expression``, if any.
+
+    ``Path.write_text`` is commonly handed ``json.dumps(<dict>, ...) + '\\n'``,
+    so a string concatenation is unwrapped before the dumps call is looked for.
+    """
+    if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+        return _json_dumps_argument(
+            expression.left
+        ) or _json_dumps_argument(expression.right)
+    if (
+        isinstance(expression, ast.Call)
+        and isinstance(expression.func, ast.Attribute)
+        and expression.func.attr == 'dumps'
+    ):
+        return expression
+    return None
+
+
 def _metrics_root_errors(
     tree: ast.AST,
     *,
@@ -206,6 +251,8 @@ def _metrics_root_errors(
             target = node.targets[0]
             if isinstance(target, ast.Name):
                 assignments[target.id] = node.value
+                if _opens_metrics_json_for_write(node.value, assignments):
+                    metric_handles.add(target.id)
             elif (
                 isinstance(target, ast.Subscript)
                 and isinstance(target.value, ast.Name)
@@ -224,14 +271,10 @@ def _metrics_root_errors(
         if not isinstance(node, ast.With):
             continue
         for item in node.items:
-            if (
-                not isinstance(item.optional_vars, ast.Name)
-                or not isinstance(item.context_expr, ast.Call)
-                or not item.context_expr.args
-            ):
+            if not isinstance(item.optional_vars, ast.Name):
                 continue
-            if _references_metrics_json(
-                item.context_expr.args[0],
+            if _opens_metrics_json_for_write(
+                item.context_expr,
                 assignments,
             ):
                 metric_handles.add(item.optional_vars.id)
@@ -280,27 +323,49 @@ def _metrics_root_errors(
     serialized_keys: set[str] = set()
     found_serialization = False
     for node in ast.walk(tree):
-        if (
-            not isinstance(node, ast.Call)
-            or not isinstance(node.func, ast.Attribute)
-            or node.func.attr != 'dump'
-            or len(node.args) < 2
-            or not isinstance(node.args[1], ast.Name)
-            or node.args[1].id not in metric_handles
-        ):
+        if not isinstance(node, ast.Call):
             continue
-        # Only json.dump(<dict>, <metrics-handle>) counts as a metrics.json
-        # serialization; the handle must have been opened from something
-        # referencing 'metrics.json' earlier in the walk.
-        found_serialization = True
-        serialized_keys.update(
-            _dict_keys(
-                node.args[0],
-                assignments,
-                subscript_keys,
-                function_return_keys,
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'dump'
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Name)
+            and node.args[1].id in metric_handles
+        ):
+            # json.dump(<dict>, <metrics-handle>): the handle must have been
+            # opened from something referencing 'metrics.json' earlier in the
+            # walk.
+            found_serialization = True
+            serialized_keys.update(
+                _dict_keys(
+                    node.args[0],
+                    assignments,
+                    subscript_keys,
+                    function_return_keys,
+                )
             )
-        )
+            continue
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'write_text'
+            and node.args
+            and _references_metrics_json(node.func.value, assignments)
+        ):
+            # Path.write_text(json.dumps(<dict>, ...)): the receiver path must
+            # resolve to metrics.json, and only a json.dumps payload counts as
+            # a JSON write.
+            dumps_call = _json_dumps_argument(node.args[0])
+            if dumps_call is None or not dumps_call.args:
+                continue
+            found_serialization = True
+            serialized_keys.update(
+                _dict_keys(
+                    dumps_call.args[0],
+                    assignments,
+                    subscript_keys,
+                    function_return_keys,
+                )
+            )
     if not found_serialization:
         return [
             f'{relative} does not have a statically verifiable JSON write to '
