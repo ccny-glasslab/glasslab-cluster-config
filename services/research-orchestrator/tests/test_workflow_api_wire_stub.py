@@ -1,11 +1,12 @@
-"""Wire-contract tests against workflow-api's REAL ASGI app, in-process.
+"""Wire-contract tests against workflow-api's REAL generic-run request model.
 
 ``test_workflow_api_contract.py`` validates the sender's body against the
 receiver's pydantic models loaded from source. This module closes the next gap:
 it drives the orchestrator's real ``WorkflowApiClusterExecutor.submit`` over an
-in-process transport bound to the real FastAPI application, so the exact bytes
-the orchestrator POSTs are parsed by the exact request model and middleware the
-service runs in production.
+in-process transport bound to a FastAPI app that serves the receiver's real
+``GenericExperimentRunRequest``, so the exact bytes the orchestrator POSTs are
+parsed by the exact request model -- and rejected with the exact FastAPI 422
+shape -- that the service runs in production.
 
 Issue #491 is the canonical defect this catches. The sender once included a
 top-level ``resources`` field that ``GenericExperimentRunRequest`` forbids
@@ -13,6 +14,13 @@ top-level ``resources`` field that ``GenericExperimentRunRequest`` forbids
 the fake rehearsal path -- which never sends a request -- advanced happily. The
 tests below prove the real sender body is accepted and that the #491 payload is
 rejected with the same ``extra_forbidden`` 422 shape the live service produced.
+
+The app is a minimal FastAPI app rather than the full workflow-api ASGI app:
+importing ``workflow-api/app/main.py`` drags in ``job_submission`` -> ``urllib3``
+-> the Kubernetes client, none of which the orchestrator CI lane installs. The
+full app is therefore unimportable in this lane; the request model, its
+``extra='forbid'`` config, and FastAPI's 422 body are not. See
+``workflow_api_wire_stub.py``.
 """
 
 from __future__ import annotations
@@ -102,7 +110,7 @@ def _bind_client(
 def _capture_sender_body(spec: ExpandedJobSpec) -> dict[str, Any]:
     # The mutation test needs the unmodified bytes the sender would POST.
     # Capture them on a throwaway in-memory transport, then replay a mutated
-    # copy through the real app.
+    # copy through the real receiver model.
     captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -132,10 +140,10 @@ def _auth_headers(*, idempotency_key: str) -> dict[str, str]:
     }
 
 
-def test_real_sender_body_is_accepted_by_the_real_app() -> None:
-    # Given the real executor wired to the real app over an in-process
-    # transport, when it submits a workspace job, then the receiver accepts it
-    # and the durable RunRecord carries the sender's identity.
+def test_real_sender_body_is_accepted_by_the_real_request_model() -> None:
+    # Given the real executor wired to a receiver that parses with the real
+    # request model, when it submits a workspace job, then the body validates
+    # and the receiver sees the sender's workload identity and objective.
     stub = build_wire_stub()
     executor = _wired_executor(stub)
 
@@ -143,15 +151,14 @@ def test_real_sender_body_is_accepted_by_the_real_app() -> None:
 
     assert submission.external_run_id
     assert submission.status is JobStatus.QUEUED
-    runs = stub.store.list_runs()
-    assert len(runs) == 1
-    assert runs[0].manifest.workload_id == 'workspace-cpu-ml-v1'
-    assert runs[0].manifest.objective.startswith('Research orchestrator variant')
+    assert len(stub.accepted) == 1
+    assert stub.accepted[0].workload_id == 'workspace-cpu-ml-v1'
+    assert stub.accepted[0].objective.startswith('Research orchestrator variant')
 
 
 def test_repeated_submit_is_idempotent_through_the_stub() -> None:
-    # The stub persists runs in a real in-memory store, so a replayed
-    # idempotency key returns the original submission instead of a second run.
+    # The executor replays its own idempotency key, so the second submit returns
+    # the original submission and the receiver is hit exactly once.
     stub = build_wire_stub()
     executor = _wired_executor(stub)
 
@@ -159,12 +166,12 @@ def test_repeated_submit_is_idempotent_through_the_stub() -> None:
     second = executor.submit(_spec(workspace=True))
 
     assert first.external_run_id == second.external_run_id
-    assert len(stub.store.list_runs()) == 1
+    assert len(stub.accepted) == 1
 
 
 def test_forbidden_top_level_resources_is_rejected_with_real_422_shape() -> None:
     # Given the real sender body, when the #491 top-level 'resources' field is
-    # reintroduced, then the real app rejects it with the same 422
+    # reintroduced, then the receiver rejects it with the same 422
     # extra_forbidden shape the live service produced.
     stub = build_wire_stub()
     body = _capture_sender_body(_spec(workspace=True))
@@ -231,7 +238,7 @@ def test_stub_serves_the_request_with_no_network(monkeypatch: pytest.MonkeyPatch
     submission = executor.submit(_spec(workspace=True))
 
     assert submission.external_run_id
-    assert len(stub.store.list_runs()) == 1
+    assert len(stub.accepted) == 1
 
 
 def test_malformed_body_reports_receiver_error_in_seconds() -> None:

@@ -1,122 +1,89 @@
-"""Reusable in-process wire stub for workflow-api's REAL FastAPI app.
+"""CI-safe in-process wire stub for workflow-api's generic-run request contract.
 
-The orchestrator's fake rehearsal path never sends an HTTP request, so it
-cannot see wire-contract defects: issue #491 was a forbidden top-level
-``resources`` field that made every live ``POST /experiments/runs`` return 422
-while the fake path advanced. This helper serves the real ASGI application in
-the test process so ``WorkflowApiClusterExecutor.submit`` exercises the real
-request models (``extra='forbid'``), the real auth middleware, and the real
-422 body shape -- with no cluster and no socket.
+Issue #491 was a sender/receiver wire defect: the orchestrator's
+``WorkflowApiClusterExecutor`` sent a top-level ``resources`` field that
+workflow-api's ``GenericExperimentRunRequest`` forbids (``extra='forbid'``), so
+every live ``POST /experiments/runs`` returned 422 while the fake rehearsal path
+advanced. This helper serves that request model in-process so the sender body is
+parsed by the receiver's real pydantic model and rejected with the real FastAPI
+422 shape -- with no cluster, no socket, and no workflow-api runtime install.
 
-The workflow-api service also owns a top-level ``app`` package, which collides
-with the orchestrator's own ``app`` package in one interpreter. The real
-package is therefore loaded under the unique import name
-``workflow_api_under_test`` via an explicit file-location spec, and no
-workflow-api directory is added to ``sys.path`` (only the repository root, for
-``services.common`` imports, which the package also adds itself).
+The stub deliberately does **not** import workflow-api's ASGI ``main`` module.
+That module's import graph reaches ``app/job_submission.py``, which imports the
+Kubernetes ``urllib3`` transport at module import time. The orchestrator CI lane
+installs only ``services/research-orchestrator/requirements.txt`` (plus pytest
+and httpx), so importing the full app raised ``ModuleNotFoundError: urllib3``
+during collection and failed the whole lane. The full ASGI app is unavailable in
+this dependency set; the request contract is not.
+
+Instead the REAL request models are loaded from
+``services/workflow-api/app/schemas.py`` (pydantic-only) with the same
+file-location bootstrap the CI-green ``test_workflow_api_contract.py`` uses. A
+minimal FastAPI app serves them, so the receiver model, its ``extra='forbid'``
+config, and FastAPI's default 422 body shape are all real. Only the production
+route handler, auth middleware, and run store are omitted, because none of those
+are importable here.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import importlib
 import importlib.util
 from pathlib import Path
 import sys
 from types import ModuleType
-from typing import Final
+from typing import Any, Final
 
 import anyio
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 import httpx
-from pydantic import SecretStr
 
 from app.cluster import WorkflowApiClusterExecutor
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_WORKFLOW_API_ROOT = _REPO_ROOT / 'services' / 'workflow-api'
-_WORKFLOW_API_PACKAGE = 'workflow_api_under_test'
+_WORKFLOW_API_SCHEMAS_SOURCE = (
+    _REPO_ROOT / 'services' / 'workflow-api' / 'app' / 'schemas.py'
+)
+
+if str(_REPO_ROOT) not in sys.path:
+    # workflow-api's schemas.py imports the shared services.common.schemas
+    # package, whose import root is the repository root.
+    sys.path.insert(0, str(_REPO_ROOT))
 
 BASE_URL: Final = 'http://workflow-api.test'
 CALLER_NAME: Final = 'research-orchestrator'
 ORCHESTRATOR_TOKEN: Final = 'wire-stub-orchestrator-token'
 
-_CONTRACT_ID: Final = 'classification-metric-v1'
-_CONTRACT_VERSION: Final = '1.0.0'
-_CONTRACT_DIGEST: Final = 'a' * 64
-
-# The workflow-api process resolves evaluation contracts from a trusted,
-# digest-pinned catalog supplied by configuration. The stub supplies the same
-# catalog for the contract the orchestrator's expanded specs reference, so a
-# schema-valid submission reaches the handler and is accepted.
-TRUSTED_EVALUATION_CONTRACTS: Final[dict[str, dict[str, str]]] = {
-    f'{_CONTRACT_ID}@{_CONTRACT_VERSION}': {
-        'contract_id': _CONTRACT_ID,
-        'version': _CONTRACT_VERSION,
-        'digest': _CONTRACT_DIGEST,
-        'execution_wrapper': 'wrapper.py',
-        'evaluation_entry_point': 'evaluate.py',
-        'container_image_digest': f'example.invalid/evaluator@sha256:{"0" * 64}',
-    },
-}
+_GENERIC_RUN_PATH: Final = '/experiments/runs'
 
 
-class WorkflowApiWireStubError(RuntimeError):
-    """The workflow-api source package could not be loaded into this process."""
-
-
-def _load_workflow_api_package() -> ModuleType:
-    existing = sys.modules.get(_WORKFLOW_API_PACKAGE)
-    if existing is not None:
-        return existing
-    if str(_REPO_ROOT) not in sys.path:
-        # services.common.schemas is imported by the workflow-api source; its
-        # import root is the repository root.
-        sys.path.insert(0, str(_REPO_ROOT))
-    package_dir = _WORKFLOW_API_ROOT / 'app'
+def _load_workflow_api_schemas() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
-        _WORKFLOW_API_PACKAGE,
-        package_dir / '__init__.py',
-        submodule_search_locations=[str(package_dir)],
+        'workflow_api_wire_stub_schemas',
+        _WORKFLOW_API_SCHEMAS_SOURCE,
     )
     if spec is None or spec.loader is None:
-        raise WorkflowApiWireStubError(
-            f'cannot load workflow-api package from {package_dir}'
+        raise RuntimeError(
+            f'cannot load workflow-api schemas from {_WORKFLOW_API_SCHEMAS_SOURCE}'
         )
     module = importlib.util.module_from_spec(spec)
-    sys.modules[_WORKFLOW_API_PACKAGE] = module
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
-_WORKFLOW_API_PACKAGE_MODULE = _load_workflow_api_package()
-_WORKFLOW_API_MAIN = importlib.import_module(f'{_WORKFLOW_API_PACKAGE}.main')
-_WORKFLOW_API_CONFIG = importlib.import_module(f'{_WORKFLOW_API_PACKAGE}.config')
-_WORKFLOW_API_AUTH = importlib.import_module(f'{_WORKFLOW_API_PACKAGE}.auth')
-_WORKFLOW_API_PERSISTENCE = importlib.import_module(
-    f'{_WORKFLOW_API_PACKAGE}.persistence'
-)
-_WORKFLOW_API_REGISTRY = importlib.import_module(f'{_WORKFLOW_API_PACKAGE}.registry')
-_WORKFLOW_API_JOB_SUBMISSION = importlib.import_module(
-    f'{_WORKFLOW_API_PACKAGE}.job_submission'
-)
-
-Settings = _WORKFLOW_API_CONFIG.Settings
-CallerPolicy = _WORKFLOW_API_AUTH.CallerPolicy
-InMemoryRunStore = _WORKFLOW_API_PERSISTENCE.InMemoryRunStore
-WorkflowRegistry = _WORKFLOW_API_REGISTRY.WorkflowRegistry
-NullJobSubmitter = _WORKFLOW_API_JOB_SUBMISSION.NullJobSubmitter
-create_app = _WORKFLOW_API_MAIN.create_app
-DEFAULT_CALLER_OPERATIONS = _WORKFLOW_API_CONFIG.DEFAULT_CALLER_OPERATIONS
+WORKFLOW_API_SCHEMAS = _load_workflow_api_schemas()
+GENERIC_RUN_REQUEST = WORKFLOW_API_SCHEMAS.GenericExperimentRunRequest
 
 
 class InProcessAsgiTransport(httpx.BaseTransport):
     """Synchronous httpx transport that drives an ASGI app without sockets.
 
-    ``WorkflowApiClusterExecutor`` uses a synchronous ``httpx.Client``; the
-    real app is an ASGI callable. This bridge runs the ASGI request to
-    completion on its own event loop and returns a buffered ``httpx.Response``,
-    so no file descriptor or network name is ever touched.
+    ``WorkflowApiClusterExecutor`` uses a synchronous ``httpx.Client``; the app
+    is an ASGI callable. This bridge runs the ASGI request to completion on its
+    own event loop and returns a buffered ``httpx.Response``, so no file
+    descriptor or network name is ever touched.
     """
 
     def __init__(self, app: FastAPI) -> None:
@@ -140,45 +107,47 @@ class InProcessAsgiTransport(httpx.BaseTransport):
 
 @dataclass(frozen=True, slots=True)
 class WireStub:
-    """A real workflow-api app plus the state and transport backing it."""
+    """A minimal FastAPI app, its in-process transport, and the parsed bodies.
+
+    ``accepted`` holds the ``GenericExperimentRunRequest`` instances the real
+    receiver model accepted, in arrival order, so tests can assert on what the
+    receiver parsed without a durable run store.
+    """
 
     app: FastAPI
-    store: InMemoryRunStore
-    settings: Settings
     transport: InProcessAsgiTransport
+    accepted: list[Any]
 
     def client(self) -> httpx.Client:
         return httpx.Client(base_url=BASE_URL, transport=self.transport)
 
 
 def build_wire_stub() -> WireStub:
-    """Build a fresh in-process workflow-api app with an isolated memory store."""
-    settings = Settings(
-        _env_file=None,
-        caller_policies=(
-            CallerPolicy(
-                name=CALLER_NAME,
-                token=SecretStr(ORCHESTRATOR_TOKEN),
-                allowed_operations=DEFAULT_CALLER_OPERATIONS[CALLER_NAME],
-            ),
-        ),
-        job_submission_mode='null',
-        evaluation_contracts=dict(TRUSTED_EVALUATION_CONTRACTS),
-    )
-    registry = WorkflowRegistry(settings.registry_dir)
-    store = InMemoryRunStore()
-    submitter = NullJobSubmitter(namespace=settings.runner_namespace)
-    app = create_app(
-        settings=settings,
-        registry=registry,
-        store=store,
-        submitter=submitter,
-    )
+    """Build a fresh in-process app that serves the real request model."""
+    accepted: list[Any] = []
+    app = FastAPI()
+
+    @app.post(_GENERIC_RUN_PATH, status_code=201)
+    def create_generic_experiment_run(
+        request: GENERIC_RUN_REQUEST,  # type: ignore[valid-type]
+    ) -> JSONResponse:
+        # The parameter annotation IS the real receiver model, so FastAPI
+        # validates the raw body with extra='forbid' and emits the same 422
+        # detail shape the live service produces.
+        accepted.append(request)
+        return JSONResponse(
+            status_code=201,
+            content={
+                'run_id': f'wire-stub-run-{len(accepted)}',
+                'status': {'status': 'accepted'},
+                'job_submission': {},
+            },
+        )
+
     return WireStub(
         app=app,
-        store=store,
-        settings=settings,
         transport=InProcessAsgiTransport(app),
+        accepted=accepted,
     )
 
 
