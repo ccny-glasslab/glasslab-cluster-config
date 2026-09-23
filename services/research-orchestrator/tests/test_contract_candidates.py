@@ -661,3 +661,142 @@ def test_candidate_empty_requirement_id_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ContractCandidateError, match='methodology_requirements'):
         _seal(manager, source)
+
+
+def _promote_fresh_candidate(
+    tmp_path: Path,
+    manager: ContractCandidateManager,
+    *,
+    version: str,
+    marker: str,
+) -> str:
+    source = tmp_path / f'source-{marker}'
+    _write_candidate(source)
+    descriptor_path = source / 'contract.json'
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor['version'] = version
+    descriptor_path.write_text(json.dumps(descriptor))
+    (source / 'evaluator.py').write_text(f'print("evaluate {marker}")\n')
+    sealed = manager.seal(
+        source=source,
+        contract_id='candidate-v1',
+        version=version,
+    )
+    manager.promote(
+        sealed_path=sealed.sealed_path,
+        expected_digest=sealed.digest,
+    )
+    return sealed.digest
+
+
+def test_allocate_version_returns_requested_version_when_free(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+
+    version, newly_reserved = manager.allocate_version(
+        contract_id='candidate-v1',
+        requested_version='1.0.0',
+        run_id='run-a',
+    )
+
+    assert version == '1.0.0'
+    assert newly_reserved is True
+
+
+def test_allocate_version_bumps_past_a_promoted_version(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+    _promote_fresh_candidate(
+        tmp_path, manager, version='1.0.0', marker='first'
+    )
+
+    version, newly_reserved = manager.allocate_version(
+        contract_id='candidate-v1',
+        requested_version='1.0.0',
+        run_id='run-b',
+    )
+
+    assert version == '1.0.1'
+    assert newly_reserved is True
+
+
+def test_allocate_version_is_idempotent_per_run_and_unique_across_runs(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+
+    first = manager.allocate_version(
+        contract_id='candidate-v1',
+        requested_version='1.0.0',
+        run_id='run-b',
+    )
+    again = manager.allocate_version(
+        contract_id='candidate-v1',
+        requested_version='1.0.0',
+        run_id='run-b',
+    )
+    other = manager.allocate_version(
+        contract_id='candidate-v1',
+        requested_version='1.0.0',
+        run_id='run-c',
+    )
+
+    assert first == ('1.0.0', True)
+    assert again == ('1.0.0', False)
+    assert other == ('1.0.1', True)
+
+
+def test_allocated_version_promotes_alongside_the_installed_contract(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+    first_digest = _promote_fresh_candidate(
+        tmp_path, manager, version='1.0.0', marker='first'
+    )
+
+    version, _ = manager.allocate_version(
+        contract_id='candidate-v1',
+        requested_version='1.0.0',
+        run_id='run-b',
+    )
+    second_digest = _promote_fresh_candidate(
+        tmp_path, manager, version=version, marker='second'
+    )
+    assert second_digest != first_digest
+
+    resolver = EvaluationContractResolver(str(tmp_path / 'shared' / 'bundles'))
+    assert resolver.resolve('candidate-v1', '1.0.0').digest == first_digest
+    assert resolver.resolve('candidate-v1', '1.0.1').digest == second_digest
+    catalog = json.loads(
+        (tmp_path / 'shared' / 'catalog.json').read_text()
+    )
+    assert catalog['candidate-v1@1.0.0']['digest'] == first_digest
+    assert catalog['candidate-v1@1.0.1']['digest'] == second_digest
+
+
+def test_promotion_still_refuses_to_overwrite_an_occupied_version(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+    _promote_fresh_candidate(
+        tmp_path, manager, version='1.0.0', marker='first'
+    )
+    source = tmp_path / 'source-second'
+    _write_candidate(source)
+    (source / 'evaluator.py').write_text('print("evaluate second")\n')
+    second = manager.seal(
+        source=source,
+        contract_id='candidate-v1',
+        version='1.0.0',
+    )
+
+    with pytest.raises(
+        ContractCandidateError,
+        match='already promoted with another digest',
+    ):
+        manager.promote(
+            sealed_path=second.sealed_path,
+            expected_digest=second.digest,
+        )
