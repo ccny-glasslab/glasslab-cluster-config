@@ -636,6 +636,8 @@ class KubernetesJobSubmitter(JobSubmitter):
         }
         if manifest.workload_id:
             labels['glasslab.io/workload-id'] = _sanitize_label(manifest.workload_id)
+        if manifest.trace_id:
+            labels['glasslab.io/trace-id'] = _sanitize_label(manifest.trace_id)
         workspace_config = manifest.config_payload.get('workspace')
         network_policy = 'none'
         if isinstance(workspace_config, dict):
@@ -649,7 +651,10 @@ class KubernetesJobSubmitter(JobSubmitter):
             priority_class_name = self.settings.user_priority_class_name
         env = [
             self.client.V1EnvVar(name='GLASSLAB_RUNNER_EXPERIMENT_ID', value=manifest.run_id),
-            self.client.V1EnvVar(name='GLASSLAB_RUNNER_TRACE_ID', value=manifest.run_id),
+            self.client.V1EnvVar(
+                name='GLASSLAB_RUNNER_TRACE_ID',
+                value=manifest.trace_id or manifest.run_id,
+            ),
             self.client.V1EnvVar(name='GLASSLAB_RUNNER_MANIFEST_JSON', value=manifest.model_dump_json()),
             self.client.V1EnvVar(name='GLASSLAB_RUNNER_ARTIFACTS_ROOT', value=self.settings.artifacts_mount_path),
         ]

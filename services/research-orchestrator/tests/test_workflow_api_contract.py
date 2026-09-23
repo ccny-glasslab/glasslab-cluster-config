@@ -353,3 +353,16 @@ def test_orchestrator_records_kubernetes_job_uid_from_receipt() -> None:
 
     assert submission.kubernetes_uid is not None
     assert submission.kubernetes_uid == job_uid
+
+
+def test_submission_body_carries_orchestrator_run_id_as_trace_id() -> None:
+    # L5: the orchestrator run id is the single correlation id. It must travel
+    # on the submit body as trace_id so the persisted workflow-api record, the
+    # Kubernetes Job label, and the runner env all resolve to the same run.
+    spec = _spec(workspace=False)
+
+    body = _submission_body(spec)
+    request = GENERIC_RUN_REQUEST.model_validate(body)
+
+    assert body['trace_id'] == spec.run_id
+    assert request.trace_id == spec.run_id

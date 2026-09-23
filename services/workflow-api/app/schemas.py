@@ -306,6 +306,7 @@ class GenericExperimentRunRequest(BaseModel):
     submitted_by: str | None = None
     run_priority: Literal['user', 'autonomous'] = 'user'
     session_id: str | None = None
+    trace_id: str | None = None
 
     @field_validator('dataset_bindings')
     @classmethod

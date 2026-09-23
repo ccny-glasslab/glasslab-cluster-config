@@ -1289,3 +1289,96 @@ def test_submit_run_receipt_carries_created_job_uid(tmp_path, monkeypatch) -> No
     receipt = submitter.submit_run(_build_submission_manifest())
 
     assert receipt.job_uid == job_uid
+
+
+def _build_recording_submitter(monkeypatch, artifacts_mount_path: Path):
+    class Record(SimpleNamespace):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    class BatchApi:
+        submitted = None
+
+        def create_namespaced_job(self, *, namespace, body):
+            self.submitted = (namespace, body)
+            return SimpleNamespace(metadata=SimpleNamespace(uid='k8s-uid-rec'))
+
+    batch = BatchApi()
+    client = SimpleNamespace(
+        BatchV1Api=lambda: batch,
+        CoreV1Api=lambda: Record(),
+        **{
+            name: Record
+            for name in (
+                'V1Capabilities',
+                'V1Container',
+                'V1EmptyDirVolumeSource',
+                'V1EnvVar',
+                'V1Job',
+                'V1JobSpec',
+                'V1LocalObjectReference',
+                'V1ObjectMeta',
+                'V1PersistentVolumeClaimVolumeSource',
+                'V1PodSecurityContext',
+                'V1PodSpec',
+                'V1PodTemplateSpec',
+                'V1ResourceRequirements',
+                'V1SeccompProfile',
+                'V1SecurityContext',
+                'V1Volume',
+                'V1VolumeMount',
+            )
+        },
+    )
+    kube_config = SimpleNamespace(load_incluster_config=lambda: None)
+    monkeypatch.setattr(
+        job_submission_module,
+        '_load_kube_modules',
+        lambda: (client, kube_config, RuntimeError, RuntimeError),
+    )
+    submitter = KubernetesJobSubmitter(
+        Settings(
+            runner_service_account_name='glasslab-research-workload',
+            artifacts_mount_path=str(artifacts_mount_path),
+        )
+    )
+    return submitter, batch
+
+
+def _runner_env(job, name: str) -> str:
+    container = job.spec.template.spec.containers[0]
+    return next(var.value for var in container.env if var.name == name)
+
+
+def test_submit_run_labels_and_envs_orchestrator_trace_id(tmp_path, monkeypatch) -> None:
+    # L5: the correlation id must reach the live Job as a label and the runner
+    # process as an env var, so cluster-side evidence is traceable to the
+    # orchestrator run without a database lookup.
+    trace_id = 'orch-run-9f8e7d6c'
+    manifest = _build_submission_manifest().model_copy(
+        update={'trace_id': trace_id}
+    )
+    submitter, batch = _build_recording_submitter(
+        monkeypatch, tmp_path / 'artifacts'
+    )
+
+    submitter.submit_run(manifest)
+
+    _, job = batch.submitted
+    assert job.metadata.labels['glasslab.io/trace-id'] == trace_id
+    assert _runner_env(job, 'GLASSLAB_RUNNER_TRACE_ID') == trace_id
+
+
+def test_submit_run_trace_env_falls_back_to_run_id(tmp_path, monkeypatch) -> None:
+    # A manifest without trace_id (legacy producer or persisted record) keeps
+    # the previous behavior: the workflow-api run id remains the trace value.
+    manifest = _build_submission_manifest()
+    submitter, batch = _build_recording_submitter(
+        monkeypatch, tmp_path / 'artifacts'
+    )
+
+    submitter.submit_run(manifest)
+
+    _, job = batch.submitted
+    assert 'glasslab.io/trace-id' not in job.metadata.labels
+    assert _runner_env(job, 'GLASSLAB_RUNNER_TRACE_ID') == manifest.run_id
