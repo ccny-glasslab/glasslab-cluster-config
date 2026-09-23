@@ -242,7 +242,7 @@ class Settings(BaseSettings):
     # (Honeydew -> Thinking on .18, Beaker -> Coder-Next on .17).
     agent_base_url_honeydew: str | None = None
     agent_base_url_beaker: str | None = None
-    qwen_base_url: str = 'http://192.168.1.17:52415/v1'
+    qwen_base_url: str = 'http://192.168.1.17:52417/v1'
     qwen_model_name: str = 'mlx-community/Qwen3-Coder-Next-4bit'
     opencode_runtime_image: str = (
         'ghcr.io/ccny-glasslab/glasslab-research-orchestrator:0.1.0'
