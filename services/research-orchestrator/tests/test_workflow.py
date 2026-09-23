@@ -52,6 +52,7 @@ from app.schemas import (
     EventRecord,
     IngestedDatasetRecord,
     JobStatus,
+    JOB_TERMINAL_STATUSES,
     RequestedAction,
     PolicyClassification,
     ProposedMetric,
@@ -2657,6 +2658,130 @@ def test_cancel_blocks_inflight_submission_leak(
         stored.status == JobStatus.CANCELLED
         for stored in store.list_jobs(run.run_id)
     )
+
+
+def _make_submission_uncertain(store, cluster, monkeypatch, job):
+    # Recreate the lost-response window: the adapter's submit reaches
+    # workflow-api (the real run is accepted and recorded) and THEN raises.
+    # Returns the real submit so a test can restore it for the recovery pass.
+    store.update_job(
+        job.model_copy(
+            update={
+                'status': JobStatus.QUEUED,
+                'external_run_id': None,
+                'job_name': None,
+                'kubernetes_uid': None,
+            }
+        )
+    )
+    reset = store.get_job(job.job_id)
+    assert reset.status == JobStatus.QUEUED
+    assert reset.external_run_id is None
+
+    real_submit = cluster.submit
+
+    def submit_then_lose_response(spec):
+        real_submit(spec)
+        raise TimeoutError('response lost after workflow-api accepted the job')
+
+    monkeypatch.setattr(cluster, 'submit', submit_then_lose_response)
+    return real_submit
+
+
+def test_submission_exception_after_cluster_accepts_is_not_marked_failed(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # A submission that raises AFTER workflow-api already accepted the job
+    # (lost response, unparsable body, adapter persist failure) must not be
+    # recorded as terminal FAILED. FAILED is excluded from reconcile, so the
+    # live Kubernetes Job would be orphaned and the run misreported. The job
+    # instead stays UNKNOWN, which is both active and reconcilable.
+    _, store, cluster, _, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    job = store.list_jobs(run.run_id)[0]
+    _make_submission_uncertain(store, cluster, monkeypatch, job)
+
+    engine._fill_job_capacity(run.run_id)
+
+    stored = store.get_job(job.job_id)
+    assert stored.status == JobStatus.UNKNOWN, (
+        f'a possibly-live submission must stay UNKNOWN, got {stored.status}'
+    )
+    assert stored.status not in JOB_TERMINAL_STATUSES
+    assert store.get_run(run.run_id).state in {
+        RunState.JOB_QUEUED,
+        RunState.JOB_RUNNING,
+    }
+
+
+def test_uncertain_submission_recovers_on_reconcile_without_duplicate_job(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # Recovery re-submits the UNKNOWN job under the SAME idempotency key:
+    # workflow-api dedupes, so the job reaches RUNNING with the originally
+    # accepted external run id and exactly one external run per job row.
+    _, store, cluster, _, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    jobs = store.list_jobs(run.run_id)
+    job = jobs[0]
+    real_submit = _make_submission_uncertain(store, cluster, monkeypatch, job)
+
+    engine._fill_job_capacity(run.run_id)
+    assert store.get_job(job.job_id).status == JobStatus.UNKNOWN
+
+    monkeypatch.setattr(cluster, 'submit', real_submit)
+    recovered = engine.reconcile_run(run.run_id)
+
+    stored = store.get_job(job.job_id)
+    assert stored.status == JobStatus.RUNNING
+    assert stored.external_run_id == f'fake-{job.spec.orchestrator_job_id}'
+    assert len(cluster.submissions) == len(jobs)
+    assert recovered.state == RunState.JOB_RUNNING
+
+
+def test_event_emitter_failure_after_submit_does_not_wipe_persisted_submission(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # Amplifier hazard: the success event used to fire INSIDE the same try as
+    # the durable persist. If that event raised, the except wrote the
+    # pre-submit copy (external_run_id=None) back over the persisted row and
+    # marked it FAILED, erasing the accepted run id. The event now fires after
+    # the commit, so a renderer failure cannot wipe the submission record.
+    _, store, cluster, _, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    job = store.list_jobs(run.run_id)[0]
+    store.update_job(
+        job.model_copy(
+            update={
+                'status': JobStatus.QUEUED,
+                'external_run_id': None,
+                'job_name': None,
+                'kubernetes_uid': None,
+            }
+        )
+    )
+
+    real_submit = cluster.submit
+
+    def renderer_failure(_run_id, *, source, event_type, payload):
+        raise RuntimeError('discord renderer unavailable')
+
+    monkeypatch.setattr(engine, '_event', renderer_failure)
+
+    with pytest.raises(RuntimeError, match='renderer unavailable'):
+        engine._fill_job_capacity(run.run_id)
+
+    stored = store.get_job(job.job_id)
+    assert stored.external_run_id == f'fake-{job.spec.orchestrator_job_id}'
+    assert stored.status not in JOB_TERMINAL_STATUSES
+    assert stored.status == JobStatus.RUNNING
+    # The idempotent adapter returns the accepted run on a replay; the event
+    # failure must not have triggered a second external submission.
+    assert real_submit(job.spec).external_run_id == stored.external_run_id
+    assert len(cluster.submissions) == len(store.list_jobs(run.run_id))
 
 
 def test_event_sequence_is_append_only_and_ordered(orchestrator_bundle) -> None:
