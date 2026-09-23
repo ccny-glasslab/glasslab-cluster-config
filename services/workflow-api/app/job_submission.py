@@ -904,7 +904,10 @@ class KubernetesJobSubmitter(JobSubmitter):
         )
 
         try:
-            self.batch_api.create_namespaced_job(namespace=self.settings.runner_namespace, body=job)
+            created_job = self.batch_api.create_namespaced_job(
+                namespace=self.settings.runner_namespace,
+                body=job,
+            )
         except self.api_exception as exc:
             upstream_status = getattr(exc, 'status', None)
             if isinstance(upstream_status, int) and 400 <= upstream_status < 500:
@@ -916,12 +919,18 @@ class KubernetesJobSubmitter(JobSubmitter):
                 502,
                 'Kubernetes Job API failed during submission',
             ) from exc
+        # The create response is the server-materialized Job; its metadata.uid is
+        # assigned by the API server before the call returns, so the receipt can
+        # carry the real uid for orchestrator-to-Job correlation.
+        created_metadata = getattr(created_job, 'metadata', None)
+        job_uid = getattr(created_metadata, 'uid', None)
         return JobSubmissionReceipt(
             job_name=job_name,
             namespace=self.settings.runner_namespace,
             accepted_at=datetime.now(timezone.utc),
             status='submitted',
             detail='Run submitted to Kubernetes Job API.',
+            job_uid=str(job_uid) if job_uid else None,
         )
 
     def get_live_status(self, record: RunRecord) -> RunStatus | None:

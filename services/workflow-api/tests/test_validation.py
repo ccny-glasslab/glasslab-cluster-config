@@ -1219,3 +1219,73 @@ def test_run_create_request_accepts_bounded_inputs() -> None:
     )
 
     assert request.inputs == {'dataset_name': 'titanic'}
+
+
+def _build_uid_recording_submitter(
+    monkeypatch,
+    artifacts_mount_path: Path,
+    job_uid: str,
+) -> KubernetesJobSubmitter:
+    class Record(SimpleNamespace):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    class BatchApi:
+        def create_namespaced_job(self, *, namespace, body):
+            return SimpleNamespace(metadata=SimpleNamespace(uid=job_uid))
+
+    batch = BatchApi()
+    client = SimpleNamespace(
+        BatchV1Api=lambda: batch,
+        CoreV1Api=lambda: Record(),
+        **{
+            name: Record
+            for name in (
+                'V1Capabilities',
+                'V1Container',
+                'V1EmptyDirVolumeSource',
+                'V1EnvVar',
+                'V1Job',
+                'V1JobSpec',
+                'V1LocalObjectReference',
+                'V1ObjectMeta',
+                'V1PersistentVolumeClaimVolumeSource',
+                'V1PodSecurityContext',
+                'V1PodSpec',
+                'V1PodTemplateSpec',
+                'V1ResourceRequirements',
+                'V1SeccompProfile',
+                'V1SecurityContext',
+                'V1Volume',
+                'V1VolumeMount',
+            )
+        },
+    )
+    kube_config = SimpleNamespace(load_incluster_config=lambda: None)
+    monkeypatch.setattr(
+        job_submission_module,
+        '_load_kube_modules',
+        lambda: (client, kube_config, RuntimeError, RuntimeError),
+    )
+    return KubernetesJobSubmitter(
+        Settings(
+            runner_service_account_name='glasslab-research-workload',
+            artifacts_mount_path=str(artifacts_mount_path),
+        )
+    )
+
+
+def test_submit_run_receipt_carries_created_job_uid(tmp_path, monkeypatch) -> None:
+    # H4: the Kubernetes create call returns the server-assigned Job with its
+    # metadata.uid. The receipt must carry that uid so the orchestrator can
+    # correlate its durable record to the live Job instead of storing None.
+    job_uid = 'k8s-uid-abc123'
+    submitter = _build_uid_recording_submitter(
+        monkeypatch,
+        tmp_path / 'artifacts',
+        job_uid,
+    )
+
+    receipt = submitter.submit_run(_build_submission_manifest())
+
+    assert receipt.job_uid == job_uid

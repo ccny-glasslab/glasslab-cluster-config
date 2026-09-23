@@ -960,6 +960,7 @@ class JobSubmissionReceipt(BaseModel):
     accepted_at: datetime
     status: str
     detail: str
+    job_uid: str | None = None
 
 
 class WorkflowFamilySummary(BaseModel):
