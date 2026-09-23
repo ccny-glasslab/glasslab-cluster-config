@@ -3726,6 +3726,40 @@ class ResearchOrchestrator:
                 ),
                 expected_version=current.version,
             )
+        # The protocol prompt pins the contract id to the objective, so a second
+        # run on the same objective would re-draft the same id@version with new
+        # bytes and collide at promotion (issue #490 follow-up). Allocate a free
+        # version before drafting and have the agent author it, so the candidate
+        # never targets an occupied id@version. The run's own referenced
+        # contract is a repository-owned template and is never allocated into.
+        evaluator_type = proposal.get('evaluator_type')
+        allocated_version = run.evaluation_contract_version
+        if (
+            isinstance(evaluator_type, str)
+            and evaluator_type
+            and evaluator_type != run.evaluation_contract_id
+        ):
+            allocated_version, newly_reserved = (
+                self.contract_candidates.allocate_version(
+                    contract_id=evaluator_type,
+                    requested_version=run.evaluation_contract_version,
+                    run_id=run_id,
+                )
+            )
+            if (
+                newly_reserved
+                and allocated_version != run.evaluation_contract_version
+            ):
+                self._event(
+                    run_id,
+                    source='orchestrator',
+                    event_type='contract.version_allocated',
+                    payload={
+                        'contract_id': evaluator_type,
+                        'requested_version': run.evaluation_contract_version,
+                        'allocated_version': allocated_version,
+                    },
+                )
         prompt = (
             'Draft an immutable evaluation-contract candidate for the approved '
             'program.md. Create a self-contained directory under '
@@ -3738,8 +3772,10 @@ class ResearchOrchestrator:
             'must be one JSON object with exactly these top-level keys and '
 'no others: contract_id (string; it must be EXACTLY the approved '
              'proposal evaluator_type value below, not a descriptive name), '
-             'version (semantic-version string such as "1.0.0"; it must '
-             'exactly match the version in the action arguments), '
+             'version (string; it must be EXACTLY '
+             f'"{allocated_version}"; the orchestrator owns the contract '
+             'version namespace and reserved this version for this '
+             'candidate), '
             'manifest (an inline JSON object with FLAT keys only: '
             'manifest.primary_metric must be the plain metric-name STRING '
             '(for example "roc_auc"), never a nested object; '
@@ -3771,7 +3807,7 @@ class ResearchOrchestrator:
             '__pycache__ directory before returning. Return exactly one '
             '`propose_evaluation_contract` '
             'action whose arguments contain exactly the keys `contract_id`, '
-            '`version` (semantic-version string such as 1.0.0; the key is '
+            f'`version` (must be exactly "{allocated_version}"; the key is '
             '`version`, never `semantic_version`), `candidate_path` (relative '
             'to the Beaker workspace), and `rationale`. Do not request '
             'publication, Kubernetes, registry, or '
@@ -3847,7 +3883,7 @@ class ResearchOrchestrator:
             sealed = self.contract_candidates.seal(
                 source=source,
                 contract_id=request.contract_id,
-                version=request.version,
+                version=allocated_version,
             )
             descriptor = sealed.descriptor
             conflict = self._resource_authority_conflict_message(
@@ -3905,6 +3941,12 @@ class ResearchOrchestrator:
                     'contract_id must be exactly the approved proposal '
                     f'evaluator_type {proposal.get("evaluator_type")!r} but '
                     f'the action proposed {request.contract_id!r}'
+                )
+            if request.version != allocated_version:
+                mismatches.append(
+                    'version must be exactly the orchestrator-allocated '
+                    f'contract version {allocated_version!r} but the action '
+                    f'proposed {request.version!r}'
                 )
             if not isinstance(primary, dict):
                 mismatches.append(

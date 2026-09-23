@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 from uuid import uuid4
 
@@ -33,6 +34,21 @@ from .schemas import EvaluationContractDescriptor
 
 class ContractCandidateError(ValueError):
     pass
+
+
+# Candidates name their version with the ContractCandidateRequest semver
+# pattern; allocation only needs the numeric core so it can bump the patch.
+_SEMANTIC_VERSION = re.compile(r'^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?$')
+
+
+def _bump_patch(version: str) -> str:
+    match = _SEMANTIC_VERSION.match(version)
+    if match is None:
+        raise ContractCandidateError(
+            f'cannot allocate a version above non-semantic version {version!r}'
+        )
+    major, minor, patch = match.groups()
+    return f'{major}.{minor}.{int(patch) + 1}'
 
 
 def _validate_declared_budget(
@@ -298,6 +314,69 @@ class ContractCandidateManager:
         return EvaluationContractDescriptor.model_validate_json(
             (path / 'contract.json').read_text()
         )
+
+    def allocate_version(
+        self,
+        *,
+        contract_id: str,
+        requested_version: str,
+        run_id: str,
+    ) -> tuple[str, bool]:
+        """Return a free version to seal a candidate under, reserving it.
+
+        A promoted id@version is immutable, so the orchestrator allocates a
+        free version before the agent drafts instead of colliding at promotion.
+        The claim is an atomic directory create, and it is keyed to ``run_id``
+        so redrafts and resumes reuse it. Returns ``(version, newly_reserved)``.
+        """
+        reservations_root = self._reservations_root(contract_id)
+        existing = self._run_reservation(reservations_root, run_id)
+        if existing is not None:
+            return existing, False
+        occupied = self._occupied_versions(contract_id)
+        candidate = requested_version
+        while True:
+            if candidate not in occupied:
+                try:
+                    (reservations_root / candidate).mkdir(parents=True)
+                except FileExistsError:
+                    occupied.add(candidate)
+                else:
+                    (reservations_root / candidate / 'run').write_text(
+                        run_id,
+                        encoding='utf-8',
+                    )
+                    return candidate, True
+            candidate = _bump_patch(candidate)
+
+    def _reservations_root(self, contract_id: str) -> Path:
+        return self.sealed_root / '.version-reservations' / contract_id
+
+    @staticmethod
+    def _run_reservation(reservations_root: Path, run_id: str) -> str | None:
+        if not reservations_root.is_dir():
+            return None
+        for entry in sorted(reservations_root.iterdir()):
+            marker = entry / 'run'
+            if (
+                entry.is_dir()
+                and marker.is_file()
+                and marker.read_text(encoding='utf-8') == run_id
+            ):
+                return entry.name
+        return None
+
+    def _occupied_versions(self, contract_id: str) -> set[str]:
+        versions: set[str] = set()
+        for root in (
+            self.promoted_root / contract_id,
+            self._reservations_root(contract_id),
+        ):
+            if root.is_dir():
+                versions.update(
+                    entry.name for entry in root.iterdir() if entry.is_dir()
+                )
+        return versions
 
     def promote(
         self,
