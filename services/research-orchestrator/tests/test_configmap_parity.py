@@ -260,18 +260,6 @@ OVERRIDES: dict[str, Override] = dict(
                 allowed=frozenset({'prompt'}),
             ),
         ),
-        # --- stale code default corrected in the next commit ---
-        (
-            _P + 'QWEN_BASE_URL',
-            Override(
-                'eq',
-                'The manifest correctly targets the live 52417 split serving; '
-                'the code default still points at the retired 52415 endpoint '
-                'and is corrected in the next commit, after which this entry is '
-                'removed.',
-                expected='http://192.168.1.17:52417/v1',
-            ),
-        ),
     ]
 )
 
