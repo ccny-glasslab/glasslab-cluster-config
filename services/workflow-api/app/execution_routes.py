@@ -248,6 +248,7 @@ def register_execution_routes(
             dataset_bindings=request.dataset_bindings,
             budget=request.budget,
             metric_contract=metric_contract,
+            trace_id=request.trace_id,
         )
         try:
             resolve_evaluation_contract(manifest, settings)

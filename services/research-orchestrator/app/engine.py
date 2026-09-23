@@ -6085,6 +6085,11 @@ class ResearchOrchestrator:
             submitting = self.store.update_job(
                 job.model_copy(update={'status': JobStatus.SUBMITTING})
             )
+            # Only the external submit and the durable write that persists its
+            # ids are inside the try: if either raises, workflow-api may
+            # already have created the Kubernetes Job, so the job is recorded
+            # UNKNOWN (never FAILED) and reconcile re-submits under the same
+            # idempotency key, which dedupes to the accepted run.
             try:
                 submission = self.cluster.submit(submitting.spec)
                 status = (
@@ -6102,22 +6107,11 @@ class ResearchOrchestrator:
                         }
                     )
                 )
-                self._event(
-                    run_id,
-                    source='cluster',
-                    event_type='job.submitted',
-                    payload={
-                        'job_id': updated.job_id,
-                        'external_run_id': updated.external_run_id,
-                        'job_name': updated.job_name,
-                        'contract_digest': updated.evaluation_contract_digest,
-                    },
-                )
             except Exception as exc:
                 self.store.update_job(
                     submitting.model_copy(
                         update={
-                            'status': JobStatus.FAILED,
+                            'status': JobStatus.UNKNOWN,
                             'exit_information': {'submission_error': str(exc)},
                         }
                     )
@@ -6125,13 +6119,28 @@ class ResearchOrchestrator:
                 self._event(
                     run_id,
                     source='cluster',
-                    event_type='job.failed',
+                    event_type='job.submission_uncertain',
                     payload={
                         'job_id': submitting.job_id,
                         'phase': 'submission',
                         'error': str(exc),
                     },
                 )
+                continue
+            # Fired only after the submission is durably committed, so a
+            # renderer/event failure cannot roll the persisted row back to its
+            # pre-submit copy (which would erase the accepted external_run_id).
+            self._event(
+                run_id,
+                source='cluster',
+                event_type='job.submitted',
+                payload={
+                    'job_id': updated.job_id,
+                    'external_run_id': updated.external_run_id,
+                    'job_name': updated.job_name,
+                    'contract_digest': updated.evaluation_contract_digest,
+                },
+            )
         run = self.store.get_run(run_id)
         active = self.store.list_jobs(
             run_id,

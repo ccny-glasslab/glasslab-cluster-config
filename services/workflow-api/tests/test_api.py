@@ -282,6 +282,45 @@ def test_generic_workspace_submission_persists_normalized_workspace() -> None:
     assert workspace['network_policy'] == 'none'
 
 
+def test_generic_experiment_persists_orchestrator_trace_id() -> None:
+    # L5: the orchestrator run id arrives as trace_id and must land on the
+    # persisted record's manifest, which is the durable correlation anchor for
+    # the Job label and runner env.
+    trace_id = 'orch-run-abc123'
+    response = build_client().post(
+        '/experiments/runs',
+        json={**_workspace_run_payload(['python3', 'run.py']), 'trace_id': trace_id},
+    )
+
+    assert response.status_code == 201
+    assert response.json()['manifest']['trace_id'] == trace_id
+
+
+def test_legacy_run_persists_trace_id() -> None:
+    # The RunCreateRequest path is the other submission entrypoint and must
+    # persist the same correlation id rather than silently dropping it.
+    trace_id = 'orch-run-legacy-1'
+    response = build_legacy_compatibility_client().post(
+        '/runs',
+        json={
+            'workflow_id': 'generic-tabular-benchmark',
+            'objective': 'Persist a correlation trace id on the legacy run path.',
+            'inputs': {
+                'dataset_name': 'titanic',
+                'train_uri': 's3://datasets/titanic/train.csv',
+                'test_uri': 's3://datasets/titanic/test.csv',
+                'target_column': 'Survived',
+            },
+            'models': ['logistic_regression'],
+            'resource_profile': 'cpu-small',
+            'trace_id': trace_id,
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()['manifest']['trace_id'] == trace_id
+
+
 def test_generic_workspace_submission_binds_registry_resource_profile() -> None:
     # Issue #491: the request body carries no resource fields at all
     # (GenericExperimentRunRequest forbids them); the Job's cpu/memory requests

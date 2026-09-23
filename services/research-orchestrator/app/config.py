@@ -52,7 +52,7 @@ class Settings(BaseSettings):
         env_file='.env',
         env_prefix='GLASSLAB_ORCHESTRATOR_',
         case_sensitive=False,
-        extra='ignore',
+        extra='forbid',
     )
 
     app_name: str = 'glasslab-research-orchestrator'
@@ -242,7 +242,7 @@ class Settings(BaseSettings):
     # (Honeydew -> Thinking on .18, Beaker -> Coder-Next on .17).
     agent_base_url_honeydew: str | None = None
     agent_base_url_beaker: str | None = None
-    qwen_base_url: str = 'http://192.168.1.17:52415/v1'
+    qwen_base_url: str = 'http://192.168.1.17:52417/v1'
     qwen_model_name: str = 'mlx-community/Qwen3-Coder-Next-4bit'
     opencode_runtime_image: str = (
         'ghcr.io/ccny-glasslab/glasslab-research-orchestrator:0.1.0'
@@ -261,7 +261,7 @@ class Settings(BaseSettings):
     cluster_execution_api_url: str = (
         'http://glasslab-workflow-api.glasslab-v2.svc.cluster.local:8080'
     )
-    cluster_execution_mode: str = 'workflow-api'
+    cluster_execution_mode: Literal['workflow-api', 'fake'] = 'workflow-api'
     cluster_execution_workload_id: str = 'workspace-cpu-ml-v1'
     cluster_execution_experiment_type: str = 'research-workspace-job'
     # Durable record of idempotency_key -> external_run_id submissions so a

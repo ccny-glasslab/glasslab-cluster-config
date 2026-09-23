@@ -47,7 +47,7 @@ class Settings(BaseSettings):
         env_file='.env',
         env_prefix='GLASSLAB_WORKFLOW_API_',
         case_sensitive=False,
-        extra='ignore',
+        extra='forbid',
     )
 
     app_name: str = 'glasslab-workflow-api'

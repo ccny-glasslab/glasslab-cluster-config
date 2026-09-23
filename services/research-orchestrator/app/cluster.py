@@ -296,6 +296,7 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
             },
             'submitted_by': 'research-orchestrator',
             'run_priority': 'user',
+            'trace_id': spec.run_id,
         }
         # Runner images are fixed by the workflow registry for every workload.
         # A persisted job spec may describe provenance, but cannot select code.

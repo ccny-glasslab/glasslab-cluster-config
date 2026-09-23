@@ -1112,6 +1112,7 @@ def create_run_record(
         evaluator_type=workflow.evaluator_type,
         approval_tier=workflow.approval_tier,
         expected_artifacts=workflow.expected_artifacts.model_dump(mode='json'),
+        trace_id=request.trace_id,
     )
     status_payload = RunStatus(run_id=run_id, status='accepted', updated_at=now, detail='Run accepted by workflow-api.')
     pending_receipt = JobSubmissionReceipt(

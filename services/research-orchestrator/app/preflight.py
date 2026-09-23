@@ -186,45 +186,101 @@ def _references_metrics_json(
             assignments,
             resolving=resolving | {expression.id},
         )
-    return 'metrics.json' in ast.unparse(expression)
+    # Match the exact filename, not a substring: ``metrics.json.bak`` and
+    # ``not_metrics.json`` are different files and must not count as the
+    # contract's metrics output.
+    return any(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and Path(node.value).name == 'metrics.json'
+        for node in ast.walk(expression)
+    )
+
+
+def _is_metrics_write_path(
+    expression: ast.expr,
+    assignments: dict[str, ast.expr],
+    renamed_metric_sources: frozenset[str],
+) -> bool:
+    # A path is a metrics write target when it references metrics.json or is a
+    # temp file atomically renamed onto metrics.json.
+    if (
+        isinstance(expression, ast.Name)
+        and expression.id in renamed_metric_sources
+    ):
+        return True
+    return _references_metrics_json(expression, assignments)
 
 
 def _opens_metrics_json_for_write(
     expression: ast.expr,
     assignments: dict[str, ast.expr],
+    renamed_metric_sources: frozenset[str] = frozenset(),
 ) -> bool:
     """Whether ``expression`` is a call opening ``metrics.json`` for writing.
 
     Covers the builtin ``open(<path>, ...)`` and the ``Path`` method
     ``<path>.open(...)``, so both ``with open('metrics.json', 'w') as handle``
     and ``handle = (output_dir / 'metrics.json').open('w')`` bind a handle the
-    later ``json.dump(<dict>, <handle>)`` scan can resolve.
+    later ``json.dump(<dict>, <handle>)`` scan can resolve. A handle opened on a
+    temp file that is later renamed onto metrics.json counts too.
     """
     if not isinstance(expression, ast.Call):
         return False
-    if expression.args and _references_metrics_json(
+    if expression.args and _is_metrics_write_path(
         expression.args[0],
         assignments,
+        renamed_metric_sources,
     ):
         return True
     func = expression.func
     return (
         isinstance(func, ast.Attribute)
         and func.attr == 'open'
-        and _references_metrics_json(func.value, assignments)
+        and _is_metrics_write_path(
+            func.value,
+            assignments,
+            renamed_metric_sources,
+        )
     )
 
 
-def _json_dumps_argument(expression: ast.expr) -> ast.Call | None:
+def _json_dumps_argument(
+    expression: ast.expr,
+    assignments: dict[str, ast.expr] | None = None,
+    *,
+    resolving: frozenset[str] = frozenset(),
+) -> ast.Call | None:
     """Return the ``json.dumps(...)`` call serializing ``expression``, if any.
 
-    ``Path.write_text`` is commonly handed ``json.dumps(<dict>, ...) + '\\n'``,
-    so a string concatenation is unwrapped before the dumps call is looked for.
+    A write target is commonly handed ``json.dumps(<dict>, ...) + '\\n'``, so a
+    string concatenation is unwrapped before the dumps call is looked for. The
+    serialized payload is also frequently bound to a variable first
+    (``payload = json.dumps(<dict>)`` then ``handle.write(payload)``), so a
+    ``Name`` is resolved through ``assignments`` when they are supplied.
+    ``resolving`` breaks cycles in self-referential assignments.
     """
     if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
         return _json_dumps_argument(
-            expression.left
-        ) or _json_dumps_argument(expression.right)
+            expression.left,
+            assignments,
+            resolving=resolving,
+        ) or _json_dumps_argument(
+            expression.right,
+            assignments,
+            resolving=resolving,
+        )
+    if isinstance(expression, ast.Name) and assignments is not None:
+        if expression.id in resolving:
+            return None
+        assigned = assignments.get(expression.id)
+        if assigned is None:
+            return None
+        return _json_dumps_argument(
+            assigned,
+            assignments,
+            resolving=resolving | {expression.id},
+        )
     if (
         isinstance(expression, ast.Call)
         and isinstance(expression.func, ast.Attribute)
@@ -245,14 +301,11 @@ def _metrics_root_errors(
     assignments: dict[str, ast.expr] = {}
     subscript_keys: dict[str, set[str]] = {}
     function_return_keys: dict[str, set[str]] = {}
-    metric_handles: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and len(node.targets) == 1:
             target = node.targets[0]
             if isinstance(target, ast.Name):
                 assignments[target.id] = node.value
-                if _opens_metrics_json_for_write(node.value, assignments):
-                    metric_handles.add(target.id)
             elif (
                 isinstance(target, ast.Subscript)
                 and isinstance(target.value, ast.Name)
@@ -268,6 +321,50 @@ def _metrics_root_errors(
             and node.value is not None
         ):
             assignments[node.target.id] = node.value
+
+    # Temp-file-then-rename writes (``tmp.write_text(...)`` followed by
+    # ``os.replace(tmp, .../metrics.json)``) are atomic metrics writes; record
+    # the temp variables so their writes resolve to metrics.json.
+    rename_candidates: set[str] = set()
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+        ):
+            continue
+        attr = node.func.attr
+        if attr not in {'replace', 'rename', 'move'}:
+            continue
+        if len(node.args) >= 2 and _references_metrics_json(
+            node.args[1],
+            assignments,
+        ):
+            # os.replace(src, dst) / os.rename(src, dst) / shutil.move(src, dst)
+            if isinstance(node.args[0], ast.Name):
+                rename_candidates.add(node.args[0].id)
+        if (
+            attr in {'replace', 'rename'}
+            and node.args
+            and _references_metrics_json(node.args[0], assignments)
+            and isinstance(node.func.value, ast.Name)
+        ):
+            # tmp.replace(dst) / tmp.rename(dst)
+            rename_candidates.add(node.func.value.id)
+    renamed_metric_sources = frozenset(rename_candidates)
+
+    metric_handles: set[str] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and _opens_metrics_json_for_write(
+                node.value,
+                assignments,
+                renamed_metric_sources,
+            )
+        ):
+            metric_handles.add(node.targets[0].id)
         if not isinstance(node, ast.With):
             continue
         for item in node.items:
@@ -276,6 +373,7 @@ def _metrics_root_errors(
             if _opens_metrics_json_for_write(
                 item.context_expr,
                 assignments,
+                renamed_metric_sources,
             ):
                 metric_handles.add(item.optional_vars.id)
 
@@ -329,8 +427,19 @@ def _metrics_root_errors(
             isinstance(node.func, ast.Attribute)
             and node.func.attr == 'dump'
             and len(node.args) >= 2
-            and isinstance(node.args[1], ast.Name)
-            and node.args[1].id in metric_handles
+            and (
+                (
+                    isinstance(node.args[1], ast.Name)
+                    and node.args[1].id in metric_handles
+                )
+                # json.dump(<dict>, open('...metrics.json...', 'w')): the handle
+                # need not be bound to a name first.
+                or _opens_metrics_json_for_write(
+                    node.args[1],
+                    assignments,
+                    renamed_metric_sources,
+                )
+            )
         ):
             # json.dump(<dict>, <metrics-handle>): the handle must have been
             # opened from something referencing 'metrics.json' earlier in the
@@ -347,14 +456,34 @@ def _metrics_root_errors(
             continue
         if (
             isinstance(node.func, ast.Attribute)
-            and node.func.attr == 'write_text'
+            and node.func.attr in {'write_text', 'write'}
             and node.args
-            and _references_metrics_json(node.func.value, assignments)
         ):
-            # Path.write_text(json.dumps(<dict>, ...)): the receiver path must
-            # resolve to metrics.json, and only a json.dumps payload counts as
-            # a JSON write.
-            dumps_call = _json_dumps_argument(node.args[0])
+            # Path.write_text(json.dumps(<dict>, ...)) / <metrics-handle>.write(
+            # json.dumps(<dict>, ...)): the receiver must resolve to a
+            # metrics.json write target - a Path referencing that filename, a
+            # handle opened for it, or an inline ``open(...)`` call - and only a
+            # json.dumps payload (possibly bound to a variable) counts as a JSON
+            # write.
+            receiver = node.func.value
+            if not (
+                _is_metrics_write_path(
+                    receiver,
+                    assignments,
+                    renamed_metric_sources,
+                )
+                or (
+                    isinstance(receiver, ast.Name)
+                    and receiver.id in metric_handles
+                )
+                or _opens_metrics_json_for_write(
+                    receiver,
+                    assignments,
+                    renamed_metric_sources,
+                )
+            ):
+                continue
+            dumps_call = _json_dumps_argument(node.args[0], assignments)
             if dumps_call is None or not dumps_call.args:
                 continue
             found_serialization = True
