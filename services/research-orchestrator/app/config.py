@@ -52,7 +52,7 @@ class Settings(BaseSettings):
         env_file='.env',
         env_prefix='GLASSLAB_ORCHESTRATOR_',
         case_sensitive=False,
-        extra='ignore',
+        extra='forbid',
     )
 
     app_name: str = 'glasslab-research-orchestrator'

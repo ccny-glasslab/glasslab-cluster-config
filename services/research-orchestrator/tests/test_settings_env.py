@@ -1,10 +1,18 @@
 """Environment-variable parsing for list-valued operator settings.
 
-Also locks the ``cluster_execution_mode`` fail-closed contract: it was an
-untyped ``str``, so a deployment typo (``workflo-api``) silently selected the
-workflow-api executor path and bypassed the ``fake`` branch entirely. It is a
-``Literal`` of the values the composition root actually branches on
-(``app/main.py``).
+Also locks two fail-closed contracts:
+
+* ``cluster_execution_mode`` is a ``Literal`` of the values the composition
+  root actually branches on (``app/main.py``), so a deployment typo fails at
+  construction instead of silently selecting the wrong executor.
+* ``Settings`` uses ``extra='forbid'``, so an unknown constructor kwarg (a
+  misspelled field name or a stale helper argument) is a construction error
+  instead of a silent drop.
+
+``extra='forbid'`` does NOT catch unknown PLAIN environment variables: the
+pydantic-settings env source only iterates declared model fields. The
+ConfigMap key-set parity guard is the real env/ConfigMap typo guard; these
+tests constrain the constructor/dotenv surface only.
 """
 
 from __future__ import annotations
@@ -58,3 +66,8 @@ def test_cluster_execution_mode_rejects_unknown_value() -> None:
 
 def test_cluster_execution_mode_default_is_workflow_api() -> None:
     assert Settings().cluster_execution_mode == 'workflow-api'
+
+
+def test_settings_reject_unknown_constructor_kwarg() -> None:
+    with pytest.raises(ValidationError):
+        Settings(cluster_execution_mod='workflow-api')
