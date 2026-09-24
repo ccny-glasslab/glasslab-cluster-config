@@ -212,6 +212,10 @@ class Settings(BaseSettings):
         '/tmp/glasslab-research-orchestrator/opencode-cache'
     )
     agent_model_provider_id: str = 'exo'
+    # Path to an OpenCode auth.json (mounted read-only from a secret) linked
+    # into each run's XDG_DATA_HOME so the built-in hosted providers (e.g.
+    # opencode-go) authenticate. Unset for local OpenAI-compatible endpoints.
+    opencode_auth_json_path: str | None = None
     agent_model_name: str | None = None
     # Per-agent overrides (#319): when set, the agent's turns run against its
     # own model on the shared endpoint; otherwise the shared

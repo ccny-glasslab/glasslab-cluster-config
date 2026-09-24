@@ -149,6 +149,37 @@ def test_opencode_runtime_config_sets_max_output_tokens(tmp_path: Path) -> None:
     assert model_cfg['options']['maxOutputTokens'] == 8192
 
 
+def test_opencode_runtime_links_hosted_provider_auth(tmp_path: Path) -> None:
+    auth_source = tmp_path / 'mounted-auth.json'
+    auth_source.write_text('{"opencode-go": {"type": "api", "key": "secret"}}')
+    settings = Settings(
+        agent_model_provider_id='opencode-go',
+        agent_model_name='deepseek-v4.1-flash',
+        opencode_auth_json_path=str(auth_source),
+    )
+    runtime = OpenCodeProcessRuntime(settings)
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    runtime._write_runtime_config(
+        run_id='run-1',
+        agent=AgentName.HONEYDEW,
+        workspace=workspace,
+    )
+    config = _read_opencode_config(workspace, AgentName.HONEYDEW)
+    assert config['model'] == 'opencode-go/deepseek-v4.1-flash'
+    assert 'provider' not in config
+    link = (
+        workspace.parent
+        / 'runtime'
+        / AgentName.HONEYDEW.value
+        / 'data'
+        / 'opencode'
+        / 'auth.json'
+    )
+    assert link.is_symlink()
+    assert link.resolve() == auth_source.resolve()
+
+
 class _ExitedProcess:
     """A process that has already exited when startup first polls it."""
 
