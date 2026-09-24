@@ -175,8 +175,10 @@ Read `docs/research-orchestrator-command-surface.md` before operating a run.
   comparison requirement's `comparison_scope`: `within_job` runs the whole
   compared grid inside one job (replicated by matrix seeds), while
   `across_jobs` runs one job per compared methodology and adjudicates the
-  result in `comparison.json`. If one job already performs an internal
-  multi-seed stability analysis, use one outer matrix seed instead of
+  result in `comparison.json`. One contract may combine at most one
+  `across_jobs` axis (the primary methodology split into jobs) with any number
+  of `within_job` axes that run inside each job. If one job already performs an
+  internal multi-seed stability analysis, use one outer matrix seed instead of
   duplicating the internal seed list.
 - Do not claim scientific confirmation from one exploratory run. Promote
   promising results into a frozen, multi-seed confirmatory campaign.

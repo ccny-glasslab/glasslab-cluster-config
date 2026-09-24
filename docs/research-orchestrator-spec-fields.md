@@ -233,7 +233,7 @@ Schema: `MethodologyRequirement` (`preflight.py:35-44`):
 | `requirement_id` | Yes | Unique per contract (`methodology_requirement_validation.py:146-169`). |
 | `config_path` | Yes | Dotted key into the matrix `base_config` YAML, rooted at `experiment_dimensions` (`preflight.py:94`, `methodology_requirement_validation.py:36-80`). |
 | `mode` | Yes, `decision` or `comparison` (`preflight.py:41`). |
-| `comparison_scope` | Optional field, default `within_job` (`preflight.py:42`). An **agent-authored** `comparison` candidate must set it explicitly at seal/promote (omission is rejected); curated repository-installed contracts may omit it and default to `within_job`. A `decision` requirement must not set it. `within_job` = every compared method runs inside one job. `across_jobs` = one job per compared methodology. At most one `across_jobs` comparison is permitted per contract, and a contract may not mix the two scopes. |
+| `comparison_scope` | Optional field, default `within_job` (`preflight.py:42`). An **agent-authored** `comparison` candidate must set it explicitly at seal/promote (omission is rejected); curated repository-installed contracts may omit it and default to `within_job`. A `decision` requirement must not set it. `within_job` = every compared method runs inside one job. `across_jobs` = one job per compared methodology. At most one `across_jobs` comparison is permitted per contract, and it may coexist with any number of `within_job` comparison requirements (mixed scope): the primary axis splits into jobs while the other comparison axes run inside each job. |
 | `minimum_distinct_values` | default 1, ge 1. |
 | `maximum_distinct_values` | optional, ge 1. |
 | `description` | non-empty (`methodology_requirement_validation.py:164-168`). |
@@ -299,7 +299,8 @@ least 2 segments; `requirement_id` non-empty and unique; `description` non-empty
 explicit `comparison_scope` (repository installs may omit it and default to
 `within_job`); `decision` requires `minimum == 1` and must not carry a
 `comparison_scope`; at most one `across_jobs` comparison is permitted per
-contract, and the two scopes may not be mixed
+contract, and it may coexist with any number of `within_job` comparison
+requirements (mixed scope)
 (`methodology_requirement_validation.py:123-143`). An `across_jobs` contract
 must also declare a string `comparison_key` property in its
 `expected_output_schema` (`methodology_requirement_validation.py:185-219`);
@@ -319,11 +320,12 @@ a distinct scalar in its `overrides`, with no empty-override variant, and the
 union of override values must be within `[minimum, maximum]`
 (`preflight.py:838-886`); the union is recorded in `comparisons`.
 
-The matrix seed floor is **scope-aware** (`preflight.py:1044-1053`): a
-`within_job` comparison requires at least `MIN_COMPARISON_SEEDS = 3` seeds
-(`schemas.py:76`), while an `across_jobs` comparison runs one replication per
-job so one seed is sufficient (the schema minimum is 1). The seed-derived job
-count is `len(variants) * len(seeds)`.
+The matrix seed floor is **scope-aware** (`preflight.py:1044-1053`): whenever
+any `within_job` comparison exists (pure `within_job`, or mixed with an
+`across_jobs` axis alongside it) at least `MIN_COMPARISON_SEEDS = 3` seeds are
+required (`schemas.py:76`), while a pure `across_jobs` comparison runs one
+replication per job so one seed is sufficient (the schema minimum is 1). The
+seed-derived job count is `len(variants) * len(seeds)`.
 
 The prompt guidance that teaches this to Honeydew/Beaker is
 `METHODOLOGY_REQUIREMENTS_GUIDANCE` (`engine.py:164`) and the scope-aware
@@ -338,6 +340,9 @@ time, so the guidance cannot drift from `ExperimentVariant.name` (#501).
 
 When a contract declares an `across_jobs` comparison requirement, each compared
 methodology runs as its own job and no per-job evaluator can see its siblings. A
+mixed contract may also declare `within_job` comparison requirements: those axes
+keep their full value lists in `base_config` and are evaluated inside each job,
+so only the single `across_jobs` axis is compared across jobs. A
 deterministic run-level artifact, `comparison.json`, adjudicates the comparison
 once every job is terminal and before the analysis evidence snapshot is built
 (`engine.py:6479`, `app/comparison.py:132`). It:

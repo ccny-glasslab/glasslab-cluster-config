@@ -672,12 +672,12 @@ def test_repository_contracts_install_including_adult_1_1_0(
     )
 
 
-def test_candidate_mixed_comparison_scopes_are_rejected(
+def test_candidate_mixed_comparison_scopes_seal_cleanly(
     tmp_path: Path,
 ) -> None:
-    # F6: an across_jobs comparison (one seed) and a within_job comparison
-    # (>= MIN_COMPARISON_SEEDS) cannot coexist; the template seed count is a
-    # contract-level property.
+    # A single across_jobs comparison axis may coexist with any number of
+    # within_job comparison axes: the primary axis splits into jobs while the
+    # secondary axes run inside each job.
     manager, source = _candidate_with_requirements(
         tmp_path,
         [
@@ -699,12 +699,22 @@ def test_candidate_mixed_comparison_scopes_are_rejected(
             },
         ],
     )
+    (source / 'output.schema.json').write_text(
+        json.dumps(
+            {
+                'type': 'object',
+                'properties': {'comparison_key': {'type': 'string'}},
+            }
+        )
+    )
 
-    with pytest.raises(
-        ContractCandidateError,
-        match='only one comparison_scope',
-    ):
-        _seal(manager, source)
+    sealed = manager.seal(
+        source=source,
+        contract_id='candidate-v1',
+        version='1.0.0',
+    )
+
+    assert sealed.digest
 
 
 @pytest.mark.parametrize(

@@ -883,24 +883,45 @@ def _comparison_topology_summary(
     comparison_scope: str,
     requirements: list[MethodologyRequirement],
 ) -> str:
-    comparison_paths = sorted(
+    across_paths = sorted(
         requirement.config_path
         for requirement in requirements
-        if requirement.mode == 'comparison'
+        if (
+            requirement.mode == 'comparison'
+            and requirement.comparison_scope == 'across_jobs'
+        )
     )
-    if not comparison_paths:
+    within_paths = sorted(
+        requirement.config_path
+        for requirement in requirements
+        if (
+            requirement.mode == 'comparison'
+            and requirement.comparison_scope == 'within_job'
+        )
+    )
+    if not across_paths and not within_paths:
         return (
             'no comparison requirement: one `candidate` variant with empty '
             'overrides'
         )
-    paths = ', '.join(f'`{path}`' for path in comparison_paths)
     if comparison_scope == 'across_jobs':
-        return (
+        split = ', '.join(f'`{path}`' for path in across_paths)
+        summary = (
             'across_jobs: one non-empty variant per compared methodology, each '
-            f'overriding {paths} with a distinct scalar; base_config holds one '
-            'placeholder scalar at each compared path; one seed per value is '
-            'correct'
+            f'overriding {split} with a distinct scalar; base_config holds one '
+            'placeholder scalar at the split path(s)'
         )
+        if within_paths:
+            internal = ', '.join(f'`{path}`' for path in within_paths)
+            summary += (
+                f'; the within_job axes {internal} keep their full value lists '
+                'in base_config and run inside each job, replicated by at least '
+                f'{MIN_COMPARISON_SEEDS} matrix seeds'
+            )
+        else:
+            summary += '; one seed per value is correct'
+        return summary
+    paths = ', '.join(f'`{path}`' for path in within_paths)
     return (
         'within_job: exactly one `candidate` variant with EMPTY overrides; the '
         f'full distinct list of compared values lives in base_config at {paths}; '

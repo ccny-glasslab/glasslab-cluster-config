@@ -760,6 +760,18 @@ ACROSS_JOBS_REQUIREMENT = {
     'description': 'Compare two model families across separate jobs.',
 }
 
+MIXED_REQUIREMENTS = [
+    ACROSS_JOBS_REQUIREMENT,
+    {
+        'requirement_id': 'feature_sets',
+        'config_path': 'experiment_dimensions.feature_sets',
+        'mode': 'comparison',
+        'comparison_scope': 'within_job',
+        'minimum_distinct_values': 2,
+        'description': 'Compare feature sets inside each job.',
+    },
+]
+
 _ACROSS_JOBS_SOURCE = (
     'import json\n'
     'json.dump({"accuracy": 0.9}, open("metrics.json", "w"))\n'
@@ -767,7 +779,12 @@ _ACROSS_JOBS_SOURCE = (
 )
 
 
-def _install_across_jobs_contract(tmp_path: Path, engine) -> str:
+def _install_across_jobs_contract(
+    tmp_path: Path,
+    engine,
+    *,
+    requirements: list[dict] | None = None,
+) -> str:
     contract_id = 'across-jobs-v1'
     version = '1.0.0'
     root = tmp_path / 'trusted-contracts' / contract_id / version
@@ -790,7 +807,11 @@ def _install_across_jobs_contract(tmp_path: Path, engine) -> str:
         'manifest': {
             'primary_metric': 'accuracy',
             'primary_metric_direction': 'maximize',
-            'methodology_requirements': [ACROSS_JOBS_REQUIREMENT],
+            'methodology_requirements': (
+                requirements
+                if requirements is not None
+                else [ACROSS_JOBS_REQUIREMENT]
+            ),
         },
     }
     (root / 'contract.json').write_text(json.dumps(descriptor))
@@ -879,6 +900,84 @@ def test_across_jobs_comparison_accepts_two_methods_one_seed(
 
     assert report.passed, report.errors
     assert report.job_count == 2
+
+
+def test_mixed_scope_matrix_passes_with_three_seeds(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    # The across_jobs axis splits into one job per value; the within_job axis
+    # keeps its full list in base_config and runs inside each job, so the
+    # within_job seed floor (>= 3) applies to the mixed matrix.
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(
+        tmp_path,
+        engine,
+        requirements=MIXED_REQUIREMENTS,
+    )
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body=(
+            'experiment_dimensions:\n'
+            '  model: model-candidate-1\n'
+            '  feature_sets: [basic, extended]\n'
+        ),
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': 'model-candidate-1'},
+            {'experiment_dimensions.model': 'model-candidate-2'},
+        ],
+        seeds=[17, 31, 49],
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert report.passed, report.errors
+    assert report.comparison_scope == 'across_jobs'
+    assert report.job_count == 6
+    assert report.comparisons['model_families'] == [
+        'model-candidate-1',
+        'model-candidate-2',
+    ]
+    assert report.comparisons['feature_sets'] == ['basic', 'extended']
+
+
+def test_mixed_scope_matrix_requires_three_seeds(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(
+        tmp_path,
+        engine,
+        requirements=MIXED_REQUIREMENTS,
+    )
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body=(
+            'experiment_dimensions:\n'
+            '  model: model-candidate-1\n'
+            '  feature_sets: [basic, extended]\n'
+        ),
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': 'model-candidate-1'},
+            {'experiment_dimensions.model': 'model-candidate-2'},
+        ],
+        seeds=[17],
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert not report.passed
+    assert any(
+        'comparison contract requires at least 3 matrix seeds' in error
+        for error in report.errors
+    )
 
 
 def test_across_jobs_comparison_rejects_list_base_config(

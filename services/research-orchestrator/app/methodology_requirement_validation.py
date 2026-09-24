@@ -128,26 +128,6 @@ def _requirement_mode_errors(
     return errors
 
 
-def _mixed_scope_errors(
-    requirements: list[MethodologyRequirement],
-) -> list[str]:
-    # A single contract cannot mix topologies: the template seed count is a
-    # contract-level property, so an across_jobs comparison (one seed) would
-    # contradict a within_job comparison's >= MIN_COMPARISON_SEEDS floor.
-    modes = {
-        requirement.comparison_scope
-        for requirement in requirements
-        if requirement.mode == 'comparison'
-    }
-    if len(modes) > 1:
-        return [
-            'methodology_requirements mixes across_jobs and within_job '
-            'comparison requirements; a contract may use only one '
-            'comparison_scope'
-        ]
-    return []
-
-
 def _across_jobs_count_errors(
     requirements: list[MethodologyRequirement],
 ) -> list[str]:
@@ -214,7 +194,6 @@ def validate_methodology_requirements(
             )
         )
     errors.extend(_across_jobs_count_errors(requirements))
-    errors.extend(_mixed_scope_errors(requirements))
     return errors
 
 
