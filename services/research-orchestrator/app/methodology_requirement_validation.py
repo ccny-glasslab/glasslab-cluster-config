@@ -128,29 +128,6 @@ def _requirement_mode_errors(
     return errors
 
 
-def _mixed_scope_errors(
-    requirements: list[MethodologyRequirement],
-) -> list[str]:
-    # A single contract cannot mix topologies: the template seed count is a
-    # contract-level property, so an across_jobs comparison (one seed) would
-    # contradict a within_job comparison's >= MIN_COMPARISON_SEEDS floor.
-    modes = {
-        requirement.comparison_scope
-        for requirement in requirements
-        if requirement.mode == 'comparison'
-    }
-    if len(modes) > 1:
-        return [
-            'methodology_requirements mixes across_jobs and within_job '
-            'comparison requirements; a contract may use only one '
-            'comparison_scope. A contract with more than one comparison '
-            'requirement must use within_job for all of them; across_jobs is '
-            'only valid when the contract declares a single comparison '
-            'requirement'
-        ]
-    return []
-
-
 def _across_jobs_count_errors(
     requirements: list[MethodologyRequirement],
 ) -> list[str]:
@@ -172,6 +149,55 @@ def _across_jobs_count_errors(
             'supported per contract'
         ]
     return []
+
+
+def _dotted_paths_overlap(first: str, second: str) -> bool:
+    # Segment-wise prefix overlap: `a.b` overlaps `a.b` and `a.b.c`, but not
+    # `a.bc`.
+    first_segments = first.split('.')
+    second_segments = second.split('.')
+    if len(first_segments) > len(second_segments):
+        first_segments, second_segments = second_segments, first_segments
+    return second_segments[: len(first_segments)] == first_segments
+
+
+def _comparison_path_overlap_errors(
+    requirements: list[MethodologyRequirement],
+) -> list[str]:
+    # An across_jobs comparison requires base_config to hold exactly one scalar
+    # at its path, while any other comparison using an equal, ancestor, or
+    # descendant path requires a full list (or a mapping under that ancestor).
+    # The deterministic base_config repair then oscillates and preflight rejects
+    # every revision, which is the issue-#457 non-convergence this validator
+    # exists to prevent. The guard is limited to overlaps that involve an
+    # across_jobs requirement; two within_job comparisons sharing a list path
+    # are coherent.
+    comparisons = [
+        (index, requirement)
+        for index, requirement in enumerate(requirements)
+        if requirement.mode == 'comparison'
+    ]
+    errors: list[str] = []
+    for index, requirement in comparisons:
+        if requirement.comparison_scope != 'across_jobs':
+            continue
+        for other_index, other in comparisons:
+            if other_index == index:
+                continue
+            if not _dotted_paths_overlap(
+                requirement.config_path,
+                other.config_path,
+            ):
+                continue
+            errors.append(
+                'methodology_requirements across_jobs comparison '
+                f'{requirement.requirement_id!r} at '
+                f'{requirement.config_path!r} overlaps comparison '
+                f'{other.requirement_id!r} at {other.config_path!r}; an '
+                'across_jobs comparison path must not be equal to, an ancestor '
+                'of, or a descendant of another comparison path'
+            )
+    return errors
 
 
 def _requirement_identity_errors(
@@ -217,7 +243,7 @@ def validate_methodology_requirements(
             )
         )
     errors.extend(_across_jobs_count_errors(requirements))
-    errors.extend(_mixed_scope_errors(requirements))
+    errors.extend(_comparison_path_overlap_errors(requirements))
     return errors
 
 
