@@ -152,14 +152,14 @@ OVERRIDES: dict[str, Override] = dict(
             _P + 'AGENT_BASE_URL_HONEYDEW', 'http://192.168.1.18:52417/v1'
         ),
         _live_route(
-            _P + 'AGENT_BASE_URL_BEAKER', 'http://192.168.1.17:52417/v1'
+            _P + 'AGENT_BASE_URL_BEAKER', 'http://192.168.1.14:52417/v1'
         ),
         _live_route(
             _P + 'AGENT_MODEL_HONEYDEW',
             'mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit',
         ),
         _live_route(
-            _P + 'AGENT_MODEL_BEAKER', 'mlx-community/Qwen3-Coder-Next-4bit'
+            _P + 'AGENT_MODEL_BEAKER', 'mlx-community/Qwen3-14B-bf16'
         ),
         _live_route(
             _P + 'HONEYDEW_REASONING_AGENT_BASE_URL',
