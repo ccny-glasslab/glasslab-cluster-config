@@ -67,17 +67,18 @@ data:
   # instead of a copy per run (see issue #99); session/auth/log state stays
   # per-run regardless of this setting.
   GLASSLAB_ORCHESTRATOR_OPENCODE_SHARED_CACHE_ROOT: /mnt/artifacts/research-orchestrator/opencode-cache
-  # OpenCode is the selected runtime; the models are served by the split exo
-  # instances at 192.168.1.18 (Honeydew reasoning) and 192.168.1.17 (Beaker,
-  # structured turns, task compiler), both listening on port 52417.
+  # OpenCode is the selected runtime; models are served by native MLX
+  # (mlx_lm.server behind the serializing model_guard) on port 52417: .18
+  # Honeydew reasoning (80B Thinking), .17 Honeydew structured turns and task
+  # compiler (Coder-Next), .14 Beaker (Qwen3-32B-8bit).
   GLASSLAB_ORCHESTRATOR_AGENT_MODEL_PROVIDER_ID: exo
   # Shared fallback for any agent without a per-agent override. The live split
   # serving listens on 52417; the retired 52415 endpoint is no longer served.
   GLASSLAB_ORCHESTRATOR_AGENT_MODEL_NAME: mlx-community/Qwen3-Coder-Next-4bit
   GLASSLAB_ORCHESTRATOR_AGENT_BASE_URL_HONEYDEW: http://192.168.1.18:52417/v1
-  GLASSLAB_ORCHESTRATOR_AGENT_BASE_URL_BEAKER: http://192.168.1.17:52417/v1
+  GLASSLAB_ORCHESTRATOR_AGENT_BASE_URL_BEAKER: http://192.168.1.14:52417/v1
   GLASSLAB_ORCHESTRATOR_AGENT_MODEL_HONEYDEW: mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit
-  GLASSLAB_ORCHESTRATOR_AGENT_MODEL_BEAKER: mlx-community/Qwen3-Coder-Next-4bit
+  GLASSLAB_ORCHESTRATOR_AGENT_MODEL_BEAKER: mlx-community/Qwen3-32B-8bit
   # Honeydew's bounded reasoning turns (verification) run on the Thinking model
   # at .18; the long-context structured-output turns stay on Coder-Next at .17
   # to avoid KV-cache exhaustion (see config.py honeydew_*_agent_base_url).
