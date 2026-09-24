@@ -124,9 +124,16 @@ spec:
               mountPath: /mnt/artifacts
             - name: temporary
               mountPath: /tmp
+            - name: opencode-auth
+              mountPath: /etc/opencode-auth
+              readOnly: true
       volumes:
         - name: artifacts-volume
           persistentVolumeClaim:
             claimName: glasslab-shared-artifacts
         - name: temporary
           emptyDir: {}
+        - name: opencode-auth
+          secret:
+            secretName: glasslab-opencode-auth
+            defaultMode: 0444

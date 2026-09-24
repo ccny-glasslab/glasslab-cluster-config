@@ -796,6 +796,17 @@ class OpenCodeProcessRuntime(AgentRuntime):
         opencode_config_root.mkdir(parents=True, exist_ok=True)
         for path in (data_root, cache_root, state_root, home_root):
             path.mkdir(parents=True, exist_ok=True)
+        auth_source = self.settings.opencode_auth_json_path
+        if auth_source:
+            # Link (not copy) the mounted credential into the per-run
+            # XDG_DATA_HOME so the built-in hosted provider authenticates
+            # without persisting the secret on the shared run volume.
+            auth_dir = data_root / 'opencode'
+            auth_dir.mkdir(parents=True, exist_ok=True)
+            auth_link = auth_dir / 'auth.json'
+            if auth_link.is_symlink() or auth_link.exists():
+                auth_link.unlink()
+            auth_link.symlink_to(auth_source)
         provider_id = self.settings.agent_model_provider_id
         model_name = model_override or self.settings.agent_model_for(agent)
         base_url = base_url_override or self.settings.base_url_for(agent)
