@@ -194,12 +194,13 @@ METHODOLOGY_REQUIREMENTS_GUIDANCE = (
     'comparison builder requires every job to carry the same key and marks the '
     'comparison unsatisfied when any is missing or differs, so the evaluator, '
     'not the prompt, owns cross-job comparability. A `decision` requirement '
-    'declares a single chosen value and must not carry a comparison_scope. Prefer '
-    '`across_jobs` when the contract declares a single comparison requirement; a '
-    'contract with more than one comparison requirement must use `within_job` for '
-    'ALL of them, because one job cannot carry two across_jobs axes (mixing '
-    'scopes, and more than one across_jobs comparison, are rejected at seal). '
-    'Worked example: to compare three '
+    'declares a single chosen value and must not carry a comparison_scope. At '
+    'most ONE `across_jobs` comparison is permitted per contract, and it may '
+    'coexist with any number of `within_job` comparison requirements: put the '
+    'PRIMARY methodology axis in separate jobs (`across_jobs`, one such axis) '
+    'while the other comparison axes run inside each job (`within_job`). A '
+    'contract whose comparisons are all `within_job` runs the whole grid in one '
+    'job, replicated by matrix seeds. Worked example: to compare three '
     'model families across jobs, declare {"requirement_id": "model_families", '
     '"config_path": "experiment_dimensions.model", "mode": "comparison", '
     '"comparison_scope": "across_jobs", "minimum_distinct_values": 3, '
@@ -5112,13 +5113,36 @@ class ResearchOrchestrator:
     def _across_jobs_execution_note(self, run_id: str) -> str:
         if self._matrix_comparison_scope(run_id) != 'across_jobs':
             return ''
+        requirements = self._contract_methodology_requirements(run_id)
+        within_job_paths = sorted(
+            requirement.config_path
+            for requirement in requirements
+            if (
+                requirement.mode == 'comparison'
+                and requirement.comparison_scope == 'within_job'
+            )
+        )
+        provenance = (
+            "Record the job's `variant_name` and `seed` in the metrics and "
+            'evidence provenance.'
+        )
+        if not within_job_paths:
+            return (
+                '\nWith comparison_scope `across_jobs`, the workload MUST '
+                "deep-merge each variant's `overrides` onto `base_config` and "
+                'run EXACTLY ONE effective configuration per job; never iterate '
+                '`experiment_dimensions` to run several methods in one job. '
+                + provenance
+            )
+        paths = ', '.join(f'`{path}`' for path in within_job_paths)
         return (
             '\nWith comparison_scope `across_jobs`, the workload MUST '
-            "deep-merge each variant's `overrides` onto `base_config` and run "
-            'EXACTLY ONE effective configuration per job; never iterate '
-            '`experiment_dimensions` to run several methods in one job. Record '
-            "the job's `variant_name` and `seed` in the metrics and evidence "
-            'provenance.'
+            "deep-merge each variant's `overrides` onto `base_config` so the "
+            'job runs the one methodology its variant selected, AND iterate the '
+            '`within_job` comparison axes inside each job: run every value '
+            f'listed in `base_config` at {paths}. Do not iterate the '
+            '`across_jobs` axis inside a job; it is already fixed by the '
+            'variant override. ' + provenance
         )
 
     def _matrix_template_variants(self, run_id: str) -> list[dict[str, Any]]:
@@ -5161,13 +5185,11 @@ class ResearchOrchestrator:
         return variants or [{'name': 'candidate', 'overrides': {}}]
 
     def _matrix_template_seeds(self, run: RunRecord) -> list[int]:
-        # An across_jobs comparison runs one job per method, so a single seed is
-        # its canonical topology. A within_job comparison replicates inside one
-        # job and therefore needs at least MIN_COMPARISON_SEEDS seeds, never
-        # fewer than the comparison's minimum_distinct_values. A contract with
-        # no comparison requirement keeps one fixed seed.
-        if self._matrix_comparison_scope(run.run_id) == 'across_jobs':
-            return [17]
+        # A within_job comparison (pure, or mixed with an across_jobs axis
+        # alongside it) replicates inside one job and therefore needs at least
+        # MIN_COMPARISON_SEEDS seeds, never fewer than any within_job
+        # requirement's minimum_distinct_values. A pure across_jobs comparison
+        # (one job per value) and a no-comparison contract keep a single seed.
         needed = 1
         for requirement in self._contract_methodology_requirements(run.run_id):
             if (

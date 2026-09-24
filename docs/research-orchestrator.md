@@ -101,7 +101,10 @@ entries. A comparison resolves a `comparison_scope`, defaulting to `within_job`,
 which runs every compared method inside one job, so the compared `base_config`
 key holds a list of distinct values; `across_jobs` runs one job per compared
 methodology, so the key holds a single placeholder scalar and the distinct
-methods live in the variant overrides. Agent-authored contract candidates must
+methods live in the variant overrides. At most one `across_jobs` axis is
+permitted per contract, and it may coexist with `within_job` comparison axes
+(the primary methodology splits into jobs; the other axes run inside each job).
+Agent-authored contract candidates must
 declare the scope explicitly; curated repository-installed contracts may omit it
 and default to `within_job`. For an `across_jobs` contract the
 run-level comparison is adjudicated deterministically by `comparison.json`. A
@@ -575,7 +578,11 @@ values and one job runs the whole grid, replicated by at least
 `MIN_COMPARISON_SEEDS = 3` matrix seeds. `across_jobs` makes each compared
 methodology its own job: the compared key holds a single placeholder scalar in
 `base_config`, one variant per method carries its distinct value in `overrides`,
-and the seed floor drops to one. Because a per-job evaluator sees only its own
+and the seed floor drops to one. A contract may mix the two: at most one
+`across_jobs` axis (the primary methodology split into jobs) may coexist with
+`within_job` axes, whose full value lists stay in `base_config` and run inside
+each job — the within_job seed floor of at least `MIN_COMPARISON_SEEDS` then
+applies. Because a per-job evaluator sees only its own
 methodology, an `across_jobs` evaluator must emit a deterministic
 `comparison_key` (a digest over the protocol constants that must be shared
 across jobs), and the contract's expected output schema must declare it; sealing

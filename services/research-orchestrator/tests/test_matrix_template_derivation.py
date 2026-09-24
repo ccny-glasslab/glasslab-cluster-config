@@ -52,6 +52,25 @@ WITHIN_JOB_COMPARISON_REQUIREMENTS = [
     },
 ]
 
+MIXED_COMPARISON_REQUIREMENTS = [
+    {
+        'requirement_id': 'model_families',
+        'config_path': 'experiment_dimensions.model',
+        'mode': 'comparison',
+        'comparison_scope': 'across_jobs',
+        'minimum_distinct_values': 2,
+        'description': 'Split model families into separate jobs.',
+    },
+    {
+        'requirement_id': 'feature_sets',
+        'config_path': 'experiment_dimensions.feature_sets',
+        'mode': 'comparison',
+        'comparison_scope': 'within_job',
+        'minimum_distinct_values': 2,
+        'description': 'Compare feature sets inside each job.',
+    },
+]
+
 
 def _install_methodology_contract(
     tmp_path: Path,
@@ -371,6 +390,67 @@ def test_template_emits_single_candidate_for_within_job_comparison(
     ]
     assert len(matrix.seeds) >= 3
     assert len(set(matrix.seeds)) == len(matrix.seeds)
+
+
+def test_template_mixed_scope_splits_primary_axis_and_replicates(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    # A mixed contract splits the across_jobs axis into one variant per value
+    # while leaving the within_job axis to run inside each job; the seed floor
+    # follows the within_job requirement (>= MIN_COMPARISON_SEEDS).
+    _, store, _, _, engine = orchestrator_bundle
+    run = _bind_comparison_contract(
+        tmp_path,
+        store,
+        engine,
+        requirements=MIXED_COMPARISON_REQUIREMENTS,
+    )
+    template = engine._matrix_action_template(run)
+    matrix = ExperimentMatrix.model_validate(template['arguments'])
+    assert len(matrix.variants) == 2
+    assert all(variant.overrides for variant in matrix.variants)
+    assert all(
+        'experiment_dimensions.feature_sets' not in variant.overrides
+        for variant in matrix.variants
+    )
+    split_values = {
+        variant.overrides['experiment_dimensions.model']
+        for variant in matrix.variants
+    }
+    assert len(split_values) == 2, split_values
+    assert len(matrix.seeds) >= 3
+
+
+def test_execution_note_pure_across_jobs_runs_one_configuration(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    _, store, _, _, engine = orchestrator_bundle
+    run = _bind_comparison_contract(tmp_path, store, engine)
+
+    note = engine._across_jobs_execution_note(run.run_id)
+
+    assert 'EXACTLY ONE effective configuration' in note
+
+
+def test_execution_note_mixed_honors_split_and_iterates_within_axes(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    _, store, _, _, engine = orchestrator_bundle
+    run = _bind_comparison_contract(
+        tmp_path,
+        store,
+        engine,
+        requirements=MIXED_COMPARISON_REQUIREMENTS,
+    )
+
+    note = engine._across_jobs_execution_note(run.run_id)
+
+    assert 'experiment_dimensions.feature_sets' in note
+    assert 'iterate' in note.lower()
+    assert 'EXACTLY ONE effective configuration' not in note
 
 
 def test_template_keeps_single_candidate_without_comparison_requirement(
