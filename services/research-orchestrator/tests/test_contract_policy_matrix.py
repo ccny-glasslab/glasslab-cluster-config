@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from app.contracts import (
     ContractIntegrityError,
     EvaluationContractResolver,
+    compute_contract_digest,
     reject_contract_overrides,
     render_read_only_contract_job,
 )
@@ -748,6 +749,397 @@ def test_non_comparison_contract_accepts_single_seed(orchestrator_bundle) -> Non
     report = preflight_matrix(run=run, matrix=matrix, contract=contract)
 
     assert report.passed
+
+
+ACROSS_JOBS_REQUIREMENT = {
+    'requirement_id': 'model_families',
+    'config_path': 'experiment_dimensions.model',
+    'mode': 'comparison',
+    'comparison_scope': 'across_jobs',
+    'minimum_distinct_values': 2,
+    'description': 'Compare two model families across separate jobs.',
+}
+
+_ACROSS_JOBS_SOURCE = (
+    'import json\n'
+    'json.dump({"accuracy": 0.9}, open("metrics.json", "w"))\n'
+    'open("report.md", "w").write("report")\n'
+)
+
+
+def _install_across_jobs_contract(tmp_path: Path, engine) -> str:
+    contract_id = 'across-jobs-v1'
+    version = '1.0.0'
+    root = tmp_path / 'trusted-contracts' / contract_id / version
+    root.mkdir(parents=True)
+    descriptor = {
+        'contract_id': contract_id,
+        'version': version,
+        'evaluation_entry_point': 'evaluator.py',
+        'execution_wrapper': 'run_contract.py',
+        'expected_input_schema': 'input.schema.json',
+        'expected_output_schema': 'output.schema.json',
+        'required_artifacts': ['metrics.json'],
+        'resource_constraints': {
+            'cpu': 1.0,
+            'memory_gib': 2.0,
+            'gpus': 0,
+            'wallclock_minutes': 30,
+        },
+        'container_image_digest': None,
+        'manifest': {
+            'primary_metric': 'accuracy',
+            'primary_metric_direction': 'maximize',
+            'methodology_requirements': [ACROSS_JOBS_REQUIREMENT],
+        },
+    }
+    (root / 'contract.json').write_text(json.dumps(descriptor))
+    for name in (
+        'evaluator.py',
+        'run_contract.py',
+        'input.schema.json',
+        'output.schema.json',
+    ):
+        (root / name).write_text('{}\n' if name.endswith('.json') else '# ok\n')
+    (root / 'contract.sha256').write_text(compute_contract_digest(root))
+    return engine.contracts.resolve(contract_id, version).digest
+
+
+def _across_jobs_run(engine, *, config_body: str):
+    run = engine.create_run(
+        request=RunCreateRequest(
+            objective='Exercise the across-jobs comparison preflight.'
+        )
+    )
+    workspace = Path(run.beaker_workspace)
+    config = workspace / 'configs' / 'candidate.yaml'
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(config_body)
+    source = workspace / 'benchmark-workspace' / 'adult-income'
+    source.mkdir(parents=True)
+    (source / 'run.py').write_text(_ACROSS_JOBS_SOURCE)
+    return run.model_copy(
+        update={
+            'task_definition': {
+                'source_subdirectory': 'benchmark-workspace/adult-income',
+            }
+        }
+    )
+
+
+def _across_jobs_matrix(
+    *,
+    overrides: list[dict],
+    seeds: list[int],
+) -> ExperimentMatrix:
+    return ExperimentMatrix.model_validate(
+        {
+            'base_config': 'configs/candidate.yaml',
+            'variants': [
+                {'name': f'variant-{index}', 'overrides': override}
+                for index, override in enumerate(overrides)
+            ],
+            'seeds': seeds,
+            'maximum_parallel_jobs': 2,
+            'runner_image': RUNNER_IMAGE,
+            'resources': {
+                'cpu': 1,
+                'memory_gib': 1,
+                'gpus': 0,
+                'wallclock_minutes': 5,
+            },
+            'required_artifacts': ['metrics.json'],
+        }
+    )
+
+
+def test_across_jobs_comparison_accepts_two_methods_one_seed(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    # Each compared methodology is its own job: two methods and one seed
+    # therefore expand to exactly two jobs, and the per-job evaluator scores a
+    # single configuration each.
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(tmp_path, engine)
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body='experiment_dimensions:\n  model: model-candidate-1\n',
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': 'model-candidate-1'},
+            {'experiment_dimensions.model': 'model-candidate-2'},
+        ],
+        seeds=[17],
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert report.passed, report.errors
+    assert report.job_count == 2
+
+
+def test_across_jobs_comparison_rejects_list_base_config(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(tmp_path, engine)
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body=(
+            'experiment_dimensions:\n'
+            '  model: [model-candidate-1, model-candidate-2]\n'
+        ),
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': 'model-candidate-1'},
+            {'experiment_dimensions.model': 'model-candidate-2'},
+        ],
+        seeds=[17],
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert not report.passed
+    assert any(
+        'must contain exactly one scalar value' in error
+        for error in report.errors
+    )
+
+
+def test_across_jobs_comparison_rejects_empty_overrides(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(tmp_path, engine)
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body='experiment_dimensions:\n  model: model-candidate-1\n',
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[{}, {'experiment_dimensions.model': 'model-candidate-2'}],
+        seeds=[17],
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert not report.passed
+    assert any(
+        'requires a non-empty `overrides` object' in error
+        for error in report.errors
+    )
+
+
+def test_across_jobs_comparison_rejects_non_scalar_override(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(tmp_path, engine)
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body='experiment_dimensions:\n  model: model-candidate-1\n',
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': ['a', 'b']},
+            {'experiment_dimensions.model': 'model-candidate-2'},
+        ],
+        seeds=[17],
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert not report.passed
+    assert any(
+        'override must be a distinct scalar value' in error
+        for error in report.errors
+    )
+
+
+def test_across_jobs_comparison_rejects_duplicate_override_values(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(tmp_path, engine)
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body='experiment_dimensions:\n  model: model-candidate-1\n',
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': 'same'},
+            {'experiment_dimensions.model': 'same'},
+        ],
+        seeds=[17],
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert not report.passed
+    assert any(
+        'across_jobs comparison requires at least 2 distinct variant override'
+        in error
+        for error in report.errors
+    )
+
+
+def test_across_jobs_comparison_rejects_single_element_list_base_config(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    # F8: the across_jobs base_config path must hold one SCALAR, not a
+    # single-element list.
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(tmp_path, engine)
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body=(
+            'experiment_dimensions:\n  model: [model-candidate-1]\n'
+        ),
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': 'model-candidate-1'},
+            {'experiment_dimensions.model': 'model-candidate-2'},
+        ],
+        seeds=[17],
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert not report.passed
+    assert any(
+        'must contain exactly one scalar value' in error
+        for error in report.errors
+    )
+
+
+def test_across_jobs_report_records_scope_and_topology(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    # F5: the preflight report carries the resolved scope and canonical shape so
+    # the agent review does not mistake the correct across_jobs topology.
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(tmp_path, engine)
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body='experiment_dimensions:\n  model: model-candidate-1\n',
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': 'model-candidate-1'},
+            {'experiment_dimensions.model': 'model-candidate-2'},
+        ],
+        seeds=[17],
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert report.comparison_scope == 'across_jobs'
+    assert 'one non-empty variant per compared methodology' in (
+        report.comparison_topology
+    )
+
+
+def test_within_job_report_records_scope_and_topology(
+    orchestrator_bundle,
+) -> None:
+    # F5: a within_job report states the single-candidate/empty-overrides shape
+    # is canonical, so Honeydew's review does not re-enter the #474 loop.
+    _, _, _, _, engine = orchestrator_bundle
+    contract = engine.contracts.resolve(
+        'ml-benchmark-adult-income-v1',
+        '1.1.0',
+    )
+    run = engine.create_run(
+        request=RunCreateRequest(objective='Within-job scope topology.')
+    )
+    workspace = Path(run.beaker_workspace)
+    config = workspace / 'configs' / 'candidate.yaml'
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        'experiment_dimensions:\n'
+        '  model: [logistic-regression, random-forest]\n'
+        '  missing_strategy: median-imputation\n'
+        '  include_fnlwgt: false\n'
+        '  encoding: ordinal\n'
+    )
+    matrix = ExperimentMatrix.model_validate(
+        {
+            'base_config': 'configs/candidate.yaml',
+            'variants': [{'name': 'candidate', 'overrides': {}}],
+            'seeds': [17, 31, 49],
+            'maximum_parallel_jobs': 1,
+            'runner_image': RUNNER_IMAGE,
+            'resources': {
+                'cpu': 1,
+                'memory_gib': 1,
+                'gpus': 0,
+                'wallclock_minutes': 5,
+            },
+            'required_artifacts': ['metrics.json'],
+        }
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert report.passed, report.errors
+    assert report.comparison_scope == 'within_job'
+    assert 'candidate' in report.comparison_topology
+    assert 'EMPTY overrides' in report.comparison_topology
+
+
+@pytest.mark.parametrize(
+    'reserved',
+    ['./comparison.json', 'sub/comparison.json'],
+)
+def test_reserved_artifact_path_shapes_rejected_at_preflight_and_expansion(
+    tmp_path,
+    orchestrator_bundle,
+    reserved: str,
+) -> None:
+    # R2/R3: reserved matching is by basename, and expansion is the single
+    # choke point that re-checks a matrix which slipped past review.
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(tmp_path, engine)
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body='experiment_dimensions:\n  model: model-candidate-1\n',
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': 'model-candidate-1'},
+            {'experiment_dimensions.model': 'model-candidate-2'},
+        ],
+        seeds=[17],
+    ).model_copy(update={'required_artifacts': ['metrics.json', reserved]})
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert not report.passed
+    assert any('orchestrator-reserved' in error for error in report.errors)
+    with pytest.raises(MatrixExpansionError, match='orchestrator-reserved'):
+        expand_experiment_matrix(
+            run_id=run.run_id,
+            action_id='action-1',
+            matrix=matrix,
+            contract=contract,
+        )
 
 
 def _single_variant_matrix() -> ExperimentMatrix:

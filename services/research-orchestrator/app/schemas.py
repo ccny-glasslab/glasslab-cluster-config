@@ -543,6 +543,7 @@ class ExpandedJobSpec(BaseModel):
     evaluation_contract_digest: str
     workload_id: str | None = None
     experiment_type: str | None = None
+    comparison_scope: str | None = None
     task_bundle: dict[str, str] | None = None
     source_bundle: dict[str, str] | None = None
     workspace_command: list[str] = Field(default_factory=list)

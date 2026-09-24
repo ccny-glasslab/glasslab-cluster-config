@@ -10,12 +10,14 @@ validation.
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+from typing import Any
 from uuid import uuid4
 
 from .contracts import (
@@ -23,11 +25,13 @@ from .contracts import (
     compute_contract_digest,
 )
 from .methodology_requirement_validation import (
+    validate_across_jobs_comparison_key_schema,
     validate_methodology_requirements,
 )
 from .preflight import (
     MethodologyRequirement,
     declared_budget_conflicts,
+    is_reserved_artifact,
 )
 from .schemas import EvaluationContractDescriptor
 
@@ -76,6 +80,9 @@ def _validate_declared_budget(
 
 def _validate_methodology_requirements(
     descriptor: EvaluationContractDescriptor,
+    *,
+    output_schema: Mapping[str, Any] | None = None,
+    require_explicit_scope: bool = True,
 ) -> None:
     # config_path semantics are validated at seal and promotion time, before a
     # contract can bind a run, so a filesystem-looking value cannot survive to
@@ -96,7 +103,17 @@ def _validate_methodology_requirements(
         raise ContractCandidateError(
             f'methodology_requirements are invalid: {exc}'
         ) from exc
-    errors = validate_methodology_requirements(requirements)
+    errors = validate_methodology_requirements(
+        requirements,
+        require_explicit_scope=require_explicit_scope,
+    )
+    if output_schema is not None:
+        errors.extend(
+            validate_across_jobs_comparison_key_schema(
+                requirements,
+                output_schema,
+            )
+        )
     if errors:
         raise ContractCandidateError('; '.join(errors))
 
@@ -177,6 +194,7 @@ class ContractCandidateManager:
         *,
         contract_id: str,
         version: str,
+        require_explicit_scope: bool = True,
     ) -> EvaluationContractDescriptor:
         descriptor_path = root / 'contract.json'
         if not descriptor_path.is_file():
@@ -209,7 +227,19 @@ class ContractCandidateManager:
                 'manifest requires primary_metric and a valid direction'
             )
         _validate_declared_budget(descriptor)
-        _validate_methodology_requirements(descriptor)
+        reserved_artifacts = sorted(
+            {
+                artifact
+                for artifact in descriptor.required_artifacts
+                if is_reserved_artifact(artifact)
+            }
+        )
+        if reserved_artifacts:
+            raise ContractCandidateError(
+                'required_artifacts may not request orchestrator-reserved '
+                f'artifact(s): {", ".join(reserved_artifacts)}'
+            )
+        output_schema: dict[str, Any] | None = None
         try:
             for field in (
                 descriptor.execution_wrapper,
@@ -231,6 +261,8 @@ class ContractCandidateManager:
                     raise ContractCandidateError(
                         f'JSON schema must be an object: {schema_path}'
                     )
+                if schema_path == descriptor.expected_output_schema:
+                    output_schema = parsed
             for python_path in (
                 descriptor.execution_wrapper,
                 descriptor.evaluation_entry_point,
@@ -244,6 +276,11 @@ class ContractCandidateManager:
                 )
         except (OSError, ValueError, SyntaxError, json.JSONDecodeError) as exc:
             raise ContractCandidateError(str(exc)) from exc
+        _validate_methodology_requirements(
+            descriptor,
+            output_schema=output_schema,
+            require_explicit_scope=require_explicit_scope,
+        )
         return descriptor
 
     def seal(
@@ -378,6 +415,33 @@ class ContractCandidateManager:
                 )
         return versions
 
+    @staticmethod
+    def _read_sealed_output_schema(
+        *,
+        sealed_path: Path,
+        descriptor: EvaluationContractDescriptor,
+    ) -> dict[str, Any]:
+        # The schema is read from inside the digest-verified sealed tree and the
+        # path is confined to that root, so promotion cannot be pointed at an
+        # external file.
+        root = sealed_path.resolve()
+        target = (root / descriptor.expected_output_schema).resolve()
+        if not target.is_relative_to(root) or not target.is_file():
+            raise ContractCandidateError(
+                'sealed candidate references a missing or external output schema'
+            )
+        try:
+            parsed = json.loads(target.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ContractCandidateError(
+                f'sealed candidate output schema is invalid: {exc}'
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ContractCandidateError(
+                'sealed candidate output schema must be a JSON object'
+            )
+        return parsed
+
     def promote(
         self,
         *,
@@ -388,7 +452,13 @@ class ContractCandidateManager:
             sealed_path=sealed_path,
             expected_digest=expected_digest,
         )
-        _validate_methodology_requirements(descriptor)
+        _validate_methodology_requirements(
+            descriptor,
+            output_schema=self._read_sealed_output_schema(
+                sealed_path=sealed_path,
+                descriptor=descriptor,
+            ),
+        )
         destination = (
             self.promoted_root / descriptor.contract_id / descriptor.version
         )
@@ -423,6 +493,7 @@ class ContractCandidateManager:
             source,
             contract_id=source.parent.name,
             version=source.name,
+            require_explicit_scope=False,
         )
         # Repository-shipped contracts already carry a pinned contract.sha256;
         # the checksum is verified before install.

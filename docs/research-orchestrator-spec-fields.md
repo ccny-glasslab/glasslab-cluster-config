@@ -212,7 +212,7 @@ wrapper, an evaluator, input/output JSON schemas, and `contract.sha256`
 | `execution_wrapper` | contract author | Yes, min 1 | seal | referenced file must exist + AST-parse `contract_candidates.py:170-204` | workflow-api job render |
 | `evaluation_entry_point` | contract author | Yes, min 1 | seal | same | evaluator invocation | Missing file → `candidate references missing file`. Fail-closed. |
 | `expected_input_schema` | contract author | Yes, min 1 | seal | file exists + JSON object `contract_candidates.py:182-190` | evaluator |
-| `expected_output_schema` | contract author | Yes, min 1 | seal | same | evaluator |
+| `expected_output_schema` | contract author | Yes, min 1 | seal | file exists + JSON object `contract_candidates.py:182-190`; must declare a string `comparison_key` property when the contract has an `across_jobs` comparison (`methodology_requirement_validation.py:185-219`) | evaluator; run-level comparison | Missing `comparison_key` for across_jobs → seal/promote rejection. |
 | `required_artifacts` | contract author | Yes, min 1 (`schemas.py:485`) | seal | non-empty enforced by Pydantic | unioned into job artifacts `matrix.py:57-66`; static source check `preflight.py:540` | Empty → seal rejection. |
 | `resource_constraints` | contract author | Yes (`ResourceRequest`, `schemas.py:486`) | seal/promote | must contain the task profile at seal/preflight (`engine.py:4956-4991`); matrix ≤ constraints `matrix.py:47-55` | profile-vs-contract conflict gate | profile > constraints → non-retryable human pause. See [section 5](#5-resource-authority-profiles-precedence-and-the-recommended-rule). |
 | `container_image_digest` | **must be null for candidates** | Optional (`schemas.py:487`) | seal | candidates must set null `contract_candidates.py:154-160`; repo contracts may pin | `contracts.render_read_only_contract_job` (review path) | Non-null in a candidate → seal rejection `shared-bundle candidates cannot choose a container image`. |
@@ -226,19 +226,30 @@ at resolution (`contracts.py:126-134`).
 
 ### 4.1 `methodology_requirements`
 
-Schema: `MethodologyRequirement` (`preflight.py:34-42`):
+Schema: `MethodologyRequirement` (`preflight.py:35-44`):
 
 | Field | Required | Meaning |
 |---|---|---|
-| `requirement_id` | Yes | Unique per contract (`methodology_requirement_validation.py:117-121`). |
-| `config_path` | Yes | Dotted key into the matrix `base_config` YAML, rooted at `experiment_dimensions` (`preflight.py:93`, `methodology_requirement_validation.py:64-77`). |
-| `mode` | Yes, `decision` or `comparison` (`preflight.py:39`). |
+| `requirement_id` | Yes | Unique per contract (`methodology_requirement_validation.py:146-169`). |
+| `config_path` | Yes | Dotted key into the matrix `base_config` YAML, rooted at `experiment_dimensions` (`preflight.py:94`, `methodology_requirement_validation.py:36-80`). |
+| `mode` | Yes, `decision` or `comparison` (`preflight.py:41`). |
+| `comparison_scope` | Optional field, default `within_job` (`preflight.py:42`). An **agent-authored** `comparison` candidate must set it explicitly at seal/promote (omission is rejected); curated repository-installed contracts may omit it and default to `within_job`. A `decision` requirement must not set it. `within_job` = every compared method runs inside one job. `across_jobs` = one job per compared methodology. At most one `across_jobs` comparison is permitted per contract, and a contract may not mix the two scopes. |
 | `minimum_distinct_values` | default 1, ge 1. |
 | `maximum_distinct_values` | optional, ge 1. |
-| `description` | non-empty (`methodology_requirement_validation.py:125-129`). |
+| `description` | non-empty (`methodology_requirement_validation.py:164-168`). |
 
-Worked example - `comparison` (from the Adult contract,
-`evaluation-contracts/ml-benchmark-adult-income-v1/1.1.0/contract.json`):
+`comparison_scope` resolves the matrix topology that used to be implicit.
+`within_job` is the legacy shape: the compared `config_path` holds a list of
+distinct values in `base_config`, and all compared methods run in one job.
+`across_jobs` makes each compared methodology its own Kubernetes job: the
+`config_path` holds exactly one placeholder scalar in `base_config`, the
+distinct methods live in the variant `overrides`, and the run-level
+[`comparison.json`](#42-comparing-across-jobs) artifact adjudicates the comparison
+after every job is terminal.
+
+Worked example - `comparison` (from the repository-installed Adult contract,
+`evaluation-contracts/ml-benchmark-adult-income-v1/1.1.0/contract.json`). Repo
+contracts may omit `comparison_scope`; it defaults to `within_job`:
 
 ```json
 {
@@ -250,9 +261,13 @@ Worked example - `comparison` (from the Adult contract,
 }
 ```
 
-The matrix `base_config` must then contain a list with at least two distinct
-values at exactly `experiment_dimensions.model`, e.g.
-`experiment_dimensions: {model: [logistic-regression, random-forest]}`.
+For a `within_job` comparison the matrix `base_config` must contain a list with
+at least two distinct values at exactly `experiment_dimensions.model`, e.g.
+`experiment_dimensions: {model: [logistic-regression, random-forest]}`, and all
+compared methods run inside one job. For an `across_jobs` comparison the
+`base_config` must instead contain exactly one scalar placeholder at that path
+(the distinct pool lives in the variant `overrides`), e.g.
+`experiment_dimensions: {model: model-candidate-1}`.
 
 Worked example - `decision` (same contract):
 
@@ -272,32 +287,88 @@ The config must contain exactly one scalar at that path, e.g.
 
 **Exactly what deterministic code asserts, and where:**
 
-*At seal/promotion* (`contract_candidates.py:35-59`, `169`, `285`;
-`methodology_requirement_validation.py:133-142`):
+*At seal/promotion* (`contract_candidates.py` `_validate_methodology_requirements`,
+`_validate_descriptor`, and `promote`;
+`methodology_requirement_validation.py:172-219`):
 `config_path` is a dotted key path, not a filesystem path
-(`methodology_requirement_validation.py:20-23`); no `/`, `\`, leading/trailing
+(`methodology_requirement_validation.py:22-26`); no `/`, `\`, leading/trailing
 dot, empty segments, or `..`; must be rooted at `experiment_dimensions` with at
 least 2 segments; `requirement_id` non-empty and unique; `description` non-empty;
 `maximum_distinct_values >= minimum_distinct_values`; `comparison` requires
-`minimum >= 2`; `decision` requires `minimum == 1`.
+`minimum >= 2`; an agent-authored (`seal`/`promote`) `comparison` also requires an
+explicit `comparison_scope` (repository installs may omit it and default to
+`within_job`); `decision` requires `minimum == 1` and must not carry a
+`comparison_scope`; at most one `across_jobs` comparison is permitted per
+contract, and the two scopes may not be mixed
+(`methodology_requirement_validation.py:123-143`). An `across_jobs` contract
+must also declare a string `comparison_key` property in its
+`expected_output_schema` (`methodology_requirement_validation.py:185-219`);
+sealing or promoting one that omits it is rejected with a deterministic error.
 
-*At matrix preflight* (`preflight.py:468-523`, `567-572`):
+*At matrix preflight* (`preflight.py:891-1053`):
 the key resolves from the base_config root (`_config_value`,
-`preflight.py:96-102`); a missing key yields
+`preflight.py:98-104`); a missing key yields
 ``missing methodology setting `<path>`: <description>``; a mapping value yields
 `` `<path>` must directly contain a scalar or list of values, not a metadata
-object; do not wrap values beneath `description` or `values` ``; the distinct
-string count must be within `[minimum, maximum]`; comparison entries land in
-`comparisons`, decisions in `decisions`; and if **any** requirement is
-`comparison`, the matrix must have at least `MIN_COMPARISON_SEEDS = 3` seeds
-(`schemas.py:73`, `preflight.py:567-572`).
+object; do not wrap values beneath `description` or `values` ``. For a
+`within_job` comparison the distinct string count must be within
+`[minimum, maximum]`, and comparison entries land in `comparisons`, decisions in
+`decisions`. For an `across_jobs` comparison the base_config path must hold
+exactly one scalar (`preflight.py:824-836`); every variant must set that path to
+a distinct scalar in its `overrides`, with no empty-override variant, and the
+union of override values must be within `[minimum, maximum]`
+(`preflight.py:838-886`); the union is recorded in `comparisons`.
+
+The matrix seed floor is **scope-aware** (`preflight.py:1044-1053`): a
+`within_job` comparison requires at least `MIN_COMPARISON_SEEDS = 3` seeds
+(`schemas.py:76`), while an `across_jobs` comparison runs one replication per
+job so one seed is sufficient (the schema minimum is 1). The seed-derived job
+count is `len(variants) * len(seeds)`.
 
 The prompt guidance that teaches this to Honeydew/Beaker is
-`METHODOLOGY_REQUIREMENTS_GUIDANCE` (`engine.py:133-153`) and
-`MATRIX_VARIANT_RULES_GUIDANCE` (`app/matrix_naming.py`) - both `[PROMPT-ONLY]`.
-The variant pattern is defined once in `app/matrix_naming.py`; the prompt prose
-and the template sanitizer derive from that constant at import time, so the
-guidance cannot drift from `ExperimentVariant.name` (#501).
+`METHODOLOGY_REQUIREMENTS_GUIDANCE` (`engine.py:164`) and the scope-aware
+`render_variant_rules_guidance` (`app/matrix_naming.py:48`) - both
+`[PROMPT-ONLY]`. The renderer emits the `within_job` single-`candidate` shape or
+the `across_jobs` one-variant-per-method shape from the run's resolved
+`comparison_scope`. The variant pattern is defined once in `app/matrix_naming.py`;
+the prompt prose and the template sanitizer derive from that constant at import
+time, so the guidance cannot drift from `ExperimentVariant.name` (#501).
+
+### 4.2 Comparing across jobs
+
+When a contract declares an `across_jobs` comparison requirement, each compared
+methodology runs as its own job and no per-job evaluator can see its siblings. A
+deterministic run-level artifact, `comparison.json`, adjudicates the comparison
+once every job is terminal and before the analysis evidence snapshot is built
+(`engine.py:6479`, `app/comparison.py:132`). It:
+
+* joins the per-job `evaluation.json` artifacts by the compared override value;
+* requires, per value, at least one `SUCCEEDED` job whose evaluator verdict
+  passes (`integrity_pass` true, or all `checks` true) and whose contract
+  binding matches the run;
+* records the job's primary metric;
+* checks mechanical comparability across the compared jobs (shared contract
+  binding, shared `base_config` path, overrides that differ only on the compared
+  `config_path`, and an identical seed set per value) and the distinct-value
+  count within `[minimum, maximum]`.
+
+For an `across_jobs` contract the evaluator-output contract adds one more
+requirement: every participating evaluation must carry a `comparison_key` — a
+deterministic digest over the protocol constants that must be shared across jobs
+(fold spec, data split, metric definitions). If any key is missing, or the keys
+are not all equal, the comparison is `satisfied: false`
+(`comparison_checks.py:comparison_key_reasons`). Contract sealing rejects an
+`across_jobs` contract whose `expected_output_schema` does not declare a string
+`comparison_key` property (`methodology_requirement_validation.py:185-219`).
+`comparison.json` is surfaced to Beaker's analysis and Honeydew's verification as
+a digest-verified evidence artifact; Honeydew must not claim the methodology
+comparison was satisfied when the artifact marks it unsatisfied.
+
+The artifact is deterministic (sorted keys and lists) and idempotent: it is
+built once per run and skipped if already recorded. It stores the comparison
+mechanically; it does not execute evaluator code in the orchestrator, and it
+notes that `base_config` file content is not checked (the job records only the
+path).
 
 ---
 
@@ -489,8 +560,11 @@ no model retry.
 | Matrix `base_config` safe + exists | preflight | `schemas.py:440-454`; `preflight.py:454-458` | retryable | `base_config does not exist inside the Beaker workspace: ...` |
 | `variants[].name` pattern/unique | compile | `schemas.py:425`, `463-472` | retryable | Pydantic `String should match pattern '^[a-z0-9][a-z0-9_-]{0,62}$'` |
 | `seeds` unique | compile | `schemas.py:456-461` | retryable | `seeds must be unique` |
-| Methodology `config_path` present + scalar/list + count | preflight | `preflight.py:481-518` | retryable | `missing methodology setting ...` / `requires at least N distinct value(s); found M` |
-| Comparison needs ≥3 matrix seeds | preflight | `preflight.py:567-572` | retryable | `comparison contract requires at least 3 matrix seeds; found N` |
+| Methodology `config_path` present + scalar/list + count | preflight | `preflight.py:891-1035` | retryable | `missing methodology setting ...` / `requires at least N distinct value(s); found M` |
+| `across_jobs` base_config is one scalar; variant overrides are non-empty distinct scalars | preflight | `preflight.py:824-886` | retryable | `must contain exactly one scalar value for an across_jobs comparison` / `requires a non-empty \`overrides\` object for an across_jobs comparison` |
+| `within_job` comparison needs ≥3 matrix seeds | preflight | `preflight.py:1044-1053` | retryable | `comparison contract requires at least 3 matrix seeds; found N` |
+| `across_jobs` evaluator `comparison_key` present and equal across jobs | run-level comparison | `comparison_checks.py` `comparison_key_reasons` | recorded (`satisfied: false`) | `an across_jobs evaluation is missing the required comparison_key` / `across_jobs evaluations do not share one comparison_key` |
+| `across_jobs` output schema declares a string `comparison_key` | seal + promote | `methodology_requirement_validation.py:185-219` | retryable (agent redraft) | `expected_output_schema must declare a string \`comparison_key\` property ...` |
 | Internal-seed duplication | preflight | `preflight.py:548-562` | retryable | `candidate config and outer experiment matrix contain the same multi-seed list...` |
 | Evaluator-owned literals not written by workload | preflight | `preflight.py:363-372` | retryable | `<file> references evaluator-owned output ...` |
 | `run.py` serializes required metric keys (bound contract's keys; task-spec keys only when the contract declares none, #497/#492 A.5) | preflight | `preflight.py:191-314`, `507-620` | retryable | `<file> serializes metrics.json without required root key(s): <keys>` |

@@ -10,7 +10,9 @@ segment by segment from the base_config root.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from .preflight import EXPERIMENT_DIMENSIONS_ROOT, MethodologyRequirement
 
@@ -78,7 +80,11 @@ def _config_path_errors(requirement: MethodologyRequirement) -> list[str]:
     return []
 
 
-def _requirement_mode_errors(requirement: MethodologyRequirement) -> list[str]:
+def _requirement_mode_errors(
+    requirement: MethodologyRequirement,
+    *,
+    require_explicit_scope: bool = True,
+) -> list[str]:
     prefix = _requirement_prefix(requirement)
     minimum = requirement.minimum_distinct_values
     maximum = requirement.maximum_distinct_values
@@ -88,20 +94,81 @@ def _requirement_mode_errors(requirement: MethodologyRequirement) -> list[str]:
             f'{prefix} sets maximum_distinct_values={maximum} below '
             f'minimum_distinct_values={minimum}'
         )
+    has_explicit_scope = 'comparison_scope' in requirement.model_fields_set
     if requirement.mode == 'comparison':
+        # Agent-proposed candidates must state the scope explicitly so no new
+        # ambiguous contract can be sealed. Curated repository-baked contracts
+        # are human-reviewed and keep the within_job default, so repository
+        # installs relax only this check.
+        if require_explicit_scope and not has_explicit_scope:
+            errors.append(
+                f'{prefix} declares mode `comparison` but omits '
+                '`comparison_scope`; a comparison requirement must declare an '
+                'explicit scope of `within_job` or `across_jobs`'
+            )
         if minimum < 2:
             errors.append(
                 f'{prefix} declares mode `comparison` but sets '
                 f'minimum_distinct_values={minimum}; a comparison requirement '
                 'must require at least 2 distinct values'
             )
-    elif minimum != 1:
-        errors.append(
-            f'{prefix} declares mode `decision` but sets '
-            f'minimum_distinct_values={minimum}; a decision requirement must '
-            'pin exactly 1 value'
-        )
+    else:
+        if has_explicit_scope:
+            errors.append(
+                f'{prefix} declares mode `decision` but sets '
+                '`comparison_scope`; a decision requirement must not carry a '
+                'comparison scope'
+            )
+        if minimum != 1:
+            errors.append(
+                f'{prefix} declares mode `decision` but sets '
+                f'minimum_distinct_values={minimum}; a decision requirement '
+                'must pin exactly 1 value'
+            )
     return errors
+
+
+def _mixed_scope_errors(
+    requirements: list[MethodologyRequirement],
+) -> list[str]:
+    # A single contract cannot mix topologies: the template seed count is a
+    # contract-level property, so an across_jobs comparison (one seed) would
+    # contradict a within_job comparison's >= MIN_COMPARISON_SEEDS floor.
+    modes = {
+        requirement.comparison_scope
+        for requirement in requirements
+        if requirement.mode == 'comparison'
+    }
+    if len(modes) > 1:
+        return [
+            'methodology_requirements mixes across_jobs and within_job '
+            'comparison requirements; a contract may use only one '
+            'comparison_scope'
+        ]
+    return []
+
+
+def _across_jobs_count_errors(
+    requirements: list[MethodologyRequirement],
+) -> list[str]:
+    # Multi-axis across-jobs comparison is out of scope, so a contract may make
+    # at most one method comparison span separate jobs. The check needs the full
+    # requirement list, not one requirement at a time.
+    across_jobs = [
+        requirement
+        for requirement in requirements
+        if (
+            requirement.mode == 'comparison'
+            and requirement.comparison_scope == 'across_jobs'
+        )
+    ]
+    if len(across_jobs) > 1:
+        return [
+            'methodology_requirements declares more than one across_jobs '
+            'comparison requirement; at most one across_jobs comparison is '
+            'supported per contract'
+        ]
+    return []
 
 
 def _requirement_identity_errors(
@@ -132,11 +199,58 @@ def _requirement_identity_errors(
 
 def validate_methodology_requirements(
     requirements: list[MethodologyRequirement],
+    *,
+    require_explicit_scope: bool = True,
 ) -> list[str]:
     errors: list[str] = []
     seen_ids: set[str] = set()
     for requirement in requirements:
         errors.extend(_requirement_identity_errors(requirement, seen_ids))
         errors.extend(_config_path_errors(requirement))
-        errors.extend(_requirement_mode_errors(requirement))
+        errors.extend(
+            _requirement_mode_errors(
+                requirement,
+                require_explicit_scope=require_explicit_scope,
+            )
+        )
+    errors.extend(_across_jobs_count_errors(requirements))
+    errors.extend(_mixed_scope_errors(requirements))
     return errors
+
+
+def validate_across_jobs_comparison_key_schema(
+    requirements: list[MethodologyRequirement],
+    output_schema: Mapping[str, Any],
+) -> list[str]:
+    """Require a string ``comparison_key`` property for across_jobs contracts.
+
+    A per-job evaluator cannot see sibling jobs, so it cannot attest that the
+    compared jobs share folds, data split, or metric definitions. It emits a
+    deterministic ``comparison_key`` digest instead, and the deterministic
+    comparison builder requires all jobs to agree. For that to be possible the
+    bound contract's expected output schema must declare the property.
+    """
+    has_across_jobs = any(
+        requirement.mode == 'comparison'
+        and requirement.comparison_scope == 'across_jobs'
+        for requirement in requirements
+    )
+    if not has_across_jobs:
+        return []
+    properties = output_schema.get('properties')
+    comparison_key = (
+        properties.get('comparison_key')
+        if isinstance(properties, Mapping)
+        else None
+    )
+    if (
+        isinstance(comparison_key, Mapping)
+        and comparison_key.get('type') == 'string'
+    ):
+        return []
+    return [
+        'expected_output_schema must declare a string `comparison_key` '
+        'property for an across_jobs comparison requirement; the evaluator '
+        'must emit a deterministic digest over the protocol constants that '
+        'must match across the compared jobs'
+    ]
