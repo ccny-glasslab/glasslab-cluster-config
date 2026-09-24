@@ -2372,6 +2372,48 @@ def test_recovery_does_not_replay_stale_approved_matrix(
     assert store.get_run(run.run_id).state == RunState.AWAITING_EXECUTION_APPROVAL
 
 
+def test_recovery_from_honeydew_reviewing_with_rejected_matrix_revises(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # A pause after the review already rejected the matrix must resume the
+    # revision the rejection called for. Re-entering the review has no pending
+    # action to re-review and raises, which re-pauses on every resume.
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Recover a rejected matrix review.')
+    )
+    run = store.replace_run(
+        run.model_copy(update={'state': RunState.HONEYDEW_REVIEWING}),
+        expected_version=run.version,
+    )
+    store.save_action(
+        ActionRecord(
+            run_id=run.run_id,
+            proposed_by=AgentName.BEAKER,
+            type='submit_experiment_matrix',
+            arguments={},
+            policy_classification=(
+                PolicyClassification.HONEYDEW_AND_HUMAN_APPROVAL
+            ),
+            approval_status=ApprovalStatus.REJECTED,
+            reason='Matrix topology rejected.',
+            idempotency_key='rejected-matrix',
+        )
+    )
+    revised: list[str] = []
+    monkeypatch.setattr(
+        engine,
+        '_beaker_revise',
+        lambda run_id, *, feedback: revised.append(feedback),
+    )
+
+    engine._recover_run(run.run_id)
+
+    assert revised == ['Matrix topology rejected.']
+    assert store.get_run(run.run_id).state == RunState.BEAKER_REVISING
+
+
 def test_recovery_backfills_protocol_artifact_from_event(
     orchestrator_bundle,
 ) -> None:
