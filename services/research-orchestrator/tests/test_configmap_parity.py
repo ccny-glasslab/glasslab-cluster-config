@@ -155,6 +155,25 @@ OVERRIDES: dict[str, Override] = dict(
         _container_path(
             _P + 'OPENCODE_AUTH_JSON_PATH', '/etc/opencode-auth/auth.json'
         ),
+        (
+            _P + 'TURN_HISTORY_ROTATION_TOKEN_THRESHOLD',
+            Override(
+                'eq',
+                'Hosted-provider rotation relaxation: the code default (24000) '
+                'and its 32000 clamp guard the local MLX host; the deployment '
+                'runs every agent on the hosted OpenCode Go provider.',
+                expected='100000',
+            ),
+        ),
+        (
+            _P + 'SESSION_CONTEXT_TOKEN_CEILING',
+            Override(
+                'eq',
+                'Hosted-provider rotation relaxation: pairs with '
+                'TURN_HISTORY_ROTATION_TOKEN_THRESHOLD.',
+                expected='131072',
+            ),
+        ),
         _live_route(
             _P + 'AGENT_BASE_URL_HONEYDEW', 'http://192.168.1.18:52417/v1'
         ),
