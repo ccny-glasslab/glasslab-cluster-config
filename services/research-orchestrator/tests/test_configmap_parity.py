@@ -174,6 +174,16 @@ OVERRIDES: dict[str, Override] = dict(
                 expected='131072',
             ),
         ),
+        (
+            _P + 'MAXIMUM_METHODOLOGY_REVISIONS',
+            Override(
+                'eq',
+                'Hosted-provider revision budget: the code default (2) assumes '
+                'a weaker local model; the hosted provider needs room for a '
+                'multi-issue matrix-topology correction to converge.',
+                expected='4',
+            ),
+        ),
         _live_route(
             _P + 'AGENT_BASE_URL_HONEYDEW', 'http://192.168.1.18:52417/v1'
         ),
