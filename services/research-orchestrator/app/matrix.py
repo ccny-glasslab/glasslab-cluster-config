@@ -15,6 +15,7 @@ from .schemas import (
     ExpandedJobSpec,
     ExperimentMatrix,
     ResolvedEvaluationContract,
+    comparison_scope_for_manifest,
 )
 
 
@@ -98,6 +99,9 @@ def expand_experiment_matrix(
                     idempotency_key=idempotency_key,
                     base_config=matrix.base_config,
                     overrides=variant.overrides,
+                    comparison_scope=comparison_scope_for_manifest(
+                        contract.descriptor.manifest
+                    ),
                     runner_image=matrix.runner_image,
                     resources=matrix.resources,
                     required_artifacts=required_artifacts,

@@ -105,6 +105,19 @@ def _ensure_requirement(
         node = child
 
     leaf = keys[-1]
+    if (
+        requirement.mode == 'comparison'
+        and requirement.comparison_scope == 'across_jobs'
+    ):
+        # An across_jobs comparison puts the distinct methods in the variant
+        # overrides, so base_config carries exactly one placeholder scalar
+        # instead of the within-job value list.
+        return _ensure_single_scalar(
+            node,
+            leaf,
+            requirement.config_path,
+            comments,
+        )
     current = node.get(leaf)
     if isinstance(current, dict):
         # Preflight rejects metadata wrappers outright, so a wrapped object is
@@ -127,6 +140,25 @@ def _ensure_requirement(
     for value in inserted:
         comments.setdefault(value, set()).add(requirement.config_path)
     return inserted
+
+
+def _ensure_single_scalar(
+    node: dict[str, Any],
+    leaf: str,
+    config_path: str,
+    comments: dict[str, set[str]],
+) -> list[str]:
+    current = node.get(leaf)
+    if current is None or isinstance(current, dict):
+        placeholder = f'{leaf}-candidate-1'
+        node[leaf] = placeholder
+        comments.setdefault(placeholder, set()).add(config_path)
+        return [placeholder]
+    if isinstance(current, list):
+        distinct = [str(value) for value in dict.fromkeys(current)]
+        if len(distinct) > 1:
+            node[leaf] = current[0]
+    return []
 
 
 def _placeholder_values(

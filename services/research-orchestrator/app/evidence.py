@@ -29,15 +29,20 @@ class EvidencePhase(StrEnum):
 _PHASE_FILENAMES: dict[EvidencePhase, frozenset[str]] = {
     EvidencePhase.ANALYSIS: frozenset({
         'runner.log', 'status.json', 'evaluation.json', 'metrics.json',
-        'metrics.csv', 'fairness.csv',
+        'metrics.csv', 'fairness.csv', 'comparison.json',
     }),
     EvidencePhase.VERIFICATION: frozenset({
         'status.json', 'evaluation.json', 'metrics.json', 'report.md',
+        'comparison.json',
     }),
-    EvidencePhase.REPORT: frozenset({'evaluation.json', 'metrics.json'}),
+    EvidencePhase.REPORT: frozenset({
+        'evaluation.json', 'metrics.json', 'comparison.json',
+    }),
 }
 
-_VERBATIM_FILENAMES = frozenset({'evaluation.json', 'metrics.json'})
+_VERBATIM_FILENAMES = frozenset({
+    'evaluation.json', 'metrics.json', 'comparison.json',
+})
 _PRIORITY_2_FILENAMES = frozenset({'runner.log', 'metrics.csv', 'fairness.csv'})
 _PRIORITY_1_FILENAMES = frozenset({'status.json', 'report.md'})
 

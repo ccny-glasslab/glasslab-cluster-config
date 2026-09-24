@@ -96,8 +96,14 @@ publish artifacts.
 The evaluation contract is repository-controlled and immutable to both agents.
 It fixes the evaluator entry point, schemas, required artifacts, resource
 limits, optional digest-pinned image, and machine-checkable methodology
-requirements. Methodology requirements distinguish comparisons, which need
-multiple configured values, from decisions, which need one explicit choice.
+requirements. Methodology requirements distinguish `comparison` from `decision`
+entries. A comparison declares a `comparison_scope`: `within_job` (the default)
+runs every compared method inside one job, so the compared `base_config` key
+holds a list of distinct values; `across_jobs` runs one job per compared
+methodology, so the key holds a single placeholder scalar and the distinct
+methods live in the variant overrides. For an `across_jobs` contract the
+run-level comparison is adjudicated deterministically by `comparison.json`. A
+decision needs one explicit choice.
 
 When an approved protocol requires a harness that is not installed, Beaker may
 draft a contract candidate in its isolated worktree. The orchestrator validates
@@ -558,6 +564,27 @@ The preflight report records the exact expanded job count, checks performed,
 configured comparisons, configured decisions, and blocking findings. Discord
 renders that report before showing approval controls.
 
+Methodology comparability across jobs is a first-class, deterministic concern.
+A `comparison` requirement declares its `comparison_scope`. `within_job` keeps
+the legacy shape: the compared `base_config` key holds the full list of distinct
+values and one job runs the whole grid, replicated by at least
+`MIN_COMPARISON_SEEDS = 3` matrix seeds. `across_jobs` makes each compared
+methodology its own job: the compared key holds a single placeholder scalar in
+`base_config`, one variant per method carries its distinct value in `overrides`,
+and the seed floor drops to one. Because a per-job evaluator sees only its own
+methodology, an `across_jobs` evaluator must emit a deterministic
+`comparison_key` (a digest over the protocol constants that must be shared
+across jobs), and the contract's expected output schema must declare it; sealing
+or promoting such a contract without it is rejected. After every job is terminal
+and before the analysis snapshot, the orchestrator writes a deterministic,
+idempotent `comparison.json` that joins the per-job `evaluation.json` results by
+methodology and checks completeness and mechanical comparability (shared
+contract binding and `base_config` path, overrides that differ only on the
+compared key, an identical seed set per value, and equal `comparison_key`s). It
+reaches Beaker's analysis and Honeydew's verification as digest-verified
+evidence; Honeydew must not claim the comparison was satisfied when the artifact
+marks it unsatisfied.
+
 The original Adult benchmark contract remains immutable at `1.0.0`.
 Methodology declarations were added as `ml-benchmark-adult-income-v1@1.1.0`;
 new Adult task runs use the newer binding while historical runs retain their
@@ -575,9 +602,12 @@ under-populated contract `config_path`, the orchestrator materializes the
 required shape in `matrix.base_config` before handing Beaker the revision: it
 creates the file/skeleton if missing, inserts every missing dotted key, and
 tops up any list to the contract's `minimum_distinct_values` with deterministic
-`<leaf>-candidate-N` placeholders, each annotated with a YAML comment. The
-engine owns only the structural shape the preflight checks; Beaker still owns
-the values and is instructed to replace every placeholder. The repair is
+`<leaf>-candidate-N` placeholders, each annotated with a YAML comment. For an
+`across_jobs` requirement it materializes a single scalar placeholder at the
+compared key instead of a list, because the distinct methods belong in the
+variant overrides. The engine owns only the structural shape the preflight
+checks; Beaker still owns the values and is instructed to replace every
+placeholder. The repair is
 bounded and idempotent, so existing valid values and unrelated keys survive and
 a second pass makes no change. This emits `methodology.base_config_materialized`.
 

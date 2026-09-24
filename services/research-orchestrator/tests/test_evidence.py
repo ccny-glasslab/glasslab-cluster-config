@@ -753,6 +753,10 @@ def test_snapshot_phase_scoped_artifact_inventory(orchestrator_bundle) -> None:
         'metrics.csv': ('metrics_table', b'metric,value\nloss,0.1\n'),
         'fairness.csv': ('fairness_table', b'group,accuracy\nA,0.75\n'),
         'report.md': ('report', b'# Report\n'),
+        'comparison.json': (
+            'comparison',
+            b'{"schema_version":"glasslab-cross-job-comparison-v1"}',
+        ),
     }
     for name, (type_, content) in artifacts.items():
         _write_artifact(
@@ -767,12 +771,15 @@ def test_snapshot_phase_scoped_artifact_inventory(orchestrator_bundle) -> None:
     allowed = {
         EvidencePhase.ANALYSIS: {
             'runner.log', 'status.json', 'evaluation.json', 'metrics.json',
-            'metrics.csv', 'fairness.csv',
+            'metrics.csv', 'fairness.csv', 'comparison.json',
         },
         EvidencePhase.VERIFICATION: {
             'status.json', 'evaluation.json', 'metrics.json', 'report.md',
+            'comparison.json',
         },
-        EvidencePhase.REPORT: {'evaluation.json', 'metrics.json'},
+        EvidencePhase.REPORT: {
+            'evaluation.json', 'metrics.json', 'comparison.json',
+        },
     }
     for phase, filenames in allowed.items():
         snapshot = build_evidence_snapshot(
@@ -783,6 +790,50 @@ def test_snapshot_phase_scoped_artifact_inventory(orchestrator_bundle) -> None:
             for entry in snapshot['artifacts']
         }
         assert inventory_names == filenames
+
+
+def test_comparison_artifact_is_in_verification_snapshot(
+    orchestrator_bundle,
+) -> None:
+    # Phase 2: the cross-job comparison must reach Honeydew's verification
+    # snapshot as digest-verified content, not only as an inventory entry.
+    settings, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Verify the cross-job comparison artifact.')
+    )
+    payload = json.dumps(
+        {
+            'schema_version': 'glasslab-cross-job-comparison-v1',
+            'satisfied': True,
+            'requirements': [],
+        },
+        sort_keys=True,
+    ).encode()
+    _write_artifact(
+        settings,
+        store,
+        run.run_id,
+        type='comparison',
+        uri='artifacts/run-1/comparison.json',
+        content=payload,
+    )
+
+    snapshot = build_evidence_snapshot(
+        settings, store, run.run_id, phase=EvidencePhase.VERIFICATION
+    )
+
+    inventory = {
+        Path(str(entry['uri']).split('://', 1)[-1]).name
+        for entry in snapshot['artifacts']
+    }
+    assert 'comparison.json' in inventory
+    content_entry = next(
+        entry
+        for entry in snapshot['artifact_contents']
+        if Path(str(entry['uri']).split('://', 1)[-1]).name == 'comparison.json'
+    )
+    assert content_entry['digest_verified'] is True
+    assert content_entry['content']['satisfied'] is True
 
 
 def test_snapshot_deterministic_across_calls(orchestrator_bundle) -> None:

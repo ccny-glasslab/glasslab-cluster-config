@@ -36,8 +36,20 @@ MODEL_COMPARISON_REQUIREMENTS = [
         'requirement_id': 'model_families',
         'config_path': 'experiment_dimensions.model',
         'mode': 'comparison',
+        'comparison_scope': 'across_jobs',
         'minimum_distinct_values': 3,
         'description': 'Compare three model families.',
+    },
+]
+
+WITHIN_JOB_COMPARISON_REQUIREMENTS = [
+    {
+        'requirement_id': 'model_families',
+        'config_path': 'experiment_dimensions.model',
+        'mode': 'comparison',
+        'comparison_scope': 'within_job',
+        'minimum_distinct_values': 3,
+        'description': 'Compare three model families within one job.',
     },
 ]
 
@@ -61,6 +73,7 @@ def _install_methodology_contract(
                 'requirement_id': 'method-comparison',
                 'config_path': 'config.json',
                 'mode': 'comparison',
+                'comparison_scope': 'within_job',
                 'minimum_distinct_values': 3,
                 'description': (
                     'Compare three bounded decoding methods: beam search '
@@ -116,11 +129,17 @@ def _install_methodology_contract(
     return resolved.digest
 
 
-def _bind_comparison_contract(tmp_path: Path, store, engine):
+def _bind_comparison_contract(
+    tmp_path: Path,
+    store,
+    engine,
+    *,
+    requirements: list[dict] | None = None,
+):
     digest = _install_methodology_contract(
         tmp_path,
         engine,
-        requirements=MODEL_COMPARISON_REQUIREMENTS,
+        requirements=requirements or MODEL_COMPARISON_REQUIREMENTS,
     )
     run = engine.create_run(
         RunCreateRequest(objective='compare three model families')
@@ -308,19 +327,19 @@ def test_template_derives_seeds_from_comparison_contract(
     assert len(set(seeds)) == len(seeds), 'seeds must be unique'
 
 
-def test_template_emits_non_empty_variants_for_comparison_requirement(
+def test_template_emits_non_empty_variants_for_across_jobs_comparison(
     tmp_path,
     orchestrator_bundle,
 ) -> None:
-    # Issue #474: the demonstrated shape must carry one distinct, non-empty
-    # variant per required compared method. A single variant with empty
-    # overrides is exactly what Honeydew's methodology review rejects.
+    # Issue #474: an across_jobs comparison runs one job per method, so the
+    # demonstrated shape must carry one distinct, non-empty variant per
+    # required compared method and a single canonical seed.
     _, store, _, _, engine = orchestrator_bundle
     run = _bind_comparison_contract(tmp_path, store, engine)
     template = engine._matrix_action_template(run)
     matrix = ExperimentMatrix.model_validate(template['arguments'])
     assert len(matrix.variants) == 3
-    assert len(matrix.seeds) >= 3
+    assert matrix.seeds == [17]
     assert all(variant.overrides for variant in matrix.variants)
     assert len({variant.name for variant in matrix.variants}) == 3
     values = [
@@ -328,6 +347,29 @@ def test_template_emits_non_empty_variants_for_comparison_requirement(
         for variant in matrix.variants
     ]
     assert len(set(values)) == 3, values
+
+
+def test_template_emits_single_candidate_for_within_job_comparison(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    # A within_job comparison runs every compared method inside one job, so the
+    # demonstrated shape is a single candidate variant with empty overrides and
+    # the replication seeds live in the matrix, not the variants.
+    _, store, _, _, engine = orchestrator_bundle
+    run = _bind_comparison_contract(
+        tmp_path,
+        store,
+        engine,
+        requirements=WITHIN_JOB_COMPARISON_REQUIREMENTS,
+    )
+    template = engine._matrix_action_template(run)
+    matrix = ExperimentMatrix.model_validate(template['arguments'])
+    assert [variant.model_dump() for variant in matrix.variants] == [
+        {'name': 'candidate', 'overrides': {}}
+    ]
+    assert len(matrix.seeds) >= 3
+    assert len(set(matrix.seeds)) == len(matrix.seeds)
 
 
 def test_template_keeps_single_candidate_without_comparison_requirement(

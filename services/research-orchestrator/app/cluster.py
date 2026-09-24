@@ -241,6 +241,7 @@ class WorkflowApiClusterExecutor(ClusterExecutor):
                 'seed': spec.seed,
                 'base_config': spec.base_config,
                 'overrides': spec.overrides,
+                'comparison_scope': spec.comparison_scope,
                 'evaluation_contract': {
                     'contract_id': spec.evaluation_contract_id,
                     'version': spec.evaluation_contract_version,

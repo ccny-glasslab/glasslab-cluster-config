@@ -237,6 +237,7 @@ def test_candidate_methodology_requirements_filesystem_config_path_is_rejected(
             'requirement_id': 'baseline-comparison',
             'config_path': 'src/train.py',
             'mode': 'comparison',
+            'comparison_scope': 'within_job',
             'minimum_distinct_values': 2,
             'description': 'compare baseline with non-linear ensembles',
         }
@@ -285,6 +286,7 @@ def test_promotion_rejects_filesystem_config_path_in_sealed_descriptor(
             'requirement_id': 'baseline-comparison',
             'config_path': 'configs/train.yaml',
             'mode': 'comparison',
+            'comparison_scope': 'within_job',
             'minimum_distinct_values': 2,
             'description': 'compare baseline with non-linear ensembles',
         }
@@ -423,10 +425,147 @@ def test_candidate_valid_comparison_requirement_seals_cleanly(
                 'requirement_id': 'model_families',
                 'config_path': 'experiment_dimensions.model',
                 'mode': 'comparison',
+                'comparison_scope': 'within_job',
                 'minimum_distinct_values': 2,
                 'description': 'Compare a linear and a non-linear model family.',
             }
         ],
+    )
+
+    sealed = manager.seal(
+        source=source,
+        contract_id='candidate-v1',
+        version='1.0.0',
+    )
+
+    assert sealed.digest
+
+
+def test_candidate_comparison_requirement_without_scope_is_rejected(
+    tmp_path: Path,
+) -> None:
+    # Ambiguous comparison semantics must never seal: every comparison
+    # requirement declares its scope explicitly so a new contract cannot fall
+    # back to the legacy within_job behavior by omission.
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'model_families',
+                'config_path': 'experiment_dimensions.model',
+                'mode': 'comparison',
+                'minimum_distinct_values': 2,
+                'description': 'Compare a linear and a non-linear model family.',
+            }
+        ],
+    )
+
+    with pytest.raises(ContractCandidateError, match='comparison_scope'):
+        _seal(manager, source)
+
+
+def test_candidate_decision_requirement_with_scope_is_rejected(
+    tmp_path: Path,
+) -> None:
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'missing_data_strategy',
+                'config_path': 'experiment_dimensions.missing_strategy',
+                'mode': 'decision',
+                'comparison_scope': 'within_job',
+                'description': 'Choose one missing-data strategy.',
+            }
+        ],
+    )
+
+    with pytest.raises(ContractCandidateError, match='decision requirement'):
+        _seal(manager, source)
+
+
+def test_candidate_multiple_across_jobs_comparisons_are_rejected(
+    tmp_path: Path,
+) -> None:
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'model_families',
+                'config_path': 'experiment_dimensions.model',
+                'mode': 'comparison',
+                'comparison_scope': 'across_jobs',
+                'minimum_distinct_values': 2,
+                'description': 'Compare model families across jobs.',
+            },
+            {
+                'requirement_id': 'search_technique',
+                'config_path': 'experiment_dimensions.search_technique',
+                'mode': 'comparison',
+                'comparison_scope': 'across_jobs',
+                'minimum_distinct_values': 2,
+                'description': 'Compare search techniques across jobs.',
+            },
+        ],
+    )
+
+    with pytest.raises(
+        ContractCandidateError,
+        match='more than one across_jobs',
+    ):
+        _seal(manager, source)
+
+
+def test_candidate_across_jobs_without_comparison_key_is_rejected(
+    tmp_path: Path,
+) -> None:
+    # An across_jobs evaluator cannot see sibling jobs, so the sealed output
+    # schema must declare the comparison_key digest property; otherwise the
+    # comparison can never be attested and sealing must fail.
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'model_families',
+                'config_path': 'experiment_dimensions.model',
+                'mode': 'comparison',
+                'comparison_scope': 'across_jobs',
+                'minimum_distinct_values': 2,
+                'description': 'Compare model families across jobs.',
+            }
+        ],
+    )
+    (source / 'output.schema.json').write_text(
+        json.dumps({'type': 'object'})
+    )
+
+    with pytest.raises(ContractCandidateError, match='comparison_key'):
+        _seal(manager, source)
+
+
+def test_candidate_across_jobs_with_comparison_key_seals_cleanly(
+    tmp_path: Path,
+) -> None:
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'model_families',
+                'config_path': 'experiment_dimensions.model',
+                'mode': 'comparison',
+                'comparison_scope': 'across_jobs',
+                'minimum_distinct_values': 2,
+                'description': 'Compare model families across jobs.',
+            }
+        ],
+    )
+    (source / 'output.schema.json').write_text(
+        json.dumps(
+            {
+                'type': 'object',
+                'properties': {'comparison_key': {'type': 'string'}},
+            }
+        )
     )
 
     sealed = manager.seal(
@@ -449,6 +588,7 @@ def test_candidate_unknown_root_config_path_is_rejected(tmp_path: Path) -> None:
                 'requirement_id': 'search_technique',
                 'config_path': 'methodology.search_technique',
                 'mode': 'comparison',
+                'comparison_scope': 'within_job',
                 'minimum_distinct_values': 2,
                 'description': 'Compare at least two search techniques.',
             }
@@ -513,6 +653,7 @@ def test_candidate_malformed_config_path_is_rejected(
                 'requirement_id': 'baseline-comparison',
                 'config_path': config_path,
                 'mode': 'comparison',
+                'comparison_scope': 'within_job',
                 'minimum_distinct_values': 2,
                 'description': 'Compare baseline with non-linear ensembles.',
             }
@@ -533,6 +674,7 @@ def test_candidate_comparison_requirement_needs_two_values(
                 'requirement_id': 'model_families',
                 'config_path': 'experiment_dimensions.model',
                 'mode': 'comparison',
+                'comparison_scope': 'within_job',
                 'minimum_distinct_values': 1,
                 'description': 'Compare model families.',
             }
@@ -582,6 +724,7 @@ def test_candidate_duplicate_requirement_id_is_rejected(tmp_path: Path) -> None:
                 'requirement_id': 'model_families',
                 'config_path': 'experiment_dimensions.model',
                 'mode': 'comparison',
+                'comparison_scope': 'within_job',
                 'minimum_distinct_values': 2,
                 'description': 'Compare model families.',
             },
@@ -611,6 +754,7 @@ def test_candidate_maximum_below_minimum_is_rejected(tmp_path: Path) -> None:
                 'requirement_id': 'model_families',
                 'config_path': 'experiment_dimensions.model',
                 'mode': 'comparison',
+                'comparison_scope': 'within_job',
                 'minimum_distinct_values': 3,
                 'maximum_distinct_values': 2,
                 'description': 'Compare model families.',

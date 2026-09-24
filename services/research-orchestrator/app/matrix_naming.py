@@ -21,21 +21,45 @@ _VARIANT_RULES_TEMPLATE = (
     '\nVariant naming and comparison rules: every variant `name` must match '
     'the pattern `{variant_name_pattern}` (lowercase letters, digits, '
     'hyphens, or underscores). When the evaluation contract declares a '
-    '`comparison` methodology requirement, emit exactly one variant per '
-    'required distinct method (at least `minimum_distinct_values` variants), '
-    'each with a distinct NON-EMPTY `overrides` object that sets that '
-    "requirement's `config_path` to one distinct value; never propose a "
-    'single variant with empty `overrides` when a comparison is required. '
-    'Write the same distinct values into `base_config` at the same '
-    '`config_path`, so the deterministic preflight (which reads base_config) '
-    'and the methodology review (which reads the variants) agree.\n'
+    '`within_job` `comparison` methodology requirement, every compared method '
+    'runs inside ONE job: emit exactly one variant named `candidate` with an '
+    'EMPTY `overrides` object, and write the complete distinct list of methods '
+    "into `base_config` at the requirement's `config_path` (at least "
+    '`minimum_distinct_values` distinct values). Replicate the within-job '
+    'comparison with at least three matrix seeds.\n'
+)
+
+_ACROSS_JOBS_VARIANT_RULES_TEMPLATE = (
+    '\nVariant naming and comparison rules: every variant `name` must match '
+    'the pattern `{variant_name_pattern}` (lowercase letters, digits, '
+    'hyphens, or underscores). When the evaluation contract declares an '
+    '`across_jobs` `comparison` methodology requirement, each compared '
+    'methodology runs in its OWN Kubernetes job scored by a per-job evaluator: '
+    'emit exactly one variant per required distinct method (at least '
+    '`minimum_distinct_values` variants), each with a distinct NON-EMPTY '
+    "`overrides` object that sets that requirement's `config_path` to one "
+    'distinct scalar value. Write a single placeholder scalar into '
+    '`base_config` at the same `config_path`; the distinct methods live only '
+    'in the variant overrides, so never propose a single variant with empty '
+    '`overrides` when an across_jobs comparison is required.\n'
 )
 
 
-def render_variant_rules_guidance(variant_name_pattern: str) -> str:
-    guidance = _VARIANT_RULES_TEMPLATE.format(
-        variant_name_pattern=variant_name_pattern
-    )
+def render_variant_rules_guidance(
+    variant_name_pattern: str,
+    comparison_scope: str = 'within_job',
+) -> str:
+    templates = {
+        'within_job': _VARIANT_RULES_TEMPLATE,
+        'across_jobs': _ACROSS_JOBS_VARIANT_RULES_TEMPLATE,
+    }
+    template = templates.get(comparison_scope)
+    if template is None:
+        raise ValueError(
+            f'unknown comparison_scope {comparison_scope!r}; expected '
+            "'within_job' or 'across_jobs'"
+        )
+    guidance = template.format(variant_name_pattern=variant_name_pattern)
     if variant_name_pattern not in guidance:
         raise RuntimeError(
             'matrix variant guidance no longer interpolates '

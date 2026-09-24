@@ -12,11 +12,15 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
+from app.preflight import MethodologyRequirement
 from app.schemas import (
     AgentTurnResult,
     EvaluationContractProposal,
+    ExpandedJobSpec,
     ExperimentVariant,
+    ResourceRequest,
     RunState,
+    comparison_scope_for_manifest,
 )
 from app.state_machine import InvalidTransition, validate_transition
 
@@ -172,3 +176,94 @@ def test_postgres_backend_requires_an_explicit_dsn() -> None:
         store_postgres_dsn='postgresql://glasslab:test@localhost/glasslab',
     )
     assert settings.store_backend == 'postgres'
+
+
+def _expanded_job_spec(**overrides) -> ExpandedJobSpec:
+    payload = {
+        'orchestrator_job_id': 'job-1',
+        'run_id': 'run-1',
+        'action_id': 'action-1',
+        'variant_name': 'candidate',
+        'seed': 17,
+        'idempotency_key': 'key-1',
+        'base_config': 'configs/candidate.yaml',
+        'overrides': {},
+        'runner_image': 'example.invalid/runner:v1',
+        'resources': ResourceRequest(),
+        'required_artifacts': ['metrics.json'],
+        'evaluation_contract_id': 'contract-v1',
+        'evaluation_contract_version': '1.0.0',
+        'evaluation_contract_digest': 'a' * 64,
+    }
+    payload.update(overrides)
+    return ExpandedJobSpec(**payload)
+
+
+def test_expanded_job_spec_comparison_scope_defaults_to_none() -> None:
+    spec = _expanded_job_spec()
+    assert spec.comparison_scope is None
+    assert (
+        _expanded_job_spec(comparison_scope='across_jobs').comparison_scope
+        == 'across_jobs'
+    )
+
+
+def test_methodology_requirement_scope_tracks_explicit_omission() -> None:
+    # model_fields_set is the seal-time signal that distinguishes an explicit
+    # comparison_scope from the within_job default.
+    implicit = MethodologyRequirement(
+        requirement_id='model_families',
+        config_path='experiment_dimensions.model',
+        mode='comparison',
+        minimum_distinct_values=2,
+        description='Compare two model families.',
+    )
+    assert implicit.comparison_scope == 'within_job'
+    assert 'comparison_scope' not in implicit.model_fields_set
+
+    explicit = MethodologyRequirement.model_validate(
+        {
+            'requirement_id': 'model_families',
+            'config_path': 'experiment_dimensions.model',
+            'mode': 'comparison',
+            'comparison_scope': 'across_jobs',
+            'minimum_distinct_values': 2,
+            'description': 'Compare two model families across jobs.',
+        }
+    )
+    assert explicit.comparison_scope == 'across_jobs'
+    assert 'comparison_scope' in explicit.model_fields_set
+
+
+def test_comparison_scope_for_manifest_resolves_topology() -> None:
+    assert comparison_scope_for_manifest({}) == 'within_job'
+    assert (
+        comparison_scope_for_manifest(
+            {
+                'methodology_requirements': [
+                    {
+                        'requirement_id': 'model_families',
+                        'config_path': 'experiment_dimensions.model',
+                        'mode': 'comparison',
+                        'comparison_scope': 'within_job',
+                    }
+                ]
+            }
+        )
+        == 'within_job'
+    )
+    assert (
+        comparison_scope_for_manifest(
+            {
+                'methodology_requirements': [
+                    {
+                        'requirement_id': 'model_families',
+                        'config_path': 'experiment_dimensions.model',
+                        'mode': 'comparison',
+                        'comparison_scope': 'across_jobs',
+                    }
+                ]
+            }
+        )
+        == 'across_jobs'
+    )
