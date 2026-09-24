@@ -22,6 +22,12 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "watch"]
+  # execution_preflight reads the pull secret to confirm it exists before
+  # submitting; scoped to that one secret so the service cannot read others.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["glasslab-ghcr-pull"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
