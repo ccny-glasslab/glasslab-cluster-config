@@ -15,6 +15,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from .comparison_checks import is_authoritative_comparison, is_comparison_filename
 from .config import Settings
 from .research_store import ResearchStore
 from .schemas import ArtifactRecord, JobRecord
@@ -29,15 +30,20 @@ class EvidencePhase(StrEnum):
 _PHASE_FILENAMES: dict[EvidencePhase, frozenset[str]] = {
     EvidencePhase.ANALYSIS: frozenset({
         'runner.log', 'status.json', 'evaluation.json', 'metrics.json',
-        'metrics.csv', 'fairness.csv',
+        'metrics.csv', 'fairness.csv', 'comparison.json',
     }),
     EvidencePhase.VERIFICATION: frozenset({
         'status.json', 'evaluation.json', 'metrics.json', 'report.md',
+        'comparison.json',
     }),
-    EvidencePhase.REPORT: frozenset({'evaluation.json', 'metrics.json'}),
+    EvidencePhase.REPORT: frozenset({
+        'evaluation.json', 'metrics.json', 'comparison.json',
+    }),
 }
 
-_VERBATIM_FILENAMES = frozenset({'evaluation.json', 'metrics.json'})
+_VERBATIM_FILENAMES = frozenset({
+    'evaluation.json', 'metrics.json', 'comparison.json',
+})
 _PRIORITY_2_FILENAMES = frozenset({'runner.log', 'metrics.csv', 'fairness.csv'})
 _PRIORITY_1_FILENAMES = frozenset({'status.json', 'report.md'})
 
@@ -114,7 +120,9 @@ def _read_excerpt(
     filename: str,
     size: int,
 ) -> dict[str, Any]:
-    verbatim = filename in _VERBATIM_FILENAMES
+    verbatim = filename in _VERBATIM_FILENAMES or is_comparison_filename(
+        filename
+    )
     maximum = (
         settings.evidence_verbatim_max_bytes
         if verbatim
@@ -182,14 +190,27 @@ def _drop_candidates(
         candidates.append(
             ('jobs', str(entry['job_id']), f"job://{entry['job_id']}")
         )
-    for filenames in (_PRIORITY_1_FILENAMES, _VERBATIM_FILENAMES):
-        for entry in sorted(
-            (e for e in contents if _entry_filename(e) in filenames),
-            key=lambda e: str(e['uri']),
-        ):
-            candidates.append(
-                ('artifact_contents', str(entry['uri']), str(entry['uri']))
-            )
+    # Status/report contents drop before verbatim evaluator/metrics and
+    # comparison contents, which must survive longest.
+    for entry in sorted(
+        (e for e in contents if _entry_filename(e) in _PRIORITY_1_FILENAMES),
+        key=lambda e: str(e['uri']),
+    ):
+        candidates.append(
+            ('artifact_contents', str(entry['uri']), str(entry['uri']))
+        )
+    for entry in sorted(
+        (
+            e
+            for e in contents
+            if _entry_filename(e) in _VERBATIM_FILENAMES
+            or is_comparison_filename(_entry_filename(e))
+        ),
+        key=lambda e: str(e['uri']),
+    ):
+        candidates.append(
+            ('artifact_contents', str(entry['uri']), str(entry['uri']))
+        )
     return candidates
 
 
@@ -237,6 +258,39 @@ def _drop_content_entry(
     return removed
 
 
+def _visible_artifacts(
+    artifacts: list[ArtifactRecord],
+    allowed: frozenset[str],
+) -> list[ArtifactRecord]:
+    # Phase-scoped filenames, plus exactly the newest authoritative comparison:
+    # superseded comparison records (a later job wave) are omitted so the
+    # snapshot never presents a stale or overwritten comparison.
+    newest_comparison: ArtifactRecord | None = None
+    for artifact in artifacts:
+        if not is_authoritative_comparison(artifact):
+            continue
+        if not is_comparison_filename(Path(artifact.uri).name):
+            continue
+        if newest_comparison is None or (
+            artifact.created_at, artifact.artifact_id
+        ) > (newest_comparison.created_at, newest_comparison.artifact_id):
+            newest_comparison = artifact
+    visible: list[ArtifactRecord] = []
+    for artifact in artifacts:
+        filename = Path(artifact.uri).name
+        if is_comparison_filename(filename):
+            if (
+                'comparison.json' in allowed
+                and newest_comparison is not None
+                and artifact.artifact_id == newest_comparison.artifact_id
+            ):
+                visible.append(artifact)
+            continue
+        if filename in allowed:
+            visible.append(artifact)
+    return visible
+
+
 def build_evidence_snapshot(
     settings: Settings,
     store: ResearchStore,
@@ -247,20 +301,18 @@ def build_evidence_snapshot(
     allowed = _PHASE_FILENAMES[phase]
     budget = max_bytes or settings.evidence_snapshot_max_bytes
     jobs = [_project_job(job, phase) for job in store.list_jobs(run_id)]
+    visible = _visible_artifacts(store.list_artifacts(run_id), allowed)
     # The inventory is phase-scoped like the contents: metadata for artifacts
     # whose content the phase never receives is not phase-relevant evidence.
     artifacts = [
         artifact.model_dump(mode='json', include=_ARTIFACT_KEYS)
-        for artifact in store.list_artifacts(run_id)
-        if Path(artifact.uri).name in allowed
+        for artifact in visible
     ]
     contents: list[dict[str, Any]] = []
     first_uri_by_digest: dict[tuple[str, str], str] = {}
     dependents_by_rep: dict[str, list[str]] = {}
-    for artifact in store.list_artifacts(run_id):
+    for artifact in visible:
         filename = Path(artifact.uri).name
-        if filename not in allowed:
-            continue
         excerpt = _artifact_excerpt(settings, artifact, filename)
         if excerpt is None:
             continue

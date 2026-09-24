@@ -2270,6 +2270,114 @@ def test_methodology_appendix_in_revision_requested_payload(
     assert 'must EXIST' in rejected[-1].reason
 
 
+def test_honeydew_review_prompt_states_resolved_comparison_scope(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # F5: the review prompt must state the resolved scope and canonical shape so
+    # Honeydew does not reject the correct within_job single-candidate/
+    # empty-overrides topology (#474).
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Review within-job comparison scope.')
+    )
+    contract = engine.contracts.resolve(
+        'ml-benchmark-adult-income-v1',
+        '1.1.0',
+    )
+    store.replace_run(
+        run.model_copy(
+            update={
+                'evaluation_contract_id': 'ml-benchmark-adult-income-v1',
+                'evaluation_contract_version': '1.1.0',
+                'evaluation_contract_digest': contract.digest,
+            }
+        ),
+        expected_version=run.version,
+    )
+    config = Path(run.beaker_workspace) / 'configs' / 'candidate.yaml'
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        'experiment_dimensions:\n'
+        '  model: [logistic-regression, random-forest]\n'
+        '  missing_strategy: median-imputation\n'
+        '  include_fnlwgt: false\n'
+        '  encoding: ordinal\n'
+    )
+    matrix = ExperimentMatrix.model_validate(
+        {
+            'base_config': 'configs/candidate.yaml',
+            'variants': [{'name': 'candidate', 'overrides': {}}],
+            'seeds': [17, 31, 49],
+            'maximum_parallel_jobs': 1,
+            'runner_image': RUNNER_IMAGE,
+            'resources': {
+                'cpu': 1,
+                'memory_gib': 1,
+                'gpus': 0,
+                'wallclock_minutes': 5,
+            },
+            'required_artifacts': ['metrics.json'],
+        }
+    )
+    engine._save_local_artifact(
+        run_id=run.run_id,
+        artifact_type='evaluation_contract_proposal',
+        uri=f'artifact://{run.run_id}/shared/evaluation-contract-proposal.json',
+        digest='d' * 64,
+        metadata={
+            'proposal': {
+                'evaluator_type': 'ml-benchmark-adult-income-v1',
+                'primary_metric': {
+                    'name': 'rubric_score',
+                    'direction': 'maximize',
+                },
+                'resource_constraints': {
+                    'cpu': 4,
+                    'memory_gib': 8,
+                    'gpus': 0,
+                    'wallclock_minutes': 60,
+                },
+                'required_artifacts': list(
+                    contract.descriptor.required_artifacts
+                ),
+            }
+        },
+    )
+    store.save_action(
+        ActionRecord(
+            run_id=run.run_id,
+            proposed_by=AgentName.BEAKER,
+            type='submit_experiment_matrix',
+            arguments=matrix.model_dump(mode='json'),
+            policy_classification=(
+                PolicyClassification.HONEYDEW_AND_HUMAN_APPROVAL
+            ),
+            approval_status=ApprovalStatus.PENDING,
+            reason='Review scope test',
+            idempotency_key='review-scope-1',
+        )
+    )
+    monkeypatch.setattr(
+        engine,
+        '_create_methodology_review_snapshot',
+        lambda **kwargs: (Path(run.beaker_workspace) / 'snapshot', []),
+    )
+    captured: dict[str, str] = {}
+
+    def capture_turn(**kwargs):
+        captured['prompt'] = kwargs['prompt']
+        raise RuntimeError('prompt captured')
+
+    monkeypatch.setattr(engine, '_run_agent_turn', capture_turn)
+
+    with pytest.raises(RuntimeError, match='prompt captured'):
+        engine._honeydew_review(run.run_id, implementation_turn_id='test')
+
+    assert 'Resolved comparison scope: `within_job`' in captured['prompt']
+    assert 'EMPTY overrides' in captured['prompt']
+
+
 def test_restart_recovery_from_job_running(orchestrator_bundle) -> None:
     # Rebuilds the engine from the same SqliteStore file after jobs completed,
     # simulating a process restart; recover() must finish the run from durable

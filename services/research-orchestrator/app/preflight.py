@@ -11,10 +11,10 @@ errors, and every error is surfaced to the human reviewer.
 from __future__ import annotations
 
 import ast
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -38,6 +38,7 @@ class MethodologyRequirement(BaseModel):
     requirement_id: str = Field(min_length=1)
     config_path: str = Field(min_length=1)
     mode: Literal['comparison', 'decision']
+    comparison_scope: Literal['within_job', 'across_jobs'] = 'within_job'
     minimum_distinct_values: int = Field(default=1, ge=1)
     maximum_distinct_values: int | None = Field(default=None, ge=1)
     description: str = Field(min_length=1)
@@ -52,6 +53,11 @@ class MatrixPreflightReport(BaseModel):
     comparisons: dict[str, list[str]] = Field(default_factory=dict)
     decisions: dict[str, list[str]] = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
+    # Resolved comparison topology, surfaced to the agent review so a correct
+    # within_job single-candidate/empty-overrides shape is not mistaken for the
+    # #474 rejected shape.
+    comparison_scope: Literal['within_job', 'across_jobs'] = 'within_job'
+    comparison_topology: str = ''
     # A non-retryable report is a configuration contradiction, not a model
     # mistake: no revision, redraft, or retry can satisfy it, so the engine
     # parks the run for human resolution instead of spending budget on an
@@ -77,6 +83,23 @@ EVALUATOR_OWNED_LITERALS = {
     'integrity_pass',
     'rubric_score',
 }
+ORCHESTRATOR_RESERVED_ARTIFACTS = frozenset({
+    # The run-level across-jobs comparison is produced by the orchestrator after
+    # all jobs are terminal. No contract or matrix may request it, and no
+    # workload may write it, so a job artifact can never masquerade as (or
+    # suppress) the authoritative comparison.
+    'comparison.json',
+})
+
+
+def is_reserved_artifact(value: str) -> bool:
+    # Reserved matching is by basename so './comparison.json',
+    # 'sub/comparison.json', and '../reports/comparison.json' are all rejected,
+    # and the fingerprint-versioned comparison-<fp>.json names are covered too.
+    name = PurePosixPath(str(value).replace('\\', '/')).name
+    if name in ORCHESTRATOR_RESERVED_ARTIFACTS:
+        return True
+    return name.startswith('comparison-') and name.endswith('.json')
 SCANNED_SOURCE_SUFFIXES = {
     # Static-analysis scope is deliberately limited to code files that carry
     # logic; data files cannot be reasoned about statically.
@@ -565,9 +588,32 @@ def _source_errors(
                 'while the immutable contract owns evaluation.json, '
                 'integrity_pass, and rubric_score'
             )
+        reserved_orchestrator = sorted(
+            literal
+            for literal in ORCHESTRATOR_RESERVED_ARTIFACTS
+            if literal in text
+        )
+        if reserved_orchestrator:
+            errors.append(
+                f'{relative} references orchestrator-reserved output '
+                f'{", ".join(reserved_orchestrator)}; the orchestrator writes '
+                'the run-level comparison and a workload must not produce or '
+                'score it'
+            )
+    reserved_artifacts = {
+        artifact
+        for artifact in required_artifacts
+        if is_reserved_artifact(artifact)
+    }
+    for artifact in sorted(reserved_artifacts):
+        errors.append(
+            f'required artifact {artifact!r} is reserved by the orchestrator; '
+            'the run-level comparison is produced by the orchestrator, not by '
+            'the workload or a contract'
+        )
     evaluator_owned = EVALUATOR_OWNED_LITERALS & set(required_artifacts)
     for artifact in required_artifacts:
-        if artifact in evaluator_owned:
+        if artifact in evaluator_owned or artifact in reserved_artifacts:
             continue
         parts = [part for part in Path(artifact).parts if part not in {'.', '/'}]
         # A required artifact counts as "statically referenced" only when every
@@ -801,6 +847,137 @@ def _reconcile_required_metric_keys(
     return contract_keys, superseded
 
 
+def resolve_comparison_scope(
+    requirements: Sequence[MethodologyRequirement | Mapping[str, Any]],
+) -> Literal['within_job', 'across_jobs']:
+    # Single source for the matrix-topology rule, accepting either parsed
+    # requirements or raw manifest mappings. At most one across_jobs comparison
+    # is permitted per contract, so the presence of one selects the across-jobs
+    # topology; anything else keeps legacy within-job behavior.
+    for requirement in requirements:
+        if isinstance(requirement, Mapping):
+            mode = requirement.get('mode')
+            scope = requirement.get('comparison_scope')
+        else:
+            mode = requirement.mode
+            scope = requirement.comparison_scope
+        if mode == 'comparison' and scope == 'across_jobs':
+            return 'across_jobs'
+    return 'within_job'
+
+
+def comparison_scope_for_manifest(manifest: Mapping[str, Any]) -> str:
+    raw_requirements = manifest.get('methodology_requirements', [])
+    if not isinstance(raw_requirements, (list, tuple)):
+        return 'within_job'
+    return resolve_comparison_scope(
+        [
+            item
+            for item in raw_requirements
+            if isinstance(item, Mapping)
+        ]
+    )
+
+
+def _comparison_topology_summary(
+    comparison_scope: str,
+    requirements: list[MethodologyRequirement],
+) -> str:
+    comparison_paths = sorted(
+        requirement.config_path
+        for requirement in requirements
+        if requirement.mode == 'comparison'
+    )
+    if not comparison_paths:
+        return (
+            'no comparison requirement: one `candidate` variant with empty '
+            'overrides'
+        )
+    paths = ', '.join(f'`{path}`' for path in comparison_paths)
+    if comparison_scope == 'across_jobs':
+        return (
+            'across_jobs: one non-empty variant per compared methodology, each '
+            f'overriding {paths} with a distinct scalar; base_config holds one '
+            'placeholder scalar at each compared path; one seed per value is '
+            'correct'
+        )
+    return (
+        'within_job: exactly one `candidate` variant with EMPTY overrides; the '
+        f'full distinct list of compared values lives in base_config at {paths}; '
+        f'use at least {MIN_COMPARISON_SEEDS} matrix seeds'
+    )
+
+
+def _is_scalar(value: Any) -> bool:
+    return isinstance(value, (str, int, float, bool))
+
+
+def _across_jobs_base_config_error(
+    requirement: MethodologyRequirement,
+    configured_value: Any,
+) -> str | None:
+    if _is_scalar(configured_value):
+        return None
+    return (
+        f'`{requirement.config_path}` must contain exactly one scalar value '
+        'for an across_jobs comparison; the compared methods belong in the '
+        'variant overrides, not in base_config'
+    )
+
+
+def _across_jobs_variant_errors(
+    requirement: MethodologyRequirement,
+    matrix: ExperimentMatrix,
+) -> tuple[list[str], list[str]]:
+    # across_jobs topology: every variant selects one methodology by overriding
+    # the compared config_path with a distinct scalar; the union is the compared
+    # set. Error text is deliberately free of variant names/values so the
+    # non-convergence signature stays stable across identical rejections.
+    config_path = requirement.config_path
+    errors: list[str] = []
+    values: list[str] = []
+    for variant in matrix.variants:
+        if not variant.overrides:
+            errors.append(
+                f'`{config_path}` requires a non-empty `overrides` object for '
+                'an across_jobs comparison; an empty-override variant cannot '
+                'select a compared methodology'
+            )
+            continue
+        if config_path not in variant.overrides:
+            errors.append(
+                f'every variant must override `{config_path}` with a distinct '
+                'scalar value for an across_jobs comparison'
+            )
+            continue
+        override = variant.overrides[config_path]
+        if not _is_scalar(override):
+            errors.append(
+                f'`{config_path}` override must be a distinct scalar value for '
+                'an across_jobs comparison, not a list or object'
+            )
+            continue
+        values.append(str(override))
+    distinct = list(dict.fromkeys(values))
+    count = len(distinct)
+    if count < requirement.minimum_distinct_values:
+        errors.append(
+            f'`{config_path}` across_jobs comparison requires at least '
+            f'{requirement.minimum_distinct_values} distinct variant override '
+            f'value(s); found {count}'
+        )
+    if (
+        requirement.maximum_distinct_values is not None
+        and count > requirement.maximum_distinct_values
+    ):
+        errors.append(
+            f'`{config_path}` across_jobs comparison allows at most '
+            f'{requirement.maximum_distinct_values} distinct variant override '
+            f'value(s); found {count}'
+        )
+    return errors, distinct
+
+
 def preflight_matrix(
     *,
     run: RunRecord,
@@ -860,6 +1037,23 @@ def preflight_matrix(
                 'beneath `description` or `values`'
             )
             continue
+        if (
+            requirement.mode == 'comparison'
+            and requirement.comparison_scope == 'across_jobs'
+        ):
+            base_config_error = _across_jobs_base_config_error(
+                requirement,
+                configured_value,
+            )
+            if base_config_error is not None:
+                errors.append(base_config_error)
+            variant_errors, values = _across_jobs_variant_errors(
+                requirement,
+                matrix,
+            )
+            errors.extend(variant_errors)
+            comparisons[requirement.requirement_id] = values
+            continue
         values = _distinct_strings(configured_value)
         count = len(values)
         if count < requirement.minimum_distinct_values:
@@ -883,6 +1077,20 @@ def preflight_matrix(
     if requirements:
         checks.append(
             f'validated {len(requirements)} contract methodology requirement(s)'
+        )
+
+    reserved_requested = sorted(
+        {
+            artifact
+            for artifact in matrix.required_artifacts
+            if is_reserved_artifact(artifact)
+        }
+    )
+    if reserved_requested:
+        errors.append(
+            'experiment matrix may not request orchestrator-reserved '
+            f'artifact(s): {", ".join(reserved_requested)}; the '
+            'orchestrator owns the run-level comparison'
         )
 
     if run.task_definition:
@@ -937,13 +1145,17 @@ def preflight_matrix(
     job_count = len(matrix.variants) * len(matrix.seeds)
     checks.append(f'deterministic expansion produces {job_count} job(s)')
 
-    has_comparison_mode = any(r.mode == 'comparison' for r in requirements)
-    if has_comparison_mode and len(matrix.seeds) < MIN_COMPARISON_SEEDS:
+    has_within_job_comparison = any(
+        r.mode == 'comparison' and r.comparison_scope == 'within_job'
+        for r in requirements
+    )
+    if has_within_job_comparison and len(matrix.seeds) < MIN_COMPARISON_SEEDS:
         errors.append(
             f'comparison contract requires at least {MIN_COMPARISON_SEEDS} '
             f'matrix seeds; found {len(matrix.seeds)}'
         )
 
+    comparison_scope = resolve_comparison_scope(requirements)
     return MatrixPreflightReport(
         passed=not errors,
         job_count=job_count,
@@ -951,6 +1163,11 @@ def preflight_matrix(
         comparisons=comparisons,
         decisions=decisions,
         errors=errors,
+        comparison_scope=comparison_scope,
+        comparison_topology=_comparison_topology_summary(
+            comparison_scope,
+            requirements,
+        ),
     )
 
 

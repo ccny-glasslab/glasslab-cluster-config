@@ -171,8 +171,12 @@ Read `docs/research-orchestrator-command-surface.md` before operating a run.
 - Every contract-required workload artifact must be produced. Preflight checks
   source references before cluster submission; the evaluator verifies actual
   files afterward.
-- Matrix seeds create separate cluster jobs. If one job already performs an
-  internal multi-seed stability analysis, use one outer matrix seed instead of
+- Matrix seeds create separate cluster jobs, and matrix topology follows a
+  comparison requirement's `comparison_scope`: `within_job` runs the whole
+  compared grid inside one job (replicated by matrix seeds), while
+  `across_jobs` runs one job per compared methodology and adjudicates the
+  result in `comparison.json`. If one job already performs an internal
+  multi-seed stability analysis, use one outer matrix seed instead of
   duplicating the internal seed list.
 - Do not claim scientific confirmation from one exploratory run. Promote
   promising results into a frozen, multi-seed confirmatory campaign.

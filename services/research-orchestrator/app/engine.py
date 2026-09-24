@@ -17,8 +17,19 @@ from uuid import uuid4, uuid5, NAMESPACE_URL
 import yaml
 
 from .analysis_notebook import write_analysis_notebook
-from .artifact_delivery import ArtifactDeliveryError, build_report_bundle
+from .artifact_delivery import (
+    ArtifactDeliveryError,
+    VerifiedArtifactReader,
+    build_report_bundle,
+)
 from .cluster import ClusterExecutor
+from .comparison import build_comparison_report
+from .comparison_checks import (
+    AUTHORITATIVE_COMPARISON_TYPE,
+    comparison_artifact_filename,
+    comparison_input_fingerprint,
+    is_authoritative_comparison,
+)
 from .config import Settings
 from .contract_candidates import ContractCandidateManager
 from .contracts import EvaluationContractResolver
@@ -32,7 +43,8 @@ from .evidence import (
 from .evidence_resolver import EvidenceURIResolver
 from .matrix import expand_experiment_matrix
 from .matrix_naming import (
-    MATRIX_VARIANT_RULES_GUIDANCE,
+    VARIANT_NAME_PATTERN,
+    render_variant_rules_guidance,
     variant_name_from_value,
 )
 from .methodology_config import (
@@ -54,6 +66,7 @@ from .preflight import (
     declared_budget_conflicts,
     preflight_matrix,
     profile_contract_resource_conflicts,
+    resolve_comparison_scope,
 )
 from .research_store import ResearchStore
 from .schemas import (
@@ -72,6 +85,7 @@ from .schemas import (
     JOB_TERMINAL_STATUSES,
     JobRecord,
     JobStatus,
+    MIN_COMPARISON_SEEDS,
     PolicyClassification,
     ResearchAnswer,
     RequestedAction,
@@ -157,22 +171,39 @@ METHODOLOGY_REQUIREMENTS_GUIDANCE = (
     'When the binding task requires explicit methodological choices or '
     'comparisons, encode them as manifest.methodology_requirements entries '
     'with requirement_id, config_path, mode (`decision` or `comparison`), '
-    'minimum_distinct_values, optional maximum_distinct_values, and '
-    'description. config_path is a DOTTED KEY PATH into the '
+    'minimum_distinct_values, optional maximum_distinct_values, description, '
+    'and, for a comparison, an explicit comparison_scope (`within_job` or '
+    '`across_jobs`). config_path is a DOTTED KEY PATH into the '
     'matrix.base_config YAML that Beaker writes later, never a filesystem '
     'path: "experiment_dimensions.model" addresses the `model` key nested '
     'under the top-level `experiment_dimensions` key, while "src/train.py" '
     'is a file path and is rejected at seal time. A `comparison` requirement '
-    'declares that the config key must hold a list of distinct values (one '
-    'per compared method) with at least minimum_distinct_values entries; a '
-    '`decision` requirement declares a single chosen value. Worked example: '
-    'to compare three model families, declare {"requirement_id": '
-    '"model_families", "config_path": "experiment_dimensions.model", '
-    '"mode": "comparison", "minimum_distinct_values": 3, "description": '
-    '"Compare at least one linear and one non-linear model family."}; Beaker '
-    'must then write experiment_dimensions: {model: [logistic-regression, '
-    'random-forest, gradient-boosting]} into the base_config YAML. Do not '
-    'turn a required choice into a comparison. '
+    'must declare its scope and may not omit it. `comparison_scope: '
+    'within_job` declares that the config key holds a list of distinct values '
+    '(one per compared method) with at least minimum_distinct_values entries, '
+    'and every compared method runs inside one job. `comparison_scope: '
+    'across_jobs` declares that each compared method runs as its OWN '
+    'Kubernetes job, so the config key holds exactly one placeholder scalar '
+    'in base_config while one variant per method supplies the distinct '
+    'values; an across_jobs evaluator therefore scores exactly ONE '
+    'methodology per job. For an across_jobs requirement the contract\'s '
+    'expected_output_schema MUST declare a string `comparison_key` property, '
+    'and the evaluator MUST emit a deterministic `comparison_key` value: a '
+    'digest over the protocol constants that must be shared across the compared '
+    'jobs (fold spec, data split, metric definitions). The deterministic '
+    'comparison builder requires every job to carry the same key and marks the '
+    'comparison unsatisfied when any is missing or differs, so the evaluator, '
+    'not the prompt, owns cross-job comparability. A `decision` requirement '
+    'declares a single chosen value and must not carry a comparison_scope. New '
+    'comparison contracts should use `across_jobs`, and at most one across_jobs '
+    'comparison is supported per contract. Worked example: to compare three '
+    'model families across jobs, declare {"requirement_id": "model_families", '
+    '"config_path": "experiment_dimensions.model", "mode": "comparison", '
+    '"comparison_scope": "across_jobs", "minimum_distinct_values": 3, '
+    '"description": "Compare at least one linear and one non-linear model '
+    'family."}; Beaker then writes one variant per model family, and the '
+    'evaluator emits a `comparison_key` digest. Do not turn a required choice '
+    'into a comparison. '
 )
 
 # Issue #474: the variant naming rule and the comparison shape are restated at
@@ -3792,7 +3823,9 @@ class ResearchOrchestrator:
             'string to the evaluator .py file), expected_input_schema '
             '(relative path string to the input JSON schema file), '
             'expected_output_schema (relative path string to the output '
-            'JSON schema file), required_artifacts (non-empty list of '
+            'JSON schema file; when the contract declares an across_jobs '
+            'comparison it MUST declare a string `comparison_key` property), '
+            'required_artifacts (non-empty list of '
             'strings), resource_constraints (object with numeric cpu, '
             'memory_gib, gpus, wallclock_minutes), container_image_digest '
             '(set to null). The descriptor must not contain kind, '
@@ -4825,7 +4858,8 @@ class ResearchOrchestrator:
                 indent=2,
                 sort_keys=True,
             )
-            + MATRIX_VARIANT_RULES_GUIDANCE
+            + self._matrix_variant_rules_guidance(run.run_id)
+            + self._across_jobs_execution_note(run.run_id)
             + '\nKeep reason beside type and arguments. Put the ExperimentMatrix '
             'fields directly in arguments; do not add a matrix or evaluator_type '
             'wrapper. arguments.base_config must be the exact relative path '
@@ -4922,7 +4956,8 @@ class ResearchOrchestrator:
                 indent=2,
                 sort_keys=True,
             )
-            + MATRIX_VARIANT_RULES_GUIDANCE
+            + self._matrix_variant_rules_guidance(run.run_id)
+            + self._across_jobs_execution_note(run.run_id)
             + '\nKeep reason beside type and arguments. Put the ExperimentMatrix '
             'fields directly in arguments; do not add a matrix or evaluator_type '
             'wrapper. arguments.base_config must be the exact relative path '
@@ -5060,17 +5095,46 @@ class ResearchOrchestrator:
             ),
         }
 
+    def _matrix_comparison_scope(self, run_id: str) -> str:
+        return resolve_comparison_scope(
+            self._contract_methodology_requirements(run_id)
+        )
+
+    def _matrix_variant_rules_guidance(self, run_id: str) -> str:
+        return render_variant_rules_guidance(
+            VARIANT_NAME_PATTERN,
+            self._matrix_comparison_scope(run_id),
+        )
+
+    def _across_jobs_execution_note(self, run_id: str) -> str:
+        if self._matrix_comparison_scope(run_id) != 'across_jobs':
+            return ''
+        return (
+            '\nWith comparison_scope `across_jobs`, the workload MUST '
+            "deep-merge each variant's `overrides` onto `base_config` and run "
+            'EXACTLY ONE effective configuration per job; never iterate '
+            '`experiment_dimensions` to run several methods in one job. Record '
+            "the job's `variant_name` and `seed` in the metrics and evidence "
+            'provenance.'
+        )
+
     def _matrix_template_variants(self, run_id: str) -> list[dict[str, Any]]:
-        # Issue #474: Honeydew rejects a single variant with empty overrides
-        # whenever the contract requires a method comparison, so the template
+        # Issue #474: a within_job comparison runs every compared method inside
+        # ONE job, so its canonical shape is a single `candidate` variant. An
+        # across_jobs comparison runs one job per method, so its shape
         # demonstrates one distinct, non-empty variant per required distinct
-        # method. The agent still replaces the placeholder values with the
-        # real methods; the leaf-based value matches the deterministic
-        # base_config repair placeholders.
+        # method. The agent replaces the placeholder values with the real
+        # methods; the leaf-based value matches the deterministic base_config
+        # repair placeholders.
+        if self._matrix_comparison_scope(run_id) != 'across_jobs':
+            return [{'name': 'candidate', 'overrides': {}}]
         variants: list[dict[str, Any]] = []
         names: set[str] = set()
         for requirement in self._contract_methodology_requirements(run_id):
-            if requirement.mode != 'comparison':
+            if (
+                requirement.mode != 'comparison'
+                or requirement.comparison_scope != 'across_jobs'
+            ):
                 continue
             leaf = requirement.config_path.split('.')[-1]
             for index in range(1, requirement.minimum_distinct_values + 1):
@@ -5094,34 +5158,25 @@ class ResearchOrchestrator:
         return variants or [{'name': 'candidate', 'overrides': {}}]
 
     def _matrix_template_seeds(self, run: RunRecord) -> list[int]:
-        # A comparison methodology contract needs at least the comparison
-        # requirement's minimum_distinct_values distinct seeds, and a
-        # fixed-seed decision requirement pins exactly one seed. Deriving the
-        # template's seeds from the contract keeps the proposed matrix
-        # consistent with the methodology the run is bound to.
-        seeds: list[int] = []
-        try:
-            contract = self.contracts.resolve(
-                run.evaluation_contract_id,
-                run.evaluation_contract_version,
-            )
-        except Exception:
+        # An across_jobs comparison runs one job per method, so a single seed is
+        # its canonical topology. A within_job comparison replicates inside one
+        # job and therefore needs at least MIN_COMPARISON_SEEDS seeds, never
+        # fewer than the comparison's minimum_distinct_values. A contract with
+        # no comparison requirement keeps one fixed seed.
+        if self._matrix_comparison_scope(run.run_id) == 'across_jobs':
             return [17]
-        requirements = contract.descriptor.manifest.get(
-            'methodology_requirements',
-            [],
-        )
-        for item in requirements:
-            try:
-                requirement = MethodologyRequirement.model_validate(item)
-            except (ValueError, TypeError):
-                continue
-            if requirement.mode == 'comparison':
-                needed = requirement.minimum_distinct_values
-                while len(seeds) < needed:
-                    seeds.append(17 + len(seeds) * 25)
-        if not seeds:
-            seeds = [17]
+        needed = 1
+        for requirement in self._contract_methodology_requirements(run.run_id):
+            if (
+                requirement.mode == 'comparison'
+                and requirement.comparison_scope == 'within_job'
+            ):
+                needed = max(
+                    needed,
+                    MIN_COMPARISON_SEEDS,
+                    requirement.minimum_distinct_values,
+                )
+        seeds = [17 + index * 25 for index in range(needed)]
         return seeds[: self.policy.maximum_parallel_jobs * 4]
 
     @staticmethod
@@ -5311,6 +5366,13 @@ class ResearchOrchestrator:
             'root of `metrics.json`; nested copies do not satisfy the contract.\n'
             'Required root metric keys:\n'
             f'{json.dumps(required_metric_keys, indent=2)}\n\n'
+            'Resolved comparison scope: '
+            f'`{preflight.comparison_scope}`.\n'
+            f'Canonical matrix topology: {preflight.comparison_topology}.\n'
+            'A `within_job` comparison is correctly one `candidate` variant '
+            'with empty overrides (the compared grid lives in base_config); do '
+            'not reject it for empty overrides. An `across_jobs` comparison '
+            'requires one non-empty variant per compared methodology.\n\n'
             'Deterministic preflight:\n'
             f'{preflight.model_dump_json(indent=2)}\n\n'
             'Review snapshot manifest:\n'
@@ -5645,6 +5707,7 @@ class ResearchOrchestrator:
             'methodology setting' in errors
             or 'requires at least' in errors
             or 'allows at most' in errors
+            or 'across_jobs' in errors
         ):
             return ''
         lines = [
@@ -5656,6 +5719,23 @@ class ResearchOrchestrator:
         ]
         for requirement in requirements:
             keys = requirement.config_path.split('.')
+            if (
+                requirement.mode == 'comparison'
+                and requirement.comparison_scope == 'across_jobs'
+            ):
+                lines.append(
+                    f'config_path `{requirement.config_path}` '
+                    f'({requirement.mode}, across_jobs: one placeholder '
+                    'scalar; the distinct methods belong in the variant '
+                    'overrides):'
+                )
+                lines.append('expected YAML inside the base_config file:')
+                for index, key in enumerate(keys):
+                    lines.append(f'{"  " * index}"{key}":')
+                lines.append(
+                    f'{"  " * len(keys)}<one placeholder value here>'
+                )
+                continue
             lines.append(
                 f'config_path `{requirement.config_path}` '
                 f'({requirement.mode}, >= '
@@ -5707,6 +5787,34 @@ class ResearchOrchestrator:
                 signature = value
         return signature
 
+    @staticmethod
+    def _matrix_topology_digest(action: ActionRecord) -> str:
+        # across_jobs comparison values live in the variant overrides, not in
+        # base_config, so a revision that changes only those values would
+        # otherwise look byte-identical to the previous rejection. Fold the
+        # canonical variants+seeds into the signature so a real revision is
+        # never misread as non-convergence. The digest is value-bearing; the
+        # error text stays value-free.
+        try:
+            matrix = ExperimentMatrix.model_validate(action.arguments)
+        except ValueError:
+            return 'unparseable'
+        payload = {
+            'variants': [
+                {'name': variant.name, 'overrides': variant.overrides}
+                for variant in matrix.variants
+            ],
+            'seeds': matrix.seeds,
+        }
+        return sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(',', ':'),
+                default=str,
+            ).encode()
+        ).hexdigest()
+
     def _preflight_rejection_signature(
         self,
         *,
@@ -5714,9 +5822,10 @@ class ResearchOrchestrator:
         action: ActionRecord,
         errors: list[str],
     ) -> tuple[str, str]:
-        # The signature pins both the normalized error set and the exact
-        # base_config bytes, so an identical rejection can only recur when the
-        # model re-emitted the same non-conforming matrix unchanged.
+        # The signature pins the normalized error set, the exact base_config
+        # bytes, and the matrix topology, so an identical rejection can only
+        # recur when the model re-emitted the same non-conforming matrix
+        # unchanged.
         target = self._matrix_base_config_target(run_id=run_id, action=action)
         base_config_digest = (
             sha256(target.read_bytes()).hexdigest()
@@ -5724,8 +5833,10 @@ class ResearchOrchestrator:
             else 'unavailable'
         )
         normalized = '\n'.join(sorted(set(errors)))
+        topology_digest = self._matrix_topology_digest(action)
         signature = sha256(
-            f'{normalized}\n--\n{base_config_digest}'.encode()
+            f'{normalized}\n--\n{base_config_digest}\n--\n{topology_digest}'
+            .encode()
         ).hexdigest()
         return signature, base_config_digest
 
@@ -5951,7 +6062,8 @@ class ResearchOrchestrator:
                 indent=2,
                 sort_keys=True,
             )
-            + MATRIX_VARIANT_RULES_GUIDANCE
+            + self._matrix_variant_rules_guidance(run.run_id)
+            + self._across_jobs_execution_note(run.run_id)
             + '\nKeep reason beside type and arguments. Put the ExperimentMatrix '
             'fields directly in arguments; do not add a matrix or evaluator_type '
             'wrapper. Matrix seeds create separate cluster jobs. If the workload '
@@ -6408,6 +6520,123 @@ class ResearchOrchestrator:
             },
         )
 
+    def _build_comparison_artifact(self, run_id: str) -> None:
+        # Phase 2: an across_jobs contract runs one job per methodology, so the
+        # run-level comparison is materialized once, after every job is
+        # terminal and before the analysis evidence snapshot, so both Beaker
+        # and Honeydew see it. Idempotent on the comparison inputs: an
+        # authoritative artifact whose input fingerprint matches is left
+        # untouched, while a changed job wave rebuilds.
+        run = self.store.get_run(run_id)
+        artifacts = self.store.list_artifacts(run_id)
+        jobs = self.store.list_jobs(run_id)
+        fingerprint = comparison_input_fingerprint(jobs, artifacts)
+        if any(
+            artifact.metadata.get('input_fingerprint') == fingerprint
+            for artifact in artifacts
+            if is_authoritative_comparison(artifact)
+        ):
+            return
+        try:
+            contract = self.contracts.resolve(
+                run.evaluation_contract_id,
+                run.evaluation_contract_version,
+            )
+        except Exception:
+            return
+        reader = VerifiedArtifactReader(self.settings.shared_mount_root)
+
+        def read_evaluation(artifact: ArtifactRecord) -> dict[str, Any] | None:
+            try:
+                payload = reader.read(
+                    artifact,
+                    maximum_bytes=self.settings.evidence_file_max_bytes,
+                )
+                parsed = json.loads(payload)
+            except (
+                ArtifactDeliveryError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ):
+                return None
+            return parsed if isinstance(parsed, dict) else None
+
+        report = build_comparison_report(
+            run=run,
+            contract=contract,
+            jobs=jobs,
+            artifacts=artifacts,
+            artifact_reader=read_evaluation,
+        )
+        if report is None:
+            return
+        shared_root = Path(self.settings.shared_mount_root).resolve()
+        filename = comparison_artifact_filename(fingerprint)
+        destination = Path(run.reports_path) / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        content = (
+            json.dumps(report, indent=2, sort_keys=True) + '\n'
+        ).encode('utf-8')
+        digest = sha256(content).hexdigest()
+        temporary = destination.with_suffix('.json.tmp')
+        temporary.write_bytes(content)
+        temporary.replace(destination)
+        # A shared-mount-relative URI keeps the artifact readable by the
+        # evidence snapshot, which resolves content relative to the mount root;
+        # a path outside the mount falls back to the scheme URI so analysis
+        # never crashes on a misconfigured workspace root.
+        try:
+            uri = str(destination.resolve().relative_to(shared_root))
+        except ValueError:
+            uri = f'artifact://{run_id}/reports/{filename}'
+        artifact = self._save_local_artifact(
+            run_id=run_id,
+            artifact_type=AUTHORITATIVE_COMPARISON_TYPE,
+            uri=uri,
+            digest=digest,
+            metadata={
+                'path': str(destination),
+                'authoritative': True,
+                'comparison_scope': 'across_jobs',
+                'satisfied': report['satisfied'],
+                'input_fingerprint': fingerprint,
+            },
+        )
+        self._event(
+            run_id,
+            source='orchestrator',
+            event_type='artifact.recorded',
+            payload={
+                'artifact_id': artifact.artifact_id,
+                'type': artifact.type,
+                'uri': artifact.uri,
+                'path': str(destination),
+                'sha256': artifact.sha256,
+                'authoritative': True,
+                'satisfied': report['satisfied'],
+            },
+        )
+
+    def _comparison_verification_note(self, run_id: str) -> str:
+        # Cite the newest authoritative comparison artifact (it is fingerprinted
+        # per input wave) so a superseded record can never be checked by mistake.
+        authoritative = [
+            artifact
+            for artifact in self.store.list_artifacts(run_id)
+            if is_authoritative_comparison(artifact)
+        ]
+        if not authoritative:
+            return ''
+        newest = authoritative[-1]
+        return (
+            f'Check `artifact://{newest.uri}` (comparison.json): every compared '
+            'methodology must have a succeeded job with a passing per-job '
+            'evaluation and a recorded primary metric, and the mechanical '
+            'comparability invariants must hold. Do not claim the methodology '
+            'comparison was satisfied when the artifact marks it unsatisfied or '
+            'omits a required value.\n\n'
+        )
+
     def _evidence_snapshot(
         self,
         run_id: str,
@@ -6480,6 +6709,7 @@ class ResearchOrchestrator:
         )
 
     def _analyze_results(self, run_id: str) -> None:
+        self._build_comparison_artifact(run_id)
         evidence = self._evidence_snapshot(
             run_id,
             phase=EvidencePhase.ANALYSIS,
@@ -6554,6 +6784,7 @@ class ResearchOrchestrator:
                 'flag any contradiction between the results and the corpus. Set '
                 'done=true only if the evidence supports a final report. Cite '
                 'artifact, job, event, or knowledge:// URIs.\n\n'
+                + self._comparison_verification_note(run_id)
                 + self._evidence_prompt_block(evidence)
             ),
             expected_kind=TurnKind.VERIFICATION,
