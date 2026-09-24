@@ -17,7 +17,12 @@ from pathlib import Path
 import pytest
 
 from app.comparison import COMPARISON_SCHEMA_VERSION, build_comparison_report
-from app.comparison_checks import evaluation_passed, is_authoritative_comparison
+from app.comparison_checks import (
+    comparison_artifact_filename,
+    evaluation_passed,
+    is_authoritative_comparison,
+    is_comparison_filename,
+)
 from app.contracts import compute_contract_digest
 from app.evidence import EvidencePhase, build_evidence_snapshot
 from app.preflight import MethodologyRequirement
@@ -762,7 +767,7 @@ def test_engine_persists_and_verifies_comparison_artifact(
     assert len(authoritative) == 1
     assert authoritative[0].job_id is None
     document = json.loads(
-        (Path(run.reports_path) / 'comparison.json').read_text()
+        Path(authoritative[0].metadata['path']).read_text()
     )
     assert document['satisfied'] is True
 
@@ -772,7 +777,9 @@ def test_engine_persists_and_verifies_comparison_artifact(
     entry = next(
         item
         for item in snapshot['artifact_contents']
-        if Path(str(item['uri']).split('://', 1)[-1]).name == 'comparison.json'
+        if is_comparison_filename(
+            Path(str(item['uri']).split('://', 1)[-1]).name
+        )
     )
     assert entry['digest_verified'] is True
     assert entry['content']['satisfied'] is True
@@ -841,6 +848,61 @@ def test_second_job_wave_rebuilds_comparison_artifact(
         artifact.metadata.get('input_fingerprint') for artifact in rebuilt
     }
     assert len(fingerprints) == 2
+
+
+def test_rebuild_versions_artifact_and_note_cites_newest(
+    tmp_path: Path,
+    orchestrator_bundle,
+) -> None:
+    # R1: a second wave must not invalidate the superseded record's digest, and
+    # the evidence snapshot plus the verification note must point at exactly the
+    # newest authoritative comparison.
+    settings, store, _, _, engine = orchestrator_bundle
+    contract = _install_across_jobs_contract(tmp_path, engine)
+    run = _bind_across_jobs_run(engine, store, contract)
+    _persist_passing_job(
+        settings, store, run, contract, index=1, value='logistic'
+    )
+    _persist_passing_job(
+        settings, store, run, contract, index=2, value='forest'
+    )
+    engine._build_comparison_artifact(run.run_id)
+
+    _persist_passing_job(
+        settings, store, run, contract, index=3, value='boosting'
+    )
+    engine._build_comparison_artifact(run.run_id)
+
+    authoritative = _authoritative_comparison_artifacts(store, run.run_id)
+    assert len(authoritative) == 2
+    older, newest = authoritative
+    older_path = Path(older.metadata['path'])
+    newest_path = Path(newest.metadata['path'])
+    assert older_path != newest_path
+    assert older_path.name == comparison_artifact_filename(
+        older.metadata['input_fingerprint']
+    )
+    # No authoritative entry points at overwritten content.
+    assert sha256(older_path.read_bytes()).hexdigest() == older.sha256
+    assert sha256(newest_path.read_bytes()).hexdigest() == newest.sha256
+
+    note = engine._comparison_verification_note(run.run_id)
+    assert f'artifact://{newest.uri}' in note
+
+    snapshot = build_evidence_snapshot(
+        settings, store, run.run_id, phase=EvidencePhase.VERIFICATION
+    )
+    comparison_entries = [
+        item
+        for item in snapshot['artifact_contents']
+        if is_comparison_filename(
+            Path(str(item['uri']).split('://', 1)[-1]).name
+        )
+    ]
+    assert len(comparison_entries) == 1
+    assert comparison_entries[0]['uri'] == f'artifact://{newest.uri}'
+    assert comparison_entries[0]['digest_verified'] is True
+    assert 'content_unavailable' not in comparison_entries[0]
 
 
 @pytest.mark.parametrize(

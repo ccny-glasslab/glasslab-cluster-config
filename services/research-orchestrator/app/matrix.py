@@ -11,7 +11,7 @@ import json
 from uuid import uuid5, NAMESPACE_URL
 
 from .contracts import reject_contract_overrides
-from .preflight import comparison_scope_for_manifest
+from .preflight import comparison_scope_for_manifest, is_reserved_artifact
 from .schemas import (
     ExpandedJobSpec,
     ExperimentMatrix,
@@ -41,6 +41,18 @@ def expand_experiment_matrix(
     # Contract keys are rejected before expansion so overrides/base_config can
     # never smuggle evaluator or contract control into the submitted job.
     reject_contract_overrides(matrix.model_dump(mode='json'))
+    reserved = sorted(
+        {
+            artifact
+            for artifact in matrix.required_artifacts
+            if is_reserved_artifact(artifact)
+        }
+    )
+    if reserved:
+        raise MatrixExpansionError(
+            'experiment matrix may not request orchestrator-reserved '
+            f'artifact(s): {", ".join(reserved)}'
+        )
     ceiling = contract.descriptor.resource_constraints
     requested = matrix.resources
     # Per-contract ceiling: policy.py enforces the global limits, this enforces

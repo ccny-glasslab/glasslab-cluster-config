@@ -97,11 +97,13 @@ The evaluation contract is repository-controlled and immutable to both agents.
 It fixes the evaluator entry point, schemas, required artifacts, resource
 limits, optional digest-pinned image, and machine-checkable methodology
 requirements. Methodology requirements distinguish `comparison` from `decision`
-entries. A comparison declares a `comparison_scope`: `within_job` (the default)
-runs every compared method inside one job, so the compared `base_config` key
-holds a list of distinct values; `across_jobs` runs one job per compared
+entries. A comparison resolves a `comparison_scope`, defaulting to `within_job`,
+which runs every compared method inside one job, so the compared `base_config`
+key holds a list of distinct values; `across_jobs` runs one job per compared
 methodology, so the key holds a single placeholder scalar and the distinct
-methods live in the variant overrides. For an `across_jobs` contract the
+methods live in the variant overrides. Agent-authored contract candidates must
+declare the scope explicitly; curated repository-installed contracts may omit it
+and default to `within_job`. For an `across_jobs` contract the
 run-level comparison is adjudicated deterministically by `comparison.json`. A
 decision needs one explicit choice.
 
@@ -565,7 +567,9 @@ configured comparisons, configured decisions, and blocking findings. Discord
 renders that report before showing approval controls.
 
 Methodology comparability across jobs is a first-class, deterministic concern.
-A `comparison` requirement declares its `comparison_scope`. `within_job` keeps
+A `comparison` requirement resolves a `comparison_scope` (agent-authored
+candidates must declare it explicitly; repository-installed contracts may omit
+it and default to `within_job`). `within_job` keeps
 the legacy shape: the compared `base_config` key holds the full list of distinct
 values and one job runs the whole grid, replicated by at least
 `MIN_COMPARISON_SEEDS = 3` matrix seeds. `across_jobs` makes each compared

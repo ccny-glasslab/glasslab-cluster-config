@@ -26,7 +26,7 @@ from .cluster import ClusterExecutor
 from .comparison import build_comparison_report
 from .comparison_checks import (
     AUTHORITATIVE_COMPARISON_TYPE,
-    COMPARISON_FILENAME,
+    comparison_artifact_filename,
     comparison_input_fingerprint,
     is_authoritative_comparison,
 )
@@ -6571,7 +6571,8 @@ class ResearchOrchestrator:
         if report is None:
             return
         shared_root = Path(self.settings.shared_mount_root).resolve()
-        destination = Path(run.reports_path) / COMPARISON_FILENAME
+        filename = comparison_artifact_filename(fingerprint)
+        destination = Path(run.reports_path) / filename
         destination.parent.mkdir(parents=True, exist_ok=True)
         content = (
             json.dumps(report, indent=2, sort_keys=True) + '\n'
@@ -6587,7 +6588,7 @@ class ResearchOrchestrator:
         try:
             uri = str(destination.resolve().relative_to(shared_root))
         except ValueError:
-            uri = f'artifact://{run_id}/reports/{COMPARISON_FILENAME}'
+            uri = f'artifact://{run_id}/reports/{filename}'
         artifact = self._save_local_artifact(
             run_id=run_id,
             artifact_type=AUTHORITATIVE_COMPARISON_TYPE,
@@ -6617,17 +6618,23 @@ class ResearchOrchestrator:
         )
 
     def _comparison_verification_note(self, run_id: str) -> str:
-        if not any(
-            is_authoritative_comparison(artifact)
+        # Cite the newest authoritative comparison artifact (it is fingerprinted
+        # per input wave) so a superseded record can never be checked by mistake.
+        authoritative = [
+            artifact
             for artifact in self.store.list_artifacts(run_id)
-        ):
+            if is_authoritative_comparison(artifact)
+        ]
+        if not authoritative:
             return ''
+        newest = authoritative[-1]
         return (
-            'Check comparison.json: every compared methodology must have a '
-            'succeeded job with a passing per-job evaluation and a recorded '
-            'primary metric, and the mechanical comparability invariants must '
-            'hold. Do not claim the methodology comparison was satisfied when '
-            'the artifact marks it unsatisfied or omits a required value.\n\n'
+            f'Check `artifact://{newest.uri}` (comparison.json): every compared '
+            'methodology must have a succeeded job with a passing per-job '
+            'evaluation and a recorded primary metric, and the mechanical '
+            'comparability invariants must hold. Do not claim the methodology '
+            'comparison was satisfied when the artifact marks it unsatisfied or '
+            'omits a required value.\n\n'
         )
 
     def _evidence_snapshot(

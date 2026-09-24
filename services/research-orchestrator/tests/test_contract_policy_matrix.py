@@ -1103,6 +1103,45 @@ def test_within_job_report_records_scope_and_topology(
     assert 'EMPTY overrides' in report.comparison_topology
 
 
+@pytest.mark.parametrize(
+    'reserved',
+    ['./comparison.json', 'sub/comparison.json'],
+)
+def test_reserved_artifact_path_shapes_rejected_at_preflight_and_expansion(
+    tmp_path,
+    orchestrator_bundle,
+    reserved: str,
+) -> None:
+    # R2/R3: reserved matching is by basename, and expansion is the single
+    # choke point that re-checks a matrix which slipped past review.
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(tmp_path, engine)
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body='experiment_dimensions:\n  model: model-candidate-1\n',
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': 'model-candidate-1'},
+            {'experiment_dimensions.model': 'model-candidate-2'},
+        ],
+        seeds=[17],
+    ).model_copy(update={'required_artifacts': ['metrics.json', reserved]})
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert not report.passed
+    assert any('orchestrator-reserved' in error for error in report.errors)
+    with pytest.raises(MatrixExpansionError, match='orchestrator-reserved'):
+        expand_experiment_matrix(
+            run_id=run.run_id,
+            action_id='action-1',
+            matrix=matrix,
+            contract=contract,
+        )
+
+
 def _single_variant_matrix() -> ExperimentMatrix:
     return ExperimentMatrix.model_validate(
         {

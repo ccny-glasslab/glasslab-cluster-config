@@ -14,7 +14,7 @@ import ast
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -90,6 +90,16 @@ ORCHESTRATOR_RESERVED_ARTIFACTS = frozenset({
     # suppress) the authoritative comparison.
     'comparison.json',
 })
+
+
+def is_reserved_artifact(value: str) -> bool:
+    # Reserved matching is by basename so './comparison.json',
+    # 'sub/comparison.json', and '../reports/comparison.json' are all rejected,
+    # and the fingerprint-versioned comparison-<fp>.json names are covered too.
+    name = PurePosixPath(str(value).replace('\\', '/')).name
+    if name in ORCHESTRATOR_RESERVED_ARTIFACTS:
+        return True
+    return name.startswith('comparison-') and name.endswith('.json')
 SCANNED_SOURCE_SUFFIXES = {
     # Static-analysis scope is deliberately limited to code files that carry
     # logic; data files cannot be reasoned about statically.
@@ -590,7 +600,11 @@ def _source_errors(
                 'the run-level comparison and a workload must not produce or '
                 'score it'
             )
-    reserved_artifacts = ORCHESTRATOR_RESERVED_ARTIFACTS & set(required_artifacts)
+    reserved_artifacts = {
+        artifact
+        for artifact in required_artifacts
+        if is_reserved_artifact(artifact)
+    }
     for artifact in sorted(reserved_artifacts):
         errors.append(
             f'required artifact {artifact!r} is reserved by the orchestrator; '
@@ -1065,13 +1079,17 @@ def preflight_matrix(
             f'validated {len(requirements)} contract methodology requirement(s)'
         )
 
-    reserved_requested = ORCHESTRATOR_RESERVED_ARTIFACTS & set(
-        matrix.required_artifacts
+    reserved_requested = sorted(
+        {
+            artifact
+            for artifact in matrix.required_artifacts
+            if is_reserved_artifact(artifact)
+        }
     )
     if reserved_requested:
         errors.append(
             'experiment matrix may not request orchestrator-reserved '
-            f'artifact(s): {", ".join(sorted(reserved_requested))}; the '
+            f'artifact(s): {", ".join(reserved_requested)}; the '
             'orchestrator owns the run-level comparison'
         )
 

@@ -24,10 +24,25 @@ from .schemas import (
 
 EVALUATION_FILENAME = 'evaluation.json'
 COMPARISON_FILENAME = 'comparison.json'
+COMPARISON_ARTIFACT_PREFIX = 'comparison-'
 AUTHORITATIVE_COMPARISON_TYPE = 'comparison'
 _CHECK_PASS_KEYS = ('passed', 'pass', 'ok', 'success')
 
 ArtifactReader = Callable[[ArtifactRecord], dict[str, Any] | None]
+
+
+def comparison_artifact_filename(fingerprint: str) -> str:
+    # Version the artifact by its input fingerprint so a rebuild never
+    # overwrites (and thus never invalidates the recorded digest of) a
+    # superseded comparison record.
+    return f'{COMPARISON_ARTIFACT_PREFIX}{fingerprint}.json'
+
+
+def is_comparison_filename(filename: str) -> bool:
+    return filename == COMPARISON_FILENAME or (
+        filename.startswith(COMPARISON_ARTIFACT_PREFIX)
+        and filename.endswith('.json')
+    )
 
 
 def is_authoritative_comparison(artifact: ArtifactRecord) -> bool:

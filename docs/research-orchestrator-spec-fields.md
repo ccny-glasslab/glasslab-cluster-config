@@ -233,7 +233,7 @@ Schema: `MethodologyRequirement` (`preflight.py:35-44`):
 | `requirement_id` | Yes | Unique per contract (`methodology_requirement_validation.py:146-169`). |
 | `config_path` | Yes | Dotted key into the matrix `base_config` YAML, rooted at `experiment_dimensions` (`preflight.py:94`, `methodology_requirement_validation.py:36-80`). |
 | `mode` | Yes, `decision` or `comparison` (`preflight.py:41`). |
-| `comparison_scope` | Optional field, default `within_job` (`preflight.py:42`). At seal, a `comparison` requirement **must set it explicitly** (omission is rejected); a `decision` requirement must not set it. `within_job` = every compared method runs inside one job. `across_jobs` = one job per compared methodology. At most one `across_jobs` comparison is permitted per contract. |
+| `comparison_scope` | Optional field, default `within_job` (`preflight.py:42`). An **agent-authored** `comparison` candidate must set it explicitly at seal/promote (omission is rejected); curated repository-installed contracts may omit it and default to `within_job`. A `decision` requirement must not set it. `within_job` = every compared method runs inside one job. `across_jobs` = one job per compared methodology. At most one `across_jobs` comparison is permitted per contract, and a contract may not mix the two scopes. |
 | `minimum_distinct_values` | default 1, ge 1. |
 | `maximum_distinct_values` | optional, ge 1. |
 | `description` | non-empty (`methodology_requirement_validation.py:164-168`). |
@@ -247,15 +247,15 @@ distinct methods live in the variant `overrides`, and the run-level
 [`comparison.json`](#42-comparing-across-jobs) artifact adjudicates the comparison
 after every job is terminal.
 
-Worked example - `comparison` (from the Adult contract,
-`evaluation-contracts/ml-benchmark-adult-income-v1/1.1.0/contract.json`):
+Worked example - `comparison` (from the repository-installed Adult contract,
+`evaluation-contracts/ml-benchmark-adult-income-v1/1.1.0/contract.json`). Repo
+contracts may omit `comparison_scope`; it defaults to `within_job`:
 
 ```json
 {
   "requirement_id": "model_families",
   "config_path": "experiment_dimensions.model",
   "mode": "comparison",
-  "comparison_scope": "within_job",
   "minimum_distinct_values": 2,
   "description": "Compare at least one linear and one non-linear model family."
 }
@@ -295,9 +295,11 @@ The config must contain exactly one scalar at that path, e.g.
 dot, empty segments, or `..`; must be rooted at `experiment_dimensions` with at
 least 2 segments; `requirement_id` non-empty and unique; `description` non-empty;
 `maximum_distinct_values >= minimum_distinct_values`; `comparison` requires
-`minimum >= 2` **and an explicit `comparison_scope`**; `decision` requires
-`minimum == 1` and must not carry a `comparison_scope`; and at most one
-`across_jobs` comparison is permitted per contract
+`minimum >= 2`; an agent-authored (`seal`/`promote`) `comparison` also requires an
+explicit `comparison_scope` (repository installs may omit it and default to
+`within_job`); `decision` requires `minimum == 1` and must not carry a
+`comparison_scope`; at most one `across_jobs` comparison is permitted per
+contract, and the two scopes may not be mixed
 (`methodology_requirement_validation.py:123-143`). An `across_jobs` contract
 must also declare a string `comparison_key` property in its
 `expected_output_schema` (`methodology_requirement_validation.py:185-219`);

@@ -707,6 +707,26 @@ def test_candidate_mixed_comparison_scopes_are_rejected(
         _seal(manager, source)
 
 
+@pytest.mark.parametrize(
+    'reserved',
+    ['./comparison.json', 'sub/comparison.json'],
+)
+def test_candidate_reserved_artifact_path_shapes_rejected(
+    tmp_path: Path,
+    reserved: str,
+) -> None:
+    # R2: reserved matching is by basename, so a path-shaped reference is still
+    # rejected at seal.
+    manager, source = _candidate_with_requirements(tmp_path, [])
+    descriptor_path = source / 'contract.json'
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor['required_artifacts'] = ['metrics.json', reserved]
+    descriptor_path.write_text(json.dumps(descriptor))
+
+    with pytest.raises(ContractCandidateError, match='orchestrator-reserved'):
+        _seal(manager, source)
+
+
 def _descriptor_with_output_schema(
     output_schema: str,
 ) -> EvaluationContractDescriptor:

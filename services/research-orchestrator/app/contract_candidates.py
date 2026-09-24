@@ -29,9 +29,9 @@ from .methodology_requirement_validation import (
     validate_methodology_requirements,
 )
 from .preflight import (
-    ORCHESTRATOR_RESERVED_ARTIFACTS,
     MethodologyRequirement,
     declared_budget_conflicts,
+    is_reserved_artifact,
 )
 from .schemas import EvaluationContractDescriptor
 
@@ -227,13 +227,17 @@ class ContractCandidateManager:
                 'manifest requires primary_metric and a valid direction'
             )
         _validate_declared_budget(descriptor)
-        reserved_artifacts = ORCHESTRATOR_RESERVED_ARTIFACTS & set(
-            descriptor.required_artifacts
+        reserved_artifacts = sorted(
+            {
+                artifact
+                for artifact in descriptor.required_artifacts
+                if is_reserved_artifact(artifact)
+            }
         )
         if reserved_artifacts:
             raise ContractCandidateError(
                 'required_artifacts may not request orchestrator-reserved '
-                f'artifact(s): {", ".join(sorted(reserved_artifacts))}'
+                f'artifact(s): {", ".join(reserved_artifacts)}'
             )
         output_schema: dict[str, Any] | None = None
         try:
