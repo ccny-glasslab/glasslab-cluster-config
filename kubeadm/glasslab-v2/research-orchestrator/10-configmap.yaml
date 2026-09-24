@@ -100,11 +100,12 @@ data:
   GLASSLAB_ORCHESTRATOR_MAXIMUM_TURNS: "20"
   # Rotate an agent's live session (through the recovery-checkpoint path) once
   # its real OpenCode-reported context crosses this many tokens; 0 disables
-  # threshold rotation. 24000 is 40% of the 60333-token prompt that deadlocked
-  # the .17 Coder host on run 295bc0ce (2026-09-16); the orchestrator also
-  # clamps any positive value to 32000 so this manifest cannot re-admit the
-  # fatal range.
-  GLASSLAB_ORCHESTRATOR_TURN_HISTORY_ROTATION_TOKEN_THRESHOLD: "24000"
+  # threshold rotation. The code default (24000) and its 32000 clamp guard the
+  # local MLX host, which deadlocked on a 60333-token prompt (run 295bc0ce).
+  # Agents run on the hosted OpenCode Go provider, which has no local
+  # KV/page-cache limit, so the deployed threshold and clamp are higher.
+  GLASSLAB_ORCHESTRATOR_TURN_HISTORY_ROTATION_TOKEN_THRESHOLD: "100000"
+  GLASSLAB_ORCHESTRATOR_SESSION_CONTEXT_TOKEN_CEILING: "131072"
   GLASSLAB_ORCHESTRATOR_MAXIMUM_METHODOLOGY_REVISIONS: "2"
   GLASSLAB_ORCHESTRATOR_MAXIMUM_RUNTIME_SECONDS: "86400"
   GLASSLAB_ORCHESTRATOR_MAXIMUM_CPU: "8"

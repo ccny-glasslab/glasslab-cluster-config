@@ -311,6 +311,10 @@ class Settings(BaseSettings):
     # added context and KV growth. Positive values are clamped to
     # SAFE_SESSION_CONTEXT_TOKEN_CEILING.
     turn_history_rotation_token_threshold: int = 24_000
+    # Clamp applied to the rotation threshold. The default protects the shared
+    # local MLX host (run 295bc0ce deadlocked it on a 60,333-token prompt); a
+    # hosted provider has no local KV/page-cache limit and may raise this.
+    session_context_token_ceiling: int = SAFE_SESSION_CONTEXT_TOKEN_CEILING
     # Anti-thrash floor: after a threshold rotation, ignore the threshold on
     # this session for at least this many further completed turns so a session
     # that immediately re-accumulates cannot rotate on every single turn. 0
@@ -369,7 +373,7 @@ class Settings(BaseSettings):
         configured = self.turn_history_rotation_token_threshold
         if configured <= 0:
             return 0
-        return min(configured, SAFE_SESSION_CONTEXT_TOKEN_CEILING)
+        return min(configured, self.session_context_token_ceiling)
 
     def agent_model_for(self, agent: AgentName) -> str:
         override = (
