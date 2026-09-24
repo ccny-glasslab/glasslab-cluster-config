@@ -143,7 +143,10 @@ def _mixed_scope_errors(
         return [
             'methodology_requirements mixes across_jobs and within_job '
             'comparison requirements; a contract may use only one '
-            'comparison_scope'
+            'comparison_scope. A contract with more than one comparison '
+            'requirement must use within_job for all of them; across_jobs is '
+            'only valid when the contract declares a single comparison '
+            'requirement'
         ]
     return []
 
