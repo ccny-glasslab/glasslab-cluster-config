@@ -20,7 +20,6 @@ from app.contracts import (
     compute_contract_digest,
 )
 from app.matrix_naming import (
-    MATRIX_VARIANT_RULES_GUIDANCE,
     VARIANT_NAME_PATTERN,
     VARIANT_NAME_RE,
     render_variant_rules_guidance,
@@ -180,7 +179,9 @@ def test_variant_rules_guidance_renders_the_pattern_argument() -> None:
     rendered = render_variant_rules_guidance(custom_pattern)
     assert custom_pattern in rendered
     assert VARIANT_NAME_PATTERN not in rendered
-    assert VARIANT_NAME_PATTERN in MATRIX_VARIANT_RULES_GUIDANCE
+    assert VARIANT_NAME_PATTERN in render_variant_rules_guidance(
+        VARIANT_NAME_PATTERN
+    )
 
 
 def test_variant_rules_guidance_guard_rejects_a_dropped_placeholder(

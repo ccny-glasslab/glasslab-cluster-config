@@ -994,6 +994,115 @@ def test_across_jobs_comparison_rejects_duplicate_override_values(
     )
 
 
+def test_across_jobs_comparison_rejects_single_element_list_base_config(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    # F8: the across_jobs base_config path must hold one SCALAR, not a
+    # single-element list.
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(tmp_path, engine)
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body=(
+            'experiment_dimensions:\n  model: [model-candidate-1]\n'
+        ),
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': 'model-candidate-1'},
+            {'experiment_dimensions.model': 'model-candidate-2'},
+        ],
+        seeds=[17],
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert not report.passed
+    assert any(
+        'must contain exactly one scalar value' in error
+        for error in report.errors
+    )
+
+
+def test_across_jobs_report_records_scope_and_topology(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    # F5: the preflight report carries the resolved scope and canonical shape so
+    # the agent review does not mistake the correct across_jobs topology.
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(tmp_path, engine)
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body='experiment_dimensions:\n  model: model-candidate-1\n',
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': 'model-candidate-1'},
+            {'experiment_dimensions.model': 'model-candidate-2'},
+        ],
+        seeds=[17],
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert report.comparison_scope == 'across_jobs'
+    assert 'one non-empty variant per compared methodology' in (
+        report.comparison_topology
+    )
+
+
+def test_within_job_report_records_scope_and_topology(
+    orchestrator_bundle,
+) -> None:
+    # F5: a within_job report states the single-candidate/empty-overrides shape
+    # is canonical, so Honeydew's review does not re-enter the #474 loop.
+    _, _, _, _, engine = orchestrator_bundle
+    contract = engine.contracts.resolve(
+        'ml-benchmark-adult-income-v1',
+        '1.1.0',
+    )
+    run = engine.create_run(
+        request=RunCreateRequest(objective='Within-job scope topology.')
+    )
+    workspace = Path(run.beaker_workspace)
+    config = workspace / 'configs' / 'candidate.yaml'
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        'experiment_dimensions:\n'
+        '  model: [logistic-regression, random-forest]\n'
+        '  missing_strategy: median-imputation\n'
+        '  include_fnlwgt: false\n'
+        '  encoding: ordinal\n'
+    )
+    matrix = ExperimentMatrix.model_validate(
+        {
+            'base_config': 'configs/candidate.yaml',
+            'variants': [{'name': 'candidate', 'overrides': {}}],
+            'seeds': [17, 31, 49],
+            'maximum_parallel_jobs': 1,
+            'runner_image': RUNNER_IMAGE,
+            'resources': {
+                'cpu': 1,
+                'memory_gib': 1,
+                'gpus': 0,
+                'wallclock_minutes': 5,
+            },
+            'required_artifacts': ['metrics.json'],
+        }
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert report.passed, report.errors
+    assert report.comparison_scope == 'within_job'
+    assert 'candidate' in report.comparison_topology
+    assert 'EMPTY overrides' in report.comparison_topology
+
+
 def _single_variant_matrix() -> ExperimentMatrix:
     return ExperimentMatrix.model_validate(
         {

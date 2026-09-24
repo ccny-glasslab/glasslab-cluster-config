@@ -21,6 +21,7 @@ from app.contracts import (
     EvaluationContractResolver,
     compute_contract_digest,
 )
+from app.schemas import EvaluationContractDescriptor, ResourceRequest
 
 
 def _write_candidate(root: Path) -> None:
@@ -341,6 +342,44 @@ def _manager(tmp_path: Path) -> ContractCandidateManager:
     )
 
 
+def _write_repo_contract(
+    root: Path,
+    *,
+    requirements: list[dict[str, object]],
+    output_schema: dict[str, object] | None = None,
+) -> None:
+    root.mkdir(parents=True)
+    descriptor = {
+        'contract_id': root.parent.name,
+        'version': root.name,
+        'manifest': {
+            'primary_metric': 'score',
+            'primary_metric_direction': 'maximize',
+            'methodology_requirements': requirements,
+        },
+        'execution_wrapper': 'run_contract.py',
+        'evaluation_entry_point': 'evaluator.py',
+        'expected_input_schema': 'input.schema.json',
+        'expected_output_schema': 'output.schema.json',
+        'required_artifacts': ['metrics.json', 'evaluation.json'],
+        'resource_constraints': {
+            'cpu': 1,
+            'memory_gib': 1,
+            'gpus': 0,
+            'wallclock_minutes': 5,
+        },
+        'container_image_digest': None,
+    }
+    (root / 'contract.json').write_text(json.dumps(descriptor))
+    (root / 'run_contract.py').write_text('print("wrapper")\n')
+    (root / 'evaluator.py').write_text('print("evaluate")\n')
+    (root / 'input.schema.json').write_text(json.dumps({'type': 'object'}))
+    (root / 'output.schema.json').write_text(
+        json.dumps(output_schema or {'type': 'object'})
+    )
+    (root / 'contract.sha256').write_text(compute_contract_digest(root) + '\n')
+
+
 def _candidate_with_requirements(
     tmp_path: Path,
     requirements: list[dict[str, object]],
@@ -575,6 +614,180 @@ def test_candidate_across_jobs_with_comparison_key_seals_cleanly(
     )
 
     assert sealed.digest
+
+
+def test_repository_install_allows_comparison_without_explicit_scope(
+    tmp_path: Path,
+) -> None:
+    # Curated repository-baked contracts are human-reviewed and keep the
+    # within_job default, so install must not require an explicit
+    # comparison_scope (agent candidates still must declare it).
+    source = tmp_path / 'repo' / 'candidate-v1' / '1.0.0'
+    _write_repo_contract(
+        source,
+        requirements=[
+            {
+                'requirement_id': 'model_families',
+                'config_path': 'experiment_dimensions.model',
+                'mode': 'comparison',
+                'minimum_distinct_values': 2,
+                'description': 'Compare model families.',
+            }
+        ],
+    )
+
+    installed = _manager(tmp_path).install_repository_contract(source)
+
+    assert installed.is_dir()
+    assert installed == (
+        tmp_path / 'shared' / 'bundles' / 'candidate-v1' / '1.0.0'
+    )
+
+
+def test_repository_contracts_install_including_adult_1_1_0(
+    tmp_path: Path,
+) -> None:
+    # Startup installs every baked contract; the already-promoted Adult 1.1.0
+    # must install with its pinned digest unchanged (deployment invariant).
+    from app.config import SERVICE_ROOT
+
+    manager = _manager(tmp_path)
+    baked = SERVICE_ROOT / 'evaluation-contracts'
+    versions = (
+        ('generic-task-integrity-v1', '1.0.0'),
+        ('ml-benchmark-adult-income-v1', '1.0.0'),
+        ('ml-benchmark-adult-income-v1', '1.1.0'),
+        ('ml-benchmark-wine-clustering-v1', '1.0.0'),
+        ('ml-benchmark-fashion-contrastive-v1', '1.0.0'),
+    )
+    for contract_id, version in versions:
+        manager.install_repository_contract(baked / contract_id / version)
+
+    adult = (
+        tmp_path / 'shared' / 'bundles'
+        / 'ml-benchmark-adult-income-v1' / '1.1.0'
+    )
+    assert compute_contract_digest(adult) == (
+        '528ddde8c22c782007b55163ac1d120cc1317a87d2ce4173747ba02425a1420c'
+    )
+
+
+def test_candidate_mixed_comparison_scopes_are_rejected(
+    tmp_path: Path,
+) -> None:
+    # F6: an across_jobs comparison (one seed) and a within_job comparison
+    # (>= MIN_COMPARISON_SEEDS) cannot coexist; the template seed count is a
+    # contract-level property.
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'model_families',
+                'config_path': 'experiment_dimensions.model',
+                'mode': 'comparison',
+                'comparison_scope': 'across_jobs',
+                'minimum_distinct_values': 2,
+                'description': 'Compare model families across jobs.',
+            },
+            {
+                'requirement_id': 'search_technique',
+                'config_path': 'experiment_dimensions.search_technique',
+                'mode': 'comparison',
+                'comparison_scope': 'within_job',
+                'minimum_distinct_values': 2,
+                'description': 'Compare search techniques within one job.',
+            },
+        ],
+    )
+
+    with pytest.raises(
+        ContractCandidateError,
+        match='only one comparison_scope',
+    ):
+        _seal(manager, source)
+
+
+def _descriptor_with_output_schema(
+    output_schema: str,
+) -> EvaluationContractDescriptor:
+    return EvaluationContractDescriptor(
+        contract_id='candidate-v1',
+        version='1.0.0',
+        manifest={
+            'primary_metric': 'score',
+            'primary_metric_direction': 'maximize',
+        },
+        execution_wrapper='run_contract.py',
+        evaluation_entry_point='evaluator.py',
+        expected_input_schema='input.schema.json',
+        expected_output_schema=output_schema,
+        required_artifacts=['metrics.json'],
+        resource_constraints=ResourceRequest(
+            cpu=1, memory_gib=1, gpus=0, wallclock_minutes=5
+        ),
+        container_image_digest=None,
+    )
+
+
+def test_read_sealed_output_schema_rejects_path_escapes(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    sealed = tmp_path / 'sealed-root'
+    sealed.mkdir()
+
+    for escaped in ('/etc/hosts', '../escape.json', 'nested/../../escape.json'):
+        with pytest.raises(ContractCandidateError):
+            manager._read_sealed_output_schema(
+                sealed_path=sealed,
+                descriptor=_descriptor_with_output_schema(escaped),
+            )
+
+    outside = tmp_path / 'outside.schema.json'
+    outside.write_text('{"type": "object"}')
+    link = sealed / 'output.schema.json'
+    link.symlink_to(outside)
+    with pytest.raises(ContractCandidateError):
+        manager._read_sealed_output_schema(
+            sealed_path=sealed,
+            descriptor=_descriptor_with_output_schema('output.schema.json'),
+        )
+
+
+def test_across_jobs_sealed_bundle_promotes(tmp_path: Path) -> None:
+    # The promote path re-validates the digest-verified output schema, so a
+    # valid across_jobs bundle must promote cleanly.
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        [
+            {
+                'requirement_id': 'model_families',
+                'config_path': 'experiment_dimensions.model',
+                'mode': 'comparison',
+                'comparison_scope': 'across_jobs',
+                'minimum_distinct_values': 2,
+                'description': 'Compare model families across jobs.',
+            }
+        ],
+    )
+    (source / 'output.schema.json').write_text(
+        json.dumps(
+            {
+                'type': 'object',
+                'properties': {'comparison_key': {'type': 'string'}},
+            }
+        )
+    )
+    sealed = manager.seal(
+        source=source,
+        contract_id='candidate-v1',
+        version='1.0.0',
+    )
+
+    promoted = manager.promote(
+        sealed_path=sealed.sealed_path,
+        expected_digest=sealed.digest,
+    )
+
+    assert promoted.is_dir()
 
 
 def test_candidate_unknown_root_config_path_is_rejected(tmp_path: Path) -> None:

@@ -70,11 +70,6 @@ def render_variant_rules_guidance(
     return guidance
 
 
-MATRIX_VARIANT_RULES_GUIDANCE = render_variant_rules_guidance(
-    VARIANT_NAME_PATTERN
-)
-
-
 def variant_name_from_value(value: str) -> str:
     """Derive a pattern-conforming variant name from a demonstrated value.
 

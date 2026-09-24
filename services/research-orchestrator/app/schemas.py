@@ -8,7 +8,6 @@ first line of defense between agent prose and policy-owned settings.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Annotated, Any, Literal
@@ -74,35 +73,6 @@ TERMINAL_STATES = {
 }
 
 MIN_COMPARISON_SEEDS = 3
-
-# The matrix topology a contract's methodology requirements resolve to. A
-# contract with no comparison requirement, or only within-job comparisons,
-# keeps the legacy single-job behavior; `across_jobs` means each compared
-# methodology runs as its own Kubernetes job.
-DEFAULT_COMPARISON_SCOPE = 'within_job'
-
-
-def comparison_scope_for_manifest(manifest: Mapping[str, Any]) -> str:
-    """Resolve the matrix comparison scope declared by a contract manifest.
-
-    At most one ``across_jobs`` comparison requirement is permitted per
-    contract (enforced at seal time), so the presence of a single such
-    requirement is enough to select the across-jobs topology. A manifest with
-    no comparison requirement, or only ``within_job`` comparisons, keeps the
-    legacy ``within_job`` scope.
-    """
-    raw_requirements = manifest.get('methodology_requirements', [])
-    if not isinstance(raw_requirements, (list, tuple)):
-        return DEFAULT_COMPARISON_SCOPE
-    for item in raw_requirements:
-        if not isinstance(item, Mapping):
-            continue
-        if (
-            item.get('mode') == 'comparison'
-            and item.get('comparison_scope') == 'across_jobs'
-        ):
-            return 'across_jobs'
-    return DEFAULT_COMPARISON_SCOPE
 
 
 class AgentName(StrEnum):

@@ -11,11 +11,11 @@ import json
 from uuid import uuid5, NAMESPACE_URL
 
 from .contracts import reject_contract_overrides
+from .preflight import comparison_scope_for_manifest
 from .schemas import (
     ExpandedJobSpec,
     ExperimentMatrix,
     ResolvedEvaluationContract,
-    comparison_scope_for_manifest,
 )
 
 

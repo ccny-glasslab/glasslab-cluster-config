@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from hashlib import sha256
 import json
 from pathlib import Path
 from typing import Any
@@ -22,9 +23,47 @@ from .schemas import (
 )
 
 EVALUATION_FILENAME = 'evaluation.json'
+COMPARISON_FILENAME = 'comparison.json'
+AUTHORITATIVE_COMPARISON_TYPE = 'comparison'
 _CHECK_PASS_KEYS = ('passed', 'pass', 'ok', 'success')
 
 ArtifactReader = Callable[[ArtifactRecord], dict[str, Any] | None]
+
+
+def is_authoritative_comparison(artifact: ArtifactRecord) -> bool:
+    # The run-level comparison is orchestrator-owned: only an artifact with no
+    # owning job and the orchestrator's type is authoritative. A workload job
+    # artifact named comparison.json is never authoritative, so it can neither
+    # suppress the build nor become the file the verifier is told to check.
+    return (
+        artifact.job_id is None
+        and artifact.type == AUTHORITATIVE_COMPARISON_TYPE
+    )
+
+
+def comparison_input_fingerprint(
+    jobs: Sequence[JobRecord],
+    artifacts: Sequence[ArtifactRecord],
+) -> str:
+    # Deterministic digest of the comparison inputs (job identity, seed,
+    # variant, status, and the digest-pinned evaluation artifacts), so a
+    # recovery replay with identical inputs is a no-op while a changed job wave
+    # forces a rebuild.
+    evaluation_shas: dict[str, list[str]] = {}
+    for artifact in artifacts:
+        if artifact.job_id is None:
+            continue
+        if Path(artifact.uri).name != EVALUATION_FILENAME:
+            continue
+        evaluation_shas.setdefault(artifact.job_id, []).append(artifact.sha256)
+    lines = []
+    for job in sorted(jobs, key=lambda item: item.job_id):
+        shas = ','.join(sorted(evaluation_shas.get(job.job_id, [])))
+        lines.append(
+            f'{job.job_id}:{job.seed}:{job.variant_name}:'
+            f'{job.status.value}:{shas}'
+        )
+    return sha256('\n'.join(lines).encode('utf-8')).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,20 +89,21 @@ def check_passed(check: Any) -> bool:
     if isinstance(check, Mapping):
         for key in _CHECK_PASS_KEYS:
             if key in check:
-                return bool(check[key])
+                return check[key] is True
         return False
-    return bool(check)
+    return check is True
 
 
 def evaluation_passed(evaluation: Mapping[str, Any]) -> bool:
-    # The evaluator verdict is either an explicit `integrity_pass` flag or a
-    # `checks` collection that must be entirely true; anything else is not a
-    # pass.
+    # The evaluator verdict is either an explicit `integrity_pass` bool or a
+    # `checks` collection whose every entry must yield a real `True`; truthy
+    # non-bools (the string "false", "no", 1) are NOT a pass, and an empty
+    # `checks` collection is fail-closed because it carries no bool verdict.
     if 'integrity_pass' in evaluation:
-        return bool(evaluation['integrity_pass'])
+        return evaluation['integrity_pass'] is True
     checks = evaluation.get('checks')
     if isinstance(checks, Mapping):
-        return bool(checks) and all(bool(value) for value in checks.values())
+        return bool(checks) and all(check_passed(value) for value in checks.values())
     if isinstance(checks, (list, tuple)):
         return bool(checks) and all(check_passed(value) for value in checks)
     return False

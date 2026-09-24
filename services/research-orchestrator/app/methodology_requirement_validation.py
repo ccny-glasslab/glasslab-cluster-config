@@ -80,7 +80,11 @@ def _config_path_errors(requirement: MethodologyRequirement) -> list[str]:
     return []
 
 
-def _requirement_mode_errors(requirement: MethodologyRequirement) -> list[str]:
+def _requirement_mode_errors(
+    requirement: MethodologyRequirement,
+    *,
+    require_explicit_scope: bool = True,
+) -> list[str]:
     prefix = _requirement_prefix(requirement)
     minimum = requirement.minimum_distinct_values
     maximum = requirement.maximum_distinct_values
@@ -92,7 +96,11 @@ def _requirement_mode_errors(requirement: MethodologyRequirement) -> list[str]:
         )
     has_explicit_scope = 'comparison_scope' in requirement.model_fields_set
     if requirement.mode == 'comparison':
-        if not has_explicit_scope:
+        # Agent-proposed candidates must state the scope explicitly so no new
+        # ambiguous contract can be sealed. Curated repository-baked contracts
+        # are human-reviewed and keep the within_job default, so repository
+        # installs relax only this check.
+        if require_explicit_scope and not has_explicit_scope:
             errors.append(
                 f'{prefix} declares mode `comparison` but omits '
                 '`comparison_scope`; a comparison requirement must declare an '
@@ -118,6 +126,26 @@ def _requirement_mode_errors(requirement: MethodologyRequirement) -> list[str]:
                 'must pin exactly 1 value'
             )
     return errors
+
+
+def _mixed_scope_errors(
+    requirements: list[MethodologyRequirement],
+) -> list[str]:
+    # A single contract cannot mix topologies: the template seed count is a
+    # contract-level property, so an across_jobs comparison (one seed) would
+    # contradict a within_job comparison's >= MIN_COMPARISON_SEEDS floor.
+    modes = {
+        requirement.comparison_scope
+        for requirement in requirements
+        if requirement.mode == 'comparison'
+    }
+    if len(modes) > 1:
+        return [
+            'methodology_requirements mixes across_jobs and within_job '
+            'comparison requirements; a contract may use only one '
+            'comparison_scope'
+        ]
+    return []
 
 
 def _across_jobs_count_errors(
@@ -171,14 +199,22 @@ def _requirement_identity_errors(
 
 def validate_methodology_requirements(
     requirements: list[MethodologyRequirement],
+    *,
+    require_explicit_scope: bool = True,
 ) -> list[str]:
     errors: list[str] = []
     seen_ids: set[str] = set()
     for requirement in requirements:
         errors.extend(_requirement_identity_errors(requirement, seen_ids))
         errors.extend(_config_path_errors(requirement))
-        errors.extend(_requirement_mode_errors(requirement))
+        errors.extend(
+            _requirement_mode_errors(
+                requirement,
+                require_explicit_scope=require_explicit_scope,
+            )
+        )
     errors.extend(_across_jobs_count_errors(requirements))
+    errors.extend(_mixed_scope_errors(requirements))
     return errors
 
 

@@ -12,7 +12,6 @@
         "requirement_id": "model_families",
         "config_path": "experiment_dimensions.model",
         "mode": "comparison",
-        "comparison_scope": "within_job",
         "minimum_distinct_values": 2,
         "description": "Compare at least one linear and one non-linear model family."
       },

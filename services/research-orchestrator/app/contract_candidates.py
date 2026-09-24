@@ -29,6 +29,7 @@ from .methodology_requirement_validation import (
     validate_methodology_requirements,
 )
 from .preflight import (
+    ORCHESTRATOR_RESERVED_ARTIFACTS,
     MethodologyRequirement,
     declared_budget_conflicts,
 )
@@ -81,6 +82,7 @@ def _validate_methodology_requirements(
     descriptor: EvaluationContractDescriptor,
     *,
     output_schema: Mapping[str, Any] | None = None,
+    require_explicit_scope: bool = True,
 ) -> None:
     # config_path semantics are validated at seal and promotion time, before a
     # contract can bind a run, so a filesystem-looking value cannot survive to
@@ -101,7 +103,10 @@ def _validate_methodology_requirements(
         raise ContractCandidateError(
             f'methodology_requirements are invalid: {exc}'
         ) from exc
-    errors = validate_methodology_requirements(requirements)
+    errors = validate_methodology_requirements(
+        requirements,
+        require_explicit_scope=require_explicit_scope,
+    )
     if output_schema is not None:
         errors.extend(
             validate_across_jobs_comparison_key_schema(
@@ -189,6 +194,7 @@ class ContractCandidateManager:
         *,
         contract_id: str,
         version: str,
+        require_explicit_scope: bool = True,
     ) -> EvaluationContractDescriptor:
         descriptor_path = root / 'contract.json'
         if not descriptor_path.is_file():
@@ -221,6 +227,14 @@ class ContractCandidateManager:
                 'manifest requires primary_metric and a valid direction'
             )
         _validate_declared_budget(descriptor)
+        reserved_artifacts = ORCHESTRATOR_RESERVED_ARTIFACTS & set(
+            descriptor.required_artifacts
+        )
+        if reserved_artifacts:
+            raise ContractCandidateError(
+                'required_artifacts may not request orchestrator-reserved '
+                f'artifact(s): {", ".join(sorted(reserved_artifacts))}'
+            )
         output_schema: dict[str, Any] | None = None
         try:
             for field in (
@@ -261,6 +275,7 @@ class ContractCandidateManager:
         _validate_methodology_requirements(
             descriptor,
             output_schema=output_schema,
+            require_explicit_scope=require_explicit_scope,
         )
         return descriptor
 
@@ -474,6 +489,7 @@ class ContractCandidateManager:
             source,
             contract_id=source.parent.name,
             version=source.name,
+            require_explicit_scope=False,
         )
         # Repository-shipped contracts already carry a pinned contract.sha256;
         # the checksum is verified before install.

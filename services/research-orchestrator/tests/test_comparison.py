@@ -14,7 +14,10 @@ import json
 from hashlib import sha256
 from pathlib import Path
 
+import pytest
+
 from app.comparison import COMPARISON_SCHEMA_VERSION, build_comparison_report
+from app.comparison_checks import evaluation_passed, is_authoritative_comparison
 from app.contracts import compute_contract_digest
 from app.evidence import EvidencePhase, build_evidence_snapshot
 from app.preflight import MethodologyRequirement
@@ -674,16 +677,11 @@ def _persist_job(store, run_id: str, job: JobRecord) -> None:
     store.create_job_if_absent(job)
 
 
-def test_engine_persists_and_verifies_comparison_artifact(
-    tmp_path: Path,
-    orchestrator_bundle,
-) -> None:
-    settings, store, _, _, engine = orchestrator_bundle
-    contract = _install_across_jobs_contract(tmp_path, engine)
+def _bind_across_jobs_run(engine, store, contract):
     run = engine.create_run(
         RunCreateRequest(objective='Persist the cross-job comparison artifact.')
     )
-    run = store.replace_run(
+    return store.replace_run(
         run.model_copy(
             update={
                 'evaluation_contract_id': contract.descriptor.contract_id,
@@ -694,47 +692,75 @@ def test_engine_persists_and_verifies_comparison_artifact(
         expected_version=run.version,
     )
 
-    for index, value in ((1, 'logistic'), (2, 'forest')):
-        job = _job(
+
+def _persist_passing_job(
+    settings,
+    store,
+    run,
+    contract,
+    *,
+    index: int,
+    value: str,
+) -> JobRecord:
+    job = _job(
+        run_id=run.run_id,
+        index=index,
+        value=value,
+        contract_digest=contract.digest,
+    )
+    _persist_job(store, run.run_id, job)
+    content = json.dumps(
+        {
+            'rubric_score': 0.8 + index / 100,
+            'integrity_pass': True,
+            'contract_id': contract.descriptor.contract_id,
+            'contract_version': contract.descriptor.version,
+            'contract_digest': contract.digest,
+            'comparison_key': 'protocol-v1',
+        },
+        sort_keys=True,
+    ).encode()
+    path = Path(settings.shared_mount_root) / f'artifacts/job-{index}/evaluation.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    store.save_artifact(
+        ArtifactRecord(
             run_id=run.run_id,
-            index=index,
-            value=value,
-            contract_digest=contract.digest,
+            job_id=f'job-{index}',
+            type='evaluation',
+            uri=f'artifacts/job-{index}/evaluation.json',
+            sha256=sha256(content).hexdigest(),
         )
-        _persist_job(store, run.run_id, job)
-        content = json.dumps(
-            {
-                'rubric_score': 0.8 + index / 100,
-                'integrity_pass': True,
-                'contract_id': contract.descriptor.contract_id,
-                'contract_version': contract.descriptor.version,
-                'contract_digest': contract.digest,
-                'comparison_key': 'protocol-v1',
-            },
-            sort_keys=True,
-        ).encode()
-        path = Path(settings.shared_mount_root) / f'artifacts/job-{index}/evaluation.json'
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
-        store.save_artifact(
-            ArtifactRecord(
-                run_id=run.run_id,
-                job_id=f'job-{index}',
-                type='evaluation',
-                uri=f'artifacts/job-{index}/evaluation.json',
-                sha256=sha256(content).hexdigest(),
-            )
-        )
+    )
+    return job
 
-    engine._build_comparison_artifact(run.run_id)
-    engine._build_comparison_artifact(run.run_id)
 
-    comparison_artifacts = [
+def _authoritative_comparison_artifacts(store, run_id: str) -> list[ArtifactRecord]:
+    return [
         artifact
-        for artifact in store.list_artifacts(run.run_id)
-        if Path(artifact.uri).name == 'comparison.json'
+        for artifact in store.list_artifacts(run_id)
+        if is_authoritative_comparison(artifact)
     ]
-    assert len(comparison_artifacts) == 1
+
+
+def test_engine_persists_and_verifies_comparison_artifact(
+    tmp_path: Path,
+    orchestrator_bundle,
+) -> None:
+    settings, store, _, _, engine = orchestrator_bundle
+    contract = _install_across_jobs_contract(tmp_path, engine)
+    run = _bind_across_jobs_run(engine, store, contract)
+    _persist_passing_job(
+        settings, store, run, contract, index=1, value='logistic'
+    )
+    _persist_passing_job(settings, store, run, contract, index=2, value='forest')
+
+    engine._build_comparison_artifact(run.run_id)
+    engine._build_comparison_artifact(run.run_id)
+
+    authoritative = _authoritative_comparison_artifacts(store, run.run_id)
+    assert len(authoritative) == 1
+    assert authoritative[0].job_id is None
     document = json.loads(
         (Path(run.reports_path) / 'comparison.json').read_text()
     )
@@ -750,4 +776,92 @@ def test_engine_persists_and_verifies_comparison_artifact(
     )
     assert entry['digest_verified'] is True
     assert entry['content']['satisfied'] is True
+
+
+def test_job_comparison_artifact_does_not_suppress_authoritative_build(
+    tmp_path: Path,
+    orchestrator_bundle,
+) -> None:
+    # F2: a workload/job artifact named comparison.json must never mask the
+    # authoritative orchestrator build nor become the artifact the verifier is
+    # told to check (identity is provenance, not filename).
+    settings, store, _, _, engine = orchestrator_bundle
+    contract = _install_across_jobs_contract(tmp_path, engine)
+    run = _bind_across_jobs_run(engine, store, contract)
+    _persist_passing_job(
+        settings, store, run, contract, index=1, value='logistic'
+    )
+    _persist_passing_job(settings, store, run, contract, index=2, value='forest')
+    store.save_artifact(
+        ArtifactRecord(
+            run_id=run.run_id,
+            job_id='job-1',
+            type='comparison',
+            uri='artifacts/job-1/comparison.json',
+            sha256='c' * 64,
+        )
+    )
+
+    # With only a job artifact present, no authoritative comparison exists.
+    assert engine._comparison_verification_note(run.run_id) == ''
+
+    engine._build_comparison_artifact(run.run_id)
+
+    authoritative = _authoritative_comparison_artifacts(store, run.run_id)
+    assert len(authoritative) == 1
+    assert authoritative[0].job_id is None
+    assert engine._comparison_verification_note(run.run_id) != ''
+
+
+def test_second_job_wave_rebuilds_comparison_artifact(
+    tmp_path: Path,
+    orchestrator_bundle,
+) -> None:
+    settings, store, _, _, engine = orchestrator_bundle
+    contract = _install_across_jobs_contract(tmp_path, engine)
+    run = _bind_across_jobs_run(engine, store, contract)
+    _persist_passing_job(
+        settings, store, run, contract, index=1, value='logistic'
+    )
+    _persist_passing_job(
+        settings, store, run, contract, index=2, value='forest'
+    )
+    engine._build_comparison_artifact(run.run_id)
+    first = _authoritative_comparison_artifacts(store, run.run_id)
+    assert len(first) == 1
+
+    # A second job wave changes the inputs, so the artifact is rebuilt.
+    _persist_passing_job(
+        settings, store, run, contract, index=3, value='boosting'
+    )
+    engine._build_comparison_artifact(run.run_id)
+    rebuilt = _authoritative_comparison_artifacts(store, run.run_id)
+    assert len(rebuilt) == 2
+    fingerprints = {
+        artifact.metadata.get('input_fingerprint') for artifact in rebuilt
+    }
+    assert len(fingerprints) == 2
+
+
+@pytest.mark.parametrize(
+    'evaluation',
+    [
+        {'integrity_pass': 'false'},
+        {'integrity_pass': 'no'},
+        {'integrity_pass': 1},
+        {'checks': {'x': 'false'}},
+        {'checks': ['false']},
+        {'checks': {}},
+        {'checks': []},
+        {},
+    ],
+)
+def test_evaluation_passed_requires_real_booleans(evaluation: dict) -> None:
+    assert evaluation_passed(evaluation) is False
+
+
+def test_evaluation_passed_accepts_bool_verdicts() -> None:
+    assert evaluation_passed({'integrity_pass': True}) is True
+    assert evaluation_passed({'checks': {'x': True, 'y': True}}) is True
+    assert evaluation_passed({'checks': [True, {'passed': True}]}) is True
 

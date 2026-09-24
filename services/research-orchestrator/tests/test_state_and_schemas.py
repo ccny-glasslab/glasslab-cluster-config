@@ -12,7 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.preflight import MethodologyRequirement
+from app.preflight import MethodologyRequirement, comparison_scope_for_manifest
 from app.schemas import (
     AgentTurnResult,
     EvaluationContractProposal,
@@ -20,7 +20,6 @@ from app.schemas import (
     ExperimentVariant,
     ResourceRequest,
     RunState,
-    comparison_scope_for_manifest,
 )
 from app.state_machine import InvalidTransition, validate_transition
 

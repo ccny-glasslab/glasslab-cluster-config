@@ -324,10 +324,9 @@ job so one seed is sufficient (the schema minimum is 1). The seed-derived job
 count is `len(variants) * len(seeds)`.
 
 The prompt guidance that teaches this to Honeydew/Beaker is
-`METHODOLOGY_REQUIREMENTS_GUIDANCE` (`engine.py:164`) and
-`MATRIX_VARIANT_RULES_GUIDANCE` (`app/matrix_naming.py:73`) - both
-`[PROMPT-ONLY]`. The guidance is scope-aware: `render_variant_rules_guidance`
-(`app/matrix_naming.py:48`) renders the `within_job` single-`candidate` shape or
+`METHODOLOGY_REQUIREMENTS_GUIDANCE` (`engine.py:164`) and the scope-aware
+`render_variant_rules_guidance` (`app/matrix_naming.py:48`) - both
+`[PROMPT-ONLY]`. The renderer emits the `within_job` single-`candidate` shape or
 the `across_jobs` one-variant-per-method shape from the run's resolved
 `comparison_scope`. The variant pattern is defined once in `app/matrix_naming.py`;
 the prompt prose and the template sanitizer derive from that constant at import

@@ -24,6 +24,12 @@ from .artifact_delivery import (
 )
 from .cluster import ClusterExecutor
 from .comparison import build_comparison_report
+from .comparison_checks import (
+    AUTHORITATIVE_COMPARISON_TYPE,
+    COMPARISON_FILENAME,
+    comparison_input_fingerprint,
+    is_authoritative_comparison,
+)
 from .config import Settings
 from .contract_candidates import ContractCandidateManager
 from .contracts import EvaluationContractResolver
@@ -5360,6 +5366,13 @@ class ResearchOrchestrator:
             'root of `metrics.json`; nested copies do not satisfy the contract.\n'
             'Required root metric keys:\n'
             f'{json.dumps(required_metric_keys, indent=2)}\n\n'
+            'Resolved comparison scope: '
+            f'`{preflight.comparison_scope}`.\n'
+            f'Canonical matrix topology: {preflight.comparison_topology}.\n'
+            'A `within_job` comparison is correctly one `candidate` variant '
+            'with empty overrides (the compared grid lives in base_config); do '
+            'not reject it for empty overrides. An `across_jobs` comparison '
+            'requires one non-empty variant per compared methodology.\n\n'
             'Deterministic preflight:\n'
             f'{preflight.model_dump_json(indent=2)}\n\n'
             'Review snapshot manifest:\n'
@@ -5774,6 +5787,34 @@ class ResearchOrchestrator:
                 signature = value
         return signature
 
+    @staticmethod
+    def _matrix_topology_digest(action: ActionRecord) -> str:
+        # across_jobs comparison values live in the variant overrides, not in
+        # base_config, so a revision that changes only those values would
+        # otherwise look byte-identical to the previous rejection. Fold the
+        # canonical variants+seeds into the signature so a real revision is
+        # never misread as non-convergence. The digest is value-bearing; the
+        # error text stays value-free.
+        try:
+            matrix = ExperimentMatrix.model_validate(action.arguments)
+        except ValueError:
+            return 'unparseable'
+        payload = {
+            'variants': [
+                {'name': variant.name, 'overrides': variant.overrides}
+                for variant in matrix.variants
+            ],
+            'seeds': matrix.seeds,
+        }
+        return sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(',', ':'),
+                default=str,
+            ).encode()
+        ).hexdigest()
+
     def _preflight_rejection_signature(
         self,
         *,
@@ -5781,9 +5822,10 @@ class ResearchOrchestrator:
         action: ActionRecord,
         errors: list[str],
     ) -> tuple[str, str]:
-        # The signature pins both the normalized error set and the exact
-        # base_config bytes, so an identical rejection can only recur when the
-        # model re-emitted the same non-conforming matrix unchanged.
+        # The signature pins the normalized error set, the exact base_config
+        # bytes, and the matrix topology, so an identical rejection can only
+        # recur when the model re-emitted the same non-conforming matrix
+        # unchanged.
         target = self._matrix_base_config_target(run_id=run_id, action=action)
         base_config_digest = (
             sha256(target.read_bytes()).hexdigest()
@@ -5791,8 +5833,10 @@ class ResearchOrchestrator:
             else 'unavailable'
         )
         normalized = '\n'.join(sorted(set(errors)))
+        topology_digest = self._matrix_topology_digest(action)
         signature = sha256(
-            f'{normalized}\n--\n{base_config_digest}'.encode()
+            f'{normalized}\n--\n{base_config_digest}\n--\n{topology_digest}'
+            .encode()
         ).hexdigest()
         return signature, base_config_digest
 
@@ -6480,12 +6524,17 @@ class ResearchOrchestrator:
         # Phase 2: an across_jobs contract runs one job per methodology, so the
         # run-level comparison is materialized once, after every job is
         # terminal and before the analysis evidence snapshot, so both Beaker
-        # and Honeydew see it. Idempotent: a run that already recorded the
-        # artifact is left untouched, so recovery replays are no-ops.
+        # and Honeydew see it. Idempotent on the comparison inputs: an
+        # authoritative artifact whose input fingerprint matches is left
+        # untouched, while a changed job wave rebuilds.
         run = self.store.get_run(run_id)
+        artifacts = self.store.list_artifacts(run_id)
+        jobs = self.store.list_jobs(run_id)
+        fingerprint = comparison_input_fingerprint(jobs, artifacts)
         if any(
-            Path(artifact.uri).name == 'comparison.json'
-            for artifact in self.store.list_artifacts(run_id)
+            artifact.metadata.get('input_fingerprint') == fingerprint
+            for artifact in artifacts
+            if is_authoritative_comparison(artifact)
         ):
             return
         try:
@@ -6515,14 +6564,14 @@ class ResearchOrchestrator:
         report = build_comparison_report(
             run=run,
             contract=contract,
-            jobs=self.store.list_jobs(run_id),
-            artifacts=self.store.list_artifacts(run_id),
+            jobs=jobs,
+            artifacts=artifacts,
             artifact_reader=read_evaluation,
         )
         if report is None:
             return
         shared_root = Path(self.settings.shared_mount_root).resolve()
-        destination = Path(run.reports_path) / 'comparison.json'
+        destination = Path(run.reports_path) / COMPARISON_FILENAME
         destination.parent.mkdir(parents=True, exist_ok=True)
         content = (
             json.dumps(report, indent=2, sort_keys=True) + '\n'
@@ -6538,10 +6587,10 @@ class ResearchOrchestrator:
         try:
             uri = str(destination.resolve().relative_to(shared_root))
         except ValueError:
-            uri = f'artifact://{run_id}/reports/comparison.json'
+            uri = f'artifact://{run_id}/reports/{COMPARISON_FILENAME}'
         artifact = self._save_local_artifact(
             run_id=run_id,
-            artifact_type='comparison',
+            artifact_type=AUTHORITATIVE_COMPARISON_TYPE,
             uri=uri,
             digest=digest,
             metadata={
@@ -6549,6 +6598,7 @@ class ResearchOrchestrator:
                 'authoritative': True,
                 'comparison_scope': 'across_jobs',
                 'satisfied': report['satisfied'],
+                'input_fingerprint': fingerprint,
             },
         )
         self._event(
@@ -6568,7 +6618,7 @@ class ResearchOrchestrator:
 
     def _comparison_verification_note(self, run_id: str) -> str:
         if not any(
-            Path(artifact.uri).name == 'comparison.json'
+            is_authoritative_comparison(artifact)
             for artifact in self.store.list_artifacts(run_id)
         ):
             return ''

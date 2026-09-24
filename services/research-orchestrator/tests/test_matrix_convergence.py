@@ -271,6 +271,100 @@ def test_repair_replaces_metadata_wrapper_with_value_list(tmp_path: Path) -> Non
     assert len({str(value) for value in model}) >= 2
 
 
+def test_repair_normalizes_single_element_list_to_scalar(
+    tmp_path: Path,
+) -> None:
+    # F8: preflight requires an across_jobs base_config path to be a scalar, so
+    # the repair must normalize a one-element list to its scalar.
+    base_config = tmp_path / 'configs' / 'candidate.yaml'
+    base_config.parent.mkdir(parents=True)
+    base_config.write_text('experiment_dimensions:\n  model: [only-value]\n')
+
+    repair = repair_methodology_settings(
+        base_config_path=base_config,
+        requirements=[
+            MethodologyRequirement(
+                requirement_id='model_families',
+                config_path='experiment_dimensions.model',
+                mode='comparison',
+                comparison_scope='across_jobs',
+                minimum_distinct_values=2,
+                description='Compare families across jobs.',
+            )
+        ],
+    )
+
+    assert repair.changed is True
+    data = yaml.safe_load(base_config.read_text(encoding='utf-8'))
+    assert data['experiment_dimensions']['model'] == 'only-value'
+
+
+def _override_matrix_arguments(override: str) -> dict:
+    return ExperimentMatrix.model_validate(
+        {
+            'base_config': 'configs/candidate.yaml',
+            'variants': [
+                {
+                    'name': 'candidate',
+                    'overrides': {'experiment_dimensions.model': override},
+                }
+            ],
+            'seeds': [17, 31, 49],
+            'maximum_parallel_jobs': 1,
+            'runner_image': RUNNER_IMAGE,
+            'resources': {
+                'cpu': 1,
+                'memory_gib': 1,
+                'gpus': 0,
+                'wallclock_minutes': 5,
+            },
+            'required_artifacts': ['metrics.json'],
+        }
+    ).model_dump(mode='json')
+
+
+def test_preflight_signature_covers_variant_overrides(
+    orchestrator_bundle,
+) -> None:
+    # F4: across_jobs comparison values live in variant overrides, so a
+    # revision that changes only those values must change the non-convergence
+    # signature.
+    _, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Signature covers overrides.')
+    )
+    config = Path(run.beaker_workspace) / 'configs' / 'candidate.yaml'
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text('experiment_dimensions:\n  model: model-candidate-1\n')
+
+    def action(override: str) -> ActionRecord:
+        return ActionRecord(
+            run_id=run.run_id,
+            proposed_by=AgentName.BEAKER,
+            type='submit_experiment_matrix',
+            arguments=_override_matrix_arguments(override),
+            policy_classification=(
+                PolicyClassification.HONEYDEW_AND_HUMAN_APPROVAL
+            ),
+            approval_status=ApprovalStatus.REJECTED,
+            reason='Deterministic matrix preflight failed',
+            idempotency_key=f'signature-{override}',
+        )
+
+    first, _ = engine._preflight_rejection_signature(
+        run_id=run.run_id,
+        action=action('value-a'),
+        errors=['same error set'],
+    )
+    second, _ = engine._preflight_rejection_signature(
+        run_id=run.run_id,
+        action=action('value-b'),
+        errors=['same error set'],
+    )
+
+    assert first != second
+
+
 def test_repair_creates_missing_base_config(tmp_path: Path) -> None:
     base_config = tmp_path / 'nested' / 'configs' / 'candidate.yaml'
     assert not base_config.exists()

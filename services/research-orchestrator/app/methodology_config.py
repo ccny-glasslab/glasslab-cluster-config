@@ -155,9 +155,14 @@ def _ensure_single_scalar(
         comments.setdefault(placeholder, set()).add(config_path)
         return [placeholder]
     if isinstance(current, list):
-        distinct = [str(value) for value in dict.fromkeys(current)]
-        if len(distinct) > 1:
-            node[leaf] = current[0]
+        if not current:
+            placeholder = f'{leaf}-candidate-1'
+            node[leaf] = placeholder
+            comments.setdefault(placeholder, set()).add(config_path)
+            return [placeholder]
+        # Normalize any value list (including a single-element list, which the
+        # preflight rejects for across_jobs) down to its scalar.
+        node[leaf] = current[0]
     return []
 
 
