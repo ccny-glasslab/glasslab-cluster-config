@@ -67,8 +67,9 @@ _CONTAINER_PATH_REASON = (
 )
 _LIVE_ROUTING_REASON = (
     'Live per-agent routing activation: the code default is None (single-'
-    'endpoint fallback); the deployment activates the .17/.18 split serving on '
-    'port 52417. Pinned so a routing regression fails review.'
+    'endpoint fallback); the deployment routes every agent to the hosted '
+    'OpenCode Go provider (deepseek-v4.1-flash). Pinned so a routing '
+    'regression fails review.'
 )
 _LIVE_DISCORD_REASON = (
     'Live Discord identity: the code default is None so local/test never posts; '
@@ -147,7 +148,13 @@ OVERRIDES: dict[str, Override] = dict(
             '/mnt/artifacts/research-orchestrator/opencode-cache',
         ),
         # --- live split-model routing (code default None) ---
-        _live_route(_P + 'AGENT_MODEL_NAME', 'mlx-community/Qwen3-Coder-Next-4bit'),
+        _live_route(_P + 'AGENT_MODEL_NAME', 'deepseek-v4.1-flash'),
+        _live_route(
+            _P + 'AGENT_MODEL_PROVIDER_ID', 'opencode-go'
+        ),
+        _container_path(
+            _P + 'OPENCODE_AUTH_JSON_PATH', '/etc/opencode-auth/auth.json'
+        ),
         _live_route(
             _P + 'AGENT_BASE_URL_HONEYDEW', 'http://192.168.1.18:52417/v1'
         ),
@@ -156,10 +163,10 @@ OVERRIDES: dict[str, Override] = dict(
         ),
         _live_route(
             _P + 'AGENT_MODEL_HONEYDEW',
-            'mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit',
+            'deepseek-v4.1-flash',
         ),
         _live_route(
-            _P + 'AGENT_MODEL_BEAKER', 'mlx-community/Qwen3-Coder-Next-4bit'
+            _P + 'AGENT_MODEL_BEAKER', 'deepseek-v4.1-flash'
         ),
         _live_route(
             _P + 'HONEYDEW_REASONING_AGENT_BASE_URL',
@@ -167,7 +174,7 @@ OVERRIDES: dict[str, Override] = dict(
         ),
         _live_route(
             _P + 'HONEYDEW_REASONING_AGENT_MODEL',
-            'mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit',
+            'deepseek-v4.1-flash',
         ),
         _live_route(
             _P + 'HONEYDEW_STRUCTURED_AGENT_BASE_URL',
@@ -175,7 +182,7 @@ OVERRIDES: dict[str, Override] = dict(
         ),
         _live_route(
             _P + 'HONEYDEW_STRUCTURED_AGENT_MODEL',
-            'mlx-community/Qwen3-Coder-Next-4bit',
+            'deepseek-v4.1-flash',
         ),
         _live_route(
             _P + 'TASK_COMPILER_AGENT_BASE_URL',
@@ -183,7 +190,7 @@ OVERRIDES: dict[str, Override] = dict(
         ),
         _live_route(
             _P + 'TASK_COMPILER_AGENT_MODEL',
-            'mlx-community/Qwen3-Coder-Next-4bit',
+            'deepseek-v4.1-flash',
         ),
         # --- live backend / feature selection ---
         (
