@@ -7378,10 +7378,35 @@ class ResearchOrchestrator:
         elif state == RunState.BEAKER_FINALIZING:
             self._beaker_finalize(run_id)
         elif state == RunState.HONEYDEW_REVIEWING:
-            self._honeydew_review(
-                run_id,
-                implementation_turn_id='recovered',
-            )
+            pending = [
+                action
+                for action in self.store.list_actions(run_id)
+                if action.type == 'submit_experiment_matrix'
+                and action.approval_status == ApprovalStatus.PENDING
+            ]
+            if pending:
+                self._honeydew_review(
+                    run_id,
+                    implementation_turn_id='recovered',
+                )
+            else:
+                # The review already rejected the matrix before the pause, so
+                # there is no pending action left to re-review. Resume the
+                # revision the rejection called for instead of re-entering the
+                # review, which raises and re-pauses on every resume.
+                rejected = [
+                    action
+                    for action in self.store.list_actions(run_id)
+                    if action.type == 'submit_experiment_matrix'
+                    and action.approval_status == ApprovalStatus.REJECTED
+                ]
+                feedback = (
+                    rejected[-1].reason
+                    if rejected
+                    else 'Resume the bounded revision.'
+                )
+                self._transition(run_id, RunState.BEAKER_REVISING)
+                self._beaker_revise(run_id, feedback=feedback)
         elif state == RunState.BEAKER_REVISING:
             rejected = [
                 action
