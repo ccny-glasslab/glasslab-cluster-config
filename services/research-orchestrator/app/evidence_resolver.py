@@ -123,7 +123,7 @@ class EvidenceURIResolver:
                 for artifact in self.store.list_artifacts(run.run_id)
             ]
         for artifact in artifacts:
-            if self._artifact_uri_matches(
+            if f'artifact://{artifact.uri}' == uri or self._artifact_uri_matches(
                 artifact.uri,
                 path,
                 legacy_path,
@@ -152,8 +152,10 @@ class EvidenceURIResolver:
             if artifact_uri.startswith('artifact://')
             else artifact_uri
         )
+        normalized = normalized.lstrip('/')
+        path = path.lstrip('/')
         return normalized == path or (
-            legacy_path is not None and normalized == legacy_path
+            legacy_path is not None and normalized == legacy_path.lstrip('/')
         )
 
     def _resolve_job(self, uri: str) -> ResolvedEvidence:
