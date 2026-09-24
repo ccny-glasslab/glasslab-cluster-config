@@ -77,7 +77,7 @@ data:
   GLASSLAB_ORCHESTRATOR_AGENT_BASE_URL_HONEYDEW: http://192.168.1.18:52417/v1
   GLASSLAB_ORCHESTRATOR_AGENT_BASE_URL_BEAKER: http://192.168.1.14:52417/v1
   GLASSLAB_ORCHESTRATOR_AGENT_MODEL_HONEYDEW: mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit
-  GLASSLAB_ORCHESTRATOR_AGENT_MODEL_BEAKER: mlx-community/Qwen3-14B-bf16
+  GLASSLAB_ORCHESTRATOR_AGENT_MODEL_BEAKER: mlx-community/Qwen3-14B-8bit
   # Honeydew's bounded reasoning turns (verification) run on the Thinking model
   # at .18; the long-context structured-output turns stay on Coder-Next at .17
   # to avoid KV-cache exhaustion (see config.py honeydew_*_agent_base_url).

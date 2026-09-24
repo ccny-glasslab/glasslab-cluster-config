@@ -159,7 +159,7 @@ OVERRIDES: dict[str, Override] = dict(
             'mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit',
         ),
         _live_route(
-            _P + 'AGENT_MODEL_BEAKER', 'mlx-community/Qwen3-14B-bf16'
+            _P + 'AGENT_MODEL_BEAKER', 'mlx-community/Qwen3-14B-8bit'
         ),
         _live_route(
             _P + 'HONEYDEW_REASONING_AGENT_BASE_URL',
