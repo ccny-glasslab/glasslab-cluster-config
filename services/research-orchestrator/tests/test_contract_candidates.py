@@ -717,6 +717,76 @@ def test_candidate_mixed_comparison_scopes_seal_cleanly(
     assert sealed.digest
 
 
+def _mixed_requirements(across_path: str, within_path: str) -> list[dict]:
+    return [
+        {
+            'requirement_id': 'model_families',
+            'config_path': across_path,
+            'mode': 'comparison',
+            'comparison_scope': 'across_jobs',
+            'minimum_distinct_values': 2,
+            'description': 'Split model families into separate jobs.',
+        },
+        {
+            'requirement_id': 'feature_sets',
+            'config_path': within_path,
+            'mode': 'comparison',
+            'comparison_scope': 'within_job',
+            'minimum_distinct_values': 2,
+            'description': 'Compare feature sets inside each job.',
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ('across_path', 'within_path'),
+    [
+        ('experiment_dimensions.model', 'experiment_dimensions.model'),
+        ('experiment_dimensions.model', 'experiment_dimensions.model.name'),
+        ('experiment_dimensions.model.name', 'experiment_dimensions.model'),
+    ],
+)
+def test_candidate_overlapping_across_jobs_paths_are_rejected(
+    tmp_path: Path,
+    across_path: str,
+    within_path: str,
+) -> None:
+    # An across_jobs path that equals, is an ancestor of, or is a descendant of
+    # another comparison path is provably unsatisfiable (one scalar vs a list),
+    # so it must not seal and re-enter the #457 revision loop.
+    manager, source = _candidate_with_requirements(
+        tmp_path,
+        _mixed_requirements(across_path, within_path),
+    )
+    (source / 'output.schema.json').write_text(
+        json.dumps(
+            {
+                'type': 'object',
+                'properties': {'comparison_key': {'type': 'string'}},
+            }
+        )
+    )
+
+    with pytest.raises(ContractCandidateError, match='overlaps comparison'):
+        _seal(manager, source)
+
+
+def test_repository_install_rejects_overlapping_across_jobs_paths(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / 'repo' / 'candidate-v1' / '1.0.0'
+    _write_repo_contract(
+        source,
+        requirements=_mixed_requirements(
+            'experiment_dimensions.model',
+            'experiment_dimensions.model',
+        ),
+    )
+
+    with pytest.raises(ContractCandidateError, match='overlaps comparison'):
+        _manager(tmp_path).install_repository_contract(source)
+
+
 @pytest.mark.parametrize(
     'reserved',
     ['./comparison.json', 'sub/comparison.json'],
