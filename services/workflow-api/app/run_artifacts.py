@@ -100,18 +100,31 @@ def build_artifacts_from_directory(settings: Settings, run_id: str) -> Artifacts
 
 
 def load_artifacts_from_disk(settings: Settings, run_id: str) -> ArtifactsIndex | None:
-    # Prefer the runner-written index; fall back to directory scanning.
-    # The runner's index is authoritative because it includes digest
-    # verification; directory scanning is a best-effort fallback.
+    # The runner-written index is authoritative for what it lists (it carries
+    # digest verification), but it is written BEFORE the contract evaluator
+    # runs, so evaluator outputs such as evaluation.json are absent from it.
+    # Merge the index with a fresh directory scan so post-index evidence is
+    # still listed; index entries win for their digest/required metadata.
     index_path = artifact_run_dir(settings, run_id) / 'artifacts_index.json'
+    index: ArtifactsIndex | None = None
     if index_path.exists():
         payload = json.loads(index_path.read_text())
         # The runner-written index is only authoritative for the run it names;
         # a foreign or unbound index must never be served for this run.
         if not isinstance(payload, dict) or payload.get('run_id') != run_id:
             return None
-        return ArtifactsIndex.model_validate(payload)
-    return build_artifacts_from_directory(settings, run_id)
+        index = ArtifactsIndex.model_validate(payload)
+    scanned = build_artifacts_from_directory(settings, run_id)
+    if index is None:
+        return scanned
+    if scanned is None:
+        return index
+    seen = {entry.name for entry in index.artifacts}
+    merged = list(index.artifacts)
+    merged.extend(
+        entry for entry in scanned.artifacts if entry.name not in seen
+    )
+    return ArtifactsIndex(run_id=run_id, artifacts=merged)
 
 
 def parse_log_line(line: str) -> LogEntry:

@@ -302,8 +302,9 @@ def _resolved_primary_metric(
     # Sealed task-specific evaluators read the metric roots from metrics.json
     # and echo them under the output's `metrics` object, also repeating the
     # primary metric as a `primary_metric` dict; flat legacy evaluators put the
-    # metric at the top level. Prefer the sealed shape, then the flat key, then
-    # the named `primary_metric` dict, and never raise on a missing one.
+    # metric at the top level. A third sealed shape names the metric in
+    # `primary_metric` and carries the value in `primary_value`. Prefer the
+    # sealed shapes, then the flat key, and never raise on a missing one.
     metrics = evaluation.get('metrics')
     if isinstance(metrics, Mapping) and primary_metric_key in metrics:
         # A key explicitly present with a null value must fall through, exactly
@@ -321,6 +322,10 @@ def _resolved_primary_metric(
         and 'value' in primary_metric
     ):
         return primary_metric['value']
+    if primary_metric == primary_metric_key and 'primary_value' in evaluation:
+        primary_value = evaluation['primary_value']
+        if primary_value is not None:
+            return primary_value
     return None
 
 
