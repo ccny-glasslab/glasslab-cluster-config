@@ -60,6 +60,9 @@ def _drive_full_workflow(engine, store, cluster, objective: str):
     )
     for job in store.list_jobs(run.run_id):
         cluster.complete(job.external_run_id, metrics={'score': 0.75})
+    # The first reconcile records the terminal artifacts and defers analysis
+    # one poll; the second advances to the report turn.
+    engine.reconcile_run(run.run_id)
     engine.reconcile_run(run.run_id)
     final = _pending_action(store, run.run_id, 'accept_final_report')
     engine.approve_action(

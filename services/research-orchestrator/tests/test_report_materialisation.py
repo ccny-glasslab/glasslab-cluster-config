@@ -168,6 +168,9 @@ def _complete_jobs(engine, store, cluster, run_id: str):
     for job in store.list_jobs(run_id):
         assert job.external_run_id
         cluster.complete(job.external_run_id, metrics={'score': 0.75})
+    # First pass records the terminal artifacts and defers analysis one poll
+    # (late evaluator artifacts must drain); the second advances the run.
+    engine.reconcile_run(run_id)
     return engine.reconcile_run(run_id)
 
 
