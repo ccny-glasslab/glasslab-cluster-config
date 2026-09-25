@@ -404,6 +404,9 @@ def test_repaired_config_passes_structural_preflight(orchestrator_bundle) -> Non
         requirements=requirements,
     )
     assert repair.changed is True
+    packaged_config = source / 'configs' / 'candidate.yaml'
+    packaged_config.parent.mkdir(parents=True, exist_ok=True)
+    packaged_config.write_text(config.read_text())
 
     report = preflight_matrix(
         run=run.model_copy(

@@ -353,6 +353,9 @@ def test_contract_accommodating_profile_converges_on_first_proposal(
     (workspace / 'implementation-plan.md').write_text('# Plan\n')
     source = workspace / 'benchmark-workspace' / 'titanic'
     source.mkdir(parents=True)
+    packaged_config = source / 'configs' / 'candidate.yaml'
+    packaged_config.parent.mkdir(parents=True, exist_ok=True)
+    packaged_config.write_text('model: [logistic_regression]\n')
     (source / 'run.py').write_text(
         'import json\n'
         'with open("metrics.json", "w") as handle:\n'

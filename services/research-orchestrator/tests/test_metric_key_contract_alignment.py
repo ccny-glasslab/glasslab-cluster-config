@@ -131,6 +131,9 @@ def _titanic_run(engine, *, metric_body: str):
     (workspace / 'configs' / 'candidate.yaml').write_text('seeds: [17]\n')
     source = workspace / TITANIC_SOURCE
     source.mkdir(parents=True)
+    packaged_config = source / 'configs' / 'candidate.yaml'
+    packaged_config.parent.mkdir(parents=True, exist_ok=True)
+    packaged_config.write_text('seeds: [17]\n')
     (source / 'run.py').write_text(
         'import json\n'
         'with open("metrics.json", "w") as handle:\n'

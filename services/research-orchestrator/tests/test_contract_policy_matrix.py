@@ -285,6 +285,9 @@ def test_adult_preflight_distinguishes_comparisons_from_decisions(
     )
     source = workspace / 'benchmark-workspace' / 'adult-income'
     source.mkdir(parents=True)
+    packaged_config = source / 'configs' / 'candidate.yaml'
+    packaged_config.parent.mkdir(parents=True, exist_ok=True)
+    packaged_config.write_text(config.read_text())
     (source / 'run.py').write_text(
         'import json\n'
         'metrics = {\n'
@@ -396,6 +399,9 @@ def test_adult_preflight_accepts_assigned_path_and_annotated_metrics(
     )
     source = workspace / 'benchmark-workspace' / 'adult-income'
     source.mkdir(parents=True)
+    packaged_config = source / 'configs' / 'candidate.yaml'
+    packaged_config.parent.mkdir(parents=True, exist_ok=True)
+    packaged_config.write_text(config.read_text())
     (source / 'run.py').write_text(
         'import json\n'
         'from pathlib import Path\n'
@@ -706,6 +712,9 @@ def test_non_comparison_contract_accepts_single_seed(orchestrator_bundle) -> Non
     config.write_text('seeds: [17]\n')
     source = workspace / 'benchmark-workspace' / 'adult-income'
     source.mkdir(parents=True)
+    packaged_config = source / 'configs' / 'candidate.yaml'
+    packaged_config.parent.mkdir(parents=True, exist_ok=True)
+    packaged_config.write_text(config.read_text())
     (source / 'run.py').write_text(
         'import json\n'
         'metrics = {\n'
@@ -826,7 +835,13 @@ def _install_across_jobs_contract(
     return engine.contracts.resolve(contract_id, version).digest
 
 
-def _across_jobs_run(engine, *, config_body: str):
+def _across_jobs_run(
+    engine,
+    *,
+    config_body: str,
+    source_subdirectory: str = 'benchmark-workspace/adult-income',
+    config_in_source: bool = True,
+):
     run = engine.create_run(
         request=RunCreateRequest(
             objective='Exercise the across-jobs comparison preflight.'
@@ -836,13 +851,20 @@ def _across_jobs_run(engine, *, config_body: str):
     config = workspace / 'configs' / 'candidate.yaml'
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(config_body)
-    source = workspace / 'benchmark-workspace' / 'adult-income'
-    source.mkdir(parents=True)
+    source = (workspace / source_subdirectory).resolve()
+    source.mkdir(parents=True, exist_ok=True)
+    # The cluster job runs the packaged task source as its working directory,
+    # so the base_config must exist inside the source as well as at the
+    # workspace root the agent edits.
+    if config_in_source:
+        packaged_config = source / 'configs' / 'candidate.yaml'
+        packaged_config.parent.mkdir(parents=True, exist_ok=True)
+        packaged_config.write_text(config_body)
     (source / 'run.py').write_text(_ACROSS_JOBS_SOURCE)
     return run.model_copy(
         update={
             'task_definition': {
-                'source_subdirectory': 'benchmark-workspace/adult-income',
+                'source_subdirectory': source_subdirectory,
             }
         }
     )
@@ -976,6 +998,93 @@ def test_mixed_scope_matrix_requires_three_seeds(
     assert not report.passed
     assert any(
         'comparison contract requires at least 3 matrix seeds' in error
+        for error in report.errors
+    )
+
+
+def test_imported_task_base_config_must_exist_in_packaged_source(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    # A matrix that passes the workspace-root check but whose base_config is
+    # absent from the packaged task source would fail at runtime, because the
+    # cluster job runs the source as its working directory.
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(tmp_path, engine)
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body='experiment_dimensions:\n  model: model-candidate-1\n',
+        config_in_source=False,
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': 'model-candidate-1'},
+            {'experiment_dimensions.model': 'model-candidate-2'},
+        ],
+        seeds=[17],
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert not report.passed
+    assert any(
+        'is not present inside the packaged task source' in error
+        for error in report.errors
+    )
+
+
+def test_imported_task_base_config_in_packaged_source_passes(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(tmp_path, engine)
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body='experiment_dimensions:\n  model: model-candidate-1\n',
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': 'model-candidate-1'},
+            {'experiment_dimensions.model': 'model-candidate-2'},
+        ],
+        seeds=[17],
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert report.passed, report.errors
+
+
+def test_dot_source_subdirectory_keeps_workspace_base_config_check(
+    tmp_path,
+    orchestrator_bundle,
+) -> None:
+    # When the source root is the workspace root, the existing check already
+    # covers base_config; the new guard must not add a duplicate error.
+    _, _, _, _, engine = orchestrator_bundle
+    _install_across_jobs_contract(tmp_path, engine)
+    contract = engine.contracts.resolve('across-jobs-v1', '1.0.0')
+    run = _across_jobs_run(
+        engine,
+        config_body='experiment_dimensions:\n  model: model-candidate-1\n',
+        source_subdirectory='.',
+    )
+    matrix = _across_jobs_matrix(
+        overrides=[
+            {'experiment_dimensions.model': 'model-candidate-1'},
+            {'experiment_dimensions.model': 'model-candidate-2'},
+        ],
+        seeds=[17],
+    )
+
+    report = preflight_matrix(run=run, matrix=matrix, contract=contract)
+
+    assert report.passed, report.errors
+    assert not any(
+        'is not present inside the packaged task source' in error
         for error in report.errors
     )
 
@@ -1270,6 +1379,9 @@ def _generic_task_run(engine, *, metric_body: str):
     (workspace / 'configs' / 'candidate.yaml').write_text('seeds: [17]\n')
     source = workspace / 'benchmark-workspace' / 'adult-income'
     source.mkdir(parents=True)
+    packaged_config = source / 'configs' / 'candidate.yaml'
+    packaged_config.parent.mkdir(parents=True, exist_ok=True)
+    packaged_config.write_text('seeds: [17]\n')
     (source / 'run.py').write_text(
         'import json\n'
         'with open("metrics.json", "w") as handle:\n'

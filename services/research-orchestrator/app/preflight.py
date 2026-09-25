@@ -1115,12 +1115,31 @@ def preflight_matrix(
         )
 
     if run.task_definition:
-        source = (
-            workspace / str(run.task_definition['source_subdirectory'])
-        ).resolve()
+        source_subdirectory = str(
+            run.task_definition['source_subdirectory']
+        ).strip()
+        source = (workspace / source_subdirectory).resolve()
         if not source.is_relative_to(workspace):
             errors.append('imported task source directory escapes the workspace')
         else:
+            # The cluster job packages the task source and runs it as its
+            # working directory, so the matrix base_config must also resolve
+            # inside that packaged source, not only at the workspace root.
+            if source_subdirectory not in ('.', ''):
+                packaged_base_config = (
+                    source / matrix.base_config
+                ).resolve()
+                if (
+                    not packaged_base_config.is_relative_to(source)
+                    or not packaged_base_config.is_file()
+                ):
+                    errors.append(
+                        f'`base_config` `{matrix.base_config}` is not present '
+                        f'inside the packaged task source '
+                        f'`{source_subdirectory}`; the cluster job runs that '
+                        'source as its working directory, so the config must '
+                        'exist there'
+                    )
             required_metric_keys, superseded_metric_keys = (
                 _reconcile_required_metric_keys(
                     contract=contract,
