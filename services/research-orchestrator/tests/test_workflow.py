@@ -26,6 +26,7 @@ import pytest
 
 from app.contracts import EvaluationContractResolver
 from app.contract_candidates import ContractCandidateManager
+from app.cluster import ClusterArtifact, ClusterJobSnapshot
 from app.config import SERVICE_ROOT
 from app.discord_adapter import DisabledDiscordAdapter
 from app.engine import (
@@ -886,14 +887,18 @@ def _advance_to_jobs(engine, store):
 
 
 def _complete_jobs(engine, store, cluster, run_id: str):
-    # FakeClusterExecutor.complete marks each external run done, then
-    # reconcile_run advances the run to AWAITING_FINAL_ACCEPTANCE.
+    # FakeClusterExecutor.complete marks each external run done. The first
+    # reconcile records the terminal artifacts and defers the analysis
+    # transition one poll so a late evaluator artifact can drain; the second
+    # advances the run to AWAITING_FINAL_ACCEPTANCE (a no-op when the first
+    # pass already advanced).
     for job in store.list_jobs(run_id):
         assert job.external_run_id
         cluster.complete(
             job.external_run_id,
             metrics={'score': 0.75},
         )
+    engine.reconcile_run(run_id)
     return engine.reconcile_run(run_id)
 
 
@@ -2425,6 +2430,9 @@ def test_restart_recovery_from_job_running(orchestrator_bundle) -> None:
         discord=DisabledDiscordAdapter(),
     )
     assert restarted.recover() == [run.run_id]
+    # The recovery reconcile records the terminal artifacts and defers the
+    # analysis transition one poll; the watcher's next poll advances the run.
+    restarted.reconcile_run(run.run_id)
     recovered = restarted_store.get_run(run.run_id)
     assert recovered.state == RunState.AWAITING_FINAL_ACCEPTANCE
     assert len(restarted_store.list_artifacts(run.run_id)) == 6
@@ -2676,6 +2684,193 @@ def test_transient_inspection_error_does_not_finish_run(
     cluster.snapshots[job.external_run_id] = snapshot
     engine.reconcile_run(run.run_id)
     assert store.get_job(job.job_id).status == JobStatus.RUNNING
+
+
+def _append_snapshot_artifact(cluster, external_run_id, artifact) -> None:
+    # A real workload's terminal snapshot is re-read on every poll, so a late
+    # evaluator artifact appears by extending the recorded artifact list.
+    snapshot = cluster.snapshots[external_run_id]
+    cluster.snapshots[external_run_id] = ClusterJobSnapshot(
+        status=snapshot.status,
+        exit_information=snapshot.exit_information,
+        artifacts=[*snapshot.artifacts, artifact],
+    )
+
+
+def _late_evaluation_artifact(external_run_id: str) -> ClusterArtifact:
+    return ClusterArtifact(
+        type='evaluation',
+        uri=f'artifact://{external_run_id}/evaluation.json',
+        sha256=sha256(b'{"integrity_pass": true}').hexdigest(),
+    )
+
+
+def test_late_evaluation_artifact_is_ingested_before_analysis(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    # Live run 11c32168: the evaluator writes evaluation.json a moment after
+    # the workload's terminal snapshot, so the first terminal observation
+    # records only the base artifacts and the run then leaves JOB_RUNNING
+    # forever. The wave must keep draining; when the late artifact appears it
+    # is recorded before analysis starts.
+    _, store, cluster, _, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    jobs = store.list_jobs(run.run_id)
+    for job in jobs:
+        assert job.external_run_id
+        cluster.complete(job.external_run_id, metrics={'score': 0.75})
+
+    analyzed_states: list[RunState] = []
+    original_analyze = engine._analyze_results
+
+    def recording_analyze(analyzed_run_id: str) -> None:
+        analyzed_states.append(store.get_run(analyzed_run_id).state)
+        original_analyze(analyzed_run_id)
+
+    monkeypatch.setattr(engine, '_analyze_results', recording_analyze)
+
+    # Terminal observation pass: base artifacts only, analysis deferred.
+    engine.reconcile_run(run.run_id)
+    assert store.get_run(run.run_id).state == RunState.JOB_RUNNING
+    assert not [
+        artifact
+        for artifact in store.list_artifacts(run.run_id)
+        if artifact.uri.endswith('evaluation.json')
+    ]
+
+    target = jobs[0]
+    late = _late_evaluation_artifact(target.external_run_id)
+    _append_snapshot_artifact(cluster, target.external_run_id, late)
+
+    # Artifact-arrival pass: ingested, transition deferred one more poll.
+    engine.reconcile_run(run.run_id)
+    assert store.get_run(run.run_id).state == RunState.JOB_RUNNING
+    recorded = [
+        artifact
+        for artifact in store.list_artifacts(run.run_id)
+        if artifact.uri == late.uri
+    ]
+    assert len(recorded) == 1
+    assert recorded[0].sha256 == late.sha256
+    assert recorded[0].job_id == target.job_id
+    assert recorded[0].metadata['evaluation_contract_id'] == (
+        target.evaluation_contract_id
+    )
+    assert recorded[0].metadata['evaluation_contract_version'] == (
+        target.evaluation_contract_version
+    )
+    assert recorded[0].metadata['evaluation_contract_digest'] == (
+        target.evaluation_contract_digest
+    )
+
+    # Drain pass: nothing new, so the run transitions to analysis with the
+    # artifact already in the store, recorded exactly once.
+    engine.reconcile_run(run.run_id)
+    assert store.get_run(run.run_id).state == RunState.AWAITING_FINAL_ACCEPTANCE
+    assert analyzed_states == [RunState.BEAKER_ANALYZING]
+    assert len(
+        [
+            event
+            for event in store.list_events(run.run_id)
+            if event.event_type == 'artifact.recorded'
+            and event.payload.get('uri') == late.uri
+        ]
+    ) == 1
+
+
+def test_analysis_transition_waits_exactly_one_poll_for_late_artifacts(
+    orchestrator_bundle,
+) -> None:
+    # The transition is deferred by exactly the artifact-arrival pass: a new
+    # artifact on the all-terminal pass holds the run in JOB_RUNNING, and the
+    # next poll (which observes nothing new) advances it.
+    _, store, cluster, _, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    jobs = store.list_jobs(run.run_id)
+    for job in jobs:
+        assert job.external_run_id
+        cluster.complete(job.external_run_id, metrics={'score': 0.75})
+    engine.reconcile_run(run.run_id)
+    assert store.get_run(run.run_id).state == RunState.JOB_RUNNING
+
+    target = jobs[0]
+    late = _late_evaluation_artifact(target.external_run_id)
+    _append_snapshot_artifact(cluster, target.external_run_id, late)
+
+    engine.reconcile_run(run.run_id)
+    received = [
+        event
+        for event in store.list_events(run.run_id)
+        if event.event_type == 'artifact.recorded'
+        and event.payload.get('uri') == late.uri
+    ]
+    assert store.get_run(run.run_id).state == RunState.JOB_RUNNING
+    assert len(received) == 1
+
+    engine.reconcile_run(run.run_id)
+    assert store.get_run(run.run_id).state == RunState.AWAITING_FINAL_ACCEPTANCE
+    # The advancing poll observed zero new artifacts: no second record event.
+    assert [
+        event
+        for event in store.list_events(run.run_id)
+        if event.event_type == 'artifact.recorded'
+        and event.payload.get('uri') == late.uri
+    ] == received
+
+
+def test_terminal_wave_without_late_artifacts_advances_after_the_drain_poll(
+    orchestrator_bundle,
+) -> None:
+    # A wave whose terminal snapshots never gain an artifact must not stall:
+    # the poll after the one that recorded the base artifacts advances the run
+    # even though it observed nothing new.
+    _, store, cluster, _, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    jobs = store.list_jobs(run.run_id)
+    for job in jobs:
+        assert job.external_run_id
+        cluster.complete(job.external_run_id, metrics={'score': 0.75})
+
+    engine.reconcile_run(run.run_id)
+    assert store.get_run(run.run_id).state == RunState.JOB_RUNNING
+    engine.reconcile_run(run.run_id)
+    assert store.get_run(run.run_id).state == RunState.AWAITING_FINAL_ACCEPTANCE
+    assert not [
+        event
+        for event in store.list_events(run.run_id)
+        if event.event_type == 'artifact.sync_failed'
+    ]
+
+
+def test_wave_sync_swallows_failed_inspection_without_changing_status(
+    orchestrator_bundle,
+) -> None:
+    # One terminal job's snapshot can vanish (transient workflow-api error)
+    # while the wave drains; the sync must record the failure, leave that
+    # job's committed status alone, and still let the run advance.
+    _, store, cluster, _, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    jobs = store.list_jobs(run.run_id)
+    for job in jobs:
+        assert job.external_run_id
+        cluster.complete(job.external_run_id, metrics={'score': 0.75})
+    engine.reconcile_run(run.run_id)
+
+    missing = jobs[0]
+    cluster.snapshots.pop(missing.external_run_id)
+
+    engine.reconcile_run(run.run_id)
+
+    assert store.get_job(missing.job_id).status == JobStatus.SUCCEEDED
+    assert store.get_run(run.run_id).state == RunState.AWAITING_FINAL_ACCEPTANCE
+    failures = [
+        event
+        for event in store.list_events(run.run_id)
+        if event.event_type == 'artifact.sync_failed'
+    ]
+    assert failures
+    assert all(event.payload['job_id'] == missing.job_id for event in failures)
 
 
 def test_cancellation_aborts_sessions_and_jobs(orchestrator_bundle) -> None:
@@ -4111,3 +4306,94 @@ def test_promote_binds_already_installed_contract(
         event.event_type == 'contract.bound_installed'
         for event in store.list_events(run.run_id)
     )
+
+
+def test_churning_artifact_defers_are_bounded_and_emit_timeout(
+    orchestrator_bundle,
+) -> None:
+    # A file whose digest changes on every inspect (e.g. a daemonized writer
+    # still appending to an inherited stdout) must not hold the run in
+    # JOB_RUNNING forever: the deferral cap forces the analysis transition and
+    # records artifact.drain_timeout.
+    from app.engine import _WAVE_ARTIFACT_DEFERRAL_CAP
+
+    _, store, cluster, _, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    jobs = store.list_jobs(run.run_id)
+    for job in jobs:
+        assert job.external_run_id
+        cluster.complete(job.external_run_id, metrics={'score': 0.75})
+    engine.reconcile_run(run.run_id)
+
+    churn_target = jobs[0]
+    for tick in range(_WAVE_ARTIFACT_DEFERRAL_CAP + 2):
+        snapshot = cluster.snapshots[churn_target.external_run_id]
+        cluster.snapshots[churn_target.external_run_id] = ClusterJobSnapshot(
+            status=snapshot.status,
+            exit_information=snapshot.exit_information,
+            artifacts=[
+                *snapshot.artifacts,
+                ClusterArtifact(
+                    type='logs/churn.log',
+                    uri=f'artifact://{churn_target.external_run_id}/churn.log',
+                    sha256=sha256(f'tick-{tick}'.encode()).hexdigest(),
+                ),
+            ],
+        )
+        engine.reconcile_run(run.run_id)
+
+    assert store.get_run(run.run_id).state == RunState.AWAITING_FINAL_ACCEPTANCE
+    assert any(
+        event.event_type == 'artifact.drain_timeout'
+        for event in store.list_events(run.run_id)
+    )
+
+
+def test_late_evaluation_only_artifact_does_not_regenerate_notebook(
+    orchestrator_bundle,
+) -> None:
+    # The terminal pass attempts the notebook from the job's metrics artifact;
+    # here that attempt fails (the fake artifact has no backing file), which is
+    # the pre-existing baseline. A later pass that records ONLY evaluation.json
+    # must not attempt a notebook from a set that cannot feed it, so the
+    # generation-failure count and notebook count must be unchanged.
+    _, store, cluster, _, engine = orchestrator_bundle
+    run = _advance_to_jobs(engine, store)
+    jobs = store.list_jobs(run.run_id)
+    for job in jobs:
+        assert job.external_run_id
+        cluster.complete(job.external_run_id, metrics={'score': 0.75})
+    engine.reconcile_run(run.run_id)
+    engine.reconcile_run(run.run_id)
+
+    target = jobs[0]
+    notebooks_before = [
+        artifact
+        for artifact in store.list_artifacts(run.run_id)
+        if artifact.type == 'analysis_notebook'
+        and artifact.metadata.get('job_id') == target.job_id
+    ]
+    failures_before = [
+        event
+        for event in store.list_events(run.run_id)
+        if event.event_type == 'artifact.generation_failed'
+    ]
+
+    late = _late_evaluation_artifact(target.external_run_id)
+    _append_snapshot_artifact(cluster, target.external_run_id, late)
+    engine.reconcile_run(run.run_id)
+    engine.reconcile_run(run.run_id)
+
+    notebooks_after = [
+        artifact
+        for artifact in store.list_artifacts(run.run_id)
+        if artifact.type == 'analysis_notebook'
+        and artifact.metadata.get('job_id') == target.job_id
+    ]
+    failures_after = [
+        event
+        for event in store.list_events(run.run_id)
+        if event.event_type == 'artifact.generation_failed'
+    ]
+    assert notebooks_after == notebooks_before
+    assert failures_after == failures_before
