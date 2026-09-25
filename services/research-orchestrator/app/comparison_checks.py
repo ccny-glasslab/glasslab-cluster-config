@@ -56,6 +56,23 @@ def is_authoritative_comparison(artifact: ArtifactRecord) -> bool:
     )
 
 
+def latest_submission_jobs(jobs: Sequence[JobRecord]) -> list[JobRecord]:
+    # One approved matrix submission creates one wave of jobs, and every job in
+    # that wave shares the approval action's id; a re-submission is a new
+    # approval action with a new action_id. Only the newest wave may be
+    # adjudicated: superseded or failed waves carry no evaluation.json, so
+    # including them would keep the requirement-level "missing the required
+    # comparison_key" reason unsatisfiable forever. The newest wave REPLACES,
+    # never unions, an earlier one; confirmatory campaigns are separate runs.
+    if not jobs:
+        return []
+    latest = max(jobs, key=lambda job: (job.created_at, job.job_id))
+    return sorted(
+        (job for job in jobs if job.action_id == latest.action_id),
+        key=lambda job: job.job_id,
+    )
+
+
 def comparison_input_fingerprint(
     jobs: Sequence[JobRecord],
     artifacts: Sequence[ArtifactRecord],
@@ -63,7 +80,8 @@ def comparison_input_fingerprint(
     # Deterministic digest of the comparison inputs (job identity, seed,
     # variant, status, and the digest-pinned evaluation artifacts), so a
     # recovery replay with identical inputs is a no-op while a changed job wave
-    # forces a rebuild.
+    # forces a rebuild. Only the newest submission wave participates, matching
+    # the scoped set build_comparison_report adjudicates.
     evaluation_shas: dict[str, list[str]] = {}
     for artifact in artifacts:
         if artifact.job_id is None:
@@ -72,7 +90,7 @@ def comparison_input_fingerprint(
             continue
         evaluation_shas.setdefault(artifact.job_id, []).append(artifact.sha256)
     lines = []
-    for job in sorted(jobs, key=lambda item: item.job_id):
+    for job in latest_submission_jobs(jobs):
         shas = ','.join(sorted(evaluation_shas.get(job.job_id, [])))
         lines.append(
             f'{job.job_id}:{job.seed}:{job.variant_name}:'
@@ -277,6 +295,35 @@ def comparability_reasons(
     return reasons
 
 
+def _resolved_primary_metric(
+    evaluation: Mapping[str, Any],
+    primary_metric_key: str,
+) -> Any:
+    # Sealed task-specific evaluators read the metric roots from metrics.json
+    # and echo them under the output's `metrics` object, also repeating the
+    # primary metric as a `primary_metric` dict; flat legacy evaluators put the
+    # metric at the top level. Prefer the sealed shape, then the flat key, then
+    # the named `primary_metric` dict, and never raise on a missing one.
+    metrics = evaluation.get('metrics')
+    if isinstance(metrics, Mapping) and primary_metric_key in metrics:
+        # A key explicitly present with a null value must fall through, exactly
+        # like the flat branch below; 0 and False are valid metric values.
+        sealed_value = metrics[primary_metric_key]
+        if sealed_value is not None:
+            return sealed_value
+    top_level = evaluation.get(primary_metric_key)
+    if top_level is not None:
+        return top_level
+    primary_metric = evaluation.get('primary_metric')
+    if (
+        isinstance(primary_metric, Mapping)
+        and primary_metric.get('name') == primary_metric_key
+        and 'value' in primary_metric
+    ):
+        return primary_metric['value']
+    return None
+
+
 def job_document(
     job: JobRecord,
     evidence: JobEvidence,
@@ -298,7 +345,10 @@ def job_document(
     else:
         integrity_pass = evaluation_passed(evaluation)
         if context.primary_metric_key is not None:
-            primary_metric = evaluation.get(context.primary_metric_key)
+            primary_metric = _resolved_primary_metric(
+                evaluation,
+                context.primary_metric_key,
+            )
         if job.status != JobStatus.SUCCEEDED:
             reason = f'job status is {job.status.value}'
         elif not integrity_pass:

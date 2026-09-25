@@ -10,6 +10,7 @@ determinism, and that within_job/no-comparison runs produce no report.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 from hashlib import sha256
 from pathlib import Path
@@ -19,9 +20,11 @@ import pytest
 from app.comparison import COMPARISON_SCHEMA_VERSION, build_comparison_report
 from app.comparison_checks import (
     comparison_artifact_filename,
+    comparison_input_fingerprint,
     evaluation_passed,
     is_authoritative_comparison,
     is_comparison_filename,
+    latest_submission_jobs,
 )
 from app.contracts import compute_contract_digest
 from app.evidence import EvidencePhase, build_evidence_snapshot
@@ -45,6 +48,7 @@ from conftest import RUNNER_IMAGE
 
 DIGEST = 'a' * 64
 _ARTIFACT_DIGEST = 'b' * 64
+_CREATED_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 def _requirement(
@@ -106,10 +110,11 @@ def _job(
     status: JobStatus = JobStatus.SUCCEEDED,
     overrides: dict | None = None,
     contract_digest: str = DIGEST,
+    action_id: str = 'action-1',
+    created_at: datetime = _CREATED_AT,
 ) -> JobRecord:
     variant_name = f'model-{index}'
     job_id = f'job-{index}'
-    action_id = f'action-{index}'
     spec = ExpandedJobSpec(
         orchestrator_job_id=f'orchestrator-{index}',
         run_id=run_id,
@@ -145,6 +150,7 @@ def _job(
         variant_name=variant_name,
         seed=seed,
         spec=spec,
+        created_at=created_at,
     )
 
 
@@ -164,14 +170,18 @@ def _evaluation(
     integrity_pass: bool = True,
     contract_digest: str = DIGEST,
     comparison_key: str | None = 'protocol-v1',
+    sealed: bool = False,
 ) -> dict:
     evaluation = {
-        'rubric_score': metric,
         'integrity_pass': integrity_pass,
         'contract_id': 'across-jobs-v1',
         'contract_version': '1.0.0',
         'contract_digest': contract_digest,
     }
+    if sealed:
+        evaluation['metrics'] = {'rubric_score': metric}
+    else:
+        evaluation['rubric_score'] = metric
     if comparison_key is not None:
         evaluation['comparison_key'] = comparison_key
     return evaluation
@@ -248,6 +258,170 @@ def test_all_values_with_passing_evaluations_are_satisfied(
         for document in value['jobs']
     }
     assert metrics == {'model-1': 0.81, 'model-2': 0.87}
+
+
+def test_sealed_metrics_object_resolves_primary_metric(
+    orchestrator_bundle,
+) -> None:
+    # The sealed task-specific evaluator echoes the metric roots under the
+    # output's `metrics` object with no flat top-level metric, so the primary
+    # metric must resolve from there or every job reads as missing.
+    _, _, _, _, engine = orchestrator_bundle
+    contract = _contract(requirements=[_requirement()])
+    run = _run(engine, contract)
+    jobs = [
+        _job(run_id=run.run_id, index=1, value='logistic'),
+        _job(run_id=run.run_id, index=2, value='forest'),
+    ]
+    artifacts = [
+        _evaluation_artifact(run_id=run.run_id, job_id=job.job_id)
+        for job in jobs
+    ]
+    evaluations = {
+        'job-1': _evaluation(metric=0.81, sealed=True),
+        'job-2': _evaluation(metric=0.87, sealed=True),
+    }
+
+    report = _report(
+        run=run,
+        contract=contract,
+        jobs=jobs,
+        artifacts=artifacts,
+        evaluations=evaluations,
+    )
+
+    assert report is not None
+    assert report['satisfied'] is True
+    assert report['reasons'] == []
+    requirement = report['requirements'][0]
+    assert requirement['satisfied'] is True
+    metrics = {
+        document['variant_name']: document['primary_metric']
+        for value in requirement['values']
+        for document in value['jobs']
+    }
+    assert metrics == {'model-1': 0.81, 'model-2': 0.87}
+
+
+def test_flat_top_level_metric_still_satisfies(orchestrator_bundle) -> None:
+    # Backward compatibility: an evaluator that flattens the primary metric to
+    # the top level keeps resolving even though the sealed shape is preferred.
+    _, _, _, _, engine = orchestrator_bundle
+    contract = _contract(requirements=[_requirement()])
+    run = _run(engine, contract)
+    jobs = [
+        _job(run_id=run.run_id, index=1, value='logistic'),
+        _job(run_id=run.run_id, index=2, value='forest'),
+    ]
+    artifacts = [
+        _evaluation_artifact(run_id=run.run_id, job_id=job.job_id)
+        for job in jobs
+    ]
+    evaluations = {
+        'job-1': _evaluation(metric=0.81),
+        'job-2': _evaluation(metric=0.87),
+    }
+
+    report = _report(
+        run=run,
+        contract=contract,
+        jobs=jobs,
+        artifacts=artifacts,
+        evaluations=evaluations,
+    )
+
+    assert report is not None
+    assert report['satisfied'] is True
+    metrics = {
+        document['variant_name']: document['primary_metric']
+        for value in report['requirements'][0]['values']
+        for document in value['jobs']
+    }
+    assert metrics == {'model-1': 0.81, 'model-2': 0.87}
+
+
+def test_named_primary_metric_dict_resolves_metric(orchestrator_bundle) -> None:
+    # The evaluator may also carry only a `primary_metric` dict naming the
+    # manifest key; its `value` is the resolved metric.
+    _, _, _, _, engine = orchestrator_bundle
+    contract = _contract(requirements=[_requirement()])
+    run = _run(engine, contract)
+    jobs = [
+        _job(run_id=run.run_id, index=1, value='logistic'),
+        _job(run_id=run.run_id, index=2, value='forest'),
+    ]
+    artifacts = [
+        _evaluation_artifact(run_id=run.run_id, job_id=job.job_id)
+        for job in jobs
+    ]
+    evaluations = {}
+    for job_id, metric in (('job-1', 0.77), ('job-2', 0.83)):
+        evaluation = _evaluation(metric=metric)
+        evaluation.pop('rubric_score')
+        evaluation['primary_metric'] = {
+            'name': 'rubric_score',
+            'value': metric,
+        }
+        evaluations[job_id] = evaluation
+
+    report = _report(
+        run=run,
+        contract=contract,
+        jobs=jobs,
+        artifacts=artifacts,
+        evaluations=evaluations,
+    )
+
+    assert report is not None
+    assert report['satisfied'] is True
+    metrics = {
+        document['variant_name']: document['primary_metric']
+        for value in report['requirements'][0]['values']
+        for document in value['jobs']
+    }
+    assert metrics == {'model-1': 0.77, 'model-2': 0.83}
+
+
+def test_null_sealed_metric_falls_through_to_primary_metric_dict(
+    orchestrator_bundle,
+) -> None:
+    # A sealed evaluator reporting `metrics: {key: null}` alongside a valid
+    # `primary_metric` dict must still resolve instead of reading as missing.
+    _, _, _, _, engine = orchestrator_bundle
+    contract = _contract(requirements=[_requirement()])
+    run = _run(engine, contract)
+    jobs = [
+        _job(run_id=run.run_id, index=1, value='logistic'),
+        _job(run_id=run.run_id, index=2, value='forest'),
+    ]
+    artifacts = [
+        _evaluation_artifact(run_id=run.run_id, job_id=job.job_id)
+        for job in jobs
+    ]
+    evaluations = {}
+    for job_id, metric in (('job-1', 0.71), ('job-2', 0.79)):
+        evaluation = _evaluation(metric=metric)
+        evaluation.pop('rubric_score')
+        evaluation['metrics'] = {'rubric_score': None}
+        evaluation['primary_metric'] = {'name': 'rubric_score', 'value': metric}
+        evaluations[job_id] = evaluation
+
+    report = _report(
+        run=run,
+        contract=contract,
+        jobs=jobs,
+        artifacts=artifacts,
+        evaluations=evaluations,
+    )
+
+    assert report is not None
+    assert report['satisfied'] is True
+    metrics = {
+        document['variant_name']: document['primary_metric']
+        for value in report['requirements'][0]['values']
+        for document in value['jobs']
+    }
+    assert metrics == {'model-1': 0.71, 'model-2': 0.79}
 
 
 def test_equal_comparison_keys_are_satisfied(orchestrator_bundle) -> None:
@@ -553,6 +727,230 @@ def test_report_is_deterministic_across_rebuilds(
 
     assert first == second
     assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+
+def test_latest_submission_jobs_returns_only_the_newest_wave() -> None:
+    older = [
+        _job(run_id='run-waves', index=1, value='logistic'),
+        _job(run_id='run-waves', index=2, value='forest'),
+    ]
+    newer = [
+        _job(
+            run_id='run-waves',
+            index=4,
+            value='forest',
+            action_id='action-2',
+            created_at=_CREATED_AT + timedelta(minutes=5),
+        ),
+        _job(
+            run_id='run-waves',
+            index=3,
+            value='logistic',
+            action_id='action-2',
+            created_at=_CREATED_AT + timedelta(minutes=5),
+        ),
+    ]
+
+    assert latest_submission_jobs([]) == []
+    assert [
+        job.job_id for job in latest_submission_jobs(older + newer)
+    ] == ['job-3', 'job-4']
+    assert [
+        job.job_id for job in latest_submission_jobs(newer + older)
+    ] == ['job-3', 'job-4']
+
+
+def test_comparison_adjudicates_only_the_latest_submission_wave(
+    orchestrator_bundle,
+) -> None:
+    # The superseded wave's failed jobs have no evaluation.json; only the newest
+    # approval action's wave may participate, so a re-submission can still
+    # satisfy the comparison.
+    _, _, _, _, engine = orchestrator_bundle
+    contract = _contract(requirements=[_requirement()])
+    run = _run(engine, contract)
+    jobs = [
+        _job(
+            run_id=run.run_id,
+            index=1,
+            value='logistic',
+            status=JobStatus.FAILED,
+            action_id='action-old',
+        ),
+        _job(
+            run_id=run.run_id,
+            index=2,
+            value='forest',
+            status=JobStatus.FAILED,
+            action_id='action-old',
+        ),
+        _job(
+            run_id=run.run_id,
+            index=3,
+            value='logistic',
+            action_id='action-new',
+            created_at=_CREATED_AT + timedelta(minutes=5),
+        ),
+        _job(
+            run_id=run.run_id,
+            index=4,
+            value='forest',
+            action_id='action-new',
+            created_at=_CREATED_AT + timedelta(minutes=5),
+        ),
+    ]
+    artifacts = [
+        _evaluation_artifact(run_id=run.run_id, job_id='job-3'),
+        _evaluation_artifact(run_id=run.run_id, job_id='job-4'),
+    ]
+    evaluations = {
+        'job-3': _evaluation(metric=0.91),
+        'job-4': _evaluation(metric=0.93),
+    }
+
+    report = _report(
+        run=run,
+        contract=contract,
+        jobs=jobs,
+        artifacts=artifacts,
+        evaluations=evaluations,
+    )
+
+    assert report is not None
+    assert report['satisfied'] is True
+    assert report['reasons'] == []
+    document_ids = [
+        document['job_id']
+        for requirement in report['requirements']
+        for value in requirement['values']
+        for document in value['jobs']
+    ]
+    assert sorted(document_ids) == ['job-3', 'job-4']
+
+
+def test_failing_latest_wave_marks_comparison_unsatisfied(
+    orchestrator_bundle,
+) -> None:
+    # The superseded wave's passing jobs must not mask the newest wave's
+    # incomplete and failing evidence.
+    _, _, _, _, engine = orchestrator_bundle
+    contract = _contract(requirements=[_requirement()])
+    run = _run(engine, contract)
+    jobs = [
+        _job(
+            run_id=run.run_id,
+            index=1,
+            value='logistic',
+            action_id='action-old',
+        ),
+        _job(
+            run_id=run.run_id,
+            index=2,
+            value='forest',
+            action_id='action-old',
+        ),
+        _job(
+            run_id=run.run_id,
+            index=3,
+            value='logistic',
+            action_id='action-new',
+            created_at=_CREATED_AT + timedelta(minutes=5),
+        ),
+        _job(
+            run_id=run.run_id,
+            index=4,
+            value='forest',
+            status=JobStatus.FAILED,
+            action_id='action-new',
+            created_at=_CREATED_AT + timedelta(minutes=5),
+        ),
+    ]
+    artifacts = [
+        _evaluation_artifact(run_id=run.run_id, job_id='job-1'),
+        _evaluation_artifact(run_id=run.run_id, job_id='job-2'),
+        _evaluation_artifact(run_id=run.run_id, job_id='job-3'),
+    ]
+    evaluations = {
+        'job-1': _evaluation(),
+        'job-2': _evaluation(),
+        'job-3': _evaluation(),
+    }
+
+    report = _report(
+        run=run,
+        contract=contract,
+        jobs=jobs,
+        artifacts=artifacts,
+        evaluations=evaluations,
+    )
+
+    assert report is not None
+    assert report['satisfied'] is False
+    document_ids = [
+        document['job_id']
+        for requirement in report['requirements']
+        for value in requirement['values']
+        for document in value['jobs']
+    ]
+    assert sorted(document_ids) == ['job-3', 'job-4']
+    forest = next(
+        value
+        for value in report['requirements'][0]['values']
+        if value['value'] == 'forest'
+    )
+    assert forest['satisfied'] is False
+    assert forest['jobs'][0]['status'] == 'failed'
+
+
+def test_comparison_input_fingerprint_tracks_the_latest_wave() -> None:
+    wave_one = [
+        _job(run_id='run-fingerprint', index=1, value='logistic'),
+        _job(run_id='run-fingerprint', index=2, value='forest'),
+    ]
+    artifacts = [
+        _evaluation_artifact(run_id='run-fingerprint', job_id=job.job_id)
+        for job in wave_one
+    ]
+    baseline = comparison_input_fingerprint(wave_one, artifacts)
+
+    # Stable for the same wave, regardless of input order.
+    assert (
+        comparison_input_fingerprint(
+            list(reversed(wave_one)),
+            list(reversed(artifacts)),
+        )
+        == baseline
+    )
+
+    # A changed wave membership changes the fingerprint.
+    extended = wave_one + [
+        _job(run_id='run-fingerprint', index=3, value='boosting')
+    ]
+    assert comparison_input_fingerprint(extended, artifacts) != baseline
+
+    # A new submission wave replaces the scoped set entirely.
+    new_wave = wave_one + [
+        _job(
+            run_id='run-fingerprint',
+            index=3,
+            value='logistic',
+            action_id='action-2',
+            created_at=_CREATED_AT + timedelta(minutes=5),
+        ),
+        _job(
+            run_id='run-fingerprint',
+            index=4,
+            value='forest',
+            action_id='action-2',
+            created_at=_CREATED_AT + timedelta(minutes=5),
+        ),
+    ]
+    new_baseline = comparison_input_fingerprint(new_wave, artifacts)
+    assert new_baseline != baseline
+    assert (
+        comparison_input_fingerprint(list(reversed(new_wave)), artifacts)
+        == new_baseline
+    )
 
 
 def test_within_job_contract_produces_no_report(orchestrator_bundle) -> None:
