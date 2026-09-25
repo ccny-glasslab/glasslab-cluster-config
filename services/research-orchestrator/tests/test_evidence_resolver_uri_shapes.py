@@ -51,3 +51,85 @@ def test_resolver_matches_relative_job_artifact_exact_form(
     )
 
     assert result.resolved
+
+
+def test_resolver_matches_absolute_citation_for_relative_stored_artifact(
+    orchestrator_bundle,
+) -> None:
+    # The workflow-api directory scan records evaluation.json as a
+    # mount-relative path while the agent cites the absolute shared-volume path
+    # it read; both spellings must resolve to the same artifact.
+    _, store, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='Resolve a cross-form evaluation URI.')
+    )
+    store.save_artifact(
+        _artifact(run.run_id, 'artifacts/eval-run-1/evaluation.json')
+    )
+
+    result = EvidenceURIResolver(store).resolve(
+        'artifact:///mnt/artifacts/eval-run-1/evaluation.json'
+    )
+
+    assert result.resolved
+    assert result.resolved_to == 'artifact'
+
+
+class _FakeContract:
+    def __init__(self, digest: str) -> None:
+        self.digest = digest
+
+
+class _FakeContracts:
+    def __init__(self, digest: str) -> None:
+        self._digest = digest
+
+    def resolve(self, contract_id: str, version: str) -> _FakeContract:
+        if (contract_id, version) != (
+            'titanic-survival-methodology-v1',
+            '1.0.11',
+        ):
+            raise KeyError(f'{contract_id}/{version}')
+        return _FakeContract(self._digest)
+
+
+def test_resolver_resolves_contract_uri_with_matching_digest(
+    orchestrator_bundle,
+) -> None:
+    _, store, _, _, _ = orchestrator_bundle
+    digest = 'b' * 64
+    resolver = EvidenceURIResolver(store, contracts=_FakeContracts(digest))
+
+    result = resolver.resolve(
+        f'contract://titanic-survival-methodology-v1/1.0.11@{digest}'
+    )
+
+    assert result.resolved
+    assert result.resolved_to == 'contract'
+
+
+def test_resolver_rejects_contract_uri_with_wrong_digest(
+    orchestrator_bundle,
+) -> None:
+    _, store, _, _, _ = orchestrator_bundle
+    resolver = EvidenceURIResolver(store, contracts=_FakeContracts('b' * 64))
+
+    result = resolver.resolve(
+        f'contract://titanic-survival-methodology-v1/1.0.11@{"c" * 64}'
+    )
+
+    assert not result.resolved
+    assert 'digest mismatch' in (result.error or '')
+
+
+def test_resolver_contract_uri_without_resolver_is_unresolved(
+    orchestrator_bundle,
+) -> None:
+    _, store, _, _, _ = orchestrator_bundle
+
+    result = EvidenceURIResolver(store).resolve(
+        'contract://titanic-survival-methodology-v1/1.0.11'
+    )
+
+    assert not result.resolved
+    assert 'unavailable' in (result.error or '')
