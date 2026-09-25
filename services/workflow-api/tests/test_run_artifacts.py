@@ -524,3 +524,26 @@ def test_run_manifest_without_runner_service_account_name_parses_with_default() 
         }
     )
     assert manifest.runner_service_account_name == "default"
+
+
+def test_load_artifacts_from_disk_merges_post_index_files(tmp_path) -> None:
+    # The runner writes artifacts_index.json before the contract evaluator runs,
+    # so evaluation.json is absent from the index. The served listing must still
+    # surface it, or the orchestrator can never ingest the evaluator verdict.
+    settings = build_settings(tmp_path)
+    run_id = 'run-post-index'
+    run_dir = artifact_run_dir(settings, run_id)
+    run_dir.mkdir(parents=True)
+    (run_dir / 'artifacts_index.json').write_text(
+        '{"run_id":"run-post-index","artifacts":['
+        '{"name":"status.json","path":"artifacts/run-post-index/status.json",'
+        '"media_type":"application/json","required":true}]}'
+    )
+    (run_dir / 'evaluation.json').write_text('{"primary_value": 0.9}')
+
+    artifacts = load_artifacts_from_disk(settings, run_id)
+
+    assert artifacts is not None
+    names = {entry.name for entry in artifacts.artifacts}
+    assert 'status.json' in names
+    assert 'evaluation.json' in names

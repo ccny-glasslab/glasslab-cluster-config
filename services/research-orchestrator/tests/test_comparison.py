@@ -1325,3 +1325,49 @@ def test_evaluation_passed_accepts_bool_verdicts() -> None:
     assert evaluation_passed({'checks': {'x': True, 'y': True}}) is True
     assert evaluation_passed({'checks': [True, {'passed': True}]}) is True
 
+
+
+def test_primary_metric_name_with_primary_value_resolves(
+    orchestrator_bundle,
+) -> None:
+    # A sealed evaluator may name the metric in `primary_metric` (a const
+    # string) and carry the value in `primary_value`, with no `metrics` object.
+    _, _, _, _, engine = orchestrator_bundle
+    contract = _contract(requirements=[_requirement()])
+    run = _run(engine, contract)
+    jobs = [
+        _job(run_id=run.run_id, index=1, value='logistic'),
+        _job(run_id=run.run_id, index=2, value='forest'),
+    ]
+    artifacts = [
+        _evaluation_artifact(run_id=run.run_id, job_id=job.job_id)
+        for job in jobs
+    ]
+    evaluations = {}
+    for job_id, metric in (('job-1', 0.72), ('job-2', 0.78)):
+        evaluations[job_id] = {
+            'primary_metric': 'rubric_score',
+            'primary_value': metric,
+            'integrity_pass': True,
+            'comparison_key': 'protocol-v1',
+            'contract_id': 'across-jobs-v1',
+            'contract_version': '1.0.0',
+            'contract_digest': DIGEST,
+        }
+
+    report = _report(
+        run=run,
+        contract=contract,
+        jobs=jobs,
+        artifacts=artifacts,
+        evaluations=evaluations,
+    )
+
+    assert report is not None
+    assert report['satisfied'] is True
+    metrics = {
+        document['variant_name']: document['primary_metric']
+        for value in report['requirements'][0]['values']
+        for document in value['jobs']
+    }
+    assert metrics == {'model-1': 0.72, 'model-2': 0.78}
