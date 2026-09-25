@@ -1993,6 +1993,12 @@ def test_imported_task_resume_finalizes_existing_runner(
     config = Path(run.beaker_workspace) / 'configs' / 'candidate.yaml'
     config.parent.mkdir(exist_ok=True)
     config.write_text('candidate: true\n')
+    packaged_config = source / 'configs' / 'candidate.yaml'
+    packaged_config.parent.mkdir(parents=True, exist_ok=True)
+    packaged_config.write_text(config.read_text())
+    # The scripted runtime proposes configs/baseline.yaml, so the packaged
+    # source must carry that matrix base_config too.
+    (source / 'configs' / 'baseline.yaml').write_text('candidate: true\n')
     (Path(run.beaker_workspace) / 'implementation-plan.md').write_text(
         '# Existing implementation plan\n'
     )
