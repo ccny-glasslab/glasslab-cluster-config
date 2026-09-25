@@ -206,28 +206,57 @@ class EvidenceURIResolver:
         ) == _canonical_artifact_path(path)
 
     def _resolve_job(self, uri: str) -> ResolvedEvidence:
-        """Resolve job://<job_id> to job record."""
+        """Resolve a job reference to a job record.
+
+        Accepts the plain job id and the compound forms an agent may cite:
+        job://<run_id>/<job_id> and job://<run_id>/<action_id> (the approval
+        action whose jobs carried the comparison).
+        """
         if not uri.startswith('job://'):
             return ResolvedEvidence(
                 uri=uri, resolved=False, error='not a job:// URI'
             )
 
-        job_id = uri[6:]  # Remove 'job://' prefix
-        try:
-            job = self.store.get_job(job_id)
-            return ResolvedEvidence(
-                uri=uri,
-                resolved=True,
-                resolved_to='job',
-                record_id=job.job_id,
-                record=job,
-            )
-        except Exception:
+        reference = uri[6:]  # Remove 'job://' prefix
+        job = self._lookup_job(reference)
+        if job is None and '/' in reference:
+            run_id, _, tail = reference.rpartition('/')
+            job = self._lookup_job(tail)
+            if job is None:
+                job = self._job_for_action(run_id, tail)
+        if job is None:
             return ResolvedEvidence(
                 uri=uri,
                 resolved=False,
-                error=f'job not found: {job_id}',
+                error=f'job not found: {reference}',
             )
+        return ResolvedEvidence(
+            uri=uri,
+            resolved=True,
+            resolved_to='job',
+            record_id=job.job_id,
+            record=job,
+        )
+
+    def _lookup_job(self, job_id: str) -> JobRecord | None:
+        if not job_id:
+            return None
+        try:
+            return self.store.get_job(job_id)
+        except Exception:
+            return None
+
+    def _job_for_action(self, run_id: str, action_id: str) -> JobRecord | None:
+        if not run_id or not action_id:
+            return None
+        try:
+            jobs = self.store.list_jobs(run_id)
+        except Exception:
+            return None
+        for job in jobs:
+            if job.action_id == action_id:
+                return job
+        return None
 
     def _resolve_event(self, uri: str) -> ResolvedEvidence:
         """Resolve event://<event_id> to an event record."""

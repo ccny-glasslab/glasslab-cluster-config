@@ -133,3 +133,62 @@ def test_resolver_contract_uri_without_resolver_is_unresolved(
 
     assert not result.resolved
     assert 'unavailable' in (result.error or '')
+
+
+class _JobStoreStub:
+    def __init__(self, jobs) -> None:
+        self._jobs = {job.job_id: job for job in jobs}
+        self._by_run: dict[str, list] = {}
+        for job in jobs:
+            self._by_run.setdefault(job.run_id, []).append(job)
+
+    def get_job(self, job_id: str):
+        if job_id not in self._jobs:
+            raise ValueError(job_id)
+        return self._jobs[job_id]
+
+    def list_jobs(self, run_id: str):
+        return self._by_run.get(run_id, [])
+
+
+def _job_stub(**kwargs) -> object:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(**kwargs)
+
+
+def test_resolver_resolves_compound_job_run_action_uri() -> None:
+    # An agent may cite job://<run_id>/<action_id> to reference the approval
+    # action whose jobs carried the comparison; it must resolve to a job of
+    # that run under that action.
+    store = _JobStoreStub(
+        [_job_stub(job_id='job-1', run_id='run-1', action_id='action-1')]
+    )
+
+    result = EvidenceURIResolver(store).resolve('job://run-1/action-1')
+
+    assert result.resolved
+    assert result.resolved_to == 'job'
+    assert result.record_id == 'job-1'
+
+
+def test_resolver_resolves_compound_job_run_job_uri() -> None:
+    store = _JobStoreStub(
+        [_job_stub(job_id='job-1', run_id='run-1', action_id='action-1')]
+    )
+
+    result = EvidenceURIResolver(store).resolve('job://run-1/job-1')
+
+    assert result.resolved
+    assert result.record_id == 'job-1'
+
+
+def test_resolver_rejects_unknown_compound_job_uri() -> None:
+    store = _JobStoreStub(
+        [_job_stub(job_id='job-1', run_id='run-1', action_id='action-1')]
+    )
+
+    result = EvidenceURIResolver(store).resolve('job://run-1/action-missing')
+
+    assert not result.resolved
+    assert 'job not found' in (result.error or '')
