@@ -9,10 +9,33 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
 
 from .research_store import ResearchStore
 from .schemas import ArtifactRecord, EventRecord, JobRecord, KnowledgeChunk, KnowledgeSource
+
+
+class _ResolvedContract(Protocol):
+    digest: str
+
+
+class _ContractResolver(Protocol):
+    def resolve(self, contract_id: str, version: str) -> _ResolvedContract: ...
+
+
+def _canonical_artifact_path(value: str) -> str:
+    # Collapse the scheme and mount prefixes the engine, the cluster adapter,
+    # and the shared volume produce so equivalent artifact paths compare equal
+    # (e.g. /mnt/artifacts/<run>/x, artifacts/<run>/x, and artifact://<run>/x).
+    path = value
+    if path.startswith('artifact://'):
+        path = path[len('artifact://'):]
+    path = path.lstrip('/')
+    for prefix in ('mnt/artifacts/', 'artifacts/'):
+        if path.startswith(prefix):
+            path = path[len(prefix):]
+            break
+    return path
 
 
 @dataclass
@@ -22,7 +45,8 @@ class ResolvedEvidence:
     uri: str
     resolved: bool
     resolved_to: Literal[
-        'artifact', 'job', 'event', 'knowledge_source', 'knowledge_chunk'
+        'artifact', 'job', 'event', 'knowledge_source', 'knowledge_chunk',
+        'contract',
     ] | None = None
     record_id: str | None = None
     record: ArtifactRecord | JobRecord | EventRecord | KnowledgeSource | KnowledgeChunk | None = None
@@ -44,6 +68,7 @@ class EvidenceURIResolver:
     - event://<event_id>                     -> event record
     - knowledge://<source_id>                -> knowledge source record
     - knowledge://context:<packet_id>        -> context packet record
+    - contract://<contract_id>/<version>[@<digest>] -> sealed contract record
     """
 
     # Pattern to extract run_id and path from artifact:// URIs.
@@ -58,8 +83,21 @@ class EvidenceURIResolver:
     # Format: knowledge://<source_id> or knowledge://context:<packet_id>
     _KNOWLEDGE_PATTERN = re.compile(r'^knowledge://([^:]+)(?::([^:]+))?$')
 
-    def __init__(self, store: ResearchStore) -> None:
+    _SUPPORTED_SCHEMES = (
+        'artifact://',
+        'job://',
+        'event://',
+        'knowledge://',
+        'contract://',
+    )
+
+    def __init__(
+        self,
+        store: ResearchStore,
+        contracts: _ContractResolver | None = None,
+    ) -> None:
         self.store = store
+        self.contracts = contracts
 
     def resolve(self, uri: str) -> ResolvedEvidence:
         """Resolve a single evidence URI against store tables.
@@ -67,9 +105,7 @@ class EvidenceURIResolver:
         Returns ResolvedEvidence with resolved=True if the URI points to
         an existing record, or resolved=False with an error message.
         """
-        if not uri.startswith(
-            ('artifact://', 'job://', 'event://', 'knowledge://')
-        ):
+        if not uri.startswith(self._SUPPORTED_SCHEMES):
             return ResolvedEvidence(
                 uri=uri,
                 resolved=False,
@@ -87,6 +123,9 @@ class EvidenceURIResolver:
 
         if uri.startswith('knowledge://'):
             return self._resolve_knowledge(uri)
+
+        if uri.startswith('contract://'):
+            return self._resolve_contract(uri)
 
         return ResolvedEvidence(uri=uri, resolved=False, error='unknown scheme')
 
@@ -112,7 +151,7 @@ class EvidenceURIResolver:
         legacy_path = (
             path[len('artifacts/'):] if path.startswith('artifacts/') else None
         )
-        artifacts = self.store.list_artifacts(run_id)
+        artifacts = self.store.list_artifacts(run_id) if run_id else []
         if not artifacts:
             # A claim may carry a different namespace than the orchestrator
             # run id (the fake cluster writes artifact://<external>/...);
@@ -154,9 +193,17 @@ class EvidenceURIResolver:
         )
         normalized = normalized.lstrip('/')
         path = path.lstrip('/')
-        return normalized == path or (
+        if normalized == path or (
             legacy_path is not None and normalized == legacy_path.lstrip('/')
-        )
+        ):
+            return True
+        # An agent may cite the absolute shared-volume path the evaluator wrote
+        # (artifact:///mnt/artifacts/<run>/evaluation.json) while the store
+        # records the mount-relative form (artifacts/<run>/evaluation.json);
+        # compare canonicalized paths so both spellings resolve.
+        return _canonical_artifact_path(
+            artifact_uri
+        ) == _canonical_artifact_path(path)
 
     def _resolve_job(self, uri: str) -> ResolvedEvidence:
         """Resolve job://<job_id> to job record."""
@@ -264,6 +311,55 @@ class EvidenceURIResolver:
                     resolved=False,
                     error=f'context packet not found: {packet_id}',
                 )
+
+    def _resolve_contract(self, uri: str) -> ResolvedEvidence:
+        """Resolve contract://<contract_id>/<version>[@<digest>] to a contract.
+
+        A contract citation is authoritative only when the sealed contract
+        resolves and, when a digest is cited, that digest matches.
+        """
+        remainder = uri[len('contract://'):]
+        if '/' not in remainder:
+            return ResolvedEvidence(
+                uri=uri,
+                resolved=False,
+                error='contract:// URI must include <contract_id>/<version>',
+            )
+        contract_id, rest = remainder.split('/', 1)
+        version, _, digest = rest.partition('@')
+        if not contract_id or not version:
+            return ResolvedEvidence(
+                uri=uri,
+                resolved=False,
+                error='contract:// URI must include <contract_id>/<version>',
+            )
+        if self.contracts is None:
+            return ResolvedEvidence(
+                uri=uri,
+                resolved=False,
+                error='contract resolution is unavailable in this context',
+            )
+        try:
+            resolved = self.contracts.resolve(contract_id, version)
+        except Exception:
+            return ResolvedEvidence(
+                uri=uri,
+                resolved=False,
+                error=f'contract not found: {contract_id}/{version}',
+            )
+        if digest and resolved.digest != digest:
+            return ResolvedEvidence(
+                uri=uri,
+                resolved=False,
+                error=f'contract digest mismatch: {contract_id}/{version}',
+            )
+        return ResolvedEvidence(
+            uri=uri,
+            resolved=True,
+            resolved_to='contract',
+            record_id=f'{contract_id}/{version}',
+            record=None,
+        )
 
     def resolve_all(self, uris: list[str]) -> list[ResolvedEvidence]:
         """Resolve multiple URIs, returning list of ResolvedEvidence."""

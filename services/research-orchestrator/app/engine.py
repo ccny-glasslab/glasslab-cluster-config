@@ -6884,7 +6884,7 @@ class ResearchOrchestrator:
         Returns (all_resolved, unresolved_evidence).
         Unresolved URIs emit an event and downgrade verification status.
         """
-        resolver = EvidenceURIResolver(self.store)
+        resolver = EvidenceURIResolver(self.store, contracts=self.contracts)
         all_resolved = True
         unresolved: list[ResolvedEvidence] = []
 
