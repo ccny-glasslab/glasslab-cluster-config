@@ -11,10 +11,13 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 from types import SimpleNamespace
+import threading
+import time
 
 import httpx
 import pytest
 
+from app import opencode_runtime
 from app.config import Settings
 from app.hermes_runtime import HermesProcessRuntime, _decode_structured_output
 from app.main import build_agent_runtime
@@ -491,3 +494,185 @@ def test_hermes_decode_applies_result_preparers_before_validation() -> None:
     )
 
     assert result.task_spec_proposal.assets[0].expected_sha256 == 'a' * 64
+
+
+class _AbortPostRecorder:
+    def __init__(self, posts: list[tuple[str, dict]]) -> None:
+        self._posts = posts
+
+    def __enter__(self) -> '_AbortPostRecorder':
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def post(self, url: str, **kwargs: object) -> SimpleNamespace:
+        self._posts.append((url, kwargs))
+        return SimpleNamespace(status_code=200)
+
+
+def _runtime_with_blocked_turn(
+    monkeypatch, tmp_path, release: threading.Event,
+):
+    runtime = OpenCodeProcessRuntime(
+        Settings(opencode_turn_timeout_seconds=0.1)
+    )
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    handle = SimpleNamespace(
+        base_url='http://opencode.test',
+        password='password',
+    )
+    monkeypatch.setattr(runtime, '_start_process', lambda **_: handle)
+    monkeypatch.setattr(runtime, '_run_turn_request_loop', lambda **_: release.wait())
+    monkeypatch.setattr(
+        opencode_runtime, '_TURN_TIMEOUT_BUFFER_SECONDS', 0.1
+    )
+    return runtime, workspace
+
+
+def test_opencode_run_turn_hard_wall_clock_raises_turn_timeout(
+    tmp_path, monkeypatch,
+) -> None:
+    # Given a turn request that never returns, When the hard wall-clock budget
+    # expires, Then run_turn raises the classified timeout, attempts the
+    # session abort, and unwinds without waiting for the stuck worker.
+    release = threading.Event()
+    runtime, workspace = _runtime_with_blocked_turn(
+        monkeypatch, tmp_path, release
+    )
+    abort_posts: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        httpx, 'Client', lambda **_: _AbortPostRecorder(abort_posts)
+    )
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(OpenCodeRuntimeError) as excinfo:
+            runtime.run_turn(
+                run_id='run-1',
+                agent=AgentName.BEAKER,
+                workspace=workspace,
+                session_id='session-1',
+                prompt='Implement the experiment.',
+            )
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 5
+    assert excinfo.value.failure_class == 'turn_timeout'
+    assert 'hard wall-clock limit' in str(excinfo.value)
+    assert [
+        url for url, _ in abort_posts if url.endswith('/session/session-1/abort')
+    ]
+
+
+def test_opencode_run_turn_propagates_worker_error_unchanged(
+    tmp_path, monkeypatch,
+) -> None:
+    runtime = OpenCodeProcessRuntime(Settings())
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    handle = SimpleNamespace(
+        base_url='http://opencode.test',
+        password='password',
+    )
+    monkeypatch.setattr(runtime, '_start_process', lambda **_: handle)
+    failure = OpenCodeRuntimeError(
+        'OpenCode provider error: model overloaded',
+        failure_class='provider',
+        details={'provider': 'exo'},
+    )
+
+    def _raise(**_: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(runtime, '_run_turn_request_loop', _raise)
+
+    with pytest.raises(OpenCodeRuntimeError) as excinfo:
+        runtime.run_turn(
+            run_id='run-1',
+            agent=AgentName.BEAKER,
+            workspace=workspace,
+            session_id='session-1',
+            prompt='Run.',
+        )
+
+    assert excinfo.value is failure
+    assert excinfo.value.failure_class == 'provider'
+    assert excinfo.value.details == {'provider': 'exo'}
+
+
+def test_opencode_run_turn_classifies_raw_http_timeout_as_turn_timeout(
+    tmp_path, monkeypatch,
+) -> None:
+    # The request's own read timeout can win the race with the join deadline on
+    # a fully stalled socket; it must surface as a classified turn_timeout (so
+    # the engine auto-resumes) rather than a generic retryable httpx error.
+    runtime = OpenCodeProcessRuntime(Settings())
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    handle = SimpleNamespace(
+        base_url='http://opencode.test',
+        password='password',
+    )
+    monkeypatch.setattr(runtime, '_start_process', lambda **_: handle)
+
+    def _timeout(**_: object) -> None:
+        raise httpx.ReadTimeout('stalled')
+
+    monkeypatch.setattr(runtime, '_run_turn_request_loop', _timeout)
+
+    with pytest.raises(OpenCodeRuntimeError) as excinfo:
+        runtime.run_turn(
+            run_id='run-1',
+            agent=AgentName.BEAKER,
+            workspace=workspace,
+            session_id='session-1',
+            prompt='Run.',
+        )
+
+    assert excinfo.value.failure_class == 'turn_timeout'
+    assert excinfo.value.details == {'timeout_class': 'ReadTimeout'}
+
+
+def test_opencode_run_turn_surfaces_watchdog_abort_while_blocked(
+    tmp_path, monkeypatch,
+) -> None:
+    # The watchdog records a classified abort while the request is still
+    # blocked; the hard timeout must surface that classification instead of
+    # synthesizing a generic turn_timeout.
+    release = threading.Event()
+    runtime, workspace = _runtime_with_blocked_turn(
+        monkeypatch, tmp_path, release
+    )
+
+    def _abort_from_watchdog(*, abort_reasons: list, **_: object) -> None:
+        abort_reasons.append(
+            SimpleNamespace(
+                reason=(
+                    'OpenCode turn aborted after 6 identical terminal tool calls'
+                ),
+                failure_class='repeated_tool_loop',
+                details={'tool': 'bash', 'count': 6},
+            )
+        )
+
+    monkeypatch.setattr(runtime, '_watch_turn', _abort_from_watchdog)
+    monkeypatch.setattr(httpx, 'Client', lambda **_: _AbortPostRecorder([]))
+
+    try:
+        with pytest.raises(OpenCodeRuntimeError) as excinfo:
+            runtime.run_turn(
+                run_id='run-1',
+                agent=AgentName.BEAKER,
+                workspace=workspace,
+                session_id='session-1',
+                prompt='Run.',
+            )
+    finally:
+        release.set()
+
+    assert excinfo.value.failure_class == 'repeated_tool_loop'
+    assert 'identical terminal tool calls' in str(excinfo.value)
+    assert excinfo.value.details == {'tool': 'bash', 'count': 6}

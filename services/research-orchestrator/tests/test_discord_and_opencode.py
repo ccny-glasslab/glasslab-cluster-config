@@ -1178,6 +1178,92 @@ def test_watch_turn_step_budget_disabled_at_zero(monkeypatch) -> None:
     assert not any(client.aborted for client in clients)
 
 
+def test_watch_turn_survives_unexpected_poll_exception(monkeypatch) -> None:
+    # An unexpected inspection error must not kill the watchdog: the next poll
+    # still detects the repeated-tool loop and records the abort.
+    messages = [
+        _completed_tool_message('read', {'filePath': '/workspace/run.py'})
+        for _ in range(3)
+    ]
+    runtime = OpenCodeProcessRuntime(Settings(opencode_repeated_tool_limit=3))
+    handle = SimpleNamespace(base_url='http://127.0.0.1:9', password='secret')
+    abort_reasons: list = []
+    clients: list[_WatchClient] = []
+    original = OpenCodeProcessRuntime._repeated_tool_abort
+    polls = {'count': 0}
+
+    def flaky(signatures: list[str], limit: int) -> dict | None:
+        polls['count'] += 1
+        if polls['count'] == 1:
+            raise RuntimeError('unexpected watchdog inspection failure')
+        return original(signatures, limit)
+
+    monkeypatch.setattr(runtime, '_repeated_tool_abort', flaky)
+
+    def _client_factory(**kwargs: object) -> _WatchClient:
+        client = _WatchClient(messages)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(httpx, 'Client', _client_factory)
+
+    runtime._watch_turn(
+        handle=handle,
+        session_id='session-1',
+        workspace=Path('/workspace'),
+        stop=_StopAfterPolls(2),
+        abort_reasons=abort_reasons,
+    )
+
+    assert polls['count'] == 2
+    assert len(abort_reasons) == 1
+    assert abort_reasons[0].failure_class == 'repeated_tool_loop'
+    assert any(client.aborted for client in clients)
+
+
+class _MissingSessionClient:
+    def __enter__(self) -> '_MissingSessionClient':
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def post(self, url: str, **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(status_code=404)
+
+
+class _UnreachableClient:
+    def __enter__(self) -> '_UnreachableClient':
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def post(self, url: str, **kwargs: object) -> SimpleNamespace:
+        raise httpx.ConnectError('connection refused')
+
+
+def test_abort_session_swallows_missing_session_and_transport_failure(
+    monkeypatch,
+) -> None:
+    runtime = OpenCodeProcessRuntime(Settings())
+    handle = SimpleNamespace(base_url='http://127.0.0.1:9', password='secret')
+
+    monkeypatch.setattr(httpx, 'Client', lambda **_: _MissingSessionClient())
+    runtime._abort_session(
+        handle=handle,
+        session_id='session-1',
+        workspace=Path('/workspace'),
+    )
+
+    monkeypatch.setattr(httpx, 'Client', lambda **_: _UnreachableClient())
+    runtime._abort_session(
+        handle=handle,
+        session_id='session-1',
+        workspace=Path('/workspace'),
+    )
+
+
 def test_extracts_current_and_legacy_opencode_structured_output() -> None:
     current = {'info': {'structured': {'kind': 'protocol_draft'}}}
     legacy = {'info': {'structured_output': {'kind': 'protocol_draft'}}}
