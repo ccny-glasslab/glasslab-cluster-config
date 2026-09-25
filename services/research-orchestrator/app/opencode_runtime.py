@@ -17,6 +17,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import secrets
@@ -36,6 +37,8 @@ from .knowledge_tool import TOOL_NAME, BoundRetrieveEvidenceTool
 from .runtime_env import build_agent_environment
 from .schemas import AgentName, AgentTurnResult, ProducedFile
 
+
+logger = logging.getLogger(__name__)
 
 ResultPreparer = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -86,6 +89,11 @@ _MODULE_RESOLUTION_FAILURE_MARKERS = (
 _RUNTIME_LOG_TAIL_BYTES = 64 * 1024
 _DEPENDENCY_CACHE_SEARCH_MAX_DIRS = 4000
 _DEPENDENCY_CACHE_SEARCH_MAX_DEPTH = 12
+# Shared buffer on top of opencode_turn_timeout_seconds for both the blocking
+# turn request's client timeout and run_turn's hard wall-clock join, so the
+# watchdog's abort path always wins the race when it can (see _client and
+# run_turn).
+_TURN_TIMEOUT_BUFFER_SECONDS = 30.0
 
 
 def dependency_resolution_failure(text: str) -> bool:
@@ -1038,8 +1046,37 @@ class OpenCodeProcessRuntime(AgentRuntime):
         return httpx.Client(
             base_url=handle.base_url,
             auth=('glasslab-orchestrator', handle.password),
-            timeout=self.settings.opencode_turn_timeout_seconds + 30.0,
+            timeout=(
+                self.settings.opencode_turn_timeout_seconds
+                + _TURN_TIMEOUT_BUFFER_SECONDS
+            ),
         )
+
+    def _abort_session(
+        self,
+        *,
+        handle: _ProcessHandle,
+        session_id: str,
+        workspace: Path,
+    ) -> None:
+        # Best-effort abort used by both the watchdog and run_turn's hard
+        # timeout: a 404 means the session is already gone and must not be
+        # treated as a failure, and transport errors are swallowed so aborting
+        # never masks the failure being surfaced.
+        try:
+            with httpx.Client(
+                base_url=handle.base_url,
+                auth=('glasslab-orchestrator', handle.password),
+                timeout=5,
+            ) as client:
+                response = client.post(
+                    f'/session/{session_id}/abort',
+                    params={'directory': str(workspace)},
+                )
+                if response.status_code not in {200, 404}:
+                    response.raise_for_status()
+        except httpx.HTTPError:
+            pass
 
     def ensure_session(
         self,
@@ -1130,33 +1167,86 @@ class OpenCodeProcessRuntime(AgentRuntime):
             name=f'opencode-watchdog-{agent.value}-{run_id[:8]}',
         )
         watchdog.start()
+        # httpx's scalar timeout is per-operation (connect/read/write/pool), not
+        # a total wall clock, so a stalled or dribbling response can hold the
+        # blocking request open forever. Run the request loop on a daemon
+        # worker and join it with a hard wall-clock budget: when the budget
+        # expires the turn is failed with a classified error even though the
+        # worker thread is still blocked, so the engine's rotation/retry/
+        # auto-resume recovery runs and the run lock is released.
+        worker_outcome: dict[str, Any] = {}
+
+        def _run_request() -> None:
+            try:
+                worker_outcome['result'] = self._run_turn_request_loop(
+                    handle=handle,
+                    agent=agent,
+                    workspace=workspace,
+                    session_id=session_id,
+                    prompt=prompt,
+                    model_override=model_override,
+                    result_preparers=result_preparers,
+                )
+            except BaseException as exc:  # noqa: BLE001 - surfaced to the caller
+                worker_outcome['error'] = exc
+
+        worker = threading.Thread(
+            target=_run_request,
+            daemon=True,
+            name=f'opencode-turn-{agent.value}-{run_id[:8]}',
+        )
+        worker.start()
+        hard_timeout = (
+            self.settings.opencode_turn_timeout_seconds
+            + _TURN_TIMEOUT_BUFFER_SECONDS
+        )
         try:
-            result = self._run_turn_request_loop(
-                handle=handle,
-                agent=agent,
-                workspace=workspace,
-                session_id=session_id,
-                prompt=prompt,
-                model_override=model_override,
-                result_preparers=result_preparers,
-            )
-            if abort_reasons:
-                abort = abort_reasons[0]
+            worker.join(hard_timeout)
+            worker_error = worker_outcome.get('error')
+            if worker.is_alive():
+                abort = (
+                    abort_reasons[0]
+                    if abort_reasons
+                    else _TurnAbort(
+                        reason=(
+                            'OpenCode turn exceeded the hard wall-clock limit '
+                            f'of {hard_timeout:g} seconds'
+                        ),
+                        failure_class='turn_timeout',
+                    )
+                )
+                self._abort_session(
+                    handle=handle,
+                    session_id=session_id,
+                    workspace=workspace,
+                )
                 raise OpenCodeRuntimeError(
                     abort.reason,
                     failure_class=abort.failure_class,
                     details=abort.details,
                 )
-            return result
-        except Exception as exc:
             if abort_reasons:
                 abort = abort_reasons[0]
                 raise OpenCodeRuntimeError(
                     abort.reason,
                     failure_class=abort.failure_class,
                     details=abort.details,
-                ) from exc
-            raise
+                ) from worker_error
+            if isinstance(worker_error, httpx.TimeoutException):
+                # The request's own read timeout can fire in the same window as
+                # the join deadline (a fully stalled socket); classify it the
+                # same as the synthesized wall-clock abort so it routes through
+                # turn_timeout auto-resume instead of a generic retryable
+                # network error.
+                raise OpenCodeRuntimeError(
+                    'OpenCode turn exceeded the hard wall-clock limit of '
+                    f'{hard_timeout:g} seconds',
+                    failure_class='turn_timeout',
+                    details={'timeout_class': type(worker_error).__name__},
+                ) from worker_error
+            if worker_error is not None:
+                raise worker_error
+            return worker_outcome['result']
         finally:
             stop_watchdog.set()
             watchdog.join(timeout=3)
@@ -1481,83 +1571,85 @@ class OpenCodeProcessRuntime(AgentRuntime):
     ) -> None:
         deadline = time.monotonic() + self.settings.opencode_turn_timeout_seconds
         while not stop.wait(2):
-            reason: str | None = None
-            failure_class: str | None = None
-            details: dict[str, Any] | None = None
-            if time.monotonic() >= deadline:
-                reason = (
-                    'OpenCode turn exceeded the hard wall-clock limit of '
-                    f'{self.settings.opencode_turn_timeout_seconds:g} seconds'
-                )
-            else:
-                try:
-                    with httpx.Client(
-                        base_url=handle.base_url,
-                        auth=('glasslab-orchestrator', handle.password),
-                        timeout=5,
-                    ) as client:
-                        response = client.get(
-                            f'/session/{session_id}/message',
-                            params={'directory': str(workspace)},
-                        )
-                        response.raise_for_status()
-                        messages = response.json()
-                    if isinstance(messages, list):
-                        signatures = self._terminal_tool_signatures(messages)
-                        limit = self.settings.opencode_repeated_tool_limit
-                        # Guard against retry loops: once `limit` consecutive
-                        # terminal tool calls are byte-identical (same tool and
-                        # same input) the turn is stuck and is aborted.
-                        details = self._repeated_tool_abort(signatures, limit)
-                        if details is not None:
-                            reason = (
-                                'OpenCode turn aborted after '
-                                f'{limit} identical terminal tool calls'
-                            )
-                            failure_class = 'repeated_tool_loop'
-                        else:
-                            step_limit = self.settings.opencode_turn_step_limit
-                            step_count = self._turn_step_count(messages)
-                            # A varied-call runaway evades the identical-tool
-                            # guard above; the step budget stops it before the
-                            # wall clock does. 0 disables the budget.
-                            if step_limit > 0 and step_count > step_limit:
-                                reason = (
-                                    'OpenCode turn exceeded the step budget of '
-                                    f'{step_limit} steps ({step_count} steps) '
-                                    'without returning a result'
-                                )
-                                failure_class = 'step_budget_exceeded'
-                                details = {
-                                    'step_count': step_count,
-                                    'step_limit': step_limit,
-                                }
-                except (httpx.HTTPError, ValueError):
-                    continue
-            if reason is None:
-                continue
-            abort_reasons.append(
-                _TurnAbort(
-                    reason=reason,
-                    failure_class=failure_class or 'turn_timeout',
-                    details=details,
-                )
-            )
             try:
-                with httpx.Client(
-                    base_url=handle.base_url,
-                    auth=('glasslab-orchestrator', handle.password),
-                    timeout=5,
-                ) as client:
-                    response = client.post(
-                        f'/session/{session_id}/abort',
-                        params={'directory': str(workspace)},
+                reason: str | None = None
+                failure_class: str | None = None
+                details: dict[str, Any] | None = None
+                if time.monotonic() >= deadline:
+                    reason = (
+                        'OpenCode turn exceeded the hard wall-clock limit of '
+                        f'{self.settings.opencode_turn_timeout_seconds:g} seconds'
                     )
-                    if response.status_code not in {200, 404}:
-                        response.raise_for_status()
-            except httpx.HTTPError:
-                pass
-            return
+                else:
+                    try:
+                        with httpx.Client(
+                            base_url=handle.base_url,
+                            auth=('glasslab-orchestrator', handle.password),
+                            timeout=5,
+                        ) as client:
+                            response = client.get(
+                                f'/session/{session_id}/message',
+                                params={'directory': str(workspace)},
+                            )
+                            response.raise_for_status()
+                            messages = response.json()
+                        if isinstance(messages, list):
+                            signatures = self._terminal_tool_signatures(messages)
+                            limit = self.settings.opencode_repeated_tool_limit
+                            # Guard against retry loops: once `limit` consecutive
+                            # terminal tool calls are byte-identical (same tool and
+                            # same input) the turn is stuck and is aborted.
+                            details = self._repeated_tool_abort(signatures, limit)
+                            if details is not None:
+                                reason = (
+                                    'OpenCode turn aborted after '
+                                    f'{limit} identical terminal tool calls'
+                                )
+                                failure_class = 'repeated_tool_loop'
+                            else:
+                                step_limit = self.settings.opencode_turn_step_limit
+                                step_count = self._turn_step_count(messages)
+                                # A varied-call runaway evades the identical-tool
+                                # guard above; the step budget stops it before the
+                                # wall clock does. 0 disables the budget.
+                                if step_limit > 0 and step_count > step_limit:
+                                    reason = (
+                                        'OpenCode turn exceeded the step budget of '
+                                        f'{step_limit} steps ({step_count} steps) '
+                                        'without returning a result'
+                                    )
+                                    failure_class = 'step_budget_exceeded'
+                                    details = {
+                                        'step_count': step_count,
+                                        'step_limit': step_limit,
+                                    }
+                    except (httpx.HTTPError, ValueError):
+                        continue
+                if reason is None:
+                    continue
+                abort_reasons.append(
+                    _TurnAbort(
+                        reason=reason,
+                        failure_class=failure_class or 'turn_timeout',
+                        details=details,
+                    )
+                )
+                self._abort_session(
+                    handle=handle,
+                    session_id=session_id,
+                    workspace=workspace,
+                )
+                return
+            except Exception:
+                # The watchdog is the enforcement backstop for the wall clock
+                # and the runaway guards; an unexpected inspection failure must
+                # never silently disable it. Log and keep polling: run_turn's
+                # hard join is the outer safety net.
+                logger.exception(
+                    'OpenCode turn watchdog failed while inspecting session %s',
+                    session_id,
+                )
+                continue
 
     def session_context_tokens(
         self,
