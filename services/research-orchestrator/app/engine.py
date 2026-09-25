@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from datetime import datetime, timedelta
@@ -22,13 +22,14 @@ from .artifact_delivery import (
     VerifiedArtifactReader,
     build_report_bundle,
 )
-from .cluster import ClusterExecutor
+from .cluster import ClusterArtifact, ClusterExecutor
 from .comparison import build_comparison_report
 from .comparison_checks import (
     AUTHORITATIVE_COMPARISON_TYPE,
     comparison_artifact_filename,
     comparison_input_fingerprint,
     is_authoritative_comparison,
+    latest_submission_jobs,
 )
 from .config import Settings
 from .contract_candidates import ContractCandidateManager
@@ -154,6 +155,21 @@ _RETRYABLE_TURN_FAILURE_CLASSES = frozenset(
 # auto-resume into a non-convergent loop.
 _AUTO_RESUMABLE_TURN_FAILURE_CLASSES = frozenset({'turn_timeout'})
 
+# Bound on consecutive analysis-transition deferrals while late job artifacts
+# drain (one deferral per watcher poll). Without a bound, a file whose digest
+# changes on every inspect would hold a run in JOB_RUNNING indefinitely.
+_WAVE_ARTIFACT_DEFERRAL_CAP = 6
+
+
+def _feeds_analysis_notebook(artifact: ArtifactRecord) -> bool:
+    # Only metrics.json and tables/*.csv can be embedded in the notebook;
+    # regenerating from a late subset that cannot feed it would emit a spurious
+    # failure and could overwrite a good notebook with a partial one.
+    name = Path(artifact.uri).name
+    return name == 'metrics.json' or (
+        artifact.type.startswith('tables/') and name.endswith('.csv')
+    )
+
 
 @dataclass(frozen=True)
 class _TurnFailure:
@@ -248,6 +264,9 @@ class ResearchOrchestrator:
     ) -> None:
         self.settings = settings
         self.store = store
+        # Consecutive analysis-transition deferrals per run while late job
+        # artifacts drain; bounds _fill_job_capacity (see the cap constant).
+        self._wave_deferrals: dict[str, int] = {}
         self.runtime = runtime
         self.workspaces = workspaces
         self.contracts = contracts
@@ -6234,7 +6253,11 @@ class ResearchOrchestrator:
         self._transition(run.run_id, RunState.JOB_QUEUED)
         self._fill_job_capacity(run.run_id)
 
-    def _fill_job_capacity(self, run_id: str) -> None:
+    def _fill_job_capacity(
+        self,
+        run_id: str,
+        newly_recorded: int = 0,
+    ) -> None:
         run = self.store.get_run(run_id)
         capacity_jobs = self.store.list_jobs(
             run_id,
@@ -6336,6 +6359,28 @@ class ResearchOrchestrator:
             RunState.JOB_QUEUED,
             RunState.JOB_RUNNING,
         }:
+            # Late evaluator artifacts must drain before analysis: defer the
+            # transition for one poll whenever this pass observed a new
+            # artifact, narrowing the window in which evaluation.json (written
+            # just after the workload's terminal snapshot) would be stranded by
+            # the run leaving JOB_RUNNING. The deferral is capped so a file
+            # whose digest changes on every inspect cannot stall the run.
+            newly_recorded += self._sync_wave_artifacts(run_id)
+            deferrals = self._wave_deferrals.get(run_id, 0)
+            if newly_recorded > 0 and deferrals < _WAVE_ARTIFACT_DEFERRAL_CAP:
+                self._wave_deferrals[run_id] = deferrals + 1
+                return
+            if newly_recorded > 0:
+                self._event(
+                    run_id,
+                    source='orchestrator',
+                    event_type='artifact.drain_timeout',
+                    payload={
+                        'deferrals': deferrals,
+                        'cap': _WAVE_ARTIFACT_DEFERRAL_CAP,
+                    },
+                )
+            self._wave_deferrals.pop(run_id, None)
             self._transition(run_id, RunState.BEAKER_ANALYZING)
             self._analyze_results(run_id)
 
@@ -6353,6 +6398,7 @@ class ResearchOrchestrator:
                     JobStatus.UNKNOWN,
                 },
             )
+            newly_recorded = 0
             for job in jobs:
                 if job.status == JobStatus.QUEUED and not job.external_run_id:
                     continue
@@ -6414,48 +6460,11 @@ class ResearchOrchestrator:
                     )
                 )
                 if snapshot.status in JOB_TERMINAL_STATUSES:
-                    recorded_artifacts: list[ArtifactRecord] = []
-                    for artifact in snapshot.artifacts:
-                        artifact_id = uuid5(
-                            NAMESPACE_URL,
-                            (
-                                f'{job.job_id}:{artifact.uri}:'
-                                f'{artifact.sha256}'
-                            ),
-                        ).hex
-                        recorded = self.store.save_artifact(
-                            ArtifactRecord(
-                                artifact_id=artifact_id,
-                                run_id=run_id,
-                                job_id=job.job_id,
-                                type=artifact.type,
-                                uri=artifact.uri,
-                                sha256=artifact.sha256,
-                                metadata={
-                                    **artifact.metadata,
-                                    'evaluation_contract_id': (
-                                        job.evaluation_contract_id
-                                    ),
-                                    'evaluation_contract_version': (
-                                        job.evaluation_contract_version
-                                    ),
-                                    'evaluation_contract_digest': (
-                                        job.evaluation_contract_digest
-                                    ),
-                                },
-                            )
-                        )
-                        recorded_artifacts.append(recorded)
-                        self._event(
-                            run_id,
-                            source='cluster',
-                            event_type='artifact.recorded',
-                            payload={
-                                'job_id': job.job_id,
-                                'uri': artifact.uri,
-                                'sha256': artifact.sha256,
-                            },
-                        )
+                    newly_recorded += self._record_job_artifacts(
+                        run_id,
+                        updated,
+                        snapshot.artifacts,
+                    )
                     event_type = (
                         'job.completed'
                         if updated.status == JobStatus.SUCCEEDED
@@ -6471,12 +6480,6 @@ class ResearchOrchestrator:
                             'exit_information': updated.exit_information,
                         },
                     )
-                    if updated.status == JobStatus.SUCCEEDED:
-                        self._generate_analysis_notebook(
-                            run_id=run_id,
-                            job=updated,
-                            source_artifacts=recorded_artifacts,
-                        )
                 elif snapshot.status == JobStatus.RUNNING:
                     self._event(
                         run_id,
@@ -6484,8 +6487,120 @@ class ResearchOrchestrator:
                         event_type='job.started',
                         payload={'job_id': updated.job_id},
                     )
-            self._fill_job_capacity(run_id)
+            # Drain evaluator artifacts that appeared after a job's terminal
+            # observation (evaluation.json lands a moment after the workload's
+            # terminal snapshot), so analysis sees the full artifact set.
+            newly_recorded += self._sync_wave_artifacts(run_id)
+            self._fill_job_capacity(run_id, newly_recorded)
             return self.store.get_run(run_id)
+
+    def _record_job_artifacts(
+        self,
+        run_id: str,
+        job: JobRecord,
+        cluster_artifacts: Sequence[ClusterArtifact],
+    ) -> int:
+        # Deterministic ids make recording idempotent: an artifact already in
+        # the store is skipped, so a repeat inspection of the same terminal
+        # snapshot emits no duplicate event and rewrites nothing.
+        existing = {
+            artifact.artifact_id
+            for artifact in self.store.list_artifacts(run_id)
+        }
+        recorded_artifacts: list[ArtifactRecord] = []
+        for artifact in cluster_artifacts:
+            artifact_id = uuid5(
+                NAMESPACE_URL,
+                f'{job.job_id}:{artifact.uri}:{artifact.sha256}',
+            ).hex
+            if artifact_id in existing:
+                continue
+            recorded = self.store.save_artifact(
+                ArtifactRecord(
+                    artifact_id=artifact_id,
+                    run_id=run_id,
+                    job_id=job.job_id,
+                    type=artifact.type,
+                    uri=artifact.uri,
+                    sha256=artifact.sha256,
+                    metadata={
+                        **artifact.metadata,
+                        'evaluation_contract_id': (
+                            job.evaluation_contract_id
+                        ),
+                        'evaluation_contract_version': (
+                            job.evaluation_contract_version
+                        ),
+                        'evaluation_contract_digest': (
+                            job.evaluation_contract_digest
+                        ),
+                    },
+                )
+            )
+            recorded_artifacts.append(recorded)
+            existing.add(artifact_id)
+            self._event(
+                run_id,
+                source='cluster',
+                event_type='artifact.recorded',
+                payload={
+                    'job_id': job.job_id,
+                    'uri': artifact.uri,
+                    'sha256': artifact.sha256,
+                },
+            )
+        if job.status == JobStatus.SUCCEEDED and any(
+            _feeds_analysis_notebook(item) for item in recorded_artifacts
+        ):
+            # Build from the job's full recorded set, and never overwrite a
+            # notebook already generated for this job from a late subset that
+            # would embed less than the first pass did.
+            job_artifacts = [
+                artifact
+                for artifact in self.store.list_artifacts(run_id)
+                if artifact.job_id == job.job_id
+            ]
+            if not any(
+                artifact.type == 'analysis_notebook'
+                and artifact.metadata.get('job_id') == job.job_id
+                for artifact in job_artifacts
+            ):
+                self._generate_analysis_notebook(
+                    run_id=run_id,
+                    job=job,
+                    source_artifacts=job_artifacts,
+                )
+        return len(recorded_artifacts)
+
+    def _sync_wave_artifacts(self, run_id: str) -> int:
+        # Artifact-only pass over the current submission wave: re-inspect every
+        # submitted job that is already terminal so evaluator artifacts written
+        # after its terminal snapshot are ingested instead of being stranded
+        # once the run leaves JOB_RUNNING. Job statuses are never touched here,
+        # and one job's inspection failure never fails the whole pass.
+        newly_recorded = 0
+        for job in latest_submission_jobs(self.store.list_jobs(run_id)):
+            if (
+                job.status not in JOB_TERMINAL_STATUSES
+                or not job.external_run_id
+            ):
+                continue
+            try:
+                snapshot = self.cluster.inspect(job.external_run_id)
+            except Exception as exc:
+                self._event(
+                    run_id,
+                    source='cluster',
+                    event_type='artifact.sync_failed',
+                    payload={'job_id': job.job_id, 'error': str(exc)},
+                )
+                continue
+            newly_recorded += self._record_job_artifacts(
+                run_id,
+                job,
+                snapshot.artifacts,
+            )
+        return newly_recorded
 
     def _generate_analysis_notebook(
         self,
