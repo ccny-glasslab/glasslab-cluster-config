@@ -30,6 +30,7 @@ from .comparison_checks import (
     comparability_reasons,
     evaluation_artifacts_by_job,
     job_document,
+    latest_submission_jobs,
 )
 from .preflight import MethodologyRequirement, resolve_comparison_scope
 from .schemas import (
@@ -163,6 +164,10 @@ def build_comparison_report(
     primary_metric_key = contract.descriptor.manifest.get('primary_metric')
     if not isinstance(primary_metric_key, str) or not primary_metric_key:
         primary_metric_key = None
+    # Scope to the newest submission wave so the report adjudicates exactly the
+    # same job set as the input fingerprint, and a superseded wave that never
+    # produced evaluation.json cannot poison the verdict.
+    scoped_jobs = latest_submission_jobs(jobs)
     artifacts_by_job = evaluation_artifacts_by_job(artifacts)
     context = ComparisonContext(
         run=run,
@@ -173,11 +178,11 @@ def build_comparison_report(
                 artifacts_by_job,
                 artifact_reader,
             )
-            for job in jobs
+            for job in scoped_jobs
         },
     )
     requirement_documents = [
-        _requirement_document(requirement, jobs, context)
+        _requirement_document(requirement, scoped_jobs, context)
         for requirement in across_jobs
     ]
     reasons: list[str] = []
