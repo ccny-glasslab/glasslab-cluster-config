@@ -72,23 +72,30 @@ def referenced_secret_names(document: dict) -> set[str]:
 
 
 class WorkflowSecurityManifestTests(unittest.TestCase):
-    def test_workflow_api_role_cannot_read_secrets(self):
-        roles = [
-            item for item in documents(KUBE_ROOT / "workflow-api" / "10-rbac.yaml")
-            if item["kind"] in {"Role", "ClusterRole"}
-        ]
-        resources = {
-            resource
-            for role in roles
+    def test_workflow_api_secret_access_is_resource_name_scoped_and_read_only(self):
+        """workflow-api may read only the named runner pull secret.
+
+        Kubernetes RBAC ignores ``resourceNames`` for list/watch, so any rule
+        that names ``secrets`` grants namespace-wide secret visibility unless it
+        is a ``get`` constrained by an explicit ``resourceNames`` list. The
+        service only needs to confirm the runner pull secret exists.
+        """
+        rules = [
+            rule
+            for role in documents(KUBE_ROOT / "workflow-api" / "10-rbac.yaml")
+            if role["kind"] in {"Role", "ClusterRole"}
             for rule in role.get("rules", [])
-            for resource in rule.get("resources", [])
-        }
-        self.assertNotIn("secrets", resources)
+        ]
+        secret_rules = [rule for rule in rules if "secrets" in rule.get("resources", [])]
+        self.assertTrue(secret_rules, "the scoped runner pull-secret read is required")
+        for rule in secret_rules:
+            with self.subTest(rule=rule):
+                self.assertEqual(rule["verbs"], ["get"])
+                self.assertEqual(rule["resourceNames"], ["glasslab-ghcr-pull"])
 
         job_rule = next(
             rule
-            for role in roles
-            for rule in role.get("rules", [])
+            for rule in rules
             if rule.get("apiGroups") == ["batch"] and "jobs" in rule.get("resources", [])
         )
         self.assertIn("delete", job_rule["verbs"])

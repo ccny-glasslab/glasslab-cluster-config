@@ -28,7 +28,9 @@ Current prerequisite boundary for execution preflight and run submission:
 
 The service account needs:
 
-- namespace-scoped read access to PVCs and secrets in `glasslab-v2`
+- namespace-scoped read access to PVCs in `glasslab-v2`
+- namespace-scoped `get` on the single named image pull secret
+  `glasslab-ghcr-pull` (resourceNames-scoped, so no other secret is readable)
 - cluster-scoped read access to:
   - `nodes`
   - `pods`
