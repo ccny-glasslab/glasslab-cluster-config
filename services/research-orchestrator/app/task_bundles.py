@@ -140,6 +140,11 @@ FIXED_WORKLOAD_RUNNER_IMAGES = {
         'glasslab-research-workspace-runner@sha256:'
         'dae5bc4967f5ac54edb6c6d63d8d3db9e4652cc46e035118b0c456eb70121061'
     ),
+    # The legacy GPU benchmark workload must rebind to the current pinned GPU
+    # image exactly like the CPU benchmark does; without this entry a
+    # GPU-compiled benchmark task keeps its stale non-ccny persisted image and
+    # can never pass preflight (issue #502 shape).
+    'benchmark-workspace-gpu-v1': RUNTIME_PROFILES['gpu-ml-standard-v1'].runner_image,
     'workspace-cpu-ml-v1': RUNTIME_PROFILES['cpu-ml-standard-v1'].runner_image,
     'workspace-gpu-ml-v1': RUNTIME_PROFILES['gpu-ml-standard-v1'].runner_image,
 }
