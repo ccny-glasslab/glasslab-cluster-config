@@ -11,14 +11,27 @@ button clicks.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+import json
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 from .discord_rest import DiscordRestCircuit, execute_guarded
+from .links import LinkBuilder, LinkError, LinkKind, run_relative_ref
 from .schemas import EventRecord
+
+_REPORT_ATTACHMENT_EVENT_TYPES = frozenset(
+    {'report.created', 'report.bundle_created'}
+)
+
+
+@dataclass(frozen=True)
+class DiscordAttachment:
+    filename: str
+    content: bytes
 
 
 @dataclass(frozen=True)
@@ -30,6 +43,12 @@ class DiscordMessage:
     # on the run record by the engine.
     is_status: bool = False
     components: list[dict[str, Any]] | None = None
+    # Files are posted as a multipart bot message. The webhook path is
+    # JSON-only, so any message carrying attachments must take the bot path.
+    attachments: tuple[DiscordAttachment, ...] = ()
+    # Small additive metadata rendered next to the content (e.g. the report
+    # run id and digest); never a substitute for the authoritative record.
+    embeds: list[dict[str, Any]] | None = None
 
 
 def _action_title(action_type: str) -> str:
@@ -294,6 +313,24 @@ def _render_action_context(payload: dict[str, Any]) -> str:
     return content[:1885].rstrip() + '\n...[details truncated]'
 
 
+def _report_embed(event: EventRecord) -> list[dict[str, Any]]:
+    # Deliberately small: identity and digest only. The authoritative report
+    # body travels as an attachment, never duplicated into the embed.
+    fields: list[dict[str, Any]] = [
+        {'name': 'Run', 'value': f'`{event.run_id}`', 'inline': True},
+    ]
+    digest = event.payload.get('sha256')
+    if isinstance(digest, str) and digest:
+        fields.append(
+            {
+                'name': 'SHA-256',
+                'value': f'`{digest[:12]}...`',
+                'inline': True,
+            }
+        )
+    return [{'title': 'Report ready', 'fields': fields}]
+
+
 class DiscordRenderer:
     IDENTITIES = {
         'honeydew': 'Honeydew',
@@ -301,6 +338,25 @@ class DiscordRenderer:
         'orchestrator': 'Orchestrator',
         'cluster': 'Orchestrator',
     }
+
+    def __init__(self, *, link_builder: LinkBuilder | None = None) -> None:
+        # Signed-link minting seam: when configured, report messages carry
+        # expiring {public_base_url}/links/{token} URLs instead of artifact://
+        # URIs. None keeps the original URI text.
+        self.link_builder = link_builder
+
+    def _link(self, event: EventRecord, kind: LinkKind, uri: object) -> str | None:
+        if self.link_builder is None or not isinstance(uri, str):
+            return None
+        ref = run_relative_ref(uri, event.run_id)
+        if ref is None:
+            return None
+        try:
+            return self.link_builder(kind, event.run_id, ref)
+        except LinkError:
+            # A target that cannot be represented as a safe signed link must
+            # never fail the Discord projection; fall back to the URI text.
+            return None
 
     def render(self, event: EventRecord) -> DiscordMessage | None:
         identity = self.IDENTITIES.get(event.source, 'Orchestrator')
@@ -449,9 +505,34 @@ class DiscordRenderer:
                 f"{event_type}: {payload.get('job_id')}",
             )
         if event_type == 'report.created':
+            uri = payload.get('uri')
+            report_url = self._link(event, LinkKind.REPORT, uri)
             return DiscordMessage(
                 'Honeydew',
-                f"Report ready: {payload.get('uri')}",
+                (
+                    f'Report ready: {report_url}'
+                    if report_url is not None
+                    else f'Report ready: {uri}'
+                ),
+                embeds=_report_embed(event),
+            )
+        if event_type == 'report.bundle_created':
+            pdf_url = self._link(event, LinkKind.ARTIFACT, payload.get('pdf'))
+            docx_url = self._link(event, LinkKind.ARTIFACT, payload.get('docx'))
+            if pdf_url is not None and docx_url is not None:
+                content = (
+                    f'Report bundle ready: [PDF]({pdf_url}) · '
+                    f'[DOCX]({docx_url})'
+                )
+            else:
+                content = (
+                    f"Report bundle ready: `{payload.get('pdf')}` "
+                    f"and `{payload.get('docx')}`"
+                )
+            return DiscordMessage(
+                'Orchestrator',
+                content,
+                embeds=_report_embed(event),
             )
         if event_type in {
             'run.paused',
@@ -529,6 +610,10 @@ class DiscordHttpAdapter(DiscordAdapter):
         webhook_url: str | None = None,
         transport: httpx.BaseTransport | None = None,
         circuit: DiscordRestCircuit | None = None,
+        attachment_loader: (
+            Callable[[EventRecord], tuple[DiscordAttachment, ...]] | None
+        ) = None,
+        link_builder: LinkBuilder | None = None,
     ) -> None:
         self.bot_token = bot_token
         self.channel_id = channel_id
@@ -536,7 +621,12 @@ class DiscordHttpAdapter(DiscordAdapter):
         # Test seam: lets the test suite inject a mock transport and assert on
         # request shape without network access.
         self.transport = transport
-        self.renderer = DiscordRenderer()
+        self.link_builder = link_builder
+        self.renderer = DiscordRenderer(link_builder=link_builder)
+        # Report events may carry files (report.md / report.pdf / report.docx)
+        # loaded through this injected seam so the projection stays free of
+        # filesystem knowledge and tests can supply attachments directly.
+        self.attachment_loader = attachment_loader
         # Bounded failure protection: every outbound REST attempt is guarded by
         # the circuit (see discord_rest.py). Failures are recorded here so the
         # engine's swallow semantics are unchanged while the failure remains
@@ -594,15 +684,18 @@ class DiscordHttpAdapter(DiscordAdapter):
             raise RuntimeError('Discord webhook URL is not configured')
 
         def attempt() -> httpx.Response:
+            payload: dict[str, Any] = {
+                'username': message.identity,
+                'content': message.content[:2000],
+                'allowed_mentions': {'parse': []},
+            }
+            if message.embeds is not None:
+                payload['embeds'] = message.embeds
             with httpx.Client(timeout=15, transport=self.transport) as client:
                 return client.post(
                     self.webhook_url,
                     params={'wait': 'true', 'thread_id': thread_id},
-                    json={
-                        'username': message.identity,
-                        'content': message.content[:2000],
-                        'allowed_mentions': {'parse': []},
-                    },
+                    json=payload,
                 )
 
         def raise_webhook_failure(response: httpx.Response) -> None:
@@ -634,23 +727,58 @@ class DiscordHttpAdapter(DiscordAdapter):
         if message is None:
             return status_message_id
         if (
+            event.event_type in _REPORT_ATTACHMENT_EVENT_TYPES
+            and self.attachment_loader is not None
+        ):
+            try:
+                attachments = self.attachment_loader(event)
+            except Exception:  # noqa: BLE001 - Discord cannot fail the workflow
+                # A file that cannot be loaded must not stop the report
+                # message itself; fall through with a plain text announcement.
+                attachments = ()
+            if attachments:
+                message = replace(message, attachments=attachments)
+        if (
             self.webhook_url
             and not message.is_status
             and not message.components
+            and not message.attachments
         ):
             # Plain non-status messages go through the webhook so they are
-            # authored with a friendly username. Status edits and component
-            # rows cannot use webhooks (they need the bot API), so those fall
-            # through to the bot path.
+            # authored with a friendly username. Status edits, component rows,
+            # and attachment messages cannot use webhooks (they need the bot
+            # API), so those fall through to the bot path.
             self._publish_webhook(thread_id=thread_id, message=message)
             return status_message_id
         content = f'**{message.identity}:** {message.content}'[:2000]
         payload: dict[str, Any] = {'content': content}
         if message.components is not None:
             payload['components'] = message.components
+        if message.embeds is not None:
+            payload['embeds'] = message.embeds
 
         def attempt() -> httpx.Response:
             with self._client() as client:
+                if message.attachments:
+                    # Discord accepts files only as multipart; the JSON body
+                    # travels as the payload_json form field.
+                    return client.post(
+                        f'/channels/{thread_id}/messages',
+                        data={'payload_json': json.dumps(payload)},
+                        files=[
+                            (
+                                f'files[{index}]',
+                                (
+                                    attachment.filename,
+                                    attachment.content,
+                                    'application/octet-stream',
+                                ),
+                            )
+                            for index, attachment in enumerate(
+                                message.attachments
+                            )
+                        ],
+                    )
                 if message.is_status and status_message_id:
                     return client.patch(
                         f'/channels/{thread_id}/messages/{status_message_id}',

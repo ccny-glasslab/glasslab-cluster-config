@@ -13,13 +13,16 @@ they leave the process even for authorized readers.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 import asyncio
+from dataclasses import dataclass
 import html
 import json
 import logging
+from pathlib import Path, PurePosixPath
 import secrets
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, assert_never
 
 import httpx
 
@@ -31,18 +34,24 @@ from fastapi import (
     Header,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     status,
 )
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import SecretStr
 
+from .artifact_delivery import ArtifactDeliveryError, VerifiedArtifactReader
 from .cluster import FakeClusterExecutor, WorkflowApiClusterExecutor
 from .config import SERVICE_ROOT, Settings, get_settings
 from .contract_candidates import ContractCandidateManager
 from .contracts import ContractIntegrityError, EvaluationContractResolver
 from .corpus_rag.pdf_backend import UnsupportedDocumentError
-from .discord_adapter import DisabledDiscordAdapter, DiscordHttpAdapter
+from .discord_adapter import (
+    DisabledDiscordAdapter,
+    DiscordAttachment,
+    DiscordHttpAdapter,
+)
 from .discord_controls import DiscordControlGateway
 from .discord_rest import (
     DiscordCircuitOpen,
@@ -55,6 +64,17 @@ from .engine import ResearchOrchestrator, WorkflowError
 from .hermes_runtime import HermesProcessRuntime
 from .knowledge_manager import KnowledgeError
 from .knowledge_tool import KnowledgeToolDenied, KnowledgeToolError
+from .links import (
+    LINKABLE_ARTIFACT_PREFIXES,
+    LinkBuilder,
+    LinkError,
+    LinkKind,
+    LinkPayload,
+    build_link_url,
+    link_token_fingerprint,
+    run_relative_ref,
+    verify_link,
+)
 from .opencode_runtime import AgentRuntime, OpenCodeProcessRuntime
 from .policy import ActionPolicy
 from .redaction import redact_payload
@@ -63,6 +83,7 @@ from .schemas import (
     ActionRecord,
     ApprovalRequest,
     ArtifactListResponse,
+    ArtifactRecord,
 ChatRequest,
     ConversationSourceBindRequest,
     ConversationSourceBinding,
@@ -86,6 +107,7 @@ IngestedDatasetRecord,
     TerminalRetryRequest,
     SourceType,
     TurnListResponse,
+    utc_now,
 )
 from .storage import ConcurrencyConflict, RecordNotFound, SqliteStore
 from .postgres_store import PostgresStore
@@ -104,10 +126,394 @@ from .workspaces import WorkspaceError, WorkspaceManager
 logger = logging.getLogger(__name__)
 
 
+class _RedactLinkTokensFilter(logging.Filter):
+    """Keep signed-link bearer tokens out of the server access log.
+
+    The token in ``/links/{token}`` is the entire authorization for that
+    route, so the default uvicorn access log must not persist it verbatim.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3:
+            target = args[2]
+            if isinstance(target, str) and target.startswith('/links/'):
+                record.args = (
+                    args[0],
+                    args[1],
+                    '/links/<redacted>',
+                    *args[3:],
+                )
+        return True
+
+
+logging.getLogger('uvicorn.access').addFilter(_RedactLinkTokensFilter())
+
+
 def build_agent_runtime(settings: Settings) -> AgentRuntime:
     if settings.agent_runtime_backend == 'hermes':
         return HermesProcessRuntime(settings)
     return OpenCodeProcessRuntime(settings)
+
+
+def _report_markdown_artifact(event: EventRecord) -> list[ArtifactRecord]:
+    payload = event.payload
+    path = payload.get('path')
+    uri = payload.get('uri')
+    digest = payload.get('sha256')
+    if not (
+        isinstance(path, str)
+        and isinstance(uri, str)
+        and isinstance(digest, str)
+    ):
+        return []
+    # The engine only ever accepts a real regular file as a report; reject a
+    # symlink before the reader resolves it, since resolution would otherwise
+    # follow the link to its target.
+    if Path(path).is_symlink():
+        return []
+    return [
+        ArtifactRecord(
+            run_id=event.run_id,
+            type='report',
+            uri=uri,
+            sha256=digest,
+            metadata={'path': path},
+        )
+    ]
+
+
+def _report_bundle_artifacts(
+    event: EventRecord,
+    store: ResearchStore,
+) -> list[ArtifactRecord]:
+    by_uri = {
+        artifact.uri: artifact for artifact in store.list_artifacts(event.run_id)
+    }
+    artifacts: list[ArtifactRecord] = []
+    for key in ('pdf', 'docx'):
+        uri = event.payload.get(key)
+        if not isinstance(uri, str):
+            continue
+        artifact = by_uri.get(uri)
+        if artifact is not None:
+            artifacts.append(artifact)
+    return artifacts
+
+
+def build_report_attachment_loader(
+    *,
+    store: ResearchStore,
+    shared_mount_root: str,
+    maximum_bytes: int,
+) -> Callable[[EventRecord], tuple[DiscordAttachment, ...]]:
+    """Load a report event's files for Discord delivery.
+
+    Reads go through the artifact-delivery guards (mount containment, symlink
+    rejection, digest verification). A file that is unavailable or does not
+    fit the remaining byte budget is skipped individually so the report
+    message itself still posts.
+    """
+    reader = VerifiedArtifactReader(shared_mount_root)
+
+    def load(event: EventRecord) -> tuple[DiscordAttachment, ...]:
+        if event.event_type == 'report.created':
+            artifacts = _report_markdown_artifact(event)
+        elif event.event_type == 'report.bundle_created':
+            artifacts = _report_bundle_artifacts(event, store)
+        else:
+            return ()
+        attachments: list[DiscordAttachment] = []
+        total = 0
+        for artifact in artifacts:
+            remaining = maximum_bytes - total
+            if remaining <= 0:
+                continue
+            try:
+                content = reader.read(artifact, maximum_bytes=remaining)
+            except ArtifactDeliveryError:
+                continue
+            total += len(content)
+            attachments.append(
+                DiscordAttachment(
+                    filename=Path(artifact.uri).name or artifact.type,
+                    content=content,
+                )
+            )
+        return tuple(attachments)
+
+    return load
+
+
+def build_link_builder(settings: Settings) -> LinkBuilder | None:
+    """Return a callable that mints ``{public_base_url}/links/{token}`` URLs.
+
+    ``None`` when ``public_base_url`` is unset, so callers keep their existing
+    non-link rendering. A configured base URL with a missing signing secret
+    still returns a callable, but every call returns ``None``: link emission
+    fails closed instead of signing with an absent secret.
+    """
+    base_url = settings.public_base_url
+    if not base_url:
+        return None
+    secret = (
+        settings.link_signing_secret.get_secret_value()
+        if settings.link_signing_secret is not None
+        else None
+    )
+    ttl_seconds = settings.link_ttl_seconds
+
+    def builder(kind: LinkKind, run_id: str, ref: str) -> str | None:
+        return build_link_url(
+            public_base_url=base_url,
+            secret=secret,
+            kind=kind,
+            run_id=run_id,
+            ref=ref,
+            ttl_seconds=ttl_seconds,
+        )
+
+    return builder
+
+
+LINK_HTML_HEADERS = {
+    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'",
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Content-Disposition': 'inline',
+}
+# Hard ceiling on a single signed-link artifact download; larger files remain
+# reachable only through the operator artifact API, never an anonymous link.
+MAXIMUM_LINK_ARTIFACT_BYTES = 64 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class LinkRedemption:
+    engine: ResearchOrchestrator
+    settings: Settings
+    payload: LinkPayload
+    token: str
+    client_host: str | None
+
+
+def _audit_link_redemption(
+    *,
+    token: str,
+    outcome: str,
+    payload: LinkPayload | None,
+    client_host: str | None,
+) -> None:
+    # Structured key=value record: the fingerprint is a one-way prefix, so the
+    # full token and its signature never reach the log.
+    logger.info(
+        'link redemption outcome=%s kind=%s run_id=%s ref=%s '
+        'token_sha256_prefix=%s client_host=%s',
+        outcome,
+        payload.kind.value if payload is not None else None,
+        payload.run_id if payload is not None else None,
+        payload.ref if payload is not None else None,
+        link_token_fingerprint(token),
+        client_host,
+    )
+
+
+def _find_artifact_by_ref(
+    artifacts: list[ArtifactRecord],
+    ref: str,
+) -> ArtifactRecord | None:
+    # Latest record wins, mirroring artifact delivery's dedup semantics.
+    match: ArtifactRecord | None = None
+    for artifact in artifacts:
+        if run_relative_ref(artifact.uri, artifact.run_id) == ref:
+            match = artifact
+    return match
+
+
+def _read_link_artifact(
+    redemption: LinkRedemption,
+    artifact: ArtifactRecord | None,
+) -> bytes | None:
+    if artifact is None:
+        return None
+    try:
+        return VerifiedArtifactReader(
+            redemption.settings.shared_mount_root
+        ).read(artifact, maximum_bytes=MAXIMUM_LINK_ARTIFACT_BYTES)
+    except ArtifactDeliveryError:
+        return None
+
+
+def _deny_link(redemption: LinkRedemption, outcome: str) -> None:
+    _audit_link_redemption(
+        token=redemption.token,
+        outcome=outcome,
+        payload=redemption.payload,
+        client_host=redemption.client_host,
+    )
+    raise HTTPException(status_code=404, detail='not found')
+
+
+def _serve_report_link(redemption: LinkRedemption) -> Response:
+    payload = redemption.payload
+    if not payload.ref.startswith('reports/'):
+        _deny_link(redemption, 'ref_denied')
+    artifact = _find_artifact_by_ref(
+        redemption.engine.store.list_artifacts(payload.run_id),
+        payload.ref,
+    )
+    content = _read_link_artifact(redemption, artifact)
+    if content is None:
+        _deny_link(redemption, 'target_unavailable')
+    _audit_link_redemption(
+        token=redemption.token,
+        outcome='served_report',
+        payload=payload,
+        client_host=redemption.client_host,
+    )
+    return HTMLResponse(
+        content=render_report_link_html(payload, artifact, content),
+        headers=LINK_HTML_HEADERS,
+    )
+
+
+def _serve_artifact_link(redemption: LinkRedemption) -> Response:
+    payload = redemption.payload
+    if not payload.ref.startswith(LINKABLE_ARTIFACT_PREFIXES):
+        _deny_link(redemption, 'ref_denied')
+    artifact = _find_artifact_by_ref(
+        redemption.engine.store.list_artifacts(payload.run_id),
+        payload.ref,
+    )
+    content = _read_link_artifact(redemption, artifact)
+    if content is None:
+        _deny_link(redemption, 'target_unavailable')
+    _audit_link_redemption(
+        token=redemption.token,
+        outcome='served_artifact',
+        payload=payload,
+        client_host=redemption.client_host,
+    )
+    return Response(
+        content=content,
+        media_type='application/octet-stream',
+        headers={
+            'Content-Disposition': (
+                f'attachment; filename="{_sanitized_link_filename(payload.ref)}"'
+            ),
+            'X-Content-Type-Options': 'nosniff',
+            'Referrer-Policy': 'no-referrer',
+        },
+    )
+
+
+def _serve_packet_link(redemption: LinkRedemption) -> Response:
+    payload = redemption.payload
+    packet_id = payload.ref.removeprefix('knowledge://context:')
+    try:
+        packet = redemption.engine.knowledge.get_context_packet(packet_id)
+    except Exception:  # noqa: BLE001 - a missing packet must never leak why
+        _deny_link(redemption, 'target_unavailable')
+    if packet.run_id != payload.run_id:
+        _deny_link(redemption, 'run_mismatch')
+    _audit_link_redemption(
+        token=redemption.token,
+        outcome='served_packet',
+        payload=payload,
+        client_host=redemption.client_host,
+    )
+    return HTMLResponse(
+        content=render_context_packet_html(packet, packet_id),
+        headers=LINK_HTML_HEADERS,
+    )
+
+
+def serve_link(redemption: LinkRedemption) -> Response:
+    match redemption.payload.kind:
+        case LinkKind.REPORT:
+            return _serve_report_link(redemption)
+        case LinkKind.ARTIFACT:
+            return _serve_artifact_link(redemption)
+        case LinkKind.PACKET:
+            return _serve_packet_link(redemption)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _sanitized_link_filename(ref: str) -> str:
+    name = PurePosixPath(ref).name
+    safe = ''.join(
+        char
+        for char in name
+        if char.isascii() and (char.isalnum() or char in '._-')
+    )
+    return safe or 'artifact.bin'
+
+
+def render_report_link_html(
+    payload: LinkPayload,
+    artifact: ArtifactRecord,
+    markdown: bytes,
+) -> str:
+    # Escape-first: the report body is agent-authored markdown and is rendered
+    # as escaped text inside <pre>, never converted to raw HTML.
+    text = markdown.decode('utf-8', errors='replace')
+    return (
+        '<html><head><title>Glasslab research report</title>'
+        '<meta charset="utf-8">'
+        '<style>body{font-family:system-ui,sans-serif;max-width:900px;'
+        'margin:2rem auto;padding:0 1rem;line-height:1.5}'
+        'h1{font-size:1.2rem} pre{white-space:pre-wrap;background:#f6f8fa;'
+        'padding:1rem;border-radius:6px;font-size:.9rem}</style>'
+        '</head><body>'
+        f'<h1>Research report <code>{html.escape(payload.run_id)}</code></h1>'
+        f'<p><strong>Artifact:</strong> <code>{html.escape(payload.ref)}</code>'
+        ' · <strong>SHA-256:</strong> '
+        f'<code>{html.escape(artifact.sha256[:12])}...</code></p>'
+        '<h2>Report</h2>'
+        f'<pre>{html.escape(text)}</pre>'
+        '</body></html>'
+    )
+
+
+def render_context_packet_html(packet: ContextPacket, packet_id: str) -> str:
+    exact = (packet.exact_text_supplied or '').strip()
+    sources = '\n'.join(
+        '<tr>'
+        f'<td>{index}</td>'
+        f'<td><code>{html.escape(str(s.get("kind", "")))}</code></td>'
+        f'<td>{html.escape(str(s.get("source_id", "")))}</td>'
+        f'<td><code>{html.escape(str(s.get("uri", "")))}</code></td>'
+        f'<td>{html.escape(str(s.get("digest", "")))[:16]}</td>'
+        f'<td>{s.get("score", 0):.3f}</td>'
+        '</tr>'
+        for index, s in enumerate(packet.ranked_sources, start=1)
+    ) or '<tr><td colspan="6">no ranked sources</td></tr>'
+    return (
+        '<html><head><title>Knowledge packet</title>'
+        '<meta charset="utf-8">'
+        '<style>body{font-family:system-ui,sans-serif;max-width:900px;'
+        'margin:2rem auto;padding:0 1rem;line-height:1.5}'
+        'h1{font-size:1.2rem} pre{white-space:pre-wrap;background:#f6f8fa;'
+        'padding:1rem;border-radius:6px;font-size:.9rem}'
+        'table{border-collapse:collapse;width:100%} '
+        'td,th{border:1px solid #d0d7de;padding:.3rem .5rem;'
+        'font-size:.85rem;text-align:left}</style>'
+        '<script id="MathJax-script" async '
+        'src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js">'
+        '</script></head><body>'
+        f'<h1>Knowledge packet <code>{html.escape(packet_id)}</code></h1>'
+        f'<p><strong>Query:</strong> {html.escape(packet.query)}</p>'
+        f'<p><strong>Agent:</strong> {packet.agent} · '
+        f'<strong>turn:</strong> {packet.turn_kind} '
+        f'#{packet.turn_number} · '
+        f'<strong>budget:</strong> {packet.token_budget} tokens</p>'
+        '<h2>Exact text supplied to the agent</h2>'
+        f'<pre>{html.escape(exact)}</pre>'
+        '<h2>Ranked sources</h2>'
+        '<table><tr><th>#</th><th>kind</th><th>source_id</th>'
+        '<th>uri</th><th>digest</th><th>score</th></tr>'
+        f'{sources}</table></body></html>'
+    )
 
 
 def build_engine(
@@ -151,6 +557,7 @@ def build_engine(
             )
         )
     if discord is None:
+        link_builder = build_link_builder(settings)
         if (
             settings.discord_enabled
             and settings.discord_bot_token
@@ -171,6 +578,14 @@ def build_engine(
                 channel_id=settings.discord_channel_id,
                 webhook_url=settings.discord_webhook_url,
                 circuit=discord_rest_circuit,
+                attachment_loader=build_report_attachment_loader(
+                    store=store,
+                    shared_mount_root=settings.shared_mount_root,
+                    maximum_bytes=(
+                        settings.maximum_discord_artifact_bundle_bytes
+                    ),
+                ),
+                link_builder=link_builder,
             )
         else:
             discord = DisabledDiscordAdapter()
@@ -1097,45 +1512,60 @@ def create_app(
             packet = engine.knowledge.get_context_packet(packet_id)
         except Exception as exc:
             raise map_error(exc) from exc
-        exact = (packet.exact_text_supplied or '').strip()
-        sources = '\n'.join(
-            '<tr>'
-            f'<td>{index}</td>'
-            f'<td><code>{html.escape(str(s.get("kind", "")))}</code></td>'
-            f'<td>{html.escape(str(s.get("source_id", "")))}</td>'
-            f'<td><code>{html.escape(str(s.get("uri", "")))}</code></td>'
-            f'<td>{html.escape(str(s.get("digest", "")))[:16]}</td>'
-            f'<td>{s.get("score", 0):.3f}</td>'
-            '</tr>'
-            for index, s in enumerate(packet.ranked_sources, start=1)
-        ) or '<tr><td colspan="6">no ranked sources</td></tr>'
-        body = (
-            '<html><head><title>Knowledge packet</title>'
-            '<meta charset="utf-8">'
-            '<style>body{font-family:system-ui,sans-serif;max-width:900px;'
-            'margin:2rem auto;padding:0 1rem;line-height:1.5}'
-            'h1{font-size:1.2rem} pre{white-space:pre-wrap;background:#f6f8fa;'
-            'padding:1rem;border-radius:6px;font-size:.9rem}'
-            'table{border-collapse:collapse;width:100%} '
-            'td,th{border:1px solid #d0d7de;padding:.3rem .5rem;'
-            'font-size:.85rem;text-align:left}</style>'
-            '<script id="MathJax-script" async '
-            'src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js">'
-            '</script></head><body>'
-            f'<h1>Knowledge packet <code>{html.escape(packet_id)}</code></h1>'
-            f'<p><strong>Query:</strong> {html.escape(packet.query)}</p>'
-            f'<p><strong>Agent:</strong> {packet.agent} · '
-            f'<strong>turn:</strong> {packet.turn_kind} '
-            f'#{packet.turn_number} · '
-            f'<strong>budget:</strong> {packet.token_budget} tokens</p>'
-            '<h2>Exact text supplied to the agent</h2>'
-            f'<pre>{html.escape(exact)}</pre>'
-            '<h2>Ranked sources</h2>'
-            '<table><tr><th>#</th><th>kind</th><th>source_id</th>'
-            '<th>uri</th><th>digest</th><th>score</th></tr>'
-            f'{sources}</table></body></html>'
+        return HTMLResponse(content=render_context_packet_html(packet, packet_id))
+
+    @app.get('/links/{token}', response_class=HTMLResponse)
+    def redeem_link(token: str, request: Request) -> Response:
+        # Deliberately NOT gated by require_operator: the signed, expiring
+        # token is the entire authorization for this route. A link token can
+        # never satisfy require_operator, and the operator token is never
+        # accepted here.
+        client_host = request.client.host if request.client is not None else None
+        if settings.public_base_url is None:
+            _audit_link_redemption(
+                token=token,
+                outcome='links_not_configured',
+                payload=None,
+                client_host=client_host,
+            )
+            raise HTTPException(status_code=404, detail='not found')
+        if settings.link_signing_secret is None:
+            # Fail loudly (503) rather than serving unsigned links: a base URL
+            # without a signing secret is a deployment error, mirroring the
+            # require_operator fail-closed pattern.
+            _audit_link_redemption(
+                token=token,
+                outcome='signing_secret_missing',
+                payload=None,
+                client_host=client_host,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail='link signing is not configured',
+            )
+        try:
+            payload = verify_link(
+                settings.link_signing_secret.get_secret_value(),
+                token,
+                now=utc_now(),
+            )
+        except LinkError:
+            _audit_link_redemption(
+                token=token,
+                outcome='invalid',
+                payload=None,
+                client_host=client_host,
+            )
+            raise HTTPException(status_code=404, detail='not found') from None
+        return serve_link(
+            LinkRedemption(
+                engine=engine,
+                settings=settings,
+                payload=payload,
+                token=token,
+                client_host=client_host,
+            )
         )
-        return HTMLResponse(content=body)
 
     @app.get('/runs', response_model=RunListResponse)
     def list_runs(

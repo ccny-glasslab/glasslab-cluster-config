@@ -11,8 +11,15 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from . import model_routing
@@ -344,6 +351,14 @@ class Settings(BaseSettings):
     job_poll_interval_seconds: float = 10.0
     require_operator_auth: bool = True
     operator_api_token: str | None = None
+    # Human-inspectable artifact links (workstream B). Unset by default: no
+    # links are emitted and /links/{token} is not served. When set, links are
+    # minted as {public_base_url}/links/{token} with an HMAC-SHA256 signature
+    # over (kind, run_id, ref, exp, kid); link_signing_secret must be a
+    # dedicated secret, never operator_api_token.
+    public_base_url: str | None = None
+    link_signing_secret: SecretStr | None = None
+    link_ttl_seconds: int = 604800
 
     discord_enabled: bool = False
     discord_bot_token: str | None = None
@@ -538,6 +553,52 @@ class Settings(BaseSettings):
         if value < 0:
             raise ValueError('discord_rest_probe_interval_seconds must be >= 0')
         return value
+
+    @field_validator('public_base_url')
+    @classmethod
+    def validate_public_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        candidate = value.strip().rstrip('/')
+        if not candidate:
+            return None
+        parsed = urlsplit(candidate)
+        if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
+            raise ValueError('public_base_url must be an absolute http(s) URL')
+        if parsed.scheme != 'https' and parsed.hostname not in {
+            'localhost',
+            '127.0.0.1',
+        }:
+            # Links carry bearer tokens; plaintext is allowed only for a local
+            # test server, never for a routable host.
+            raise ValueError(
+                'public_base_url must use https unless it targets localhost'
+            )
+        if parsed.query or parsed.fragment:
+            raise ValueError('public_base_url must not carry a query or fragment')
+        return candidate
+
+    @field_validator('link_ttl_seconds')
+    @classmethod
+    def enforce_link_ttl_positive(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError('link_ttl_seconds must be >= 1')
+        return value
+
+    @model_validator(mode='after')
+    def reject_operator_token_as_link_secret(self) -> Settings:
+        # A shared secret would collapse the link and operator auth domains;
+        # the deployment must configure a dedicated signing secret.
+        if (
+            self.link_signing_secret is not None
+            and self.operator_api_token
+            and self.link_signing_secret.get_secret_value()
+            == self.operator_api_token
+        ):
+            raise ValueError(
+                'link_signing_secret must not reuse operator_api_token'
+            )
+        return self
 
     @field_validator('knowledge_allowlist_roots', mode='before')
     @classmethod
