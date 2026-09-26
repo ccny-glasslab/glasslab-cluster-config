@@ -43,6 +43,7 @@ GATED_GET_PATHS = [
     '/runs/missing-run/context-packets',
     '/actions/missing-action',
     '/chat/missing-conversation',
+    '/ui/',
 ]
 
 _PATH_PARAM = re.compile(r'\{[^}]+\}')

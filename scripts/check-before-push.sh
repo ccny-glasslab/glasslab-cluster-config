@@ -75,6 +75,7 @@ run_secret_boundary_tests() {
     tests.security.test_workflow_security_manifests \
     tests.security.test_task_fabric_manifests \
     tests.security.test_node_maintenance_wrappers \
+    services/research-orchestrator/tests/scripts/test_orchestrator_ui_proxy.py \
     -v
 }
 

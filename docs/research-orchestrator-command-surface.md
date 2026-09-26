@@ -250,6 +250,7 @@ GET /task-bundles/{task_id}/preflight
 GET /datasets
 GET /datasets/{dataset_id}
 GET /knowledge/sources
+GET /ui/
 GET /actions/{action_id}
 GET /health
 GET /ready
@@ -272,6 +273,16 @@ POST /runs/{run_id}/cancel
 POST /actions/{action_id}/approve
 POST /actions/{action_id}/reject
 ```
+
+`GET /ui/` is a server-rendered, read-only HTML page over the same durable
+state (three panes: sources, document, evidence inspector). It is gated by the
+same operator header, and a browser can't attach that header to a top-level
+navigation, so open it through the loopback proxy instead: run
+`python3 scripts/glasslab-orchestrator-ui-proxy.py` on the workstation (it
+injects the operator token from the environment), then browse
+`http://127.0.0.1:19090/ui/`. See
+[Orchestrator Corpus UI](glasslab-v2/runbooks/orchestrator-corpus-ui.md) for
+the proxy flags, pane layout, and citation badges.
 
 Do not put the operator token, Discord token, or webhook URL in documentation,
 Git, shell history, or screenshots.

@@ -93,6 +93,25 @@ _KNOWN_SECRET_FORMATS = (
     re.compile(r'\bcertificate-authority-data:'),
 )
 
+# A whole PEM private-key block. The header-only pattern above is enough to
+# condemn a payload string outright, but free-text redaction replaces just the
+# matched span, so the base64 body must be captured too. A truncated key with
+# no END marker is redacted to end-of-string rather than left readable.
+_PEM_PRIVATE_KEY_BLOCK = re.compile(
+    r'-----BEGIN [A-Z ]*PRIVATE KEY-----'
+    r'.*?'
+    r'(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)',
+    re.DOTALL,
+)
+
+# Free-text scanning needs no keyword context: the concrete formats plus whole
+# PEM blocks. Ordered so a complete PEM block is consumed before its header
+# line is matched on its own.
+_FREE_TEXT_SECRET_FORMATS = (
+    _PEM_PRIVATE_KEY_BLOCK,
+    *_KNOWN_SECRET_FORMATS,
+)
+
 
 def _is_sensitive_key(key: str) -> bool:
     normalized = key.strip().lower()
@@ -106,6 +125,21 @@ def _looks_like_secret(text: str) -> bool:
     if any(pattern.search(text) for pattern in _KNOWN_SECRET_FORMATS):
         return True
     return any(pattern.search(text) for pattern in _KEYWORD_VALUE_PATTERNS)
+
+
+def redact_free_text(text: str) -> str:
+    """Redact concrete credential formats inside free-form text.
+
+    Unlike :func:`redact_payload`, no field-name or keyword-context heuristic
+    applies: prose that merely discusses credentials ("set a password", "rotate
+    the API key") is returned unchanged, and only byte sequences matching a
+    concrete credential format are replaced. Used for report/answer/question/
+    citation text, where keyword redaction would corrupt legitimate content.
+    """
+    redacted = text
+    for pattern in _FREE_TEXT_SECRET_FORMATS:
+        redacted = pattern.sub(REDACTED, redacted)
+    return redacted
 
 
 def redact_payload(value: Any) -> Any:
