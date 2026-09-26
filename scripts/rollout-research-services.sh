@@ -225,6 +225,7 @@ rollout_research_orchestrator() {
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/research-orchestrator/00-service-account.yaml"
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/research-orchestrator/10-configmap.yaml"
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/research-orchestrator/30-service.yaml"
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/research-orchestrator/50-ingress-network-policy.yaml"
 
   printf '[rollout-research-services] deploying research-orchestrator image %s\n' "$image"
   "$KUBECTL" set image \

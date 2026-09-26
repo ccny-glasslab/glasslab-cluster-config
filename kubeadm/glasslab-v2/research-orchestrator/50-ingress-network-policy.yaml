@@ -1,0 +1,30 @@
+# Default-deny pod-to-pod ingress for the research orchestrator (issue #592).
+#
+# The operator reaches the orchestrator only through kubectl port-forward
+# (the provisioner's persistent unit dials the pod from inside its network
+# namespace), which Calico does not police, so no pod peer needs to be allowed
+# here and none is: any agent-run or neighbouring pod is denied.
+#
+# The node /32 carve-out exists solely for the kubelet httpGet liveness and
+# readiness probes on port 8080, which originate from the node hosting the
+# pod. The deployment pins the pod to node05 (192.168.1.47) via its
+# nodeSelector; if that pin changes, update this CIDR or the probes will fail
+# and the pod will be removed from the Service endpoints.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: glasslab-research-orchestrator-ingress
+  namespace: glasslab-v2
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: glasslab-research-orchestrator
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 192.168.1.47/32
+      ports:
+        - protocol: TCP
+          port: 8080
