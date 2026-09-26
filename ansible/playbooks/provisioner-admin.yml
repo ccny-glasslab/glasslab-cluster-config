@@ -77,3 +77,32 @@
         owner: glasslab
         group: glasslab
         mode: '0700'
+
+    - name: Install the research orchestrator port-forward unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/glasslab-orchestrator-forward.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Glasslab research orchestrator port-forward (127.0.0.1:18080)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          Environment=KUBECONFIG=/home/glasslab/.kube/config
+          ExecStart=/usr/bin/kubectl -n glasslab-v2 port-forward --address 127.0.0.1 svc/glasslab-research-orchestrator 18080:8080
+          Restart=always
+          RestartSec=2
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable the research orchestrator port-forward unit
+      ansible.builtin.systemd:
+        name: glasslab-orchestrator-forward.service
+        enabled: true
+        state: started
+        daemon_reload: true
