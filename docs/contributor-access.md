@@ -33,6 +33,9 @@ Host glasslab-provisioner
   User <same-personal-user>
   IdentityFile ~/.ssh/<personal-key>
   ProxyJump glasslab-gateway
+  # Signed research links open at http://127.0.0.1:18080 while this session is
+  # open (the provisioner keeps the persistent forward; see below).
+  LocalForward 18080 127.0.0.1:18080
 
 Host glasslab-exo17
   HostName 192.168.1.17
@@ -54,6 +57,22 @@ Password retirement is staged. Existing passwords remain available until the
 contributor has demonstrated key-only login from every computer they actively
 use. An administrator then changes the account's committed
 `password_locked` setting and reapplies the identity playbook.
+
+## Inspecting Signed Research Links
+
+Research reports and artifacts are exported to Discord as signed links. The
+provisioner runs the port-forward persistently, so no contributor starts one by
+hand:
+
+- A systemd unit on the provisioner (`glasslab-orchestrator-forward.service`)
+  keeps `127.0.0.1:18080` forwarded to the research orchestrator service.
+- The `LocalForward 18080 127.0.0.1:18080` line in the `glasslab-provisioner`
+  block above maps that port to the same local port, so a signed link opens at
+  `http://127.0.0.1:18080/links/...` while your SSH session is open.
+
+The link host is `127.0.0.1`, so a link only resolves on a machine that holds an
+SSH session; access stays bounded by the SSH whitelist and the signed,
+expiring token rather than by network exposure.
 
 ## Development Checkouts
 
