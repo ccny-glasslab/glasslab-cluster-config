@@ -74,6 +74,47 @@ The link host is `127.0.0.1`, so a link only resolves on a machine that holds an
 SSH session; access stays bounded by the SSH whitelist and the signed,
 expiring token rather than by network exposure.
 
+## Inspecting The Corpus And Reports (Read-Only UI)
+
+The orchestrator serves a read-only, no-JavaScript page at `GET /ui/`. It shows
+the runs, corpus sources, and context packets, a digest-verified text preview
+of a linkable artifact, and a citation inspector. The route sits behind the
+same operator token as the rest of the API, so a browser can't open it
+directly. A small local proxy injects the token for you.
+
+Prerequisites:
+
+- The `glasslab-provisioner` block above already forwards
+  `127.0.0.1:18080` while your SSH session is open.
+- Your operator token is exported in the environment as
+  `GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN`. Read it from the deployment
+  secret. Never paste the value into a file, shell history, issue, or chat.
+
+Start the proxy on the workstation. It binds `127.0.0.1:19090` and forwards to
+`127.0.0.1:18080`:
+
+```bash
+python3 scripts/glasslab-orchestrator-ui-proxy.py
+```
+
+Then open:
+
+```text
+http://127.0.0.1:19090/ui/
+```
+
+The proxy reads the token from the environment and adds
+`X-Glasslab-Operator-Token` to every upstream request. The token stays in the
+proxy process and never enters the browser: it is not accepted as a
+command-line argument, not written to disk, and not logged. The proxy is
+loopback-only and read-only by default. It refuses to start when the token
+variable is unset or empty, only forwards `GET` and `HEAD` (any other method
+gets `405`), and rejects a request whose `Host` header doesn't name the
+loopback listener (a DNS-rebinding name gets `421`).
+
+See the [Corpus UI runbook](glasslab-v2/runbooks/orchestrator-corpus-ui.md) for
+the proxy flags, the pane layout, the citation badges, and troubleshooting.
+
 ## Development Checkouts
 
 Contributors must develop in separate clones under their own home directories.

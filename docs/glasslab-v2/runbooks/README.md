@@ -14,4 +14,5 @@ Key runbooks:
 - `provision-minio-scoped-users.md`
 - `purge-temporary-provisioning-debug.md`
 - `knowledge-corpus.md`
+- `orchestrator-corpus-ui.md`
 - `drive-a-real-run.md`
