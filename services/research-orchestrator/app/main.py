@@ -77,7 +77,7 @@ from .links import (
 )
 from .opencode_runtime import AgentRuntime, OpenCodeProcessRuntime
 from .policy import ActionPolicy
-from .redaction import redact_payload
+from .redaction import redact_free_text, redact_payload
 from .research_store import ResearchStore
 from .schemas import (
     ActionRecord,
@@ -112,6 +112,7 @@ IngestedDatasetRecord,
 from .storage import ConcurrencyConflict, RecordNotFound, SqliteStore
 from .postgres_store import PostgresStore
 from .turn_inspection import DEFAULT_TURN_LIMIT, MAXIMUM_TURN_LIMIT, summarize_turns
+from .ui import register_ui_routes
 from .task_bundles import (
     TaskBundleError,
     TaskBundleManager,
@@ -476,18 +477,21 @@ def render_report_link_html(
 
 
 def render_context_packet_html(packet: ContextPacket, packet_id: str) -> str:
-    exact = (packet.exact_text_supplied or '').strip()
+    # Same F6 scrub as the JSON read surface, applied before escaping:
+    # ranked-source URIs (filesystem/upload paths) are dropped and
+    # credential-shaped source metadata redacted before the page is built.
+    redacted = redact_context_packet(packet)
+    exact = (redacted.exact_text_supplied or '').strip()
     sources = '\n'.join(
         '<tr>'
         f'<td>{index}</td>'
         f'<td><code>{html.escape(str(s.get("kind", "")))}</code></td>'
         f'<td>{html.escape(str(s.get("source_id", "")))}</td>'
-        f'<td><code>{html.escape(str(s.get("uri", "")))}</code></td>'
         f'<td>{html.escape(str(s.get("digest", "")))[:16]}</td>'
         f'<td>{s.get("score", 0):.3f}</td>'
         '</tr>'
-        for index, s in enumerate(packet.ranked_sources, start=1)
-    ) or '<tr><td colspan="6">no ranked sources</td></tr>'
+        for index, s in enumerate(redacted.ranked_sources, start=1)
+    ) or '<tr><td colspan="5">no ranked sources</td></tr>'
     return (
         '<html><head><title>Knowledge packet</title>'
         '<meta charset="utf-8">'
@@ -502,16 +506,16 @@ def render_context_packet_html(packet: ContextPacket, packet_id: str) -> str:
         'src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js">'
         '</script></head><body>'
         f'<h1>Knowledge packet <code>{html.escape(packet_id)}</code></h1>'
-        f'<p><strong>Query:</strong> {html.escape(packet.query)}</p>'
-        f'<p><strong>Agent:</strong> {packet.agent} · '
-        f'<strong>turn:</strong> {packet.turn_kind} '
-        f'#{packet.turn_number} · '
-        f'<strong>budget:</strong> {packet.token_budget} tokens</p>'
+        f'<p><strong>Query:</strong> {html.escape(redacted.query)}</p>'
+        f'<p><strong>Agent:</strong> {redacted.agent} · '
+        f'<strong>turn:</strong> {redacted.turn_kind} '
+        f'#{redacted.turn_number} · '
+        f'<strong>budget:</strong> {redacted.token_budget} tokens</p>'
         '<h2>Exact text supplied to the agent</h2>'
         f'<pre>{html.escape(exact)}</pre>'
         '<h2>Ranked sources</h2>'
         '<table><tr><th>#</th><th>kind</th><th>source_id</th>'
-        '<th>uri</th><th>digest</th><th>score</th></tr>'
+        '<th>digest</th><th>score</th></tr>'
         f'{sources}</table></body></html>'
     )
 
@@ -746,6 +750,47 @@ def redact_run(run: RunRecord) -> RunRecord:
     if run.seed_context is not None:
         update['seed_context'] = redact_payload(run.seed_context)
     return run.model_copy(update=update)
+
+
+def _redact_free_text_field(value: object) -> object:
+    return redact_free_text(value) if isinstance(value, str) else value
+
+
+def redact_context_packet(packet: ContextPacket) -> ContextPacket:
+    """Strip filesystem locators and credentials from a stored packet.
+
+    ``ranked_sources[].uri`` is dropped outright: it can be a filesystem path
+    or ``upload://`` reference that browser/read surfaces must not expose
+    (issue #592, F6). The remaining source metadata is redacted by field name
+    and value shape, and free-text fields pass through :func:`redact_free_text`
+    (concrete credential formats only, so ordinary prose survives).
+    ``exact_text_supplied`` keeps the block text the agent saw: blocks are
+    secret-scanned at ingestion time (KnowledgeManager SECRET_PATTERNS), so
+    preserving the retrieval content is the intended contract, not a leak.
+    """
+    sources: list[dict[str, Any]] = []
+    for source in packet.ranked_sources:
+        sources.append(
+            redact_payload(
+                {
+                    key: value
+                    for key, value in source.items()
+                    if key != 'uri'
+                }
+            )
+        )
+    exact_text = packet.exact_text_supplied
+    return packet.model_copy(
+        update={
+            'query': redact_free_text(packet.query),
+            'ranked_sources': sources,
+            'exact_text_supplied': (
+                redact_free_text(exact_text)
+                if exact_text is not None
+                else None
+            ),
+        }
+    )
 
 
 def sse_frame(event: EventRecord) -> str:
@@ -1344,15 +1389,26 @@ def create_app(
         binding = engine.store.get_conversation_binding(conversation_id)
         turns = [
             {
-                'question': turn.input_event.get('question'),
+                'question': _redact_free_text_field(
+                    turn.input_event.get('question')
+                ),
                 'answer': (
-                    turn.structured_output.research_answer.answer
+                    _redact_free_text_field(
+                        turn.structured_output.research_answer.answer
+                    )
                     if turn.structured_output
                     and turn.structured_output.research_answer
                     else None
                 ),
                 'citations': [
-                    citation.model_dump(mode='json')
+                    {
+                        # Structured citation fields are redacted by key and
+                        # value shape; source/excerpt are free text, so their
+                        # prose is restored with format-only redaction.
+                        **redact_payload(citation.model_dump(mode='json')),
+                        'source': redact_free_text(citation.source),
+                        'excerpt': redact_free_text(citation.excerpt),
+                    }
                     for citation in (
                         turn.structured_output.research_answer.citations
                         if turn.structured_output
@@ -1478,7 +1534,10 @@ def create_app(
         try:
             engine.store.get_run(run_id)
             return ContextPacketListResponse(
-                packets=engine.store.list_context_packets(run_id)
+                packets=[
+                    redact_context_packet(packet)
+                    for packet in engine.store.list_context_packets(run_id)
+                ]
             )
         except Exception as exc:
             raise map_error(exc) from exc
@@ -1492,7 +1551,9 @@ def create_app(
         _: None = Depends(require_operator),
     ) -> ContextPacket:
         try:
-            return engine.knowledge.get_context_packet(packet_id)
+            return redact_context_packet(
+                engine.knowledge.get_context_packet(packet_id)
+            )
         except Exception as exc:
             raise map_error(exc) from exc
 
@@ -1749,6 +1810,16 @@ def create_app(
                 'X-Accel-Buffering': 'no',
             },
         )
+
+    # Read-only corpus/reports page (issue #592): registered by its own module
+    # so the escape-first no-JS page contract and its CSP stay with the
+    # implementation; the route inherits this app's operator-token dependency.
+    register_ui_routes(
+        app,
+        engine=engine,
+        settings=settings,
+        require_operator=require_operator,
+    )
 
     return app
 

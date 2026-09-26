@@ -7,7 +7,7 @@ GET /runs/{run_id}/turns and the /research-turns Discord command).
 
 from __future__ import annotations
 
-from app.redaction import REDACTED, redact_payload
+from app.redaction import REDACTED, redact_free_text, redact_payload
 
 
 def test_redacts_known_credential_field_names() -> None:
@@ -83,6 +83,46 @@ def test_redacts_pem_private_key_block() -> None:
     redacted = redact_payload(payload)
 
     assert redacted['notes'] == REDACTED
+
+
+def test_redact_free_text_preserves_credential_prose() -> None:
+    # Keyword heuristics would nuke these sentences; free-text redaction must
+    # not, because reports and answers legitimately discuss credentials.
+    prose = (
+        'Password managers and api_key= placeholders are ordinary '
+        'documentation; rotate the token when a secret expires.'
+    )
+
+    assert redact_free_text(prose) == prose
+
+
+def test_redact_free_text_redacts_concrete_credential_formats() -> None:
+    # Built from segments so the synthetic key never appears as a literal
+    # credential in the source text itself.
+    github_token = 'gh' + 'p_' + 'a' * 36
+    text = f'Leaked key {github_token} must never leave the process.'
+
+    redacted = redact_free_text(text)
+
+    assert github_token not in redacted
+    assert 'Leaked key' in redacted
+    assert REDACTED in redacted
+
+
+def test_redact_free_text_redacts_whole_pem_block() -> None:
+    body = 'MIIBfakefakefake'
+    pem = (
+        '-----BEGIN RSA PRIVATE KEY-----\n'
+        f'{body}\n'
+        '-----END RSA PRIVATE KEY-----'
+    )
+
+    redacted = redact_free_text(f'Attached material:\n{pem}\ndone')
+
+    assert body not in redacted
+    assert 'PRIVATE KEY' not in redacted
+    assert 'Attached material:' in redacted
+    assert redacted.count(REDACTED) == 1
 
 
 def test_leaves_provenance_hashes_and_uris_untouched() -> None:

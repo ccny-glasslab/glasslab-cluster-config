@@ -20,7 +20,17 @@ from app.engine import ResearchOrchestrator
 from app.main import create_app
 from app.mock_runtime import ScriptedMockRuntime
 from app.policy import ActionPolicy
-from app.schemas import RunCreateRequest
+from app.redaction import REDACTED
+from app.schemas import (
+    AgentName,
+    AgentTurnResult,
+    Citation,
+    ContextPacket,
+    ResearchAnswer,
+    RunCreateRequest,
+    TurnKind,
+    TurnRecord,
+)
 from app.storage import SqliteStore
 from app.workspaces import WorkspaceManager
 from conftest import RUNNER_IMAGE, create_test_repo
@@ -409,6 +419,136 @@ def test_context_packet_html_page_renders_exact_text(tmp_path: Path) -> None:
         assert 'text/html' in response.headers['content-type']
         assert packet.exact_text_supplied[:60] in response.text
         assert 'Ranked sources' in response.text
+
+
+def _save_packet_with_private_source(engine, run_id: str) -> ContextPacket:
+    # Built from segments so the synthetic key never appears as a literal
+    # credential in the source text itself.
+    leaked = 'gh' + 'p_' + 'a' * 36
+    packet = ContextPacket(
+        run_id=run_id,
+        agent=AgentName.HONEYDEW,
+        turn_number=1,
+        turn_kind=TurnKind.RESEARCH_ANSWER,
+        query='what does the private corpus say',
+        index_version='v1',
+        ranked_sources=[
+            {
+                'source_id': 'src-private',
+                'kind': 'prose',
+                'uri': '/srv/private/runtime/session.log',
+                'digest': 'a' * 64,
+                'score': 0.5,
+                'api_key': 'not-a-real-key-value',
+                'notes': f'report mentions {leaked}',
+            }
+        ],
+        exact_text_supplied=(
+            'passage: ligand efficiency for the target is 0.31; '
+            'the word password appears only as biology prose.'
+        ),
+        token_budget=1024,
+    )
+    engine.store.save_context_packet(packet)
+    return packet
+
+
+def test_context_packet_reads_strip_uri_and_redact_metadata(
+    tmp_path: Path,
+) -> None:
+    _, settings, engine = _bundle(tmp_path)
+    app = create_app(settings, engine=engine, start_watcher=False)
+    run = engine.create_run(
+        RunCreateRequest(objective='exercise packet read redaction')
+    )
+    packet = _save_packet_with_private_source(engine, run.run_id)
+    leaked = 'gh' + 'p_' + 'a' * 36
+
+    with TestClient(app) as client:
+        detail = client.get(f'/context-packets/{packet.packet_id}')
+        listed = client.get(f'/runs/{run.run_id}/context-packets')
+        page = client.get(f'/knowledge/packets/{packet.packet_id}')
+
+    assert detail.status_code == 200
+    assert listed.status_code == 200
+    assert page.status_code == 200
+
+    for response in (detail, listed):
+        body = response.json()
+        packets = body['packets'] if 'packets' in body else [body]
+        served = next(
+            item for item in packets if item['packet_id'] == packet.packet_id
+        )
+        source = served['ranked_sources'][0]
+        assert 'uri' not in source, response.request.url
+        assert source['api_key'] == REDACTED
+        assert source['notes'] == REDACTED
+        assert source['source_id'] == 'src-private'
+
+    for response in (detail, listed, page):
+        assert '/srv/private/runtime/session.log' not in response.text
+        assert leaked not in response.text
+
+    # The browser page no longer renders a uri column at all.
+    assert '<th>uri</th>' not in page.text
+    assert '<th>digest</th>' in page.text
+
+    # The block text is the retrieval the agent saw: ordinary prose survives
+    # free-text redaction, including the word "password".
+    assert 'password appears only as biology prose' in page.text
+
+
+def test_chat_view_redacts_credentials_but_keeps_prose(tmp_path: Path) -> None:
+    _, settings, engine = _bundle(tmp_path)
+    app = create_app(settings, engine=engine, start_watcher=False)
+    leaked = 'gh' + 'p_' + 'a' * 36
+    run = engine.create_run(
+        RunCreateRequest(objective='exercise chat read redaction')
+    )
+    engine.store.save_turn(
+        TurnRecord(
+            run_id=run.run_id,
+            agent=AgentName.HONEYDEW,
+            input_event={
+                'question': f'does the password policy cover {leaked}'
+            },
+            structured_output=AgentTurnResult(
+                kind=TurnKind.RESEARCH_ANSWER,
+                summary='Answered the research question from the corpus.',
+                research_answer=ResearchAnswer(
+                    answer=(
+                        f'Rotate {leaked}; password policy is documented.'
+                    ),
+                    citations=[
+                        Citation(
+                            knowledge_uri='knowledge://context:abc',
+                            source=f'key note {leaked}',
+                            excerpt='password hygiene guidance',
+                        )
+                    ],
+                ),
+                done=True,
+            ),
+            status='completed',
+        )
+    )
+
+    with TestClient(app) as client:
+        view = client.get(f'/chat/{run.run_id}')
+
+    assert view.status_code == 200
+    turn = next(
+        item for item in view.json()['turns'] if item['question'] is not None
+    )
+    assert 'password policy' in turn['question']
+    assert leaked not in turn['question']
+    assert 'password policy is documented' in turn['answer']
+    assert leaked not in turn['answer']
+    citation = turn['citations'][0]
+    assert citation['knowledge_uri'] == 'knowledge://context:abc'
+    assert citation['source'].startswith('key note')
+    assert leaked not in citation['source']
+    assert citation['excerpt'] == 'password hygiene guidance'
 
 
 def _seed_chat(client, conversation_id: str) -> None:
