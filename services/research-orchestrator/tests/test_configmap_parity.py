@@ -299,6 +299,19 @@ OVERRIDES: dict[str, Override] = dict(
                 allowed=frozenset({'prompt'}),
             ),
         ),
+        # --- live operator link front door ---
+        (
+            _P + 'PUBLIC_BASE_URL',
+            Override(
+                'eq',
+                'Live link front door: the code default is None so local/test '
+                'never emit links; the deployment points at the persistent SSH '
+                'port-forward convention on 127.0.0.1:18080 (see '
+                'docs/contributor-access.md). Pinned so a misdirected link '
+                'host fails review.',
+                expected='http://127.0.0.1:18080',
+            ),
+        ),
     ]
 )
 

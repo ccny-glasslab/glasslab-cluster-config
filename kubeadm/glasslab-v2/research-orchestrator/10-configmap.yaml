@@ -123,3 +123,9 @@ data:
   # Mystic Arts Masters. Authorization uses the immutable role ID.
   GLASSLAB_ORCHESTRATOR_DISCORD_ADMIN_ROLE_ID: "1529938777714200767"
   GLASSLAB_ORCHESTRATOR_DISCORD_ADMIN_USER_IDS: ""
+  # Human-inspectable artifact links. The front door is the SSH port-forward
+  # convention in docs/contributor-access.md: the provisioner keeps a
+  # persistent forward on 127.0.0.1:18080 and each authorized contributor maps
+  # that same port locally with LocalForward. The signed link token is the
+  # authorization; the signing secret lives in the orchestrator Secret.
+  GLASSLAB_ORCHESTRATOR_PUBLIC_BASE_URL: "http://127.0.0.1:18080"
