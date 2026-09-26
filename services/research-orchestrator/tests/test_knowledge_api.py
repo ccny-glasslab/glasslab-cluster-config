@@ -444,8 +444,19 @@ def _save_packet_with_private_source(engine, run_id: str) -> ContextPacket:
             }
         ],
         exact_text_supplied=(
+            '<knowledge-context source="src-private" kind="prose" '
+            'score="0.500" scope="approved" '
+            'uri="file:///srv/private/secret.log" '
+            f'digest="{"b" * 64}">\n'
             'passage: ligand efficiency for the target is 0.31; '
-            'the word password appears only as biology prose.'
+            'the word password appears only as biology prose.\n'
+            '</knowledge-context>\n\n'
+            "<knowledge-context source='src-second' kind='prose' "
+            "score='0.500' scope='approved' "
+            "uri='upload://single-quoted-private.txt' "
+            f"digest='{'c' * 64}'>\n"
+            'second body passage survives\n'
+            '</knowledge-context>'
         ),
         token_budget=1024,
     )
@@ -489,6 +500,19 @@ def test_context_packet_reads_strip_uri_and_redact_metadata(
         assert '/srv/private/runtime/session.log' not in response.text
         assert leaked not in response.text
 
+    # GAP A: the uri attribute inside the <knowledge-context> wrapper leaks the
+    # same filesystem/upload path unless it is stripped from exact_text_supplied
+    # too (double- and single-quoted attributes).
+    for response in (detail, listed, page):
+        assert 'file:///srv/private/secret.log' not in response.text
+        assert 'upload://single-quoted-private.txt' not in response.text
+        assert 'uri=' not in response.text
+
+    # The wrapper and its block body survive; only the uri attribute is gone.
+    packet_payload = detail.json()
+    assert '<knowledge-context' in packet_payload['exact_text_supplied']
+    assert 'source="src-private"' in packet_payload['exact_text_supplied']
+
     # The browser page no longer renders a uri column at all.
     assert '<th>uri</th>' not in page.text
     assert '<th>digest</th>' in page.text
@@ -496,6 +520,7 @@ def test_context_packet_reads_strip_uri_and_redact_metadata(
     # The block text is the retrieval the agent saw: ordinary prose survives
     # free-text redaction, including the word "password".
     assert 'password appears only as biology prose' in page.text
+    assert 'second body passage survives' in page.text
 
 
 def test_chat_view_redacts_credentials_but_keeps_prose(tmp_path: Path) -> None:

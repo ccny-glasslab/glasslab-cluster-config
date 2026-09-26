@@ -21,6 +21,7 @@ import html
 import json
 import logging
 from pathlib import Path, PurePosixPath
+import re
 import secrets
 from typing import Any, AsyncIterator, assert_never
 
@@ -756,17 +757,34 @@ def _redact_free_text_field(value: object) -> object:
     return redact_free_text(value) if isinstance(value, str) else value
 
 
+_KNOWLEDGE_CONTEXT_OPEN_TAG = re.compile(r'<knowledge-context\b[^>]*>')
+_CONTEXT_URI_ATTRIBUTE = re.compile(r'\s+uri=(?:"[^"]*"|\'[^\']*\')')
+
+
+def _strip_context_uris(exact_text: str) -> str:
+    # exact_text_supplied embeds each ranked source's uri attribute inside its
+    # <knowledge-context> opening tag, so dropping ranked_sources[].uri alone
+    # still leaks a filesystem/upload path through the block wrapper. Only
+    # opening tags are rewritten; block body text is never touched.
+    def strip_tag(tag: re.Match[str]) -> str:
+        return _CONTEXT_URI_ATTRIBUTE.sub('', tag.group(0))
+
+    return _KNOWLEDGE_CONTEXT_OPEN_TAG.sub(strip_tag, exact_text)
+
+
 def redact_context_packet(packet: ContextPacket) -> ContextPacket:
     """Strip filesystem locators and credentials from a stored packet.
 
     ``ranked_sources[].uri`` is dropped outright: it can be a filesystem path
     or ``upload://`` reference that browser/read surfaces must not expose
-    (issue #592, F6). The remaining source metadata is redacted by field name
-    and value shape, and free-text fields pass through :func:`redact_free_text`
-    (concrete credential formats only, so ordinary prose survives).
-    ``exact_text_supplied`` keeps the block text the agent saw: blocks are
-    secret-scanned at ingestion time (KnowledgeManager SECRET_PATTERNS), so
-    preserving the retrieval content is the intended contract, not a leak.
+    (issue #592, F6). The same uri attribute is also stripped from the
+    ``<knowledge-context>`` wrapper inside ``exact_text_supplied``. The
+    remaining source metadata is redacted by field name and value shape, and
+    free-text fields pass through :func:`redact_free_text` (concrete credential
+    formats only, so ordinary prose survives). ``exact_text_supplied`` keeps
+    the block text the agent saw: blocks are secret-scanned at ingestion time
+    (KnowledgeManager SECRET_PATTERNS), so preserving the retrieval content is
+    the intended contract, not a leak.
     """
     sources: list[dict[str, Any]] = []
     for source in packet.ranked_sources:
@@ -780,15 +798,13 @@ def redact_context_packet(packet: ContextPacket) -> ContextPacket:
             )
         )
     exact_text = packet.exact_text_supplied
+    if exact_text is not None:
+        exact_text = redact_free_text(_strip_context_uris(exact_text))
     return packet.model_copy(
         update={
             'query': redact_free_text(packet.query),
             'ranked_sources': sources,
-            'exact_text_supplied': (
-                redact_free_text(exact_text)
-                if exact_text is not None
-                else None
-            ),
+            'exact_text_supplied': exact_text,
         }
     )
 

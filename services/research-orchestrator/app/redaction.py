@@ -95,11 +95,12 @@ _KNOWN_SECRET_FORMATS = (
 
 # A whole PEM private-key block. The header-only pattern above is enough to
 # condemn a payload string outright, but free-text redaction replaces just the
-# matched span, so the base64 body must be captured too.
+# matched span, so the base64 body must be captured too. A truncated key with
+# no END marker is redacted to end-of-string rather than left readable.
 _PEM_PRIVATE_KEY_BLOCK = re.compile(
     r'-----BEGIN [A-Z ]*PRIVATE KEY-----'
     r'.*?'
-    r'-----END [A-Z ]*PRIVATE KEY-----',
+    r'(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)',
     re.DOTALL,
 )
 

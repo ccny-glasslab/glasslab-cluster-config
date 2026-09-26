@@ -125,6 +125,19 @@ def test_redact_free_text_redacts_whole_pem_block() -> None:
     assert redacted.count(REDACTED) == 1
 
 
+def test_redact_free_text_redacts_truncated_pem_block() -> None:
+    # A BEGIN header with no END marker must still fail closed through
+    # end-of-string rather than leaving the key body readable.
+    body = 'MIIBtruncatedfakebody'
+    truncated = f'-----BEGIN RSA PRIVATE KEY-----\n{body}\n'
+
+    redacted = redact_free_text(f'prefix {truncated}')
+
+    assert body not in redacted
+    assert '-----BEGIN' not in redacted
+    assert 'PRIVATE KEY' not in redacted
+
+
 def test_leaves_provenance_hashes_and_uris_untouched() -> None:
     # sha256 digests and evidence URIs are exactly the structured input/output
     # content the turn-inspection endpoint exists to expose; they must never

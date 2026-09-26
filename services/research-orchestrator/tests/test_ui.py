@@ -284,6 +284,50 @@ def test_ui_never_renders_uris_paths_or_tokens(orchestrator_bundle) -> None:
     assert OPERATOR_TOKEN not in response.text
 
 
+def test_ui_redacts_credential_formats_in_packet_free_text(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    # Assembled at runtime so the synthetic key is never a literal credential
+    # in the test source itself.
+    leaked = 'gh' + 'p_' + 'a' * 36
+    run = engine.create_run(RunCreateRequest(objective='redact ui free text'))
+    packet = ContextPacket(
+        run_id=run.run_id,
+        agent=AgentName.HONEYDEW,
+        turn_number=1,
+        turn_kind=TurnKind.RESEARCH_ANSWER,
+        query=f'password policy question mentioning {leaked}',
+        index_version='v1',
+        ranked_sources=[
+            {'source_id': 'src-1', 'digest': 'a' * 64, 'score': 0.5}
+        ],
+        exact_text_supplied=_packet_text(
+            f'password hygiene note with {leaked} inside'
+        ),
+        token_budget=2048,
+    )
+    engine.store.save_context_packet(packet)
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={
+                'run': run.run_id,
+                'packet': packet.packet_id,
+                'excerpt': f'password hygiene note with {leaked} inside',
+            },
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert leaked not in response.text
+    assert '[REDACTED]' in response.text
+    # Ordinary prose that merely discusses credentials survives unchanged.
+    assert 'password policy question mentioning' in response.text
+    assert 'password hygiene note with' in response.text
+
+
 @pytest.mark.parametrize(
     'ref',
     [

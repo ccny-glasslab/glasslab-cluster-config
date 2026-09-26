@@ -152,6 +152,22 @@ def test_match_block_returns_none_when_block_count_is_zero() -> None:
     assert match_block([], _EXACT_BLOCK, source_index=1) is None
 
 
+def test_match_block_prefers_full_verbatim_among_prefix_collisions() -> None:
+    common = 'Shared prefix passage alpha beta gamma delta epsilon'
+    block_a = f'{common} zeta tail of the first source'
+    block_b = f'{common} eta tail of the second source'
+    blocks = parse_context_blocks(_packet_text(block_a, block_b))
+
+    # Both blocks share the excerpt's first 36 normalized characters, so the
+    # first-prefix-match rule selected block 0; only block 1 contains the full
+    # excerpt verbatim.
+    match = match_block(blocks, block_b, source_index=1)
+
+    assert match is not None
+    assert match.block_index == 1
+    assert block_b in match.block_text
+
+
 def test_match_block_returns_none_for_out_of_range_source_index() -> None:
     blocks = parse_context_blocks(_packet_text(_EXACT_BLOCK))
 

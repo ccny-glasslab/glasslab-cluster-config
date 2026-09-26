@@ -47,6 +47,7 @@ from .links import (
     run_relative_ref,
     validate_ref,
 )
+from .redaction import redact_free_text
 from .storage import RecordNotFound
 
 if TYPE_CHECKING:
@@ -178,7 +179,7 @@ def _render_sources_pane(
         '<li>'
         f'{link} <span class="muted">{_escape(packet.agent)} '
         f'turn {packet.turn_number} ({_escape(packet.turn_kind)})</span> '
-        f'{_escape(packet.query)}</li>'
+        f'{_escape(redact_free_text(packet.query))}</li>'
         for link, packet in zip(packet_links, packets, strict=True)
     ) or (
         '<li class="muted">select a run to list its context packets</li>'
@@ -305,13 +306,14 @@ def _render_citation(packet: ContextPacket, excerpt: str | None) -> str:
             f'<code>{_escape(_digest_prefix(source.get("digest")))}</code> · '
             f'<strong>score:</strong> '
             f'{_escape(_format_score(source.get("score")))}</p>'
-            f'<pre>{_escape(match.block_text)}</pre>'
+            f'<pre>{_escape(redact_free_text(match.block_text))}</pre>'
         )
     return (
         '<h3>Citation</h3>'
         f'<p><span class="badge badge-{classification}">'
         f'{_escape(_CITATION_BADGES[classification])}</span></p>'
-        f'<p><strong>Excerpt:</strong> <code>{_escape(excerpt)}</code></p>'
+        f'<p><strong>Excerpt:</strong> '
+        f'<code>{_escape(redact_free_text(excerpt))}</code></p>'
         f'{detail}'
     )
 
@@ -345,7 +347,8 @@ def _render_evidence_pane(
         f'<code>{_escape(packet.packet_id)}</code> · '
         f'{_escape(packet.agent)} · turn {packet.turn_number} '
         f'({_escape(packet.turn_kind)})</p>'
-        f'<p><strong>Query:</strong> {_escape(packet.query)}</p>'
+        f'<p><strong>Query:</strong> {_escape(redact_free_text(packet.query))}'
+        '</p>'
         '<h3>Ranked sources</h3>'
         '<table><tr><th>#</th><th>source_id</th><th>digest</th>'
         f'<th>score</th></tr>{ranked_rows}</table>'

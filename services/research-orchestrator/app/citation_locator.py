@@ -77,15 +77,30 @@ def _excerpt_prefix(excerpt: str) -> str:
     return normalize_alnum(excerpt)[:_EXCERPT_PREFIX_CHARS]
 
 
-def _prefix_match_position(
+def _prefix_match_positions(
     blocks: Sequence[ContextBlock], prefix: str
-) -> int | None:
+) -> list[int]:
     if not prefix:
-        return None
-    for position, block in enumerate(blocks):
-        if prefix in normalize_alnum(block.text):
+        return []
+    return [
+        position
+        for position, block in enumerate(blocks)
+        if prefix in normalize_alnum(block.text)
+    ]
+
+
+def _prefer_verbatim(
+    blocks: Sequence[ContextBlock],
+    positions: Sequence[int],
+    excerpt: str,
+) -> int:
+    # A 36-character normalized prefix can collide across blocks. Prefer a
+    # block where the full excerpt verifies verbatim; otherwise keep the old
+    # first-prefix-match behavior.
+    for position in positions:
+        if verify_excerpt(excerpt, blocks[position].text):
             return position
-    return None
+    return positions[0]
 
 
 def match_block(
@@ -95,16 +110,20 @@ def match_block(
 ) -> MatchResult | None:
     """Locate the block a citation excerpt came from.
 
-    Tries the normalized prefix of the excerpt first; if that finds nothing and
-    ``source_index`` (1-based) is within range, falls back to that rank. Returns
-    ``None`` when neither resolves.
+    Tries the normalized prefix of the excerpt first. When several blocks share
+    that prefix, the block where the full excerpt verifies verbatim wins over
+    the first prefix match. If the prefix finds nothing and ``source_index``
+    (1-based) is within range, falls back to that rank. Returns ``None`` when
+    neither resolves.
     """
     if not blocks:
         return None
-    matched = _prefix_match_position(blocks, _excerpt_prefix(excerpt))
-    if matched is None and source_index is not None:
-        if 1 <= source_index <= len(blocks):
-            matched = source_index - 1
+    matched: int | None = None
+    prefix_positions = _prefix_match_positions(blocks, _excerpt_prefix(excerpt))
+    if prefix_positions:
+        matched = _prefer_verbatim(blocks, prefix_positions, excerpt)
+    elif source_index is not None and 1 <= source_index <= len(blocks):
+        matched = source_index - 1
     if matched is None:
         return None
     return MatchResult(block_index=matched, block_text=blocks[matched].text)
