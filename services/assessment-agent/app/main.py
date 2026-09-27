@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import os
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
+from .internal_auth import require_internal_token
 from .models import (
     AssessmentDraft,
     AssessmentRequest,
@@ -122,7 +123,7 @@ def healthz() -> HealthResponse:
     return HealthResponse(status='ok', model_backend=MODEL_BACKEND.model_dump())
 
 
-@app.post('/assess-interpretation', response_model=AssessmentResponse)
+@app.post('/assess-interpretation', response_model=AssessmentResponse, dependencies=[Depends(require_internal_token)])
 def assess_interpretation(request: AssessmentRequest) -> AssessmentResponse:
     return AssessmentResponse(
         request_id=request.request_id,

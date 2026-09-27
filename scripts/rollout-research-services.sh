@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOCAL_SECRETS_DIR="${GLASSLAB_V2_LOCAL_SECRETS_DIR:-$ROOT_DIR/kubeadm/glasslab-v2/secrets}"
 NAMESPACE="${GLASSLAB_V2_NAMESPACE:-glasslab-v2}"
 KUBECTL="${KUBECTL:-kubectl}"
 SERVICE="all"
@@ -25,7 +26,8 @@ Roll out the authenticated workflow-api bundle and research-orchestrator images.
 Images are selected by immutable Git commit tag; this script does not build or push.
 
 Options:
-  --service <name>  all, workflow-api, research-orchestrator, or rabbitmq.
+  --service <name>  all, workflow-api, research-orchestrator, schedule-worker,
+                    or rabbitmq.
                     workflow-api includes the authenticated caller set.
                     rabbitmq rolls out only the task-fabric broker. Default: all
   --tag <tag>       GHCR image tag. Default: full SHA of the checked-out commit
@@ -41,6 +43,9 @@ Environment:
   IMAGE_PROBE          Command used to probe GHCR manifests (default: crane)
   IMAGE_POLL_ATTEMPTS  Max preflight probe attempts (default: 30)
   IMAGE_POLL_INTERVAL  Seconds between probe attempts (default: 10)
+  GLASSLAB_V2_LOCAL_SECRETS_DIR
+                       Directory scanned for *.local.yaml permission preflight
+                       (default: <repo>/kubeadm/glasslab-v2/secrets)
 USAGE
 }
 
@@ -110,13 +115,22 @@ wait_for_image() {
 
 service_images() {
   case "$SERVICE" in
-    all|workflow-api)
+    all)
+      printf '%s\n' \
+        "ghcr.io/ccny-glasslab/glasslab-research-orchestrator:${IMAGE_TAG}" \
+        "ghcr.io/ccny-glasslab/glasslab-workflow-api:${IMAGE_TAG}" \
+        "ghcr.io/ccny-glasslab/glasslab-schedule-worker:${IMAGE_TAG}"
+      ;;
+    workflow-api)
       printf '%s\n' \
         "ghcr.io/ccny-glasslab/glasslab-research-orchestrator:${IMAGE_TAG}" \
         "ghcr.io/ccny-glasslab/glasslab-workflow-api:${IMAGE_TAG}"
       ;;
     research-orchestrator)
       printf '%s\n' "ghcr.io/ccny-glasslab/glasslab-research-orchestrator:${IMAGE_TAG}"
+      ;;
+    schedule-worker)
+      printf '%s\n' "ghcr.io/ccny-glasslab/glasslab-schedule-worker:${IMAGE_TAG}"
       ;;
   esac
 }
@@ -215,6 +229,9 @@ rollout_authenticated_workflow_bundle() {
   # New callers remain compatible with the old unauthenticated API. Roll them
   # first so the server is never switched to fail-closed auth ahead of clients.
   rollout_research_orchestrator
+  # The schedule-worker CronJob can only reach a running worker (issue #602),
+  # so the caller set includes it; it rolls before the workflow-api server.
+  rollout_schedule_worker
   rollout_workflow_api
 }
 
@@ -226,6 +243,7 @@ rollout_research_orchestrator() {
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/research-orchestrator/10-configmap.yaml"
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/research-orchestrator/30-service.yaml"
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/research-orchestrator/50-ingress-network-policy.yaml"
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/research-orchestrator/45-egress-network-policy.yaml"
 
   printf '[rollout-research-services] deploying research-orchestrator image %s\n' "$image"
   "$KUBECTL" set image \
@@ -300,7 +318,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$SERVICE" in
-  all|workflow-api|research-orchestrator|rabbitmq) ;;
+  all|workflow-api|research-orchestrator|schedule-worker|rabbitmq) ;;
   *)
     printf '[rollout-research-services] invalid service: %s\n' "$SERVICE" >&2
     exit 1
@@ -309,6 +327,11 @@ esac
 
 need_cmd git
 need_cmd "$KUBECTL"
+
+# Fail before touching the checkout or the cluster: the same *.local.yaml
+# manifests this rollout assumes must not be group/other-accessible.
+printf '[rollout-research-services] checking local Secret manifest permissions\n'
+"$ROOT_DIR/scripts/check-secret-permissions.sh" "$LOCAL_SECRETS_DIR"
 
 cd "$ROOT_DIR"
 
@@ -356,6 +379,10 @@ case "$SERVICE" in
   research-orchestrator)
     require_object secret glasslab-workflow-api-research-orchestrator
     rollout_research_orchestrator
+    ;;
+  schedule-worker)
+    require_object secret glasslab-workflow-api-schedule-worker
+    rollout_schedule_worker
     ;;
   rabbitmq)
     rollout_rabbitmq

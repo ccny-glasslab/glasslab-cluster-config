@@ -11,8 +11,9 @@ import json
 import os
 from urllib import request as urllib_request
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
+from .internal_auth import require_internal_token
 from .models import HealthResponse, RunOnceResponse, ScheduledExecutionPayload, WorkerConfigMetadata
 
 WORKFLOW_API_URL = os.environ.get(
@@ -79,7 +80,7 @@ def healthz() -> HealthResponse:
     return HealthResponse(status='ok', worker_config=worker_config())
 
 
-@app.post('/run-once', response_model=RunOnceResponse)
+@app.post('/run-once', response_model=RunOnceResponse, dependencies=[Depends(require_internal_token)])
 def run_once() -> RunOnceResponse:
     digest_result = run_due_digest_cycle()
     # Digest cycle runs first so execution ordering is stable; rerun

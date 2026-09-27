@@ -11,6 +11,7 @@ import types
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +44,19 @@ main_module = load_package_module(f'{PACKAGE_NAME}.main', APP_ROOT / 'main.py')
 app = main_module.app
 build_assessment_draft = main_module.build_assessment_draft
 AssessmentRequest = models_module.AssessmentRequest
+
+INTERNAL_TOKEN_HEADER = 'X-Glasslab-Internal-Token'
+INTERNAL_TOKEN_ENV = 'GLASSLAB_AGENT_INTERNAL_TOKEN'
+INTERNAL_TOKEN = 'test-internal-token'
+
+
+def internal_auth_headers() -> dict[str, str]:
+    return {INTERNAL_TOKEN_HEADER: INTERNAL_TOKEN}
+
+
+@pytest.fixture(autouse=True)
+def configure_internal_token(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
 
 
 def build_request() -> AssessmentRequest:
@@ -92,7 +106,11 @@ def test_build_assessment_draft_prefers_ready_workflow() -> None:
 
 def test_assess_interpretation_endpoint() -> None:
     client = TestClient(app)
-    response = client.post('/assess-interpretation', json=build_request().model_dump())
+    response = client.post(
+        '/assess-interpretation',
+        json=build_request().model_dump(),
+        headers=internal_auth_headers(),
+    )
     assert response.status_code == 200
     payload = response.json()
     assert payload['request_id'] == 'assessment-1'
@@ -102,3 +120,35 @@ def test_assess_interpretation_endpoint() -> None:
     assert payload['warnings'] == [
         'current implementation is deterministic scaffold logic; live model integration is not enabled yet',
     ]
+
+
+def test_assess_interpretation_rejects_missing_internal_token() -> None:
+    client = TestClient(app)
+    response = client.post('/assess-interpretation', json=build_request().model_dump())
+    assert response.status_code == 401
+
+
+def test_assess_interpretation_rejects_wrong_internal_token() -> None:
+    client = TestClient(app)
+    response = client.post(
+        '/assess-interpretation',
+        json=build_request().model_dump(),
+        headers={INTERNAL_TOKEN_HEADER: 'wrong-token'},
+    )
+    assert response.status_code == 401
+
+
+def test_assess_interpretation_fails_closed_when_token_unconfigured(monkeypatch) -> None:
+    monkeypatch.delenv(INTERNAL_TOKEN_ENV)
+    client = TestClient(app)
+    response = client.post(
+        '/assess-interpretation',
+        json=build_request().model_dump(),
+        headers=internal_auth_headers(),
+    )
+    assert response.status_code == 503
+
+
+def test_healthz_stays_anonymous() -> None:
+    client = TestClient(app)
+    assert client.get('/healthz').status_code == 200

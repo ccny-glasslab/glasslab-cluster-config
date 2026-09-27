@@ -17,7 +17,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts' / 'corpus
 
 from fetch_corpus import main as fetch_main  # noqa: E402
 
+from app.corpus_rag import CorpusManifestEntry  # noqa: E402
 from app.storage import SqliteStore  # noqa: E402
+
+from pydantic import ValidationError  # noqa: E402
 
 
 def _write_pdf(path: Path, marker: str) -> str:
@@ -60,6 +63,36 @@ def local_manifest(tmp_path: Path) -> Path:
     manifest = tmp_path / 'manifest.jsonl'
     manifest.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
     return manifest
+
+
+def test_manifest_id_is_rejected_when_it_can_shape_a_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # issue #603: fetch_corpus builds dest / f'{entry.id}.pdf', so a manifest id
+    # with a path separator or '..' component must fail validation at load.
+    for bad_id in ('../x', 'a/b', '..', '..evil/../x'):
+        with pytest.raises(ValidationError):
+            CorpusManifestEntry.model_validate(
+                {'id': bad_id, 'title': 'Evil', 'url': 'https://example.invalid/x.pdf'}
+            )
+
+    manifest = tmp_path / 'evil.jsonl'
+    manifest.write_text(
+        json.dumps(
+            {'id': '../x', 'title': 'Evil', 'url': 'https://example.invalid/x.pdf'}
+        )
+        + '\n'
+    )
+    with pytest.raises(ValidationError):
+        fetch_main(['--manifest', str(manifest), '--dest', str(tmp_path / 'out')])
+
+
+def test_manifest_id_accepts_safe_path_components() -> None:
+    for good_id in ('islr2', 'esl', 'gap-statistic', 'senbabaoglu_consensus.v2'):
+        entry = CorpusManifestEntry.model_validate(
+            {'id': good_id, 'title': 'ok', 'url': 'https://example.invalid/x.pdf'}
+        )
+        assert entry.id == good_id
 
 
 def test_fetch_downloads_verifies_and_writes_sidecars(

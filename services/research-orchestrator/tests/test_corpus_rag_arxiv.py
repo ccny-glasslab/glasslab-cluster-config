@@ -20,6 +20,7 @@ from app.corpus_rag.arxiv import (
     ArxivEntry,
     ArxivQuery,
     PdfTooLargeError,
+    PdfUrlNotAllowedError,
     download_pdf,
     fetch_entries,
     is_oversized,
@@ -39,7 +40,7 @@ _ATOM_FEED = """<?xml version="1.0" encoding="UTF-8"?>
     <author><name>Ada Author</name></author>
     <author><name>Ben Researcher</name></author>
     <link rel="related" type="application/pdf"
-          href="http://arxiv.org/pdf/2401.00001v1"/>
+          href="https://arxiv.org/pdf/2401.00001v1"/>
     <arxiv:primary_category term="cs.LG"/>
   </entry>
   <entry>
@@ -49,7 +50,7 @@ _ATOM_FEED = """<?xml version="1.0" encoding="UTF-8"?>
     <title>Stability of Stochastic Gradient Descent</title>
     <author><name>Casey Chen</name></author>
     <link rel="related" type="application/pdf"
-          href="http://arxiv.org/pdf/2401.00002v2"/>
+          href="https://arxiv.org/pdf/2401.00002v2"/>
     <arxiv:primary_category term="stat.ML"/>
   </entry>
 </feed>
@@ -121,7 +122,7 @@ def test_fetch_entries_parses_atom_feed_deterministically() -> None:
     assert first.title == 'Resampling Methods for Evaluation'
     assert first.authors == ('Ada Author', 'Ben Researcher')
     assert first.published == _dt.date(2024, 1, 1)
-    assert first.pdf_url == 'http://arxiv.org/pdf/2401.00001v1'
+    assert first.pdf_url == 'https://arxiv.org/pdf/2401.00001v1'
     second = entries[1]
     assert second.authors == ('Casey Chen',)
     assert second.published == _dt.date(2024, 1, 2)
@@ -162,7 +163,7 @@ def test_oversized_entry_skipped_before_download() -> None:
         title='Huge Paper',
         authors=(),
         published=_dt.date(2024, 1, 3),
-        pdf_url='http://arxiv.org/pdf/2401.00003v1',
+        pdf_url='https://arxiv.org/pdf/2401.00003v1',
         pdf_bytes=MAX_PDF_BYTES + 1,
     )
     assert is_oversized(entry, MAX_PDF_BYTES)
@@ -175,12 +176,12 @@ def test_download_rejects_declared_content_length_over_cap() -> None:
         title='Declared Huge',
         authors=(),
         published=_dt.date(2024, 1, 4),
-        pdf_url='http://arxiv.org/pdf/2401.00004v1',
+        pdf_url='https://arxiv.org/pdf/2401.00004v1',
     )
     response = _FakeResponse(
         b'%PDF-1.4\n%%EOF\n', headers={'Content-Length': str(MAX_PDF_BYTES + 1)}
     )
-    stub = _stub_urlopen({'http://arxiv.org/pdf/': response})
+    stub = _stub_urlopen({'https://arxiv.org/pdf/': response})
 
     with pytest.raises(PdfTooLargeError):
         download_pdf(entry, max_pdf_bytes=MAX_PDF_BYTES, urlopen=stub)
@@ -193,24 +194,73 @@ def test_download_rejects_streamed_body_over_cap() -> None:
         title='Streamed Huge',
         authors=(),
         published=_dt.date(2024, 1, 5),
-        pdf_url='http://arxiv.org/pdf/2401.00005v1',
+        pdf_url='https://arxiv.org/pdf/2401.00005v1',
     )
     stub = _stub_urlopen(
-        {'http://arxiv.org/pdf/': _FakeResponse(b'%PDF-' + b'x' * (MAX_PDF_BYTES + 1))}
+        {'https://arxiv.org/pdf/': _FakeResponse(b'%PDF-' + b'x' * (MAX_PDF_BYTES + 1))}
     )
 
     with pytest.raises(PdfTooLargeError):
         download_pdf(entry, max_pdf_bytes=MAX_PDF_BYTES, urlopen=stub)
 
 
-# --------------- (d) end-to-end pipeline composition --------------- #
+# ------------------------- (d) PDF URL allowlist ------------------------- #
+
+
+def _pdf_entry(pdf_url: str) -> ArxivEntry:
+    return ArxivEntry(
+        arxiv_id='http://arxiv.org/abs/2401.00006v1',
+        title='URL boundary paper',
+        authors=(),
+        published=_dt.date(2024, 1, 6),
+        pdf_url=pdf_url,
+    )
+
+
+def test_download_accepts_only_arxiv_https_urls() -> None:
+    accepted = (
+        'https://arxiv.org/pdf/2401.00006v1',
+        'https://www.arxiv.org/pdf/2401.00006v1',
+        'https://export.arxiv.org/pdf/2401.00006v1',
+        'https://arxiv.org:443/pdf/2401.00006v1',
+    )
+    for url in accepted:
+        payload, digest = download_pdf(
+            _pdf_entry(url),
+            urlopen=_stub_urlopen({url: _FakeResponse(b'%PDF-1.4\n%%EOF\n')}),
+        )
+        assert payload.startswith(b'%PDF')
+        assert digest == hashlib.sha256(payload).hexdigest()
+
+
+def test_download_rejects_feed_supplied_urls_outside_the_allowlist() -> None:
+    # issue #603: the feed-supplied pdf_url is fetched with no scheme/host/port
+    # allowlist, so a poisoned or compromised feed can point the downloader at
+    # arbitrary endpoints (e.g. the cloud metadata address). The empty route
+    # stub raises AssertionError if validation lets a request through.
+    blocked = (
+        'http://arxiv.org/pdf/2401.00006v1',
+        'http://169.254.169.254/latest/meta-data/',
+        'https://169.254.169.254/latest/meta-data/',
+        'https://arxiv.org:8443/pdf/2401.00006v1',
+        'https://evil.example/pdf/2401.00006v1',
+        'https://arxiv.org.evil.example/pdf/2401.00006v1',
+        'https://user@evil.example/pdf/2401.00006v1',
+        'not-a-url',
+    )
+    for url in blocked:
+        with pytest.raises(PdfUrlNotAllowedError):
+            download_pdf(_pdf_entry(url), urlopen=_stub_urlopen({}))
+
+
+# --------------- (e) end-to-end pipeline composition --------------- #
 
 
 def test_fetched_pdf_flows_through_ingest_document(store: SqliteStore) -> None:
     pdf = _make_pdf()
     routes = {
         'https://export.arxiv.org/api/query': _FakeResponse(_ATOM_FEED.encode('utf-8')),
-        'http://arxiv.org/pdf/2401.00001v1': _FakeResponse(pdf),
+        'https://arxiv.org/pdf/2401.00001v1': _FakeResponse(pdf),
     }
     stub = _stub_urlopen(routes)
     query = ArxivQuery(

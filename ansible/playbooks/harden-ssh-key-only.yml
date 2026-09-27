@@ -1,8 +1,18 @@
 ---
-- name: Enforce key-only SSH access on cluster nodes
-  hosts: "{{ ssh_hardening_target_group | default('k8s_nodes') }}"
+- name: Enforce key-only SSH access on every managed SSH host
+  hosts: "{{ ssh_hardening_target_group | default('ssh_hardening_hosts') }}"
   gather_facts: true
   become: true
+  vars_files:
+    - ../group_vars/identity_hosts.yml
+  vars:
+    glasslab_ssh_identity_scope: "{{ identity_scope | default('') }}"
+    glasslab_ssh_allowed_users: >-
+      {{ (glasslab_identity_users | default([]))
+         | selectattr('state', 'equalto', 'present')
+         | selectattr('targets', 'contains', glasslab_ssh_identity_scope)
+         | map(attribute='username') | list }}
+    glasslab_ssh_key_only_dropin: /etc/ssh/sshd_config.d/00-key-only-auth.conf
   tasks:
     - name: Remove obsolete late-order SSH overrides
       ansible.builtin.file:
@@ -14,18 +24,77 @@
 
     - name: Install early key-only SSH override
       ansible.builtin.copy:
-        dest: /etc/ssh/sshd_config.d/00-key-only-auth.conf
+        dest: "{{ glasslab_ssh_key_only_dropin }}"
         mode: '0644'
         backup: true
         content: |
           PasswordAuthentication no
           KbdInteractiveAuthentication no
           PubkeyAuthentication yes
+          PermitRootLogin no
           UsePAM yes
+
+    - name: Find pre-existing SSH drop-ins
+      ansible.builtin.find:
+        paths: /etc/ssh/sshd_config.d
+        patterns: '*.conf'
+        file_type: file
+        hidden: true
+      register: glasslab_ssh_dropins
+
+    - name: Neutralize password and root login in pre-existing SSH drop-ins
+      ansible.builtin.replace:
+        path: "{{ item.path }}"
+        regexp: '(?im)^[ \t]*(PasswordAuthentication|KbdInteractiveAuthentication|PermitRootLogin)[ \t]+(yes|prohibit-password|without-password)[ \t]*$'
+        replace: '# \g<0>'
+        backup: true
+      loop: "{{ glasslab_ssh_dropins.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      when: item.path != glasslab_ssh_key_only_dropin
+
+    - name: Publish the identity-ledger SSH allowlist
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/10-glasslab-allowusers.conf
+        content: "AllowUsers {{ glasslab_ssh_allowed_users | join(' ') }}\n"
+        owner: root
+        group: root
+        mode: '0644'
+        validate: /usr/sbin/sshd -t -f %s
+      when: glasslab_ssh_allowed_users | length > 0
+
+    - name: Install fail2ban
+      ansible.builtin.apt:
+        name: fail2ban
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_os_family == 'Debian'
+
+    - name: Enable and start fail2ban
+      ansible.builtin.systemd:
+        name: fail2ban
+        enabled: true
+        state: started
+      when: ansible_os_family == 'Debian'
 
     - name: Validate sshd configuration
       ansible.builtin.command: sshd -t
       changed_when: false
+
+    - name: Assert the connected operator account stays allowed before restart
+      ansible.builtin.assert:
+        that:
+          - ansible_user in glasslab_ssh_allowed_users
+        fail_msg: >-
+          Refusing to restart sshd: Ansible connects as {{ ansible_user }}, which
+          is not in the identity-ledger AllowUsers
+          ({{ glasslab_ssh_allowed_users | join(', ') }}). Add the account to
+          ansible/group_vars/identity_hosts.yml, or recover through the host
+          console/IPMI, before this host is locked out of SSH.
+      when:
+        - glasslab_ssh_allowed_users | length > 0
+        - ansible_connection | default('ssh') != 'local'
 
     - name: Restart ssh service
       ansible.builtin.systemd:
@@ -41,10 +110,23 @@
       register: sshd_effective
       changed_when: false
 
-    - name: Assert password auth is disabled
+    - name: Assert password authentication is disabled
       ansible.builtin.assert:
         that:
           - "'passwordauthentication no' in sshd_effective.stdout"
           - "'kbdinteractiveauthentication no' in sshd_effective.stdout"
           - "'pubkeyauthentication yes' in sshd_effective.stdout"
+          - "'permitrootlogin no' in sshd_effective.stdout"
         fail_msg: SSH hardening did not take effect as expected.
+
+    - name: Assert identity-ledger users remain allowed
+      ansible.builtin.assert:
+        that:
+          - >-
+            item in (sshd_effective.stdout_lines
+                     | select('match', '^allowusers ')
+                     | map('regex_replace', '^allowusers ', '')
+                     | list)
+        fail_msg: "Identity-ledger user {{ item }} is missing from the effective sshd AllowUsers."
+      loop: "{{ glasslab_ssh_allowed_users }}"
+      when: glasslab_ssh_allowed_users | length > 0

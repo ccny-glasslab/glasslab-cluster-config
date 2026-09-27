@@ -2,6 +2,11 @@ FROM python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41
 
 ARG OPENCODE_VERSION=1.18.14
 ARG HERMES_VERSION=v2026.8.3
+# Issue #603: the Hermes bootstrap below is fetched and executed as root. Pin
+# its exact bytes (curl the URL, review the diff, then update this hash) so a
+# changed upstream script fails the build at sha256sum -c instead of silently
+# executing new code. A hash mismatch is intentional; bump it deliberately.
+ARG HERMES_INSTALL_SHA256=bd7e483f49968f17b88f05d98e84e09078a6d3585bcd79a1b1ed74533e2c8218
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -11,11 +16,22 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git nodejs npm ca-certificates curl xz-utils libatomic1 \
     && npm install --global "opencode-ai@${OPENCODE_VERSION}" \
     && curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/install-hermes.sh \
-    # The orchestrator does not use Hermes' browser tooling. The upstream
-    # installer still installs its npm workspace even with --skip-browser.
-    && sed -i 's/if \[ -f "$INSTALL_DIR\/package.json" \]; then/if false; then/' /tmp/install-hermes.sh \
+    && echo "${HERMES_INSTALL_SHA256}  /tmp/install-hermes.sh" | sha256sum -c - \
+    # The orchestrator does not use Hermes' browser tooling; the pinned
+    # bootstrap supports --skip-browser. It no longer carries the npm-workspace
+    # block the old sed patched, so keep the patch fail-closed (issue #603): if
+    # a future pinned revision reintroduces the block, patch it and assert the
+    # patch applied; otherwise assert the script still supports the
+    # --skip-browser contract this image depends on. A silent no-op sed is the
+    # failure mode being fixed.
+    && if grep -qF 'if [ -f "$INSTALL_DIR/package.json" ]; then' /tmp/install-hermes.sh; then \
+         sed -i 's|if \[ -f "\$INSTALL_DIR/package.json" \]; then|if false; then|' /tmp/install-hermes.sh \
+         && ! grep -qF 'if [ -f "$INSTALL_DIR/package.json" ]; then' /tmp/install-hermes.sh; \
+       else \
+         grep -qF -- '--skip-browser' /tmp/install-hermes.sh; \
+       fi \
     && bash /tmp/install-hermes.sh \
-        --branch "${HERMES_VERSION}" --skip-setup --skip-browser --no-skills \
+        --branch "${HERMES_VERSION}" --skip-setup --skip-browser \
     && rm -f /tmp/install-hermes.sh \
     && rm -rf /var/lib/apt/lists/*
 

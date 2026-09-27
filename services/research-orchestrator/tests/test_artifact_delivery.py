@@ -21,6 +21,7 @@ from app.analysis_notebook import build_analysis_notebook
 from app.artifact_delivery import (
     ArtifactDeliveryError,
     VerifiedArtifactReader,
+    _artifact_archive_name,
     build_report_bundle,
     build_run_artifact_bundle,
 )
@@ -126,6 +127,64 @@ def test_bundle_contains_successful_verified_results_and_manifest(tmp_path) -> N
         manifest = json.loads(archive.read('artifact-manifest.json'))
     assert manifest['run_id'] == run_id
     assert manifest['artifacts'][0]['sha256'] == artifacts[0].sha256
+
+
+def test_job_id_cannot_escape_the_archive_member_path(tmp_path) -> None:
+    # issue #603: job_id is interpolated into the zip member path. A traversal
+    # job_id must be rejected by _safe_archive_name, never written to the zip.
+    good = _artifact(
+        tmp_path,
+        run_id='run-1',
+        job_id='job-ok',
+        relative='artifacts/ok/metrics.json',
+        artifact_type='metrics.json',
+        content=b'{"ok": true}\n',
+    )
+    evil = _artifact(
+        tmp_path,
+        run_id='run-1',
+        job_id='../evil',
+        relative='artifacts/evil/runner.log',
+        artifact_type='logs/runner.log',
+        content=b'evil\n',
+    )
+    jobs = [
+        SimpleNamespace(job_id='job-ok', status=JobStatus.SUCCEEDED),
+        SimpleNamespace(job_id='../evil', status=JobStatus.SUCCEEDED),
+    ]
+
+    bundle = build_run_artifact_bundle(
+        run_id='run-1',
+        artifacts=[good, evil],
+        jobs=jobs,  # type: ignore[arg-type]
+        shared_mount_root=str(tmp_path),
+        maximum_bytes=1024 * 1024,
+    )
+
+    with zipfile.ZipFile(io.BytesIO(bundle.content)) as archive:
+        names = archive.namelist()
+        manifest = json.loads(archive.read('artifact-manifest.json'))
+    assert 'jobs/job-ok/metrics.json' in names
+    assert not any('..' in name for name in names)
+    assert not any(name.startswith('/') for name in names)
+    # The traversal-named artifact is reported, not silently delivered.
+    assert any(
+        'unsafe artifact archive path' in entry['reason']
+        for entry in manifest['unavailable']
+    )
+
+
+def test_artifact_archive_name_rejects_traversal_job_id() -> None:
+    artifact = ArtifactRecord(
+        run_id='run-1',
+        job_id='../evil',
+        type='metrics.json',
+        uri='artifacts/metrics.json',
+        sha256='a' * 64,
+    )
+
+    with pytest.raises(ArtifactDeliveryError, match='unsafe artifact archive path'):
+        _artifact_archive_name(artifact)
 
 
 def test_reader_resolves_workflow_api_artifacts_bucket_prefix(tmp_path) -> None:

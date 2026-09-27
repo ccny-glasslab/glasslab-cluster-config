@@ -11,6 +11,7 @@ import types
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +37,19 @@ sys.modules[PACKAGE_NAME] = package
 models_module = load_package_module(f'{PACKAGE_NAME}.models', APP_ROOT / 'models.py')
 main_module = load_package_module(f'{PACKAGE_NAME}.main', APP_ROOT / 'main.py')
 app = main_module.app
+
+INTERNAL_TOKEN_HEADER = 'X-Glasslab-Internal-Token'
+INTERNAL_TOKEN_ENV = 'GLASSLAB_AGENT_INTERNAL_TOKEN'
+INTERNAL_TOKEN = 'test-internal-token'
+
+
+def internal_auth_headers() -> dict[str, str]:
+    return {INTERNAL_TOKEN_HEADER: INTERNAL_TOKEN}
+
+
+@pytest.fixture(autouse=True)
+def configure_internal_token(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
 
 
 def test_healthz() -> None:
@@ -95,7 +109,7 @@ def test_run_once_calls_workflow_api(monkeypatch) -> None:
     monkeypatch.setenv('GLASSLAB_WORKFLOW_API_TOKEN', 'schedule-secret')
 
     client = TestClient(app)
-    response = client.post('/run-once')
+    response = client.post('/run-once', headers=internal_auth_headers())
     assert response.status_code == 200
     payload = response.json()
     assert payload['executed_count'] == 2
@@ -184,7 +198,7 @@ def test_run_once_partial_failure_preserves_digest_executions(monkeypatch) -> No
     _set_credentials(monkeypatch)
 
     client = TestClient(app)
-    response = client.post('/run-once')
+    response = client.post('/run-once', headers=internal_auth_headers())
 
     assert response.status_code == 200
     payload = response.json()
@@ -203,6 +217,40 @@ def test_run_once_digest_failure_stays_retryable(monkeypatch) -> None:
     _set_credentials(monkeypatch)
 
     client = TestClient(app, raise_server_exceptions=False)
-    response = client.post('/run-once')
+    response = client.post('/run-once', headers=internal_auth_headers())
 
     assert response.status_code == 500
+
+
+def test_run_once_rejects_missing_internal_token(monkeypatch) -> None:
+    def fake_urlopen(request_obj, timeout):
+        raise AssertionError('unauthenticated request must never reach the workflow API')
+
+    monkeypatch.setattr(main_module.urllib_request, 'urlopen', fake_urlopen)
+    _set_credentials(monkeypatch)
+    client = TestClient(app)
+    response = client.post('/run-once')
+    assert response.status_code == 401
+
+
+def test_run_once_rejects_wrong_internal_token(monkeypatch) -> None:
+    def fake_urlopen(request_obj, timeout):
+        raise AssertionError('wrong-token request must never reach the workflow API')
+
+    monkeypatch.setattr(main_module.urllib_request, 'urlopen', fake_urlopen)
+    _set_credentials(monkeypatch)
+    client = TestClient(app)
+    response = client.post('/run-once', headers={INTERNAL_TOKEN_HEADER: 'wrong-token'})
+    assert response.status_code == 401
+
+
+def test_run_once_fails_closed_when_token_unconfigured(monkeypatch) -> None:
+    def fake_urlopen(request_obj, timeout):
+        raise AssertionError('unconfigured server must never execute a cycle')
+
+    monkeypatch.setattr(main_module.urllib_request, 'urlopen', fake_urlopen)
+    monkeypatch.delenv(INTERNAL_TOKEN_ENV)
+    client = TestClient(app)
+    response = client.post('/run-once', headers=internal_auth_headers())
+    assert response.status_code == 503
+

@@ -557,7 +557,7 @@ class RepositoryCredentialPolicyTests(unittest.TestCase):
         / "pxe"
         / "cloud-init"
     )
-    PXE_PROFILES = ("default", "node02", "node03", "node04", "node05", "node48", "node49")
+    PXE_PROFILES = ("archimedes", "default", "node02", "node03", "node04", "node05", "node48", "node49")
 
     def run_vllm_deploy(
         self,

@@ -101,8 +101,11 @@ def _safe_archive_name(value: str) -> str:
 def _artifact_archive_name(artifact: ArtifactRecord) -> str:
     basename = Path(artifact.uri).name or Path(artifact.type).name
     if artifact.job_id:
+        # Both components of the member path are untrusted record fields; a
+        # traversal-shaped job_id must fail like a traversal-shaped type.
+        relative_job = _safe_archive_name(artifact.job_id)
         relative_type = _safe_archive_name(artifact.type)
-        return f'jobs/{artifact.job_id}/{relative_type}'
+        return f'jobs/{relative_job}/{relative_type}'
     return f'run/{_safe_archive_name(artifact.type)}/{_safe_archive_name(basename)}'
 
 

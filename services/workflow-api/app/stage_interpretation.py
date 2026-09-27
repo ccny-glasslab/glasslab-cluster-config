@@ -20,6 +20,7 @@ from urllib import request as urllib_request
 from uuid import uuid4
 
 from .config import Settings
+from .internal_agent_auth import internal_agent_headers
 from .persistence import RunStore
 from .registry import WorkflowRegistry
 from .schemas import IntakeRecord, InterpretationRecord
@@ -243,7 +244,7 @@ def call_interpretation_agent(
     request_obj = urllib_request.Request(
         settings.interpretation_agent_url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=internal_agent_headers(settings),
         method="POST",
     )
 

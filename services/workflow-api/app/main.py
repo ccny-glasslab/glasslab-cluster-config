@@ -33,6 +33,7 @@ from services.common.schemas import ArtifactIndexEntry, ArtifactsIndex, RunManif
 
 from .config import Settings, get_settings
 from .auth import authenticate_request
+from .internal_agent_auth import internal_agent_headers
 
 from .digest_scheduling import schedule_is_due
 from .execution_routes import register_execution_routes
@@ -410,7 +411,7 @@ def call_problem_harvester_plan(
     request_obj = urllib_request.Request(
         resolve_intake_agent_base_url(settings) + '/paper-harvester/plan-from-problem',
         data=json.dumps(payload).encode('utf-8'),
-        headers={'Content-Type': 'application/json'},
+        headers=internal_agent_headers(settings),
         method='POST',
     )
 

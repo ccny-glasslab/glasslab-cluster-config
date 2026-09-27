@@ -9,6 +9,11 @@ on:
       - "services/workflow-api/**"
       - "services/workflow-registry/**"
       - "services/research-orchestrator/**"
+      - "services/assessment-agent/**"
+      - "services/design-agent/**"
+      - "services/intake-agent/**"
+      - "services/interpretation-agent/**"
+      - "services/schedule-worker/**"
       - ".github/workflows/service-images.yml"
   workflow_dispatch:
 
@@ -83,3 +88,153 @@ jobs:
             GLASSLAB_BUILD_SOURCE=github:${{ github.run_id }}
           cache-from: type=gha,scope=research-orchestrator
           cache-to: type=gha,mode=max,scope=research-orchestrator
+
+  assessment-agent:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
+        with:
+          context: .
+          file: services/assessment-agent/Dockerfile
+          push: true
+          tags: ghcr.io/ccny-glasslab/glasslab-assessment-agent:${{ github.sha }}
+          build-args: |
+            GLASSLAB_GIT_SHA=${{ github.sha }}
+            GLASSLAB_BUILD_SOURCE=github:${{ github.run_id }}
+          cache-from: type=gha,scope=assessment-agent
+          cache-to: type=gha,mode=max,scope=assessment-agent
+
+  design-agent:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
+        with:
+          context: .
+          file: services/design-agent/Dockerfile
+          push: true
+          tags: ghcr.io/ccny-glasslab/glasslab-design-agent:${{ github.sha }}
+          build-args: |
+            GLASSLAB_GIT_SHA=${{ github.sha }}
+            GLASSLAB_BUILD_SOURCE=github:${{ github.run_id }}
+          cache-from: type=gha,scope=design-agent
+          cache-to: type=gha,mode=max,scope=design-agent
+
+  intake-agent:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
+        with:
+          context: .
+          file: services/intake-agent/Dockerfile
+          push: true
+          tags: ghcr.io/ccny-glasslab/glasslab-intake-agent:${{ github.sha }}
+          build-args: |
+            GLASSLAB_GIT_SHA=${{ github.sha }}
+            GLASSLAB_BUILD_SOURCE=github:${{ github.run_id }}
+          cache-from: type=gha,scope=intake-agent
+          cache-to: type=gha,mode=max,scope=intake-agent
+
+  interpretation-agent:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
+        with:
+          context: .
+          file: services/interpretation-agent/Dockerfile
+          push: true
+          tags: ghcr.io/ccny-glasslab/glasslab-interpretation-agent:${{ github.sha }}
+          build-args: |
+            GLASSLAB_GIT_SHA=${{ github.sha }}
+            GLASSLAB_BUILD_SOURCE=github:${{ github.run_id }}
+          cache-from: type=gha,scope=interpretation-agent
+          cache-to: type=gha,mode=max,scope=interpretation-agent
+
+  schedule-worker:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
+        with:
+          context: .
+          file: services/schedule-worker/Dockerfile
+          push: true
+          tags: ghcr.io/ccny-glasslab/glasslab-schedule-worker:${{ github.sha }}
+          build-args: |
+            GLASSLAB_GIT_SHA=${{ github.sha }}
+            GLASSLAB_BUILD_SOURCE=github:${{ github.run_id }}
+          cache-from: type=gha,scope=schedule-worker
+          cache-to: type=gha,mode=max,scope=schedule-worker

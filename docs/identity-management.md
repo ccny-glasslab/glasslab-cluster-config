@@ -82,8 +82,12 @@ ledger entry removes that user from the namespace bindings. The playbook also
 removes credentials that it previously managed for a revoked observer.
 
 The legacy shared `glasslab` account is not in the personal-account ledger. It
-is retained as a service owner and break-glass path while remaining software is
-migrated. It is not the normal contributor login.
+remains a service-owner identity for local and service use while remaining
+software is migrated, but it is no longer an SSH break-glass path: key-only
+hardening (`ansible/playbooks/harden-ssh-key-only.yml`) publishes `AllowUsers`
+from the ledger (personal accounts only) and disables root SSH. Recover a host
+through its console or IPMI rather than re-enabling the shared login. It is not
+the normal contributor login.
 
 ## Apply Changes
 
@@ -143,9 +147,11 @@ Unix, GitHub, and Kubernetes remain intentional separate trust boundaries.
 
 ## Recovery
 
-The personal infrastructure administrator and the legacy `glasslab` account
-are the current independent administrative paths. Add Mike's personal key as a
-second `infrastructure_admin` record before retiring the shared account.
+The `infrastructure_admin` personal account (`gr66ss-glasslab`) is the current
+SSH administrative path. The legacy shared `glasslab` account is no longer a
+key-only SSH login (see above); when SSH is unavailable, recover through the
+host console or out-of-band management (IPMI/iDRAC). Add Mike's personal key as
+a second `infrastructure_admin` record before relying on a single account.
 Back up the provisioner's local secrets and SSH recovery material through the
 planned encrypted off-host backup path; Git only reconstructs public identity
 policy.

@@ -18,8 +18,9 @@ from urllib.parse import urlparse
 
 import yaml
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
+from .internal_auth import require_internal_token
 from .models import (
     ApprovedSourcesSummary,
     HealthResponse,
@@ -454,34 +455,34 @@ def healthz() -> HealthResponse:
     )
 
 
-@app.get('/approved-sources', response_model=ApprovedSourcesSummary)
+@app.get('/approved-sources', response_model=ApprovedSourcesSummary, dependencies=[Depends(require_internal_token)])
 def approved_sources() -> ApprovedSourcesSummary:
     return load_approved_sources_summary()
 
 
-@app.get('/paper-harvester/tracks', response_model=list[TrackDefinition])
+@app.get('/paper-harvester/tracks', response_model=list[TrackDefinition], dependencies=[Depends(require_internal_token)])
 def paper_harvester_tracks() -> list[TrackDefinition]:
     return load_tracks()
 
 
-@app.get('/paper-harvester/papers', response_model=list[SeedPaperSummary])
+@app.get('/paper-harvester/papers', response_model=list[SeedPaperSummary], dependencies=[Depends(require_internal_token)])
 def paper_harvester_papers(track: str | None = None, priority: str | None = None) -> list[SeedPaperSummary]:
     track_ids = [track.strip()] if isinstance(track, str) and track.strip() else []
     priorities = [priority.strip()] if isinstance(priority, str) and priority.strip() else []
     return filter_seed_papers(track_ids, priorities, max_papers=50)
 
 
-@app.post('/paper-harvester/plan', response_model=PaperHarvesterPlanResponse)
+@app.post('/paper-harvester/plan', response_model=PaperHarvesterPlanResponse, dependencies=[Depends(require_internal_token)])
 def paper_harvester_plan(request: PaperHarvesterPlanRequest) -> PaperHarvesterPlanResponse:
     return build_harvester_plan(request)
 
 
-@app.post('/paper-harvester/plan-from-problem', response_model=PaperHarvesterPlanResponse)
+@app.post('/paper-harvester/plan-from-problem', response_model=PaperHarvesterPlanResponse, dependencies=[Depends(require_internal_token)])
 def paper_harvester_plan_from_problem(request: ProblemHarvesterPlanRequest) -> PaperHarvesterPlanResponse:
     return build_problem_harvester_plan(request)
 
 
-@app.post('/normalize-intake', response_model=NormalizeIntakeResponse)
+@app.post('/normalize-intake', response_model=NormalizeIntakeResponse, dependencies=[Depends(require_internal_token)])
 def normalize_intake(request: NormalizeIntakeRequest) -> NormalizeIntakeResponse:
     return NormalizeIntakeResponse(
         request_id=request.request_id,

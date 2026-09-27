@@ -1,0 +1,29 @@
+# Default-deny pod-to-pod ingress for the design agent (issue #602).
+#
+# workflow-api is the only intended caller; every other pod peer is denied.
+# The authenticated token gate is the primary control and this policy is the
+# defense-in-depth boundary. Kubelet httpGet probes are host-to-pod traffic
+# and are not policed by pod ingress policy (same pattern as postgres, minio,
+# and nats), so no node CIDR carve-out is needed here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: glasslab-design-agent-ingress
+  namespace: glasslab-v2
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: glasslab-design-agent
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: glasslab-workflow-api
+      ports:
+        - protocol: TCP
+          port: 8093

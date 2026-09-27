@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -171,16 +173,20 @@ class WorkflowSecurityManifestTests(unittest.TestCase):
         bundle = rollout[rollout.index("rollout_authenticated_workflow_bundle()") :]
         for caller in CALLERS:
             self.assertIn(f"'{CALLERS[caller]['secret']}:token'", rollout)
-        # Retired (command-router) and legacy (schedule-worker) services are
-        # not part of the authenticated bundle; their images are not published
-        # by the ccny service-image pipeline.
+        # Retired (command-router) services are not part of the authenticated
+        # bundle. The schedule-worker IS an authenticated caller and must roll
+        # out with the bundle so its CronJob can reach a running pod (#602).
         self.assertNotIn("rollout_command_router", bundle)
-        self.assertNotIn("rollout_schedule_worker", bundle)
+        self.assertIn("rollout_schedule_worker", bundle)
         secret_preflight_position = bundle.index("require_workflow_caller_secrets")
         orchestrator_position = bundle.index("rollout_research_orchestrator")
+        schedule_worker_position = bundle.index("rollout_schedule_worker")
         server_position = bundle.index("rollout_workflow_api")
+        # Callers (orchestrator and schedule-worker) roll before the server so
+        # workflow-api is never switched to fail-closed auth ahead of clients.
         self.assertLess(secret_preflight_position, server_position)
         self.assertLess(orchestrator_position, server_position)
+        self.assertLess(schedule_worker_position, server_position)
 
     def test_public_smoke_does_not_call_protected_workflow_routes(self):
         smoke = (REPOSITORY_ROOT / "scripts" / "smoke-test-v2.sh").read_text(encoding="utf-8")
@@ -320,6 +326,171 @@ class MinioCredentialScopingTests(unittest.TestCase):
                 resource.startswith(f"arn:aws:s3:::{MINIO_SOURCE_DOCUMENT_BUCKET}"),
                 f"policy grants access outside the scoped bucket: {resource}",
             )
+
+
+SERVICE_IMAGE_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "service-images.yml"
+CANONICAL_FULL_SHA_IMAGE_RE = re.compile(r"^ghcr\.io/ccny-glasslab/glasslab-([a-z0-9-]+):[0-9a-f]{40}$")
+# Canonical images CI has never published. service-images.yml only builds on
+# push to main, so before the first merge no real SHA exists; the manifest must
+# say so explicitly instead of guessing a SHA. scripts/validate-configs.py
+# tolerates this marker only for exactly these image names.
+PENDING_BUILD_TAG = "pending-ci-build"
+CANONICAL_PENDING_BUILD_IMAGE_RE = re.compile(
+    r"^ghcr\.io/ccny-glasslab/glasslab-([a-z0-9-]+):" + re.escape(PENDING_BUILD_TAG) + r"$"
+)
+ZERO_SHA = "0" * 40
+ZERO_DIGEST = "sha256:" + "0" * 64
+BOUNDED_SERVICE_DEPLOYMENTS = {
+    "assessment-agent": KUBE_ROOT / "assessment-agent" / "10-deployment.yaml",
+    "design-agent": KUBE_ROOT / "design-agent" / "10-deployment.yaml",
+    "intake-agent": KUBE_ROOT / "intake-agent" / "10-deployment.yaml",
+    "interpretation-agent": KUBE_ROOT / "interpretation-agent" / "10-deployment.yaml",
+    "schedule-worker": KUBE_ROOT / "schedule-worker" / "10-deployment.yaml",
+}
+PUBLISHED_SERVICES = ("workflow-api", "research-orchestrator", *BOUNDED_SERVICE_DEPLOYMENTS)
+
+
+class ServiceImageSupplyChainTests(unittest.TestCase):
+    """Issue #600: deployed images must come from the canonical org, pinned."""
+
+    def test_bounded_service_deployments_pin_canonical_org_full_sha_tags(self):
+        for service, path in BOUNDED_SERVICE_DEPLOYMENTS.items():
+            with self.subTest(service=service):
+                container = container_for(path, service)
+                image = container["image"]
+                sha_match = CANONICAL_FULL_SHA_IMAGE_RE.match(image)
+                pending_match = CANONICAL_PENDING_BUILD_IMAGE_RE.match(image)
+                self.assertTrue(
+                    sha_match or pending_match,
+                    f"{service} is neither pinned to a canonical full SHA nor the documented pending marker: {image}",
+                )
+                match = sha_match or pending_match
+                self.assertEqual(match.group(1), service)
+                if sha_match:
+                    self.assertNotEqual(image.rsplit(":", 1)[1], ZERO_SHA)
+
+    def test_schedule_worker_runs_a_pod_so_the_cronjob_can_reach_it(self):
+        deployment = next(
+            item
+            for item in documents(KUBE_ROOT / "schedule-worker" / "10-deployment.yaml")
+            if item["kind"] == "Deployment"
+        )
+        self.assertGreaterEqual(
+            deployment["spec"]["replicas"],
+            1,
+            "the schedule-worker CronJob POSTs to the Service and needs a running pod",
+        )
+
+    def test_service_image_pipeline_publishes_every_service_at_the_git_sha(self):
+        jobs = yaml.safe_load(SERVICE_IMAGE_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        for service in PUBLISHED_SERVICES:
+            with self.subTest(service=service):
+                build = next(
+                    step
+                    for step in jobs[service]["steps"]
+                    if step.get("uses", "").startswith("docker/build-push-action")
+                )
+                self.assertEqual(
+                    build["with"]["tags"],
+                    f"ghcr.io/ccny-glasslab/glasslab-{service}:${{{{ github.sha }}}}",
+                )
+                self.assertEqual(build["with"]["file"], f"services/{service}/Dockerfile")
+
+    def test_no_manifest_references_the_personal_registry_org(self):
+        for path in sorted(KUBE_ROOT.rglob("*.yaml")):
+            with self.subTest(path=path.relative_to(KUBE_ROOT).as_posix()):
+                self.assertNotIn("ghcr.io/offensivegeneric/", path.read_text(encoding="utf-8"))
+
+    def test_minio_and_nats_images_stay_digest_pinned(self):
+        for relative_path, container_name in (
+            ("minio/20-deployment.yaml", "minio"),
+            ("nats/10-deployment.yaml", "nats"),
+        ):
+            with self.subTest(manifest=relative_path):
+                container = container_for(KUBE_ROOT / relative_path, container_name)
+                self.assertRegex(container["image"], r"@sha256:[0-9a-f]{64}$")
+
+
+class ServiceImagePinSentinelTests(unittest.TestCase):
+    """The pinning gate must reject fake zero-SHA pins (#602 review).
+
+    An all-zero tag or digest satisfies a naive 40-hex/64-hex shape while
+    naming no real commit or image, so it could smuggle an unpinned service
+    past the gate. The pending marker is the only tolerated non-SHA, and only
+    for the exact images CI has not published yet.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "validate_configs", REPOSITORY_ROOT / "scripts" / "validate-configs.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        cls.validate_configs = module
+
+    def test_all_zero_sha_tag_is_rejected(self):
+        self.assertFalse(
+            self.validate_configs.is_pinned_image_ref(
+                f"ghcr.io/ccny-glasslab/glasslab-schedule-worker:{ZERO_SHA}"
+            )
+        )
+
+    def test_all_zero_sha256_digest_is_rejected(self):
+        self.assertFalse(
+            self.validate_configs.is_pinned_image_ref(
+                f"ghcr.io/ccny-glasslab/glasslab-schedule-worker@{ZERO_DIGEST}"
+            )
+        )
+
+    def test_all_zero_sha_component_is_rejected(self):
+        self.assertFalse(
+            self.validate_configs.is_pinned_image_ref(
+                f"ghcr.io/ccny-glasslab/glasslab-metric-search:smoke-test-{ZERO_SHA}"
+            )
+        )
+
+    def test_real_sha_and_digest_still_pass(self):
+        self.assertTrue(
+            self.validate_configs.is_pinned_image_ref(
+                f"ghcr.io/ccny-glasslab/glasslab-workflow-api:{'a' * 40}"
+            )
+        )
+        self.assertTrue(
+            self.validate_configs.is_pinned_image_ref(
+                f"ghcr.io/ccny-glasslab/glasslab-minio@sha256:{'b' * 64}"
+            )
+        )
+
+    def test_pending_marker_is_tolerated_only_for_the_unpublished_images(self):
+        for service in BOUNDED_SERVICE_DEPLOYMENTS:
+            with self.subTest(service=service):
+                self.assertTrue(
+                    self.validate_configs.is_pinned_image_ref(
+                        f"ghcr.io/ccny-glasslab/glasslab-{service}:{PENDING_BUILD_TAG}"
+                    )
+                )
+        rejected = (
+            f"ghcr.io/ccny-glasslab/glasslab-workflow-api:{PENDING_BUILD_TAG}",
+            f"ghcr.io/ccny-glasslab/glasslab-research-orchestrator:{PENDING_BUILD_TAG}",
+            f"ghcr.io/offensivegeneric/glasslab-intake-agent:{PENDING_BUILD_TAG}",
+            "ghcr.io/ccny-glasslab/glasslab-intake-agent:latest",
+        )
+        for ref in rejected:
+            with self.subTest(ref=ref):
+                self.assertFalse(self.validate_configs.is_pinned_image_ref(ref))
+
+    def test_marker_manifests_are_exactly_the_bounded_services(self):
+        marker_services: set[str] = set()
+        for path in sorted(KUBE_ROOT.rglob("*.yaml")):
+            marker_services.update(
+                re.findall(
+                    r"ghcr\.io/ccny-glasslab/glasslab-([a-z0-9-]+):" + re.escape(PENDING_BUILD_TAG),
+                    path.read_text(encoding="utf-8"),
+                )
+            )
+        self.assertEqual(marker_services, set(BOUNDED_SERVICE_DEPLOYMENTS))
 
 
 if __name__ == "__main__":

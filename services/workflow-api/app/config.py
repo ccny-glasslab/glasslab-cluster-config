@@ -121,6 +121,11 @@ class Settings(BaseSettings):
     caller_policies: tuple[CallerPolicy, ...] = Field(default_factory=tuple)
     schedule_worker_token: SecretStr | None = None
     research_orchestrator_token: SecretStr | None = None
+    # Shared token workflow-api presents to the four stage agents and to
+    # schedule-worker (issue #602). Optional so local/test runs against
+    # not-yet-enforcing servers keep working; the receiving services fail
+    # closed when their own copy of this token is unconfigured.
+    agent_internal_token: SecretStr | None = None
 
     @model_validator(mode='after')
     def validate_store_backend(self) -> 'Settings':

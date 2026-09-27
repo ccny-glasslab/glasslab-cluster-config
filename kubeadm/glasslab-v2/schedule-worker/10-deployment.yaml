@@ -4,7 +4,10 @@ metadata:
   name: glasslab-schedule-worker
   namespace: glasslab-v2
 spec:
-  replicas: 0
+  # The schedule-worker CronJob (30-cronjob.yaml) POSTs to this Deployment's
+  # Service, so it must have a running pod; replicas: 0 made /run-once
+  # unreachable and every CronJob run failed.
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: glasslab-schedule-worker
@@ -21,7 +24,11 @@ spec:
         - name: glasslab-ghcr-pull
       containers:
         - name: schedule-worker
-          image: ghcr.io/ccny-glasslab/glasslab-schedule-worker:0.1.0
+          # Not published yet: service-images.yml builds on push to main and
+          # tags with the commit SHA. This marker is allowlisted in
+          # scripts/validate-configs.py, and the release path substitutes the
+          # merged main SHA; never replace it with a guessed or all-zero SHA.
+          image: ghcr.io/ccny-glasslab/glasslab-schedule-worker:pending-ci-build
           imagePullPolicy: IfNotPresent
           env:
             - name: GLASSLAB_WORKFLOW_API_CALLER_NAME
@@ -35,6 +42,11 @@ spec:
               value: http://glasslab-workflow-api.glasslab-v2.svc.cluster.local:8080
             - name: GLASSLAB_SCHEDULE_WORKER_TIMEOUT_SECONDS
               value: "30"
+            - name: GLASSLAB_AGENT_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-agent-internal-token
+                  key: token
           ports:
             - containerPort: 8094
               name: http

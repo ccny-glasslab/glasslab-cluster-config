@@ -5,6 +5,7 @@
   become: true
   vars:
     ansible_ssh_common_args: '-o StrictHostKeyChecking=accept-new'
+    glasslab_canonical_checkout: /home/glasslab/cluster-config
   vars_files:
     - ../group_vars/all.yml
   tasks:
@@ -78,6 +79,38 @@
         group: glasslab
         mode: '0700'
 
+    - name: Check whether the canonical checkout exists
+      ansible.builtin.stat:
+        path: "{{ glasslab_canonical_checkout }}"
+      register: glasslab_canonical_checkout_stat
+
+    - name: Enforce canonical checkout directory mode
+      ansible.builtin.file:
+        path: "{{ glasslab_canonical_checkout }}"
+        state: directory
+        mode: '0755'
+      when: glasslab_canonical_checkout_stat.stat.exists
+
+    - name: Find live local Secret manifests in the canonical checkout
+      ansible.builtin.find:
+        paths: "{{ glasslab_canonical_checkout }}/kubeadm/glasslab-v2/secrets"
+        patterns: '*.local.yaml'
+        file_type: file
+      register: glasslab_v2_local_secret_manifests
+      when: glasslab_canonical_checkout_stat.stat.exists
+
+    - name: Restrict live local Secret manifests to owner-only access
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        mode: '0600'
+      loop: "{{ glasslab_v2_local_secret_manifests.files | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    # The port-forward reads only the glasslab account's kubeconfig
+    # (/home/glasslab/.kube/config, owner glasslab mode 0600 inside a 0700
+    # home; verified on the provisioner 2026-09-27) and binds an unprivileged
+    # loopback port, so the unit runs as glasslab instead of root (issue #603).
     - name: Install the research orchestrator port-forward unit
       ansible.builtin.copy:
         dest: /etc/systemd/system/glasslab-orchestrator-forward.service
@@ -92,6 +125,8 @@
 
           [Service]
           Type=simple
+          User=glasslab
+          Group=glasslab
           Environment=KUBECONFIG=/home/glasslab/.kube/config
           ExecStart=/usr/bin/kubectl -n glasslab-v2 port-forward --address 127.0.0.1 svc/glasslab-research-orchestrator 18080:8080
           Restart=always

@@ -72,10 +72,14 @@ run_secret_boundary_tests() {
     tests.scripts.test_glasslab_opencode \
     tests.scripts.test_resolve_runner_image \
     tests.scripts.test_model_serve_hf_home \
+    tests.scripts.test_secret_permissions_preflight \
+    tests.scripts.test_deploy_image_override \
     tests.security.test_workflow_security_manifests \
     tests.security.test_task_fabric_manifests \
     tests.security.test_node_maintenance_wrappers \
     tests.security.test_orchestrator_network_policy \
+    tests.security.test_orchestrator_infra_hardening \
+    tests.security.test_internal_service_auth_manifests \
     services/research-orchestrator/tests/scripts/test_orchestrator_ui_proxy.py \
     -v
 }

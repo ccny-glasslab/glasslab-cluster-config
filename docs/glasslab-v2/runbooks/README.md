@@ -15,4 +15,5 @@ Key runbooks:
 - `purge-temporary-provisioning-debug.md`
 - `knowledge-corpus.md`
 - `orchestrator-corpus-ui.md`
+- `internal-service-auth-rollout.md`
 - `drive-a-real-run.md`
