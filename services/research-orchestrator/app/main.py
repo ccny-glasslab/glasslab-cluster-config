@@ -44,7 +44,7 @@ from pydantic import SecretStr
 
 from .artifact_delivery import ArtifactDeliveryError, VerifiedArtifactReader
 from .cluster import FakeClusterExecutor, WorkflowApiClusterExecutor
-from .config import SERVICE_ROOT, Settings, get_settings
+from .config import SERVICE_ROOT, Settings, get_settings, read_secret_file
 from .contract_candidates import ContractCandidateManager
 from .contracts import ContractIntegrityError, EvaluationContractResolver
 from .corpus_rag.pdf_backend import UnsupportedDocumentError
@@ -1255,12 +1255,19 @@ def create_app(
         """
         import os
 
+        # The DSN is read from the read-only secret file first so it never
+        # has to sit in the process environment (issue #597); the Settings
+        # object already resolves file-over-env, so the remaining entries can
+        # use it directly.
         raw: list[Any] = [
             settings.operator_api_token,
+            settings.link_signing_secret,
             settings.discord_bot_token,
             settings.discord_webhook_url,
             settings.workflow_api_token,
-            os.environ.get('GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN', ''),
+            read_secret_file(settings.secrets_dir, 'store_postgres_dsn')
+            or settings.store_postgres_dsn
+            or os.environ.get('GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN', ''),
         ]
         values: list[str] = []
         for item in raw:

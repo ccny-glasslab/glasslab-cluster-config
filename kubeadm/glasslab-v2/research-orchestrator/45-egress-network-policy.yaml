@@ -1,0 +1,99 @@
+# Default-deny egress for the research orchestrator (issue #597).
+#
+# The orchestrator spawns the same-UID OpenCode child inside this pod, so a
+# prompt-injected agent that reaches the bash tool must not be able to use it
+# as a network pivot. Egress is denied unless it matches an explicit peer and
+# port below:
+#
+#   * DNS from kube-system (CoreDNS) — required for every cluster name;
+#   * the in-namespace data services the orchestrator talks to (Postgres,
+#     MinIO, NATS, rabbitmq) and workflow-api on 8080;
+#   * the local exo model endpoints (.17/.18) on 52417;
+#   * TCP 443 — the documented residual for the approved-repo init clone,
+#     HuggingFace model/embedding downloads, and any hosted model provider.
+#
+# The 443 rule is the residual: it is broad by design and is the piece a
+# later egress-proxy / second-container split should replace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: glasslab-research-orchestrator-egress
+  namespace: glasslab-v2
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: glasslab-research-orchestrator
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: glasslab-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: glasslab-minio
+      ports:
+        - protocol: TCP
+          port: 9000
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: glasslab-nats
+      ports:
+        - protocol: TCP
+          port: 4222
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: glasslab-rabbitmq
+      ports:
+        - protocol: TCP
+          port: 5672
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: glasslab-workflow-api
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: 192.168.1.17/32
+        - ipBlock:
+            cidr: 192.168.1.18/32
+      ports:
+        - protocol: TCP
+          port: 52417
+    # Documented residual: broad HTTPS egress, port 443 only.
+    - ports:
+        - protocol: TCP
+          port: 443

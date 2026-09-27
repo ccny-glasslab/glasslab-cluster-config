@@ -8,13 +8,19 @@ is set, otherwise the shared effective model applies to both agents.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 from pathlib import Path
 
 import httpx
 import yaml
 
-from app.config import Settings
+from app.config import (
+    CONTROL_PLANE_SECRET_FIELDS,
+    Settings,
+    read_secret_file,
+    secret_env_name,
+)
 from app.hermes_runtime import HermesProcessRuntime, _HermesHandle
 from app.opencode_runtime import OpenCodeProcessRuntime
 from app.schemas import AgentName, TurnKind
@@ -379,3 +385,273 @@ def test_operator_auth_fails_closed_by_default() -> None:
     # Security C3: any deployment that omits the env var must reject
     # unauthenticated state-changing requests, not allow them through.
     assert Settings().require_operator_auth is True
+
+
+# --- Control-plane secrets from read-only files (issue #597) ---------------
+#
+# The same-UID OpenCode child shares the orchestrator's PID namespace and can
+# read /proc/1/environ. Control-plane secrets therefore come from files under
+# GLASSLAB_ORCHESTRATOR_SECRETS_DIR mounted read-only, with the environment
+# kept only as the local/test fallback.
+
+
+def _write_secret(secrets_dir: Path, field_name: str, value: str) -> None:
+    (secrets_dir / secret_env_name(field_name)).write_text(
+        value + '\n', encoding='utf-8'
+    )
+
+
+def test_control_plane_secret_fields_are_exactly_the_documented_set() -> None:
+    assert CONTROL_PLANE_SECRET_FIELDS == (
+        'operator_api_token',
+        'link_signing_secret',
+        'discord_bot_token',
+        'discord_webhook_url',
+        'store_postgres_dsn',
+    )
+
+
+def test_secrets_dir_defaults_to_none() -> None:
+    assert Settings().secrets_dir is None
+
+
+def test_secret_files_take_precedence_over_environment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    secrets_dir = tmp_path / 'secrets'
+    secrets_dir.mkdir()
+    _write_secret(secrets_dir, 'operator_api_token', 'file-operator')
+    _write_secret(secrets_dir, 'link_signing_secret', 'file-link')
+    _write_secret(secrets_dir, 'discord_bot_token', 'file-discord')
+    _write_secret(secrets_dir, 'discord_webhook_url', 'file-webhook')
+    _write_secret(secrets_dir, 'store_postgres_dsn', 'postgresql://file/db')
+    monkeypatch.setenv(
+        'GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN', 'env-operator'
+    )
+    monkeypatch.setenv(
+        'GLASSLAB_ORCHESTRATOR_LINK_SIGNING_SECRET', 'env-link'
+    )
+    monkeypatch.setenv(
+        'GLASSLAB_ORCHESTRATOR_DISCORD_BOT_TOKEN', 'env-discord'
+    )
+    monkeypatch.setenv(
+        'GLASSLAB_ORCHESTRATOR_DISCORD_WEBHOOK_URL', 'env-webhook'
+    )
+    monkeypatch.setenv(
+        'GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN', 'postgresql://env/db'
+    )
+
+    settings = Settings(
+        secrets_dir=str(secrets_dir),
+        store_backend='postgres',
+    )
+
+    assert settings.operator_api_token == 'file-operator'
+    assert settings.link_signing_secret is not None
+    assert settings.link_signing_secret.get_secret_value() == 'file-link'
+    assert settings.discord_bot_token == 'file-discord'
+    assert settings.discord_webhook_url == 'file-webhook'
+    assert settings.store_postgres_dsn == 'postgresql://file/db'
+
+
+def test_missing_secret_files_fall_back_to_environment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    secrets_dir = tmp_path / 'secrets'
+    secrets_dir.mkdir()
+    monkeypatch.setenv(
+        'GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN', 'env-operator'
+    )
+
+    settings = Settings(secrets_dir=str(secrets_dir))
+
+    assert settings.operator_api_token == 'env-operator'
+
+
+def test_empty_secret_file_falls_back_to_environment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    secrets_dir = tmp_path / 'secrets'
+    secrets_dir.mkdir()
+    # kubectl --from-file of an empty value writes a single newline.
+    (secrets_dir / secret_env_name('discord_bot_token')).write_text(
+        '\n', encoding='utf-8'
+    )
+    monkeypatch.setenv(
+        'GLASSLAB_ORCHESTRATOR_DISCORD_BOT_TOKEN', 'env-discord'
+    )
+
+    settings = Settings(secrets_dir=str(secrets_dir))
+
+    assert settings.discord_bot_token == 'env-discord'
+
+
+def test_postgres_dsn_file_satisfies_postgres_backend(tmp_path: Path) -> None:
+    secrets_dir = tmp_path / 'secrets'
+    secrets_dir.mkdir()
+    _write_secret(secrets_dir, 'store_postgres_dsn', 'postgresql://file/db')
+
+    settings = Settings(
+        secrets_dir=str(secrets_dir),
+        store_backend='postgres',
+    )
+
+    assert settings.store_postgres_dsn == 'postgresql://file/db'
+
+
+def test_read_secret_file_returns_none_without_directory(tmp_path: Path) -> None:
+    assert read_secret_file(None, 'operator_api_token') is None
+    assert read_secret_file(str(tmp_path), 'operator_api_token') is None
+
+
+def test_secret_env_name_is_prefixed_field_name() -> None:
+    assert (
+        secret_env_name('store_postgres_dsn')
+        == 'GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN'
+    )
+
+
+# --- Default-deny bash allowlist (issue #597) ------------------------------
+#
+# OpenCode evaluates bash permission rules last-match-wins over the
+# sort_keys=True config order, so the test replica sorts the rule keys and
+# takes the last glob match (the same semantics the runtime documents).
+
+SAFE_COMMANDS = (
+    'pwd',
+    'ls -la',
+    'cat report.md',
+    'head -n 5 report.md',
+    'tail -f run.log',
+    'wc -l report.md',
+    'grep -n result report.md',
+    'rg result .',
+    'find . -name "*.py"',
+    'sort report.txt',
+    'uniq report.txt',
+    'diff a.txt b.txt',
+    'tree src',
+    'git status',
+    'git diff HEAD~1',
+    'git log --oneline',
+    'pytest -q tests',
+    'python3 -m pytest -q tests',
+    'make test',
+    'jq . data.json',
+    'sed -n 1,5p report.md',
+    'awk "{print $1}" report.md',
+    'xargs -r wc -l',
+    'mkdir -p out',
+    'cp a.txt b.txt',
+    'mv a.txt b.txt',
+    'rm -f scratch.txt',
+    'touch marker',
+    'echo hello',
+    'tee out.txt',
+    'tar -czf out.tgz src',
+    'unzip bundle.zip',
+)
+
+DENIED_COMMANDS = (
+    'python3 -c "import os"',
+    "node -e 'process.exit()'",
+    "sh -c 'id'",
+    "bash -c 'id'",
+    "perl -e 'print 1'",
+    "ruby -e 'puts 1'",
+    'env',
+    'env | grep TOKEN',
+    'printenv',
+    'curl http://example.invalid',
+    'wget http://example.invalid',
+    'nc 10.0.0.1 4444',
+    'ncat 10.0.0.1 4444',
+    'socat - TCP:10.0.0.1:4444',
+    'ssh user@host',
+    'scp file user@host:/tmp',
+    'kubectl get pods',
+    'docker ps',
+    'podman ps',
+    'cat < /dev/tcp/10.0.0.1/443',
+    'cat /dev/tcp/10.0.0.1/443',
+    "sh -c 'cat < /dev/tcp/10.0.0.1/443'",
+)
+
+
+def _bash_rules(agent: AgentName, enabled: bool) -> dict[str, str]:
+    runtime = OpenCodeProcessRuntime(
+        Settings(agent_bash_allowlist_enabled=enabled)
+    )
+    return runtime._permissions(agent)['bash']
+
+
+def _classify(rules: dict[str, str], command: str) -> str:
+    verdict = 'deny'
+    for pattern in sorted(rules):
+        if fnmatch.fnmatchcase(command, pattern):
+            verdict = rules[pattern]
+    return verdict
+
+
+def test_bash_allowlist_disabled_keeps_legacy_denylist() -> None:
+    rules = _bash_rules(AgentName.BEAKER, enabled=False)
+    assert rules['*'] == 'allow'
+    assert rules['kubectl *'] == 'deny'
+    assert rules['curl *'] == 'deny'
+    assert 'rm *' not in rules
+
+
+def test_bash_allowlist_enabled_is_default_deny() -> None:
+    rules = _bash_rules(AgentName.BEAKER, enabled=True)
+    assert rules['*'] == 'deny'
+
+
+def test_bash_allowlist_allows_every_documented_safe_command() -> None:
+    rules = _bash_rules(AgentName.BEAKER, enabled=True)
+    for command in SAFE_COMMANDS:
+        assert _classify(rules, command) == 'allow', command
+
+
+def test_bash_allowlist_denies_interpreters_shells_and_egress() -> None:
+    rules = _bash_rules(AgentName.BEAKER, enabled=True)
+    for command in DENIED_COMMANDS:
+        assert _classify(rules, command) == 'deny', command
+
+
+def test_bash_allowlist_denies_git_push_for_both_agents() -> None:
+    for agent in (AgentName.HONEYDEW, AgentName.BEAKER):
+        rules = _bash_rules(agent, enabled=True)
+        assert _classify(rules, 'git push origin main') == 'deny'
+
+
+def test_bash_allowlist_honeydew_cannot_mutate_repository() -> None:
+    honeydew = _bash_rules(AgentName.HONEYDEW, enabled=True)
+    assert _classify(honeydew, 'git commit -m x') == 'deny'
+    assert _classify(honeydew, 'git checkout main') == 'deny'
+    assert _classify(honeydew, 'git switch main') == 'deny'
+
+    beaker = _bash_rules(AgentName.BEAKER, enabled=True)
+    assert _classify(beaker, 'git commit -m x') == 'allow'
+
+
+def test_bash_allowlist_is_off_by_default() -> None:
+    assert Settings().agent_bash_allowlist_enabled is False
+
+
+def test_secrets_dir_from_environment_enables_file_loading(
+    tmp_path: Path, monkeypatch
+) -> None:
+    secrets_dir = tmp_path / 'secrets'
+    secrets_dir.mkdir()
+    _write_secret(secrets_dir, 'operator_api_token', 'env-dir-operator')
+    monkeypatch.setenv(
+        'GLASSLAB_ORCHESTRATOR_SECRETS_DIR', str(secrets_dir)
+    )
+    monkeypatch.delenv(
+        'GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN', raising=False
+    )
+
+    settings = Settings()
+
+    assert settings.secrets_dir == str(secrets_dir)
+    assert settings.operator_api_token == 'env-dir-operator'

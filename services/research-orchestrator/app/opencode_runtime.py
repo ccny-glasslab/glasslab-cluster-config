@@ -95,6 +95,128 @@ _DEPENDENCY_CACHE_SEARCH_MAX_DEPTH = 12
 # run_turn).
 _TURN_TIMEOUT_BUFFER_SECONDS = 30.0
 
+# Legacy prefix denylist, kept verbatim for agents running with
+# agent_bash_allowlist_enabled=False (the default until the allowlist has been
+# validated in production).
+_LEGACY_DENIED_SHELL: dict[str, str] = {
+    'kubectl *': 'deny',
+    'ssh *': 'deny',
+    'scp *': 'deny',
+    'docker *': 'deny',
+    'podman *': 'deny',
+    'git push*': 'deny',
+    'gh pr create*': 'deny',
+    '*secret*': 'deny',
+    # Network egress: a prompt-injected agent must not be able to exfiltrate
+    # the model-provider API keys present in its env.
+    'curl *': 'deny',
+    'curl.exe *': 'deny',
+    'wget *': 'deny',
+    'nc *': 'deny',
+    'ncat *': 'deny',
+    'fetch *': 'deny',
+    'telnet *': 'deny',
+    'ftp *': 'deny',
+    'socat *': 'deny',
+}
+_HONEYDEW_EXTRA_DENIED_SHELL: dict[str, str] = {
+    'git commit*': 'deny',
+    'git checkout*': 'deny',
+    'git switch*': 'deny',
+}
+
+# Default-deny bash allowlist (issue #597). A command is allowed only when its
+# exact invocation, or its invocation with arguments, matches one of these
+# entries; everything else is denied by the '*' catch-all. The set is
+# deliberately small and contains no shell, no interpreter-as-shell, and no
+# network client.
+SAFE_BASH_COMMANDS: tuple[str, ...] = (
+    'pwd',
+    'ls',
+    'cat',
+    'head',
+    'tail',
+    'wc',
+    'grep',
+    'rg',
+    'find',
+    'sort',
+    'uniq',
+    'diff',
+    'tree',
+    'git',
+    'pytest',
+    'python3 -m pytest',
+    'make',
+    'jq',
+    'sed',
+    'awk',
+    'xargs',
+    'mkdir',
+    'cp',
+    'mv',
+    'rm',
+    'touch',
+    'echo',
+    'tee',
+    'tar',
+    'unzip',
+)
+
+# Denied even though the catch-all is already deny: these document the
+# boundary and stay effective if a future change widens the allowlist. Command
+# names (letters) sort after the '*' catch-all, so they win when no safe entry
+# matches.
+DENIED_BASH_COMMANDS: tuple[str, ...] = (
+    'kubectl',
+    'kubectl *',
+    'ssh',
+    'ssh *',
+    'scp',
+    'scp *',
+    'docker',
+    'docker *',
+    'podman',
+    'podman *',
+    'curl',
+    'curl *',
+    'curl.exe *',
+    'wget',
+    'wget *',
+    'nc',
+    'nc *',
+    'ncat',
+    'ncat *',
+    'socat',
+    'socat *',
+    'telnet',
+    'telnet *',
+    'ftp',
+    'ftp *',
+    'env',
+    'env *',
+    'printenv',
+    'printenv *',
+    'sh',
+    'sh *',
+    'bash',
+    'bash *',
+    'dash *',
+    'zsh *',
+    'python3 -c*',
+    'python -c*',
+    'python2 -c*',
+    'node -e*',
+    'node --eval*',
+    'sh -c*',
+    'bash -c*',
+    'perl -e*',
+    'ruby -e*',
+    'git push*',
+    '*secret*',
+    '*/dev/tcp*',
+)
+
 
 def dependency_resolution_failure(text: str) -> bool:
     """True when OpenCode text describes the worktree dependency failure."""
@@ -706,45 +828,40 @@ class OpenCodeProcessRuntime(AgentRuntime):
             '})\n'
         )
 
+    def _bash_permission_rules(self, agent: AgentName) -> dict[str, str]:
+        if not self.settings.agent_bash_allowlist_enabled:
+            rules = {'*': 'allow'}
+            rules.update(_LEGACY_DENIED_SHELL)
+            if agent == AgentName.HONEYDEW:
+                rules.update(_HONEYDEW_EXTRA_DENIED_SHELL)
+            return rules
+        rules = {'*': 'deny'}
+        for pattern in DENIED_BASH_COMMANDS:
+            rules[pattern] = 'deny'
+        for command in SAFE_BASH_COMMANDS:
+            rules[command] = 'allow'
+            rules[f'{command} *'] = 'allow'
+            # Containment rules must sort after the command's own allow so
+            # they win the last-match-wins evaluation; a leading '*' would
+            # sort before every letter-prefixed allow and never apply.
+            rules[f'{command} *secret*'] = 'deny'
+            rules[f'{command} */dev/tcp*'] = 'deny'
+        if agent == AgentName.HONEYDEW:
+            for pattern in _HONEYDEW_EXTRA_DENIED_SHELL:
+                rules[pattern] = 'deny'
+        return rules
+
     def _permissions(
         self,
         agent: AgentName,
         run_root: Path | None = None,
     ) -> dict[str, Any]:
-        # Deny-list for the agent's bash tool. Cluster mutation, network
-        # egress to the cluster, image publication, and git push/PR creation
-        # are off limits for both agents; Honeydew additionally cannot mutate
-        # the repository at all while drafting and reviewing.
-        denied_shell = {
-            '*': 'allow',
-            'kubectl *': 'deny',
-            'ssh *': 'deny',
-            'scp *': 'deny',
-            'docker *': 'deny',
-            'podman *': 'deny',
-            'git push*': 'deny',
-            'gh pr create*': 'deny',
-            '*secret*': 'deny',
-            # Network egress: a prompt-injected agent must not be able to
-            # exfiltrate the model-provider API keys present in its env.
-            'curl *': 'deny',
-            'curl.exe *': 'deny',
-            'wget *': 'deny',
-            'nc *': 'deny',
-            'ncat *': 'deny',
-            'fetch *': 'deny',
-            'telnet *': 'deny',
-            'ftp *': 'deny',
-            'socat *': 'deny',
-        }
-        if agent == AgentName.HONEYDEW:
-            denied_shell.update(
-                {
-                    'git commit*': 'deny',
-                    'git checkout*': 'deny',
-                    'git switch*': 'deny',
-                }
-            )
+        # Bash allowlist/denylist for the agent's bash tool. Cluster
+        # mutation, network egress to the cluster, image publication, and git
+        # push/PR creation are off limits for both agents; Honeydew
+        # additionally cannot mutate the repository at all while drafting and
+        # reviewing.
+        denied_shell = self._bash_permission_rules(agent)
         # external_directory default-denies every path outside the agent's
         # own worktree. Only the SAME run's read-only durable directories
         # (protocol/, shared-artifacts/, reports/, events/) are allowed by

@@ -62,10 +62,13 @@ spec:
           envFrom:
             - configMapRef:
                 name: glasslab-research-orchestrator-config
-            - secretRef:
-                name: glasslab-research-orchestrator
-                optional: true
           env:
+            # Control-plane secrets are projected as read-only files under
+            # GLASSLAB_ORCHESTRATOR_SECRETS_DIR, not env: the same-UID
+            # OpenCode child shares this container and could read
+            # /proc/1/environ (issue #597).
+            - name: GLASSLAB_ORCHESTRATOR_SECRETS_DIR
+              value: /etc/glasslab-secrets
             - name: GLASSLAB_WORKFLOW_API_CALLER_NAME
               value: research-orchestrator
             - name: GLASSLAB_WORKFLOW_API_TOKEN
@@ -73,11 +76,6 @@ spec:
                 secretKeyRef:
                   name: glasslab-workflow-api-research-orchestrator
                   key: token
-            - name: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
-              valueFrom:
-                secretKeyRef:
-                  name: glasslab-research-orchestrator
-                  key: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
             # The dense-retrieval embedding model downloads its weights to
             # HF_HOME at first use; the pod home is read-only, so point the
             # cache at the persistent shared volume next to opencode-cache.
@@ -127,6 +125,9 @@ spec:
             - name: opencode-auth
               mountPath: /etc/opencode-auth
               readOnly: true
+            - name: control-plane-secrets
+              mountPath: /etc/glasslab-secrets
+              readOnly: true
       volumes:
         - name: artifacts-volume
           persistentVolumeClaim:
@@ -137,3 +138,21 @@ spec:
           secret:
             secretName: glasslab-opencode-auth
             defaultMode: 0444
+        # Control-plane secrets as read-only files, never env (issue #597).
+        # Only the keys the service reads are projected; the live Secret must
+        # contain every listed key (see 11-secret.example.yaml).
+        - name: control-plane-secrets
+          secret:
+            secretName: glasslab-research-orchestrator
+            defaultMode: 0400
+            items:
+              - key: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+                path: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+              - key: GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN
+                path: GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN
+              - key: GLASSLAB_ORCHESTRATOR_DISCORD_BOT_TOKEN
+                path: GLASSLAB_ORCHESTRATOR_DISCORD_BOT_TOKEN
+              - key: GLASSLAB_ORCHESTRATOR_DISCORD_WEBHOOK_URL
+                path: GLASSLAB_ORCHESTRATOR_DISCORD_WEBHOOK_URL
+              - key: GLASSLAB_ORCHESTRATOR_LINK_SIGNING_SECRET
+                path: GLASSLAB_ORCHESTRATOR_LINK_SIGNING_SECRET
