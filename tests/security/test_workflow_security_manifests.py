@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -172,8 +173,8 @@ class WorkflowSecurityManifestTests(unittest.TestCase):
         for caller in CALLERS:
             self.assertIn(f"'{CALLERS[caller]['secret']}:token'", rollout)
         # Retired (command-router) and legacy (schedule-worker) services are
-        # not part of the authenticated bundle; their images are not published
-        # by the ccny service-image pipeline.
+        # not part of the authenticated bundle; the release pipeline publishes
+        # the bounded service images separately (service-images.yml).
         self.assertNotIn("rollout_command_router", bundle)
         self.assertNotIn("rollout_schedule_worker", bundle)
         secret_preflight_position = bundle.index("require_workflow_caller_secrets")
@@ -320,6 +321,59 @@ class MinioCredentialScopingTests(unittest.TestCase):
                 resource.startswith(f"arn:aws:s3:::{MINIO_SOURCE_DOCUMENT_BUCKET}"),
                 f"policy grants access outside the scoped bucket: {resource}",
             )
+
+
+SERVICE_IMAGE_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "service-images.yml"
+CANONICAL_FULL_SHA_IMAGE_RE = re.compile(r"^ghcr\.io/ccny-glasslab/glasslab-([a-z0-9-]+):[0-9a-f]{40}$")
+BOUNDED_SERVICE_DEPLOYMENTS = {
+    "assessment-agent": KUBE_ROOT / "assessment-agent" / "10-deployment.yaml",
+    "design-agent": KUBE_ROOT / "design-agent" / "10-deployment.yaml",
+    "intake-agent": KUBE_ROOT / "intake-agent" / "10-deployment.yaml",
+    "interpretation-agent": KUBE_ROOT / "interpretation-agent" / "10-deployment.yaml",
+    "schedule-worker": KUBE_ROOT / "schedule-worker" / "10-deployment.yaml",
+}
+PUBLISHED_SERVICES = ("workflow-api", "research-orchestrator", *BOUNDED_SERVICE_DEPLOYMENTS)
+
+
+class ServiceImageSupplyChainTests(unittest.TestCase):
+    """Issue #600: deployed images must come from the canonical org, pinned."""
+
+    def test_bounded_service_deployments_pin_canonical_org_full_sha_tags(self):
+        for service, path in BOUNDED_SERVICE_DEPLOYMENTS.items():
+            with self.subTest(service=service):
+                container = container_for(path, service)
+                match = CANONICAL_FULL_SHA_IMAGE_RE.match(container["image"])
+                self.assertIsNotNone(match, f"{service} is not pinned to a canonical full SHA: {container['image']}")
+                self.assertEqual(match.group(1), service)
+
+    def test_service_image_pipeline_publishes_every_service_at_the_git_sha(self):
+        jobs = yaml.safe_load(SERVICE_IMAGE_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        for service in PUBLISHED_SERVICES:
+            with self.subTest(service=service):
+                build = next(
+                    step
+                    for step in jobs[service]["steps"]
+                    if step.get("uses", "").startswith("docker/build-push-action")
+                )
+                self.assertEqual(
+                    build["with"]["tags"],
+                    f"ghcr.io/ccny-glasslab/glasslab-{service}:${{{{ github.sha }}}}",
+                )
+                self.assertEqual(build["with"]["file"], f"services/{service}/Dockerfile")
+
+    def test_no_manifest_references_the_personal_registry_org(self):
+        for path in sorted(KUBE_ROOT.rglob("*.yaml")):
+            with self.subTest(path=path.relative_to(KUBE_ROOT).as_posix()):
+                self.assertNotIn("ghcr.io/offensivegeneric/", path.read_text(encoding="utf-8"))
+
+    def test_minio_and_nats_images_stay_digest_pinned(self):
+        for relative_path, container_name in (
+            ("minio/20-deployment.yaml", "minio"),
+            ("nats/10-deployment.yaml", "nats"),
+        ):
+            with self.subTest(manifest=relative_path):
+                container = container_for(KUBE_ROOT / relative_path, container_name)
+                self.assertRegex(container["image"], r"@sha256:[0-9a-f]{64}$")
 
 
 if __name__ == "__main__":

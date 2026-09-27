@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import os
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
+from .internal_auth import require_internal_token
 from .models import DesignDraft, DesignRequest, DesignResponse, HealthResponse, ModelBackendMetadata
 
 UNRESOLVED_PREFIX = 'UNRESOLVED_'
@@ -129,7 +130,7 @@ def healthz() -> HealthResponse:
     return HealthResponse(status='ok', model_backend=MODEL_BACKEND.model_dump())
 
 
-@app.post('/draft-design', response_model=DesignResponse)
+@app.post('/draft-design', response_model=DesignResponse, dependencies=[Depends(require_internal_token)])
 def draft_design(request: DesignRequest) -> DesignResponse:
     return DesignResponse(
         request_id=request.request_id,

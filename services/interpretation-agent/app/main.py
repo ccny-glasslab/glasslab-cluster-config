@@ -19,8 +19,9 @@ from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
+from .internal_auth import require_internal_token
 from .models import (
     HealthResponse,
     InterpretationDraft,
@@ -600,7 +601,7 @@ def healthz() -> HealthResponse:
     return HealthResponse(status='ok', model_backend=MODEL_BACKEND.model_dump())
 
 
-@app.post('/interpret-intake', response_model=InterpretationResponse)
+@app.post('/interpret-intake', response_model=InterpretationResponse, dependencies=[Depends(require_internal_token)])
 def interpret_intake(request: InterpretationRequest) -> InterpretationResponse:
     draft, backend, warnings = interpret_with_backends(request)
     return InterpretationResponse(

@@ -10,9 +10,14 @@ metadata:
   name: glasslab-workflow-api-job-submitter
   namespace: glasslab-v2
 rules:
+  # No list/watch on jobs: app/job_submission.py is the only Kubernetes job
+  # client and uses create_namespaced_job, read_namespaced_job, and
+  # delete_namespaced_job only; execution_preflight.py and run_artifacts.py
+  # never touch the batch API. Re-add list/watch only together with a code
+  # path that consumes them (issue #602).
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["create", "delete", "get", "list", "watch"]
+    verbs: ["create", "delete", "get"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]

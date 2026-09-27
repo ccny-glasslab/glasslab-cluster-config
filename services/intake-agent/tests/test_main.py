@@ -14,6 +14,7 @@ import types
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +52,19 @@ build_harvester_plan = main_module.build_harvester_plan
 build_problem_harvester_plan = main_module.build_problem_harvester_plan
 NormalizeIntakeRequest = models_module.NormalizeIntakeRequest
 
+INTERNAL_TOKEN_HEADER = 'X-Glasslab-Internal-Token'
+INTERNAL_TOKEN_ENV = 'GLASSLAB_AGENT_INTERNAL_TOKEN'
+INTERNAL_TOKEN = 'test-internal-token'
+
+
+def internal_auth_headers() -> dict[str, str]:
+    return {INTERNAL_TOKEN_HEADER: INTERNAL_TOKEN}
+
+
+@pytest.fixture(autouse=True)
+def configure_internal_token(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
 
 def build_request() -> NormalizeIntakeRequest:
     # example.org is deliberately absent from the seed manifest's venue
@@ -81,7 +95,7 @@ def test_healthz() -> None:
 
 def test_approved_sources_endpoint() -> None:
     client = TestClient(app)
-    response = client.get('/approved-sources')
+    response = client.get('/approved-sources', headers=internal_auth_headers())
     assert response.status_code == 200
     payload = response.json()
     assert payload['manifest_version'] == 1
@@ -91,7 +105,7 @@ def test_approved_sources_endpoint() -> None:
 
 def test_paper_harvester_tracks_endpoint() -> None:
     client = TestClient(app)
-    response = client.get('/paper-harvester/tracks')
+    response = client.get('/paper-harvester/tracks', headers=internal_auth_headers())
     assert response.status_code == 200
     payload = response.json()
     assert any(track['track_id'] == 'tabular_baselines' for track in payload)
@@ -122,6 +136,7 @@ def test_paper_harvester_plan_warns_on_unknown_track() -> None:
             'track_ids': ['does-not-exist'],
             'max_papers': 3,
         },
+        headers=internal_auth_headers(),
     )
     assert response.status_code == 200
     payload = response.json()
@@ -218,6 +233,7 @@ def test_problem_harvester_plan_endpoint() -> None:
             'problem_statement': 'Find bounded reproducibility papers and benchmark-suite work we can run on the cluster.',
             'max_papers': 2,
         },
+        headers=internal_auth_headers(),
     )
     assert response.status_code == 200
     payload = response.json()
@@ -246,7 +262,11 @@ def test_build_approval_warnings_for_unapproved_host() -> None:
 
 def test_normalize_intake_endpoint() -> None:
     client = TestClient(app)
-    response = client.post('/normalize-intake', json=build_request().model_dump())
+    response = client.post(
+        '/normalize-intake',
+        json=build_request().model_dump(),
+        headers=internal_auth_headers(),
+    )
     assert response.status_code == 200
     payload = response.json()
     assert payload['request_id'] == 'intake-1'
@@ -260,3 +280,55 @@ def test_normalize_intake_endpoint() -> None:
         'current implementation is deterministic scaffold logic; live model integration is not enabled yet',
         'source refs include hosts outside the current approved seed manifest: example.org',
     ]
+
+
+PROTECTED_REQUESTS = [
+    ('get', '/approved-sources', None),
+    ('get', '/paper-harvester/tracks', None),
+    ('get', '/paper-harvester/papers', None),
+    ('post', '/paper-harvester/plan', {'request_id': 'auth-plan', 'track_ids': [], 'max_papers': 1}),
+    (
+        'post',
+        '/paper-harvester/plan-from-problem',
+        {
+            'request_id': 'auth-problem',
+            'problem_statement': 'Find bounded benchmark papers.',
+            'max_papers': 1,
+        },
+    ),
+    ('post', '/normalize-intake', build_request().model_dump()),
+]
+
+PROTECTED_REQUEST_IDS = [entry[1] for entry in PROTECTED_REQUESTS]
+
+
+@pytest.mark.parametrize(('method', 'path', 'body'), PROTECTED_REQUESTS, ids=PROTECTED_REQUEST_IDS)
+def test_protected_route_rejects_missing_internal_token(method, path, body) -> None:
+    client = TestClient(app)
+    response = client.request(method, path, json=body)
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize(('method', 'path', 'body'), PROTECTED_REQUESTS, ids=PROTECTED_REQUEST_IDS)
+def test_protected_route_rejects_wrong_internal_token(method, path, body) -> None:
+    client = TestClient(app)
+    response = client.request(
+        method,
+        path,
+        json=body,
+        headers={INTERNAL_TOKEN_HEADER: 'wrong-token'},
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize(('method', 'path', 'body'), PROTECTED_REQUESTS, ids=PROTECTED_REQUEST_IDS)
+def test_protected_route_fails_closed_when_token_unconfigured(monkeypatch, method, path, body) -> None:
+    monkeypatch.delenv(INTERNAL_TOKEN_ENV)
+    client = TestClient(app)
+    response = client.request(method, path, json=body, headers=internal_auth_headers())
+    assert response.status_code == 503
+
+
+def test_healthz_stays_anonymous() -> None:
+    client = TestClient(app)
+    assert client.get('/healthz').status_code == 200

@@ -11,6 +11,7 @@ import types
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +45,19 @@ app = main_module.app
 build_interpretation_draft = main_module.build_interpretation_draft
 interpret_with_backends = main_module.interpret_with_backends
 InterpretationRequest = models_module.InterpretationRequest
+
+INTERNAL_TOKEN_HEADER = 'X-Glasslab-Internal-Token'
+INTERNAL_TOKEN_ENV = 'GLASSLAB_AGENT_INTERNAL_TOKEN'
+INTERNAL_TOKEN = 'test-internal-token'
+
+
+def internal_auth_headers() -> dict[str, str]:
+    return {INTERNAL_TOKEN_HEADER: INTERNAL_TOKEN}
+
+
+@pytest.fixture(autouse=True)
+def configure_internal_token(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
 
 
 def build_request() -> InterpretationRequest:
@@ -96,7 +110,11 @@ def test_interpret_intake_endpoint_returns_bounded_draft_shape(monkeypatch) -> N
 
     monkeypatch.setattr(main_module, 'interpret_with_backends', fake_interpret_with_backends)
     client = TestClient(app)
-    response = client.post('/interpret-intake', json=build_request().model_dump())
+    response = client.post(
+        '/interpret-intake',
+        json=build_request().model_dump(),
+        headers=internal_auth_headers(),
+    )
 
     assert response.status_code == 200
     payload = response.json()
@@ -158,3 +176,35 @@ def test_interpretation_agent_falls_back_to_deterministic_scaffold(monkeypatch) 
     assert draft.candidate_workflow_families[0] == 'generic-tabular-benchmark'
     assert backend.base_url == 'http://192.168.1.21:52415'
     assert any('all model backends failed' in warning for warning in warnings)
+
+
+def test_interpret_intake_rejects_missing_internal_token() -> None:
+    client = TestClient(app)
+    response = client.post('/interpret-intake', json=build_request().model_dump())
+    assert response.status_code == 401
+
+
+def test_interpret_intake_rejects_wrong_internal_token() -> None:
+    client = TestClient(app)
+    response = client.post(
+        '/interpret-intake',
+        json=build_request().model_dump(),
+        headers={INTERNAL_TOKEN_HEADER: 'wrong-token'},
+    )
+    assert response.status_code == 401
+
+
+def test_interpret_intake_fails_closed_when_token_unconfigured(monkeypatch) -> None:
+    monkeypatch.delenv(INTERNAL_TOKEN_ENV)
+    client = TestClient(app)
+    response = client.post(
+        '/interpret-intake',
+        json=build_request().model_dump(),
+        headers=internal_auth_headers(),
+    )
+    assert response.status_code == 503
+
+
+def test_healthz_stays_anonymous() -> None:
+    client = TestClient(app)
+    assert client.get('/healthz').status_code == 200
