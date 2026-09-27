@@ -34,6 +34,7 @@ from pydantic import ValidationError
 
 from .config import Settings
 from .knowledge_tool import TOOL_NAME, BoundRetrieveEvidenceTool
+from .process_permissions import make_directory_group_writable
 from .runtime_env import build_agent_environment
 from .schemas import AgentName, AgentTurnResult, ProducedFile
 
@@ -94,6 +95,183 @@ _DEPENDENCY_CACHE_SEARCH_MAX_DEPTH = 12
 # watchdog's abort path always wins the race when it can (see _client and
 # run_turn).
 _TURN_TIMEOUT_BUFFER_SECONDS = 30.0
+
+# Legacy prefix denylist, kept verbatim for the explicit opt-out path
+# (agent_bash_allowlist_enabled=False). It is NOT a security boundary: it
+# allows python3, sh, env, awk, sed, and find, so a prompt-injected agent can
+# still run arbitrary code. The deployed posture is the default-deny allowlist
+# below (issue #597 F1).
+_LEGACY_DENIED_SHELL: dict[str, str] = {
+    'kubectl *': 'deny',
+    'ssh *': 'deny',
+    'scp *': 'deny',
+    'docker *': 'deny',
+    'podman *': 'deny',
+    'git push*': 'deny',
+    'gh pr create*': 'deny',
+    '*secret*': 'deny',
+    # Network egress: a prompt-injected agent must not be able to exfiltrate
+    # the model-provider API keys present in its env.
+    'curl *': 'deny',
+    'curl.exe *': 'deny',
+    'wget *': 'deny',
+    'nc *': 'deny',
+    'ncat *': 'deny',
+    'fetch *': 'deny',
+    'telnet *': 'deny',
+    'ftp *': 'deny',
+    'socat *': 'deny',
+}
+_HONEYDEW_EXTRA_DENIED_SHELL: dict[str, str] = {
+    'git commit*': 'deny',
+    'git checkout*': 'deny',
+    'git switch*': 'deny',
+}
+
+# Default-deny bash allowlist (issue #597 F2). A command is allowed only when
+# its exact invocation, or its invocation with arguments, matches one of these
+# entries; everything else is denied by the '*' catch-all.
+#
+# Every entry here is a non-interpreter command that cannot be turned into
+# arbitrary code execution by an argument. Commands that CAN are deliberately
+# absent (awk, sed, find, xargs, make, tar, unzip, tee): `awk 'BEGIN{system(
+# "id")}'`, `find . -exec sh -c id \;`, `sed '1e id'`, `xargs sh -c id`,
+# `make -f evil.mk`, and `tar --checkpoint-action=exec=sh` all execute an
+# arbitrary program. `python3 -m pytest` is retained because running the
+# worktree's test suite is a required Beaker workflow; it executes project
+# code as the agent UID, which owns no control-plane secret in the split
+# deployment (a separate container with no secret mount).
+SAFE_BASH_COMMANDS: tuple[str, ...] = (
+    'pwd',
+    'ls',
+    'cat',
+    'head',
+    'tail',
+    'wc',
+    'grep',
+    'rg',
+    'sort',
+    'uniq',
+    'diff',
+    'tree',
+    'jq',
+    'mkdir',
+    'cp',
+    'mv',
+    'rm',
+    'touch',
+    'echo',
+    'pytest',
+    'python3 -m pytest',
+)
+
+# `git` is split into exact subcommands rather than a `git *` allow: the bare
+# command and its config/exec escape hatches (`git -c core.pager=...`,
+# `git --exec-path`, `git config alias.x '!sh -c id'`) run an arbitrary
+# program. Beaker needs status/diff/log/add/commit; Honeydew's _HONEYDEW_
+# EXTRA_DENIED_SHELL removes even commit/checkout/switch.
+SAFE_GIT_SUBCOMMANDS: tuple[str, ...] = (
+    'git status',
+    'git diff',
+    'git log',
+    'git show',
+    'git add',
+    'git commit',
+    'git rev-parse',
+    'git branch',
+    'git stash',
+)
+
+# Denied even though the catch-all is already deny: these document the
+# boundary and stay effective if a future change widens the allowlist. Command
+# names (letters) sort after the '*' catch-all, so they win when no safe entry
+# matches.
+DENIED_BASH_COMMANDS: tuple[str, ...] = (
+    'kubectl',
+    'kubectl *',
+    'ssh',
+    'ssh *',
+    'scp',
+    'scp *',
+    'docker',
+    'docker *',
+    'podman',
+    'podman *',
+    'curl',
+    'curl *',
+    'curl.exe *',
+    'wget',
+    'wget *',
+    'nc',
+    'nc *',
+    'ncat',
+    'ncat *',
+    'socat',
+    'socat *',
+    'telnet',
+    'telnet *',
+    'ftp',
+    'ftp *',
+    'env',
+    'env *',
+    'printenv',
+    'printenv *',
+    'sh',
+    'sh *',
+    'bash',
+    'bash *',
+    'dash *',
+    'zsh *',
+    'python3 -c*',
+    'python -c*',
+    'python2 -c*',
+    'node -e*',
+    'node --eval*',
+    'sh -c*',
+    'bash -c*',
+    'perl -e*',
+    'ruby -e*',
+    'git push*',
+    '*secret*',
+    '*/dev/tcp*',
+    # Meta-commands removed from the allowlist because each executes an
+    # arbitrary program through an argument (issue #597 F2).
+    'awk',
+    'awk *',
+    'sed',
+    'sed *',
+    'find',
+    'find *',
+    'xargs',
+    'xargs *',
+    'make',
+    'make *',
+    'tar',
+    'tar *',
+    'unzip',
+    'unzip *',
+    'tee',
+    'tee *',
+    # git escape hatches that run an arbitrary program or reach the network,
+    # even though the exact subcommands in SAFE_GIT_SUBCOMMANDS are allowed.
+    'git -c*',
+    'git -C*',
+    'git --exec-path*',
+    'git config*',
+    'git help*',
+    'git difftool*',
+    'git mergetool*',
+    'git -p*',
+    'git --paginate*',
+    'git fetch*',
+    'git pull*',
+    'git clone*',
+    'git remote*',
+    'git submodule*',
+    'git rebase*',
+    'git filter-branch*',
+)
+
 
 
 def dependency_resolution_failure(text: str) -> bool:
@@ -560,8 +738,70 @@ class _ProcessHandle:
     workspace: Path
     base_url: str
     password: str
-    process: subprocess.Popen[str]
+    process: subprocess.Popen[str] | _RemoteProcess
     log_handle: Any
+
+
+class _RemoteProcess:
+    """Handle for a server spawned by the opencode sidecar broker.
+
+    Implements the subset of ``subprocess.Popen`` the runtime uses
+    (``poll``/``terminate``/``kill``/``wait``) by calling the broker over
+    loopback, so the port reservation, health poll, watchdog, and shutdown
+    paths stay unchanged when the process lives in the sidecar container.
+    """
+
+    def __init__(
+        self, *, runtime_id: str, base_url: str, timeout: float
+    ) -> None:
+        self.runtime_id = runtime_id
+        self._base_url = base_url.rstrip('/')
+        self._timeout = timeout
+
+    def poll(self) -> int | None:
+        try:
+            response = httpx.get(
+                f'{self._base_url}/v1/servers/{self.runtime_id}',
+                timeout=self._timeout,
+            )
+            if response.status_code == 404:
+                return 0
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, ValueError):
+            # A transient broker failure must not be mistaken for a dead
+            # server; the startup health poll and the turn watchdog remain the
+            # authoritative liveness checks.
+            return None
+        if body.get('running'):
+            return None
+        returncode = body.get('returncode')
+        return int(returncode) if isinstance(returncode, int) else 0
+
+    def terminate(self) -> None:
+        self._terminate()
+
+    def kill(self) -> None:
+        self._terminate()
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            returncode = self.poll()
+            if returncode is not None:
+                return returncode
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired('opencode-sidecar', timeout)
+            time.sleep(0.1)
+
+    def _terminate(self) -> None:
+        try:
+            httpx.post(
+                f'{self._base_url}/v1/servers/{self.runtime_id}/terminate',
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError:
+            pass
 
 
 class OpenCodeProcessRuntime(AgentRuntime):
@@ -706,45 +946,46 @@ class OpenCodeProcessRuntime(AgentRuntime):
             '})\n'
         )
 
+    def _bash_permission_rules(self, agent: AgentName) -> dict[str, str]:
+        if not self.settings.agent_bash_allowlist_enabled:
+            rules = {'*': 'allow'}
+            rules.update(_LEGACY_DENIED_SHELL)
+            if agent == AgentName.HONEYDEW:
+                rules.update(_HONEYDEW_EXTRA_DENIED_SHELL)
+            return rules
+        rules = {'*': 'deny'}
+        for pattern in DENIED_BASH_COMMANDS:
+            rules[pattern] = 'deny'
+        for command in (*SAFE_BASH_COMMANDS, *SAFE_GIT_SUBCOMMANDS):
+            rules[command] = 'allow'
+            rules[f'{command} *'] = 'allow'
+            # Containment rules must sort after the command's own allow so
+            # they win the last-match-wins evaluation; a leading '*' would
+            # sort before every letter-prefixed allow and never apply.
+            rules[f'{command} *secret*'] = 'deny'
+            rules[f'{command} */dev/tcp*'] = 'deny'
+            # The control-plane secret mount and /proc are denied by canonical
+            # path, not by the word "secret": a glob (`/etc/glasslab-*/...`)
+            # or a quoted path does not contain the literal word. Both
+            # patterns sort after '<command> *' because '/' > '*', so they win.
+            rules[f'{command} */proc*'] = 'deny'
+            rules[f'{command} */etc/glasslab*'] = 'deny'
+        if agent == AgentName.HONEYDEW:
+            for pattern in _HONEYDEW_EXTRA_DENIED_SHELL:
+                rules[pattern] = 'deny'
+        return rules
+
     def _permissions(
         self,
         agent: AgentName,
         run_root: Path | None = None,
     ) -> dict[str, Any]:
-        # Deny-list for the agent's bash tool. Cluster mutation, network
-        # egress to the cluster, image publication, and git push/PR creation
-        # are off limits for both agents; Honeydew additionally cannot mutate
-        # the repository at all while drafting and reviewing.
-        denied_shell = {
-            '*': 'allow',
-            'kubectl *': 'deny',
-            'ssh *': 'deny',
-            'scp *': 'deny',
-            'docker *': 'deny',
-            'podman *': 'deny',
-            'git push*': 'deny',
-            'gh pr create*': 'deny',
-            '*secret*': 'deny',
-            # Network egress: a prompt-injected agent must not be able to
-            # exfiltrate the model-provider API keys present in its env.
-            'curl *': 'deny',
-            'curl.exe *': 'deny',
-            'wget *': 'deny',
-            'nc *': 'deny',
-            'ncat *': 'deny',
-            'fetch *': 'deny',
-            'telnet *': 'deny',
-            'ftp *': 'deny',
-            'socat *': 'deny',
-        }
-        if agent == AgentName.HONEYDEW:
-            denied_shell.update(
-                {
-                    'git commit*': 'deny',
-                    'git checkout*': 'deny',
-                    'git switch*': 'deny',
-                }
-            )
+        # Bash allowlist/denylist for the agent's bash tool. Cluster
+        # mutation, network egress to the cluster, image publication, and git
+        # push/PR creation are off limits for both agents; Honeydew
+        # additionally cannot mutate the repository at all while drafting and
+        # reviewing.
+        denied_shell = self._bash_permission_rules(agent)
         # external_directory default-denies every path outside the agent's
         # own worktree. Only the SAME run's read-only durable directories
         # (protocol/, shared-artifacts/, reports/, events/) are allowed by
@@ -804,6 +1045,19 @@ class OpenCodeProcessRuntime(AgentRuntime):
         opencode_config_root.mkdir(parents=True, exist_ok=True)
         for path in (data_root, cache_root, state_root, home_root):
             path.mkdir(parents=True, exist_ok=True)
+        # The uid-10002 sidecar must write these trees while the orchestrator
+        # (uid 10001) owns them; the in-tree NFS PV ignores fsGroup, so add
+        # group write explicitly for pre-existing directories (issue #597).
+        for path in (
+            config_root.parent,
+            config_root,
+            opencode_config_root,
+            data_root,
+            cache_root,
+            state_root,
+            home_root,
+        ):
+            make_directory_group_writable(path)
         auth_source = self.settings.opencode_auth_json_path
         if auth_source:
             # Link (not copy) the mounted credential into the per-run
@@ -917,6 +1171,67 @@ class OpenCodeProcessRuntime(AgentRuntime):
             detail=f'linked {source} into {target}',
         )
 
+    def _spawn_server(
+        self,
+        *,
+        argv: list[str],
+        cwd: Path,
+        environment: dict[str, str],
+        log_handle: Any,
+        log_path: Path,
+    ) -> subprocess.Popen[str] | _RemoteProcess:
+        if self.settings.opencode_spawn_backend == 'sidecar':
+            return self._spawn_sidecar_server(
+                argv=argv,
+                cwd=cwd,
+                environment=environment,
+                log_path=log_path,
+            )
+        return subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=environment,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+    def _spawn_sidecar_server(
+        self,
+        *,
+        argv: list[str],
+        cwd: Path,
+        environment: dict[str, str],
+        log_path: Path,
+    ) -> _RemoteProcess:
+        # The sidecar broker owns the exec; this process only asks it to fork.
+        # The payload is secret-free by construction (build_agent_environment)
+        # and the broker re-validates argv, cwd, log path, and env keys.
+        payload = {
+            'argv': argv,
+            'cwd': str(cwd),
+            'env': environment,
+            'log_path': str(log_path),
+        }
+        try:
+            response = httpx.post(
+                f'{self.settings.opencode_sidecar_url.rstrip("/")}/v1/servers',
+                json=payload,
+                timeout=self.settings.opencode_sidecar_timeout_seconds,
+            )
+            response.raise_for_status()
+            runtime_id = str(response.json()['runtime_id'])
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            raise OpenCodeRuntimeError(
+                f'OpenCode sidecar spawn failed: {exc}',
+                failure_class='startup',
+            ) from exc
+        return _RemoteProcess(
+            runtime_id=runtime_id,
+            base_url=self.settings.opencode_sidecar_url,
+            timeout=self.settings.opencode_sidecar_timeout_seconds,
+        )
+
     def _start_process(
         self,
         *,
@@ -975,8 +1290,8 @@ class OpenCodeProcessRuntime(AgentRuntime):
                 },
             )
             try:
-                process = subprocess.Popen(
-                    [
+                process = self._spawn_server(
+                    argv=[
                         self.settings.opencode_executable,
                         'serve',
                         '--hostname',
@@ -985,10 +1300,9 @@ class OpenCodeProcessRuntime(AgentRuntime):
                         str(port),
                     ],
                     cwd=workspace,
-                    env=environment,
-                    stdout=log_handle,
-                    stderr=subprocess.STDOUT,
-                    text=True,
+                    environment=environment,
+                    log_handle=log_handle,
+                    log_path=log_path,
                 )
             except Exception:
                 log_handle.close()

@@ -49,6 +49,11 @@ data:
   GLASSLAB_ORCHESTRATOR_AGENT_RUNTIME_BACKEND: opencode
   GLASSLAB_ORCHESTRATOR_OPENCODE_EXECUTABLE: /usr/local/bin/opencode
   GLASSLAB_ORCHESTRATOR_OPENCODE_START_PORT: "4210"
+  # The agent runtime is forked by the separate `opencode` sidecar container
+  # (uid 10002, no control-plane-secrets mount) instead of this container
+  # (issue #597). The broker shares the pod network namespace on loopback.
+  GLASSLAB_ORCHESTRATOR_OPENCODE_SPAWN_BACKEND: sidecar
+  GLASSLAB_ORCHESTRATOR_OPENCODE_SIDECAR_URL: http://127.0.0.1:4200
   # Must never be lower than the code default in app/config.py: the env entry
   # overrides it, so a stale value here silently narrows the wall clock the
   # Thinking-model widening in config.py exists to guarantee. Guarded by
@@ -63,6 +68,12 @@ data:
   GLASSLAB_ORCHESTRATOR_OPENCODE_TURN_STEP_LIMIT: "600"
   GLASSLAB_ORCHESTRATOR_OPENCODE_STRUCTURED_REPAIR_ATTEMPTS: "1"
   GLASSLAB_ORCHESTRATOR_OPENCODE_STRUCTURED_OUTPUT_MODE: prompt
+  # Default-deny bash allowlist (issue #597 F1). The code default is already
+  # true (fail closed), but the key is pinned here explicitly so the deployed
+  # posture is auditable and cannot silently revert; guarded by
+  # tests/security/test_orchestrator_secret_isolation.py and
+  # services/research-orchestrator/tests/test_configmap_parity.py.
+  GLASSLAB_ORCHESTRATOR_AGENT_BASH_ALLOWLIST_ENABLED: "true"
   # One shared package/model download cache for every run and both agents
   # instead of a copy per run (see issue #99); session/auth/log state stays
   # per-run regardless of this setting.

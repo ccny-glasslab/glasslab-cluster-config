@@ -29,6 +29,45 @@ from .task_bundles import RUNTIME_PROFILES
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 
+ENV_PREFIX = 'GLASSLAB_ORCHESTRATOR_'
+
+# Control-plane secrets whose values may be supplied as read-only files under
+# Settings.secrets_dir instead of the process environment (issue #597). The
+# orchestrator and its same-UID OpenCode child share one container, so a
+# secret left in the environment is readable through /proc/1/environ. File
+# names are the canonical environment-variable names; the environment stays
+# the local/test fallback.
+CONTROL_PLANE_SECRET_FIELDS: tuple[str, ...] = (
+    'operator_api_token',
+    'link_signing_secret',
+    'discord_bot_token',
+    'discord_webhook_url',
+    'store_postgres_dsn',
+)
+
+
+def secret_env_name(field_name: str) -> str:
+    """Return the canonical env-var (and secret-file) name for a field."""
+    return f'{ENV_PREFIX}{field_name.upper()}'
+
+
+def read_secret_file(secrets_dir: str | None, field_name: str) -> str | None:
+    """Read a control-plane secret from ``<secrets_dir>/<ENV_NAME>``.
+
+    Returns ``None`` when ``secrets_dir`` is unset, the file is missing, or the
+    file is empty, so callers fall back to the environment (local/test). A
+    trailing newline (the common ``kubectl create secret --from-file``
+    artifact) is trimmed.
+    """
+    if not secrets_dir:
+        return None
+    path = Path(secrets_dir) / secret_env_name(field_name)
+    try:
+        value = path.read_text(encoding='utf-8').strip()
+    except OSError:
+        return None
+    return value or None
+
 # The minimal satisfiable evidence snapshot is the empty jobs/artifacts/
 # artifact_contents skeleton plus a count-only truncation note, which
 # serializes to ~251 bytes. A cap below this floor could never be honored, so
@@ -157,6 +196,13 @@ class Settings(BaseSettings):
     opencode_server_host: str = '127.0.0.1'
     opencode_start_port: int = 4210
     opencode_start_timeout_seconds: float = 60.0
+    # Where `opencode serve` is spawned (issue #597). 'local' forks it in this
+    # process (local development and tests); 'sidecar' asks the loopback
+    # broker in the separate, secret-free opencode container to fork it, so the
+    # agent runtime never shares this container's UID or mounts.
+    opencode_spawn_backend: Literal['local', 'sidecar'] = 'local'
+    opencode_sidecar_url: str = 'http://127.0.0.1:4200'
+    opencode_sidecar_timeout_seconds: float = 30.0
     opencode_turn_timeout_seconds: float = 3600.0
     opencode_repeated_tool_limit: int = 6
     # Per-turn step budget: the number of OpenCode loop steps a single turn may
@@ -166,6 +212,21 @@ class Settings(BaseSettings):
     # disables the budget; the wall-clock and repeated-tool guards stay active.
     opencode_turn_step_limit: int = 250
     agent_turn_max_retries: int = 2
+    # Default-ON switch for the default-deny bash allowlist (issues #597,
+    # #604). It defaults to the secure posture (fail closed): when the flag is
+    # absent the agent gets only the small allowlist in
+    # opencode_runtime.SAFE_BASH_COMMANDS, with '*': 'deny'. While off,
+    # OpenCodeProcessRuntime._permissions keeps the legacy prefix denylist,
+    # which allows interpreters and meta-commands (python3, sh, awk, sed,
+    # find) and therefore cannot contain a prompt-injected agent.
+    #
+    # A local developer who needs the permissive legacy denylist must set
+    # GLASSLAB_ORCHESTRATOR_AGENT_BASH_ALLOWLIST_ENABLED=false explicitly and
+    # must never set it false in a tracked deployment manifest. The deployed
+    # ConfigMap pins it true (kubeadm/glasslab-v2/research-orchestrator/
+    # 10-configmap.yaml) and a parity test asserts the key cannot silently
+    # revert.
+    agent_bash_allowlist_enabled: bool = True
     # Bounded auto-resume of a single turn after a wall-clock abort
     # (failure_class='turn_timeout'). A turn_timeout is deliberately
     # non-retryable through agent_turn_max_retries -- a fresh session with the
@@ -349,6 +410,10 @@ class Settings(BaseSettings):
     # durable event the next time a new run is created.
     paused_run_staleness_days: int = 3
     job_poll_interval_seconds: float = 10.0
+    # Read-only directory holding control-plane secret files named after their
+    # environment variable (issue #597). Unset keeps the environment as the
+    # only source (local/test); the deployment mounts the Secret here.
+    secrets_dir: str | None = None
     require_operator_auth: bool = True
     operator_api_token: str | None = None
     # Human-inspectable artifact links (workstream B). Unset by default: no
@@ -584,6 +649,25 @@ class Settings(BaseSettings):
         if value < 1:
             raise ValueError('link_ttl_seconds must be >= 1')
         return value
+
+    @model_validator(mode='before')
+    @classmethod
+    def load_control_plane_secret_files(cls, data: object) -> object:
+        # File-backed secrets take precedence over the environment so the pod
+        # can keep control-plane secrets out of /proc/1/environ (issue #597).
+        # A missing or empty file leaves the env/default value untouched so
+        # local and test runs keep working with the environment alone.
+        if not isinstance(data, dict):
+            return data
+        secrets_dir = data.get('secrets_dir')
+        if not secrets_dir:
+            return data
+        resolved = dict(data)
+        for field_name in CONTROL_PLANE_SECRET_FIELDS:
+            value = read_secret_file(str(secrets_dir), field_name)
+            if value is not None:
+                resolved[field_name] = value
+        return resolved
 
     @model_validator(mode='after')
     def reject_operator_token_as_link_secret(self) -> Settings:

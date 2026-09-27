@@ -44,7 +44,7 @@ from pydantic import SecretStr
 
 from .artifact_delivery import ArtifactDeliveryError, VerifiedArtifactReader
 from .cluster import FakeClusterExecutor, WorkflowApiClusterExecutor
-from .config import SERVICE_ROOT, Settings, get_settings
+from .config import SERVICE_ROOT, Settings, get_settings, read_secret_file
 from .contract_candidates import ContractCandidateManager
 from .contracts import ContractIntegrityError, EvaluationContractResolver
 from .corpus_rag.pdf_backend import UnsupportedDocumentError
@@ -78,6 +78,7 @@ from .links import (
 )
 from .opencode_runtime import AgentRuntime, OpenCodeProcessRuntime
 from .policy import ActionPolicy
+from .process_permissions import enable_shared_group_write
 from .redaction import redact_free_text, redact_payload
 from .research_store import ResearchStore
 from .schemas import (
@@ -825,6 +826,11 @@ def create_app(
     start_watcher: bool = True,
 ) -> FastAPI:
     settings = settings or get_settings()
+    # The split agent runtime shares the NFS artifacts volume between uid 10001
+    # (this container) and uid 10002 (the opencode sidecar); make every
+    # per-run directory/file group-writable so the sidecar can write it
+    # (issue #597).
+    enable_shared_group_write()
     engine = engine or build_engine(settings)
     discord_adapter = getattr(engine, 'discord', None)
     discord_rest_circuit = (
@@ -1255,12 +1261,19 @@ def create_app(
         """
         import os
 
+        # The DSN is read from the read-only secret file first so it never
+        # has to sit in the process environment (issue #597); the Settings
+        # object already resolves file-over-env, so the remaining entries can
+        # use it directly.
         raw: list[Any] = [
             settings.operator_api_token,
+            settings.link_signing_secret,
             settings.discord_bot_token,
             settings.discord_webhook_url,
             settings.workflow_api_token,
-            os.environ.get('GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN', ''),
+            read_secret_file(settings.secrets_dir, 'store_postgres_dsn')
+            or settings.store_postgres_dsn
+            or os.environ.get('GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN', ''),
         ]
         values: list[str] = []
         for item in raw:

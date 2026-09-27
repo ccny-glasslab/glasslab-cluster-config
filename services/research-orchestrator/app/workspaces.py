@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import zipfile
 
+from .process_permissions import ensure_group_writable_tree
 from .schemas import AgentName
 
 
@@ -103,8 +104,18 @@ class WorkspaceManager:
     def seed_agent_context(self, run_id: str) -> None:
         # Resume paths skip prepare(); existing worktrees still need the
         # authoritative tool roster so retried sessions see it.
-        self._seed_tool_roster(self.paths(run_id).beaker)
-        self._seed_tool_roster(self.paths(run_id).honeydew)
+        paths = self.paths(run_id)
+        self._seed_tool_roster(paths.beaker)
+        self._seed_tool_roster(paths.honeydew)
+        # A worktree created before the uid split is 0755/0644 owned by uid
+        # 10001; the uid-10002 sidecar can read but not write it. Add group
+        # write here (resume path only), then restore the deliberately
+        # read-only program.md (issue #597).
+        for workspace in (paths.beaker, paths.honeydew):
+            ensure_group_writable_tree(workspace)
+            program = workspace / 'program.md'
+            if program.is_file() and not program.is_symlink():
+                program.chmod(0o444)
 
     def _seed_tool_roster(self, workspace: Path) -> None:
         agents_md = workspace / 'AGENTS.md'
