@@ -1,7 +1,10 @@
 FROM python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534
 
 ARG OPENCODE_VERSION=1.18.14
-ARG HERMES_VERSION=v2026.8.3
+# Hermes is the opt-in rollback runtime. Pin an immutable commit on the
+# default branch: the current bootstrap requires the repo's pm/ tooling,
+# which no release tag carries, so a branch/tag pin breaks the build.
+ARG HERMES_COMMIT=6e69a8933adda7dbbff7cf3009a259a4524477e9
 # Issue #603: the Hermes bootstrap below is fetched and executed as root. Pin
 # its exact bytes (curl the URL, review the diff, then update this hash) so a
 # changed upstream script fails the build at sha256sum -c instead of silently
@@ -31,7 +34,7 @@ RUN apt-get update \
          grep -qF -- '--skip-browser' /tmp/install-hermes.sh; \
        fi \
     && bash /tmp/install-hermes.sh \
-        --branch "${HERMES_VERSION}" --skip-setup --skip-browser \
+        --commit "${HERMES_COMMIT}" --skip-setup --skip-browser \
     && rm -f /tmp/install-hermes.sh \
     && rm -rf /var/lib/apt/lists/*
 
