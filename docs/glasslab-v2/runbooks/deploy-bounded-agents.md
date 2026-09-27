@@ -27,13 +27,44 @@ GHCR_TOKEN="$(gh auth token)" ./scripts/create-ghcr-pull-secret.sh
 
 ## 2. Apply The Manifests
 
+The bounded-agent images are published by
+`.github/workflows/service-images.yml`, which only runs on a push to `main` and
+tags each image with that commit's SHA. Before the first such build completes
+there is no real SHA to pin, so the bounded-agent manifests carry the
+`pending-ci-build` marker. That marker is allowlisted in
+`scripts/validate-configs.py` and is never deployed: the deploy and rollout
+scripts override every service image with the checked-out commit SHA.
+
 Apply the bounded-agent manifests and the updated `workflow-api` ConfigMap:
 
 ```bash
 ./scripts/deploy-glasslab-v2.sh
 ```
 
-The core deploy script now includes the bounded-agent manifest directories.
+The core deploy script includes the bounded-agent manifest directories and
+resolves each service image tag from `git rev-parse HEAD` (or
+`GLASSLAB_V2_IMAGE_TAG`), so the plain deploy path cannot ship stale code.
+
+### Substitute The Merged Main SHA After CI Publishes
+
+This is the release step once the change has merged to `main`:
+
+1. Wait for the `Publish Service Images` workflow on `main` to finish. The
+   published tags are `ghcr.io/ccny-glasslab/glasslab-<service>:<merged-main-sha>`.
+2. In the canonical checkout, fast-forward to the merged commit and roll out:
+
+   ```bash
+   cd /home/glasslab/cluster-config
+   ./scripts/rollout-research-services.sh --service all --sync
+   ```
+
+   The rollout resolves `IMAGE_TAG` from `git rev-parse HEAD`, waits for GHCR to
+   expose the tag, and substitutes the merged main SHA into every Deployment
+   (including `schedule-worker`).
+3. Optionally follow up with a change that pins the manifests to that merged
+   SHA so the committed state names the exact released image. Never write the
+   all-zero sentinel or any guessed SHA: `scripts/validate-configs.py` rejects
+   both, and the marker is accepted only for the allowlisted image names.
 
 ## 3. Verify Service Rollout
 

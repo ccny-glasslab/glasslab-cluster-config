@@ -28,6 +28,7 @@ SCRIPT = REPO_ROOT / "scripts/rollout-research-services.sh"
 TAG = "97d0caa"
 ORCHESTRATOR_IMAGE = f"ghcr.io/ccny-glasslab/glasslab-research-orchestrator:{TAG}"
 WORKFLOW_API_IMAGE = f"ghcr.io/ccny-glasslab/glasslab-workflow-api:{TAG}"
+SCHEDULE_WORKER_IMAGE = f"ghcr.io/ccny-glasslab/glasslab-schedule-worker:{TAG}"
 PRIOR_ORCHESTRATOR = "ghcr.io/ccny-glasslab/glasslab-research-orchestrator:prior-sha"
 PRIOR_WORKFLOW_API = "ghcr.io/ccny-glasslab/glasslab-workflow-api:prior-sha"
 
@@ -210,8 +211,10 @@ class RolloutImagePreflightTests(unittest.TestCase):
         self.assertNotIn("set image", self._invocations())
 
     def test_proceeds_when_image_tag_exists(self) -> None:
-        # Given: GHCR already contains both bundle images for the tag.
-        self.existing.write_text(f"{ORCHESTRATOR_IMAGE}\n{WORKFLOW_API_IMAGE}\n")
+        # Given: GHCR already contains every bundle image for the tag.
+        self.existing.write_text(
+            f"{ORCHESTRATOR_IMAGE}\n{WORKFLOW_API_IMAGE}\n{SCHEDULE_WORKER_IMAGE}\n"
+        )
         # When: the full bundle is rolled out.
         completed = self._run(
             "--service", "all",
@@ -245,9 +248,11 @@ class RolloutImagePreflightTests(unittest.TestCase):
         )
 
     def test_mid_bundle_failure_prints_rollback_guidance_with_prior_image(self) -> None:
-        # Given: both images exist, the orchestrator rolls first, and the
-        # workflow-api rollout fails; the cluster previously ran prior-sha.
-        self.existing.write_text(f"{ORCHESTRATOR_IMAGE}\n{WORKFLOW_API_IMAGE}\n")
+        # Given: every bundle image exists, the orchestrator rolls first, and
+        # the workflow-api rollout fails; the cluster previously ran prior-sha.
+        self.existing.write_text(
+            f"{ORCHESTRATOR_IMAGE}\n{WORKFLOW_API_IMAGE}\n{SCHEDULE_WORKER_IMAGE}\n"
+        )
         # When: the bundle rollout fails partway through.
         completed = self._run(
             "--service", "all",
@@ -266,9 +271,11 @@ class RolloutImagePreflightTests(unittest.TestCase):
         self.assertIn("set image", completed.stderr)
 
     def test_successful_rollout_prints_no_rollback_guidance(self) -> None:
-        # Given: both images exist, every component rolls out cleanly, and the
-        # cluster previously ran prior-sha (so guidance *would* name it).
-        self.existing.write_text(f"{ORCHESTRATOR_IMAGE}\n{WORKFLOW_API_IMAGE}\n")
+        # Given: every bundle image exists, every component rolls out cleanly,
+        # and the cluster previously ran prior-sha (so guidance *would* name it).
+        self.existing.write_text(
+            f"{ORCHESTRATOR_IMAGE}\n{WORKFLOW_API_IMAGE}\n{SCHEDULE_WORKER_IMAGE}\n"
+        )
         # When: the full bundle completes with a zero exit status.
         completed = self._run(
             "--service", "all",

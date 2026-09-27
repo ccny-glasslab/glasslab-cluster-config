@@ -7,6 +7,9 @@ Beyond the parse check, this script enforces supply-chain pinning rules:
 - kubeadm/ manifests: every ``image:`` value must be pinned to a full
   40-hex git SHA tag or a ``@sha256:<64 hex>`` digest. Short SHAs and
   floating tags (``:latest``, ``:v1``, ``:2.10-alpine``, ...) fail.
+- The all-zero sentinel (a 40-zero tag or a ``sha256:<64 zeros>`` digest)
+  is rejected outright: it is a fake pin that looks like a full SHA without
+  naming any commit or image.
 - services/*/Dockerfile*: every ``FROM`` base must be digest-pinned.
 - .github/workflows/: every ``uses:`` action must be a local path or a
   full 40-hex SHA pin.
@@ -16,7 +19,9 @@ Intentional exceptions: Python ``>=`` comparison operators are not tags,
 and test fixtures that deliberately assert rejection (e.g. ``:latest`` in
 services/*/tests) are outside the scanned paths. Legacy image tags that
 cannot be resolved to a git SHA or registry digest are listed explicitly
-in LEGACY_IMAGE_ALLOWLIST.
+in LEGACY_IMAGE_ALLOWLIST. Canonical service images that CI has never
+published yet may declare that state explicitly with PENDING_BUILD_TAG for
+exactly the image names in PENDING_BUILD_IMAGES, instead of guessing a SHA.
 """
 from __future__ import annotations
 
@@ -45,6 +50,12 @@ EXCLUDED_SUFFIXES = {
 FULL_SHA_RE = re.compile(r'^[0-9a-f]{40}$')
 DIGEST_RE = re.compile(r'^sha256:[0-9a-f]{64}$')
 
+# The all-zero forms are fake pins: they satisfy FULL_SHA_RE / DIGEST_RE
+# syntactically but name no real commit or image. Reject them so a manifest
+# cannot pass the gate by filling the shape with zeros.
+ZERO_SHA = '0' * 40
+ZERO_DIGEST = 'sha256:' + '0' * 64
+
 # Legacy/manual image tags that cannot be resolved to a git SHA or a
 # registry digest: the images are built and pushed by hand (no CI build
 # record) into private GHCR packages, so neither a full-SHA tag nor a
@@ -52,6 +63,21 @@ DIGEST_RE = re.compile(r'^sha256:[0-9a-f]{64}$')
 # so the pinning gate stays enforceable on everything else.
 LEGACY_IMAGE_ALLOWLIST = {
     'ghcr.io/ccny-glasslab/glasslab-gpu-experiment-runner:0.1.7-local',
+}
+
+# Canonical service images that CI has not published yet. service-images.yml
+# only builds on push to main and tags with the commit SHA, so before the
+# first merge of a service no real 40-hex tag exists. A manifest for one of
+# these images must say so with PENDING_BUILD_TAG rather than guess a SHA or
+# fall back to the all-zero sentinel. The allowlist is by exact image name,
+# so the marker is tolerated for these five images and no other reference.
+PENDING_BUILD_TAG = 'pending-ci-build'
+PENDING_BUILD_IMAGES = {
+    'ghcr.io/ccny-glasslab/glasslab-assessment-agent',
+    'ghcr.io/ccny-glasslab/glasslab-design-agent',
+    'ghcr.io/ccny-glasslab/glasslab-intake-agent',
+    'ghcr.io/ccny-glasslab/glasslab-interpretation-agent',
+    'ghcr.io/ccny-glasslab/glasslab-schedule-worker',
 }
 
 
@@ -63,23 +89,47 @@ def should_skip(path: Path) -> bool:
     return any(path.name.endswith(suffix) for suffix in EXCLUDED_SUFFIXES)
 
 
+def is_zero_sha_token(token: str) -> bool:
+    """True for the all-zero 40-hex sentinel, which names no real commit."""
+    return token == ZERO_SHA
+
+
+def is_pending_build_ref(ref: str) -> bool:
+    """True only for an allowlisted image carrying the documented marker tag."""
+    if ':' not in ref:
+        return False
+    name, tag = ref.rsplit(':', 1)
+    return name in PENDING_BUILD_IMAGES and tag == PENDING_BUILD_TAG
+
+
 def is_pinned_image_ref(ref: str) -> bool:
     """True when an image reference is pinned to a digest or full git SHA.
 
     A pinned reference is either ``name@sha256:<64 hex>``, a tag that is
     exactly 40 hex characters, or a tag that embeds a 40-hex SHA as a
     dash-separated component (e.g. ``smoke-test-<40hex>`` or
-    ``sha-<40hex>-benchmark-gpu``).
+    ``sha-<40hex>-benchmark-gpu``). The all-zero sentinel does not count,
+    and an unpublished allowlisted image may instead carry PENDING_BUILD_TAG.
     """
     if ref in LEGACY_IMAGE_ALLOWLIST:
         return True
+    if is_pending_build_ref(ref):
+        return True
     if '@' in ref:
-        return bool(DIGEST_RE.match(ref.split('@', 1)[1]))
+        digest = ref.split('@', 1)[1]
+        if digest == ZERO_DIGEST:
+            return False
+        return bool(DIGEST_RE.match(digest))
     if ':' in ref:
         tag = ref.rsplit(':', 1)[1]
+        if is_zero_sha_token(tag):
+            return False
         if FULL_SHA_RE.match(tag):
             return True
-        return any(FULL_SHA_RE.match(part) for part in tag.split('-'))
+        return any(
+            FULL_SHA_RE.match(part) and not is_zero_sha_token(part)
+            for part in tag.split('-')
+        )
     return False
 
 

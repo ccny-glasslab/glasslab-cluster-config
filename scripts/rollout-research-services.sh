@@ -26,7 +26,8 @@ Roll out the authenticated workflow-api bundle and research-orchestrator images.
 Images are selected by immutable Git commit tag; this script does not build or push.
 
 Options:
-  --service <name>  all, workflow-api, research-orchestrator, or rabbitmq.
+  --service <name>  all, workflow-api, research-orchestrator, schedule-worker,
+                    or rabbitmq.
                     workflow-api includes the authenticated caller set.
                     rabbitmq rolls out only the task-fabric broker. Default: all
   --tag <tag>       GHCR image tag. Default: full SHA of the checked-out commit
@@ -114,13 +115,22 @@ wait_for_image() {
 
 service_images() {
   case "$SERVICE" in
-    all|workflow-api)
+    all)
+      printf '%s\n' \
+        "ghcr.io/ccny-glasslab/glasslab-research-orchestrator:${IMAGE_TAG}" \
+        "ghcr.io/ccny-glasslab/glasslab-workflow-api:${IMAGE_TAG}" \
+        "ghcr.io/ccny-glasslab/glasslab-schedule-worker:${IMAGE_TAG}"
+      ;;
+    workflow-api)
       printf '%s\n' \
         "ghcr.io/ccny-glasslab/glasslab-research-orchestrator:${IMAGE_TAG}" \
         "ghcr.io/ccny-glasslab/glasslab-workflow-api:${IMAGE_TAG}"
       ;;
     research-orchestrator)
       printf '%s\n' "ghcr.io/ccny-glasslab/glasslab-research-orchestrator:${IMAGE_TAG}"
+      ;;
+    schedule-worker)
+      printf '%s\n' "ghcr.io/ccny-glasslab/glasslab-schedule-worker:${IMAGE_TAG}"
       ;;
   esac
 }
@@ -219,6 +229,9 @@ rollout_authenticated_workflow_bundle() {
   # New callers remain compatible with the old unauthenticated API. Roll them
   # first so the server is never switched to fail-closed auth ahead of clients.
   rollout_research_orchestrator
+  # The schedule-worker CronJob can only reach a running worker (issue #602),
+  # so the caller set includes it; it rolls before the workflow-api server.
+  rollout_schedule_worker
   rollout_workflow_api
 }
 
@@ -305,7 +318,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$SERVICE" in
-  all|workflow-api|research-orchestrator|rabbitmq) ;;
+  all|workflow-api|research-orchestrator|schedule-worker|rabbitmq) ;;
   *)
     printf '[rollout-research-services] invalid service: %s\n' "$SERVICE" >&2
     exit 1
@@ -366,6 +379,10 @@ case "$SERVICE" in
   research-orchestrator)
     require_object secret glasslab-workflow-api-research-orchestrator
     rollout_research_orchestrator
+    ;;
+  schedule-worker)
+    require_object secret glasslab-workflow-api-schedule-worker
+    rollout_schedule_worker
     ;;
   rabbitmq)
     rollout_rabbitmq
