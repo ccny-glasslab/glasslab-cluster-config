@@ -56,6 +56,8 @@ jobs:
           tests.security.test_workflow_security_manifests
           tests.security.test_orchestrator_network_policy
           tests.security.test_orchestrator_infra_hardening
+          tests.scripts.test_secret_permissions_preflight
+          tests.scripts.test_deploy_image_override
           services/research-orchestrator/tests/scripts/test_orchestrator_ui_proxy.py
           -v
 
