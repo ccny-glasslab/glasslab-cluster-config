@@ -145,8 +145,15 @@ preflight_images() {
 }
 
 capture_prior_images() {
+  # The orchestrator pod has two containers (the orchestrator and the
+  # secret-free opencode agent-runtime sidecar) and both carry the same
+  # service image. Capture each by name so a rollback restores both; the
+  # sidecar container is absent on pre-#597 deployments, so its capture may
+  # be empty.
   PRIOR_ORCHESTRATOR_IMAGE="$("$KUBECTL" -n "$NAMESPACE" get deployment glasslab-research-orchestrator \
-    -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+    -o jsonpath='{.spec.template.spec.containers[?(@.name=="orchestrator")].image}' 2>/dev/null || true)"
+  PRIOR_OPENCODE_IMAGE="$("$KUBECTL" -n "$NAMESPACE" get deployment glasslab-research-orchestrator \
+    -o jsonpath='{.spec.template.spec.containers[?(@.name=="opencode")].image}' 2>/dev/null || true)"
   PRIOR_WORKFLOW_API_IMAGE="$("$KUBECTL" -n "$NAMESPACE" get deployment glasslab-workflow-api \
     -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
 }
@@ -157,6 +164,10 @@ print_rollback_guidance() {
   if [[ -n "$PRIOR_ORCHESTRATOR_IMAGE" ]]; then
     printf '[rollout-research-services]   kubectl -n %s set image deployment/glasslab-research-orchestrator orchestrator=%s\n' \
       "$NAMESPACE" "$PRIOR_ORCHESTRATOR_IMAGE" >&2
+  fi
+  if [[ -n "$PRIOR_OPENCODE_IMAGE" ]]; then
+    printf '[rollout-research-services]   kubectl -n %s set image deployment/glasslab-research-orchestrator opencode=%s\n' \
+      "$NAMESPACE" "$PRIOR_OPENCODE_IMAGE" >&2
   fi
   if [[ -n "$PRIOR_WORKFLOW_API_IMAGE" ]]; then
     printf '[rollout-research-services]   kubectl -n %s set image deployment/glasslab-workflow-api workflow-api=%s\n' \
@@ -246,9 +257,13 @@ rollout_research_orchestrator() {
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/research-orchestrator/45-egress-network-policy.yaml"
 
   printf '[rollout-research-services] deploying research-orchestrator image %s\n' "$image"
+  # Both the orchestrator and the opencode agent-runtime sidecar run the same
+  # service image (issue #597). Override both tags; setting only the
+  # orchestrator container leaves the sidecar on the stale pinned image, which
+  # lacks the new app.opencode_sidecar module and crash-loops.
   "$KUBECTL" set image \
     -f "$ROOT_DIR/kubeadm/glasslab-v2/research-orchestrator/20-deployment.yaml" \
-    "orchestrator=$image" --local -o yaml |
+    "orchestrator=$image" "opencode=$image" --local -o yaml |
     "$KUBECTL" apply -f -
   "$KUBECTL" -n "$NAMESPACE" rollout status \
     deployment/glasslab-research-orchestrator --timeout=300s
