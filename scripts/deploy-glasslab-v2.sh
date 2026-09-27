@@ -75,9 +75,13 @@ apply_yaml_dir() {
 apply_service_dir() {
   local dir="$1"
   local deployment="$2"
-  local container="$3"
-  local image_repo="$4"
+  local image_repo="$3"
+  shift 3
+  # One or more container names in that deployment which share this image.
+  local containers=("$@")
   local file
+  local container
+  local set_args=()
   if ! find "$dir" -maxdepth 1 -type f -name '*.yaml' ! -name '*.example.yaml' | grep -q .; then
     printf '[deploy-glasslab-v2] skipping %s (no deployable YAML manifests yet)\n' "$dir"
     return
@@ -86,8 +90,11 @@ apply_service_dir() {
   while IFS= read -r file; do
     if [[ "$file" == "$dir/$deployment" ]]; then
       printf '[deploy-glasslab-v2] applying %s (image %s:%s)\n' "$file" "$image_repo" "$IMAGE_TAG"
-      "$KUBECTL" set image -f "$file" \
-        "${container}=${image_repo}:${IMAGE_TAG}" --local -o yaml |
+      set_args=()
+      for container in "${containers[@]}"; do
+        set_args+=("${container}=${image_repo}:${IMAGE_TAG}")
+      done
+      "$KUBECTL" set image -f "$file" "${set_args[@]}" --local -o yaml |
         "$KUBECTL" apply -f -
     else
       printf '[deploy-glasslab-v2] applying %s\n' "$file"
@@ -143,16 +150,16 @@ apply_yaml_dir "$MANIFEST_ROOT/postgres"
 apply_yaml_dir "$MANIFEST_ROOT/nats"
 apply_yaml_dir "$MANIFEST_ROOT/minio"
 apply_service_dir "$MANIFEST_ROOT/intake-agent" \
-  10-deployment.yaml intake-agent ghcr.io/ccny-glasslab/glasslab-intake-agent
+  10-deployment.yaml ghcr.io/ccny-glasslab/glasslab-intake-agent intake-agent
 apply_service_dir "$MANIFEST_ROOT/interpretation-agent" \
-  10-deployment.yaml interpretation-agent ghcr.io/ccny-glasslab/glasslab-interpretation-agent
+  10-deployment.yaml ghcr.io/ccny-glasslab/glasslab-interpretation-agent interpretation-agent
 apply_service_dir "$MANIFEST_ROOT/assessment-agent" \
-  10-deployment.yaml assessment-agent ghcr.io/ccny-glasslab/glasslab-assessment-agent
+  10-deployment.yaml ghcr.io/ccny-glasslab/glasslab-assessment-agent assessment-agent
 apply_service_dir "$MANIFEST_ROOT/design-agent" \
-  10-deployment.yaml design-agent ghcr.io/ccny-glasslab/glasslab-design-agent
+  10-deployment.yaml ghcr.io/ccny-glasslab/glasslab-design-agent design-agent
 apply_service_dir "$MANIFEST_ROOT/schedule-worker" \
-  10-deployment.yaml schedule-worker ghcr.io/ccny-glasslab/glasslab-schedule-worker
+  10-deployment.yaml ghcr.io/ccny-glasslab/glasslab-schedule-worker schedule-worker
 apply_service_dir "$MANIFEST_ROOT/workflow-api" \
-  20-deployment.yaml workflow-api ghcr.io/ccny-glasslab/glasslab-workflow-api
+  20-deployment.yaml ghcr.io/ccny-glasslab/glasslab-workflow-api workflow-api
 apply_service_dir "$MANIFEST_ROOT/research-orchestrator" \
-  20-deployment.yaml orchestrator ghcr.io/ccny-glasslab/glasslab-research-orchestrator
+  20-deployment.yaml ghcr.io/ccny-glasslab/glasslab-research-orchestrator orchestrator opencode

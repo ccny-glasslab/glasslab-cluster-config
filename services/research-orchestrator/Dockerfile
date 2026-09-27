@@ -6,7 +6,7 @@ ARG HERMES_VERSION=v2026.8.3
 # its exact bytes (curl the URL, review the diff, then update this hash) so a
 # changed upstream script fails the build at sha256sum -c instead of silently
 # executing new code. A hash mismatch is intentional; bump it deliberately.
-ARG HERMES_INSTALL_SHA256=bd7e483f49968f17b88f05d98e84e09078a6d3585bcd79a1b1ed74533e2c8218
+ARG HERMES_INSTALL_SHA256=abca7d8aed691fe608d794bd44e33ffc6f68513c5b4e9270d176701e16afccd9
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

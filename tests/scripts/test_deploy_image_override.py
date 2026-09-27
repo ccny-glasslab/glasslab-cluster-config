@@ -30,15 +30,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = REPO_ROOT / "scripts/deploy-glasslab-v2.sh"
 CHECKER = REPO_ROOT / "scripts/check-secret-permissions.sh"
 
-# (manifest path relative to the repo root, container name, image repository)
+# (manifest path relative to the repo root, container names sharing the image, image repository)
 SERVICE_DEPLOYMENTS = (
-    ("kubeadm/glasslab-v2/intake-agent/10-deployment.yaml", "intake-agent", "ghcr.io/ccny-glasslab/glasslab-intake-agent"),
-    ("kubeadm/glasslab-v2/interpretation-agent/10-deployment.yaml", "interpretation-agent", "ghcr.io/ccny-glasslab/glasslab-interpretation-agent"),
-    ("kubeadm/glasslab-v2/assessment-agent/10-deployment.yaml", "assessment-agent", "ghcr.io/ccny-glasslab/glasslab-assessment-agent"),
-    ("kubeadm/glasslab-v2/design-agent/10-deployment.yaml", "design-agent", "ghcr.io/ccny-glasslab/glasslab-design-agent"),
-    ("kubeadm/glasslab-v2/schedule-worker/10-deployment.yaml", "schedule-worker", "ghcr.io/ccny-glasslab/glasslab-schedule-worker"),
-    ("kubeadm/glasslab-v2/workflow-api/20-deployment.yaml", "workflow-api", "ghcr.io/ccny-glasslab/glasslab-workflow-api"),
-    ("kubeadm/glasslab-v2/research-orchestrator/20-deployment.yaml", "orchestrator", "ghcr.io/ccny-glasslab/glasslab-research-orchestrator"),
+    ("kubeadm/glasslab-v2/intake-agent/10-deployment.yaml", ("intake-agent",), "ghcr.io/ccny-glasslab/glasslab-intake-agent"),
+    ("kubeadm/glasslab-v2/interpretation-agent/10-deployment.yaml", ("interpretation-agent",), "ghcr.io/ccny-glasslab/glasslab-interpretation-agent"),
+    ("kubeadm/glasslab-v2/assessment-agent/10-deployment.yaml", ("assessment-agent",), "ghcr.io/ccny-glasslab/glasslab-assessment-agent"),
+    ("kubeadm/glasslab-v2/design-agent/10-deployment.yaml", ("design-agent",), "ghcr.io/ccny-glasslab/glasslab-design-agent"),
+    ("kubeadm/glasslab-v2/schedule-worker/10-deployment.yaml", ("schedule-worker",), "ghcr.io/ccny-glasslab/glasslab-schedule-worker"),
+    ("kubeadm/glasslab-v2/workflow-api/20-deployment.yaml", ("workflow-api",), "ghcr.io/ccny-glasslab/glasslab-workflow-api"),
+    ("kubeadm/glasslab-v2/research-orchestrator/20-deployment.yaml", ("orchestrator", "opencode"), "ghcr.io/ccny-glasslab/glasslab-research-orchestrator"),
 )
 
 STALE_TAGS = ("pending-ci-build", "d2033ff8b683edaa9b5c3125b50e3a98a402bacc")
@@ -125,11 +125,11 @@ class DeployImageOverrideTests(unittest.TestCase):
         # Then: it succeeds and rewrites every service image to HEAD.
         self.assertEqual(completed.returncode, 0, completed.stderr)
         invocations = self._invocations()
-        for manifest, container, repo in SERVICE_DEPLOYMENTS:
+        for manifest, containers, repo in SERVICE_DEPLOYMENTS:
             with self.subTest(manifest=manifest):
                 path = str(REPO_ROOT / manifest)
-                expected = f"set image -f {path} {container}={repo}:{head} --local -o yaml"
-                self.assertIn(expected, invocations)
+                set_args = " ".join(f"{container}={repo}:{head}" for container in containers)
+                self.assertIn(f"set image -f {path} {set_args} --local -o yaml", invocations)
 
     def test_placeholder_tags_never_reach_kubectl(self):
         # Given: a clean checkout.
@@ -151,10 +151,11 @@ class DeployImageOverrideTests(unittest.TestCase):
         # Then: every service image uses the explicit tag.
         self.assertEqual(completed.returncode, 0, completed.stderr)
         invocations = self._invocations()
-        for manifest, container, repo in SERVICE_DEPLOYMENTS:
+        for manifest, containers, repo in SERVICE_DEPLOYMENTS:
             with self.subTest(manifest=manifest):
                 path = str(REPO_ROOT / manifest)
-                self.assertIn(f"set image -f {path} {container}={repo}:release-tag-7 --local -o yaml", invocations)
+                set_args = " ".join(f"{container}={repo}:release-tag-7" for container in containers)
+                self.assertIn(f"set image -f {path} {set_args} --local -o yaml", invocations)
 
     def test_unresolvable_head_fails_before_any_kubectl_call(self):
         # Given: a checkout copy that is not a git repository and has no tag.
