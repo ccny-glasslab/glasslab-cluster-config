@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOCAL_SECRETS_DIR="${GLASSLAB_V2_LOCAL_SECRETS_DIR:-$ROOT_DIR/kubeadm/glasslab-v2/secrets}"
 NAMESPACE="${GLASSLAB_V2_NAMESPACE:-glasslab-v2}"
 KUBECTL="${KUBECTL:-kubectl}"
 SERVICE="all"
@@ -41,6 +42,9 @@ Environment:
   IMAGE_PROBE          Command used to probe GHCR manifests (default: crane)
   IMAGE_POLL_ATTEMPTS  Max preflight probe attempts (default: 30)
   IMAGE_POLL_INTERVAL  Seconds between probe attempts (default: 10)
+  GLASSLAB_V2_LOCAL_SECRETS_DIR
+                       Directory scanned for *.local.yaml permission preflight
+                       (default: <repo>/kubeadm/glasslab-v2/secrets)
 USAGE
 }
 
@@ -226,6 +230,7 @@ rollout_research_orchestrator() {
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/research-orchestrator/10-configmap.yaml"
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/research-orchestrator/30-service.yaml"
   apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/research-orchestrator/50-ingress-network-policy.yaml"
+  apply_manifest "$ROOT_DIR/kubeadm/glasslab-v2/research-orchestrator/45-egress-network-policy.yaml"
 
   printf '[rollout-research-services] deploying research-orchestrator image %s\n' "$image"
   "$KUBECTL" set image \
@@ -309,6 +314,11 @@ esac
 
 need_cmd git
 need_cmd "$KUBECTL"
+
+# Fail before touching the checkout or the cluster: the same *.local.yaml
+# manifests this rollout assumes must not be group/other-accessible.
+printf '[rollout-research-services] checking local Secret manifest permissions\n'
+"$ROOT_DIR/scripts/check-secret-permissions.sh" "$LOCAL_SECRETS_DIR"
 
 cd "$ROOT_DIR"
 

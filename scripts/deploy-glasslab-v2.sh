@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST_ROOT="$ROOT_DIR/kubeadm/glasslab-v2"
+LOCAL_SECRETS_DIR="${GLASSLAB_V2_LOCAL_SECRETS_DIR:-$MANIFEST_ROOT/secrets}"
 KUBECTL="${KUBECTL:-kubectl}"
 NAMESPACE="${GLASSLAB_V2_NAMESPACE:-glasslab-v2}"
 usage() {
@@ -20,6 +21,11 @@ Deploy the core Glasslab v2 services by default:
 - workflow-api
 - research-orchestrator
 Example manifests ending in .example.yaml are never applied.
+
+Environment:
+  GLASSLAB_V2_LOCAL_SECRETS_DIR
+      Directory scanned for the *.local.yaml permission preflight (default:
+      kubeadm/glasslab-v2/secrets)
 USAGE
 }
 
@@ -68,6 +74,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 need_cmd "$KUBECTL"
+
+# Live *.local.yaml manifests are applied below and must never be readable or
+# writable by the checkout's group (which includes every contributor account).
+# Refuse before any cluster mutation when one is not owner-only.
+printf '[deploy-glasslab-v2] checking local Secret manifest permissions\n'
+"$ROOT_DIR/scripts/check-secret-permissions.sh" "$LOCAL_SECRETS_DIR"
 
 printf '[deploy-glasslab-v2] validating workflow registry definitions\n'
 "$ROOT_DIR/scripts/seed-registry.sh"

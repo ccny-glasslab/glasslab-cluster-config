@@ -1,0 +1,73 @@
+#cloud-config
+autoinstall:
+  version: 1
+  identity:
+    hostname: archimedes
+    username: clusteradmin
+    password: '!'
+  ssh:
+    install-server: true
+    allow-pw: false
+    authorized-keys:
+    - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKcgFpfLo5xYrSB3Nonbm9wD9ldnN7kpOIW0sZlcER4Z
+      glasslab@glasslab-PXE-01
+  user-data:
+    ssh_pwauth: false
+    write_files:
+    - path: /etc/ssh/sshd_config.d/00-key-only-auth.conf
+      permissions: '0644'
+      owner: root:root
+      content: 'PasswordAuthentication no
+
+        KbdInteractiveAuthentication no
+
+        PubkeyAuthentication yes
+
+        UsePAM yes
+
+        '
+    runcmd:
+    - - systemctl
+      - restart
+      - ssh
+  early-commands:
+  - |
+    set -eux
+    mdadm --stop --scan || true
+    # Archimedes-specific safety: only wipe the selected 500G SATA install disk.
+    for md in /dev/md/* /dev/md1* /dev/md12* /dev/md127 /dev/md126; do
+      [ -e "$md" ] && mdadm --stop "$md" || true
+    done
+    d=/dev/sda
+    [ -b "$d" ]
+    mdadm --zero-superblock "$d" || true
+    wipefs -a "$d" || true
+    sgdisk --zap-all "$d" || true
+  storage:
+    config:
+    - id: disk-a
+      type: disk
+      match:
+        name: sda
+      wipe: superblock-recursive
+      ptable: gpt
+      grub_device: true
+    - id: part-biosgrub
+      type: partition
+      device: disk-a
+      size: 1M
+      flag: bios_grub
+    - id: part-root
+      type: partition
+      device: disk-a
+      size: -1
+    - id: fs-root
+      type: format
+      volume: part-root
+      fstype: ext4
+    - id: mnt-root
+      type: mount
+      device: fs-root
+      path: /
+  packages:
+  - openssh-server

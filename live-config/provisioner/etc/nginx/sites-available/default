@@ -51,6 +51,17 @@ server {
 		try_files $uri $uri/ =404;
 	}
 
+	# PXE installers fetch their autoinstall data through the /c/<profile>/
+	# alias (see var/www/html/pxe/ipxe/boot.ipxe), which symlinks into this
+	# directory.
+	# Deny the direct, enumerable /pxe/cloud-init/ path so the user-data
+	# identity and provisioning metadata are not served to general HTTP
+	# clients. Do not move this under /c/: the installer depends on /c/.
+	# Applied live by scripts/restore-provisioner-config.sh.
+	location ^~ /pxe/cloud-init {
+		deny all;
+	}
+
 	# pass PHP scripts to FastCGI server
 	#
 	#location ~ \.php$ {
