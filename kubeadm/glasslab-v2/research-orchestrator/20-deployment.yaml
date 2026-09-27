@@ -128,11 +128,56 @@ spec:
             - name: control-plane-secrets
               mountPath: /etc/glasslab-secrets
               readOnly: true
+        # The agent runtime runs as a different UID (10002) in this container,
+        # which does NOT mount control-plane-secrets (issue #597). It shares
+        # the pod network namespace, so the orchestrator reaches the loopback
+        # broker and each opencode server on 127.0.0.1. It holds only the
+        # shared artifacts volume and the model-provider auth it legitimately
+        # needs; the same primary group (10001) keeps the shared NFS volume
+        # writable without fsGroup support.
+        - name: opencode
+          image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:d2033ff8b683edaa9b5c3125b50e3a98a402bacc
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-m", "app.opencode_sidecar"]
+          env:
+            - name: GLASSLAB_OPENCODE_SIDECAR_HOST
+              value: 127.0.0.1
+            - name: GLASSLAB_OPENCODE_SIDECAR_PORT
+              value: "4200"
+            - name: GLASSLAB_OPENCODE_SIDECAR_EXECUTABLE
+              value: /usr/local/bin/opencode
+            - name: GLASSLAB_OPENCODE_SIDECAR_WORKSPACE_ROOT
+              value: /mnt/artifacts/research-orchestrator/runs
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10002
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: artifacts-volume
+              mountPath: /mnt/artifacts
+            - name: opencode-temporary
+              mountPath: /tmp
+            - name: opencode-auth
+              mountPath: /etc/opencode-auth
+              readOnly: true
       volumes:
         - name: artifacts-volume
           persistentVolumeClaim:
             claimName: glasslab-shared-artifacts
         - name: temporary
+          emptyDir: {}
+        - name: opencode-temporary
           emptyDir: {}
         - name: opencode-auth
           secret:

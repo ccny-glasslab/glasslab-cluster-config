@@ -78,6 +78,7 @@ from .links import (
 )
 from .opencode_runtime import AgentRuntime, OpenCodeProcessRuntime
 from .policy import ActionPolicy
+from .process_permissions import enable_shared_group_write
 from .redaction import redact_free_text, redact_payload
 from .research_store import ResearchStore
 from .schemas import (
@@ -825,6 +826,11 @@ def create_app(
     start_watcher: bool = True,
 ) -> FastAPI:
     settings = settings or get_settings()
+    # The split agent runtime shares the NFS artifacts volume between uid 10001
+    # (this container) and uid 10002 (the opencode sidecar); make every
+    # per-run directory/file group-writable so the sidecar can write it
+    # (issue #597).
+    enable_shared_group_write()
     engine = engine or build_engine(settings)
     discord_adapter = getattr(engine, 'discord', None)
     discord_rest_circuit = (

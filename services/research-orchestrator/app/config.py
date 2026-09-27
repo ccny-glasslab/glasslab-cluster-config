@@ -196,6 +196,13 @@ class Settings(BaseSettings):
     opencode_server_host: str = '127.0.0.1'
     opencode_start_port: int = 4210
     opencode_start_timeout_seconds: float = 60.0
+    # Where `opencode serve` is spawned (issue #597). 'local' forks it in this
+    # process (local development and tests); 'sidecar' asks the loopback
+    # broker in the separate, secret-free opencode container to fork it, so the
+    # agent runtime never shares this container's UID or mounts.
+    opencode_spawn_backend: Literal['local', 'sidecar'] = 'local'
+    opencode_sidecar_url: str = 'http://127.0.0.1:4200'
+    opencode_sidecar_timeout_seconds: float = 30.0
     opencode_turn_timeout_seconds: float = 3600.0
     opencode_repeated_tool_limit: int = 6
     # Per-turn step budget: the number of OpenCode loop steps a single turn may
@@ -205,11 +212,21 @@ class Settings(BaseSettings):
     # disables the budget; the wall-clock and repeated-tool guards stay active.
     opencode_turn_step_limit: int = 250
     agent_turn_max_retries: int = 2
-    # Default-off switch for the default-deny bash allowlist (issue #597).
-    # While off, OpenCodeProcessRuntime._permissions keeps the legacy prefix
-    # denylist so a live agent is not disrupted before the allowlist has been
-    # validated in production.
-    agent_bash_allowlist_enabled: bool = False
+    # Default-ON switch for the default-deny bash allowlist (issues #597,
+    # #604). It defaults to the secure posture (fail closed): when the flag is
+    # absent the agent gets only the small allowlist in
+    # opencode_runtime.SAFE_BASH_COMMANDS, with '*': 'deny'. While off,
+    # OpenCodeProcessRuntime._permissions keeps the legacy prefix denylist,
+    # which allows interpreters and meta-commands (python3, sh, awk, sed,
+    # find) and therefore cannot contain a prompt-injected agent.
+    #
+    # A local developer who needs the permissive legacy denylist must set
+    # GLASSLAB_ORCHESTRATOR_AGENT_BASH_ALLOWLIST_ENABLED=false explicitly and
+    # must never set it false in a tracked deployment manifest. The deployed
+    # ConfigMap pins it true (kubeadm/glasslab-v2/research-orchestrator/
+    # 10-configmap.yaml) and a parity test asserts the key cannot silently
+    # revert.
+    agent_bash_allowlist_enabled: bool = True
     # Bounded auto-resume of a single turn after a wall-clock abort
     # (failure_class='turn_timeout'). A turn_timeout is deliberately
     # non-retryable through agent_turn_max_retries -- a fresh session with the
