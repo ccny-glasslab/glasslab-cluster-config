@@ -37,12 +37,20 @@ ssh glasslab-gateway
 ssh glasslab-provisioner
 ```
 
-Canonical shared-administrator aliases, for exceptional use only:
+The shared-administrator aliases target the legacy shared `glasslab` account:
 
 ```bash
 ssh glasslab-gateway-admin
 ssh glasslab-provisioner-admin
 ```
+
+Key-only hardening (`ansible/playbooks/harden-ssh-key-only.yml`) publishes
+`AllowUsers` from the identity ledger, which lists only the personal accounts
+`gr66ss-glasslab`, `denic`, and `tristanc`. The shared `glasslab` `*-admin`
+logins and `root` are consequently removed from sshd and are no longer
+reachable over SSH; the aliases remain only for historical reference. Recover a
+host through its console or out-of-band management (IPMI/iDRAC) rather than
+re-enabling password or root SSH.
 
 The older `glasslab-bastion`, `glasslab-44`, `glasslab-bastion-admin`, and
 `glasslab-44-admin` aliases remain compatible. New documentation and scripts

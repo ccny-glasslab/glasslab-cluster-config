@@ -82,6 +82,20 @@
       ansible.builtin.command: sshd -t
       changed_when: false
 
+    - name: Assert the connected operator account stays allowed before restart
+      ansible.builtin.assert:
+        that:
+          - ansible_user in glasslab_ssh_allowed_users
+        fail_msg: >-
+          Refusing to restart sshd: Ansible connects as {{ ansible_user }}, which
+          is not in the identity-ledger AllowUsers
+          ({{ glasslab_ssh_allowed_users | join(', ') }}). Add the account to
+          ansible/group_vars/identity_hosts.yml, or recover through the host
+          console/IPMI, before this host is locked out of SSH.
+      when:
+        - glasslab_ssh_allowed_users | length > 0
+        - ansible_connection | default('ssh') != 'local'
+
     - name: Restart ssh service
       ansible.builtin.systemd:
         name: ssh
