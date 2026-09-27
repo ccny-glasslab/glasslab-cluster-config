@@ -6,6 +6,9 @@ MANIFEST_ROOT="$ROOT_DIR/kubeadm/glasslab-v2"
 LOCAL_SECRETS_DIR="${GLASSLAB_V2_LOCAL_SECRETS_DIR:-$MANIFEST_ROOT/secrets}"
 KUBECTL="${KUBECTL:-kubectl}"
 NAMESPACE="${GLASSLAB_V2_NAMESPACE:-glasslab-v2}"
+# Service images are resolved from the checked-out commit, not the placeholder
+# tag baked into the manifest, so a plain deploy cannot ship stale code.
+IMAGE_TAG="${GLASSLAB_V2_IMAGE_TAG:-}"
 usage() {
   cat <<'USAGE'
 Usage: deploy-glasslab-v2.sh
@@ -22,10 +25,17 @@ Deploy the core Glasslab v2 services by default:
 - research-orchestrator
 Example manifests ending in .example.yaml are never applied.
 
+Service image tags are overridden with the checked-out commit SHA (same
+semantics as rollout-research-services.sh), so the pending-ci-build markers in
+the manifests never reach the cluster unchanged.
+
 Environment:
   GLASSLAB_V2_LOCAL_SECRETS_DIR
       Directory scanned for the *.local.yaml permission preflight (default:
       kubeadm/glasslab-v2/secrets)
+  GLASSLAB_V2_IMAGE_TAG
+      Image tag to deploy instead of the checked-out commit SHA (default:
+      git rev-parse HEAD)
 USAGE
 }
 
@@ -59,6 +69,33 @@ apply_yaml_dir() {
   done < <(find "$dir" -maxdepth 1 -type f -name '*.yaml' ! -name '*.example.yaml' | sort)
 }
 
+# Apply a service directory, but replace the deployment's image tag with the
+# resolved commit SHA before it reaches kubectl. The plain `apply -f` path
+# would otherwise ship the manifest's placeholder/pinned tag.
+apply_service_dir() {
+  local dir="$1"
+  local deployment="$2"
+  local container="$3"
+  local image_repo="$4"
+  local file
+  if ! find "$dir" -maxdepth 1 -type f -name '*.yaml' ! -name '*.example.yaml' | grep -q .; then
+    printf '[deploy-glasslab-v2] skipping %s (no deployable YAML manifests yet)\n' "$dir"
+    return
+  fi
+
+  while IFS= read -r file; do
+    if [[ "$file" == "$dir/$deployment" ]]; then
+      printf '[deploy-glasslab-v2] applying %s (image %s:%s)\n' "$file" "$image_repo" "$IMAGE_TAG"
+      "$KUBECTL" set image -f "$file" \
+        "${container}=${image_repo}:${IMAGE_TAG}" --local -o yaml |
+        "$KUBECTL" apply -f -
+    else
+      printf '[deploy-glasslab-v2] applying %s\n' "$file"
+      "$KUBECTL" apply -f "$file"
+    fi
+  done < <(find "$dir" -maxdepth 1 -type f -name '*.yaml' ! -name '*.example.yaml' | sort)
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help|-h)
@@ -81,6 +118,20 @@ need_cmd "$KUBECTL"
 printf '[deploy-glasslab-v2] checking local Secret manifest permissions\n'
 "$ROOT_DIR/scripts/check-secret-permissions.sh" "$LOCAL_SECRETS_DIR"
 
+# The manifests carry placeholder/pinned image tags; deploy must use the
+# checked-out commit so a plain deploy cannot ship stale code.
+if [[ -z "$IMAGE_TAG" ]]; then
+  need_cmd git
+  if ! IMAGE_TAG="$(git -C "$ROOT_DIR" rev-parse --verify HEAD 2>/dev/null)" || [[ -z "$IMAGE_TAG" ]]; then
+    printf '[deploy-glasslab-v2] ERROR: cannot resolve the checked-out commit SHA (git rev-parse HEAD); refusing to deploy service images that cannot be pinned\n' >&2
+    exit 1
+  fi
+fi
+if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+  printf '[deploy-glasslab-v2] invalid image tag: %s\n' "$IMAGE_TAG" >&2
+  exit 1
+fi
+
 printf '[deploy-glasslab-v2] validating workflow registry definitions\n'
 "$ROOT_DIR/scripts/seed-registry.sh"
 
@@ -91,10 +142,17 @@ apply_yaml_dir "$MANIFEST_ROOT/config"
 apply_yaml_dir "$MANIFEST_ROOT/postgres"
 apply_yaml_dir "$MANIFEST_ROOT/nats"
 apply_yaml_dir "$MANIFEST_ROOT/minio"
-apply_yaml_dir "$MANIFEST_ROOT/intake-agent"
-apply_yaml_dir "$MANIFEST_ROOT/interpretation-agent"
-apply_yaml_dir "$MANIFEST_ROOT/assessment-agent"
-apply_yaml_dir "$MANIFEST_ROOT/design-agent"
-apply_yaml_dir "$MANIFEST_ROOT/schedule-worker"
-apply_yaml_dir "$MANIFEST_ROOT/workflow-api"
-apply_yaml_dir "$MANIFEST_ROOT/research-orchestrator"
+apply_service_dir "$MANIFEST_ROOT/intake-agent" \
+  10-deployment.yaml intake-agent ghcr.io/ccny-glasslab/glasslab-intake-agent
+apply_service_dir "$MANIFEST_ROOT/interpretation-agent" \
+  10-deployment.yaml interpretation-agent ghcr.io/ccny-glasslab/glasslab-interpretation-agent
+apply_service_dir "$MANIFEST_ROOT/assessment-agent" \
+  10-deployment.yaml assessment-agent ghcr.io/ccny-glasslab/glasslab-assessment-agent
+apply_service_dir "$MANIFEST_ROOT/design-agent" \
+  10-deployment.yaml design-agent ghcr.io/ccny-glasslab/glasslab-design-agent
+apply_service_dir "$MANIFEST_ROOT/schedule-worker" \
+  10-deployment.yaml schedule-worker ghcr.io/ccny-glasslab/glasslab-schedule-worker
+apply_service_dir "$MANIFEST_ROOT/workflow-api" \
+  20-deployment.yaml workflow-api ghcr.io/ccny-glasslab/glasslab-workflow-api
+apply_service_dir "$MANIFEST_ROOT/research-orchestrator" \
+  20-deployment.yaml orchestrator ghcr.io/ccny-glasslab/glasslab-research-orchestrator
