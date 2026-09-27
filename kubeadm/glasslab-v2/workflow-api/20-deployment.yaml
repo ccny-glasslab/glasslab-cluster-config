@@ -16,6 +16,12 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: node05
       serviceAccountName: glasslab-workflow-api
+      # Kubernetes job submission calls load_incluster_config()
+      # (app/job_submission.py), so the projected ServiceAccount token must be
+      # mounted. automountServiceAccountToken: false removes that token and
+      # breaks every job submission; this is pinned true explicitly so a
+      # hardening sweep cannot silently disable it (issue #602).
+      automountServiceAccountToken: true
       securityContext:
         fsGroup: 10001
         fsGroupChangePolicy: OnRootMismatch
@@ -23,7 +29,7 @@ spec:
         - name: glasslab-ghcr-pull
       containers:
         - name: workflow-api
-          image: ghcr.io/ccny-glasslab/glasslab-workflow-api:0fd3f2f48f3add706ffac1874895ab397188896c
+          image: ghcr.io/ccny-glasslab/glasslab-workflow-api:d2033ff8b683edaa9b5c3125b50e3a98a402bacc
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
@@ -59,6 +65,11 @@ spec:
                   optional: true
             - name: GLASSLAB_WORKFLOW_API_MINIO_ENDPOINT
               value: glasslab-minio.glasslab-v2.svc.cluster.local:9000
+            - name: GLASSLAB_WORKFLOW_API_AGENT_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-agent-internal-token
+                  key: token
           ports:
             - containerPort: 8080
               name: http

@@ -17,7 +17,9 @@ spec:
         - name: glasslab-ghcr-pull
       containers:
         - name: assessment-agent
-          image: ghcr.io/ccny-glasslab/glasslab-assessment-agent:0.1.0
+          # Placeholder full-SHA tag; the release rollout replaces it with the
+          # exact commit SHA built by .github/workflows/service-images.yml.
+          image: ghcr.io/ccny-glasslab/glasslab-assessment-agent:0000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           env:
             - name: GLASSLAB_ASSESSMENT_AGENT_PROVIDER_API
@@ -28,6 +30,11 @@ spec:
               value: mlx-community/Qwen3-Coder-Next-4bit
             - name: GLASSLAB_ASSESSMENT_AGENT_TIMEOUT_SECONDS
               value: "120"
+            - name: GLASSLAB_AGENT_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-agent-internal-token
+                  key: token
           ports:
             - containerPort: 8092
               name: http

@@ -52,12 +52,6 @@ DIGEST_RE = re.compile(r'^sha256:[0-9a-f]{64}$')
 # so the pinning gate stays enforceable on everything else.
 LEGACY_IMAGE_ALLOWLIST = {
     'ghcr.io/ccny-glasslab/glasslab-gpu-experiment-runner:0.1.7-local',
-    'ghcr.io/ccny-glasslab/glasslab-assessment-agent:0.1.0',
-    'ghcr.io/ccny-glasslab/glasslab-intake-agent:0.1.0',
-    'ghcr.io/ccny-glasslab/glasslab-interpretation-agent:0.1.1',
-    'ghcr.io/ccny-glasslab/glasslab-research-orchestrator:0.1.0',
-    'ghcr.io/ccny-glasslab/glasslab-design-agent:0.1.0',
-    'ghcr.io/ccny-glasslab/glasslab-schedule-worker:0.1.0',
 }
 
 

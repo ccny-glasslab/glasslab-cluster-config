@@ -58,6 +58,15 @@ default:
 
 That means deployment alone is safe.
 
+## 5. Internal Service Authentication
+
+The four bounded agents and `schedule-worker` require the shared internal
+token (`glasslab-agent-internal-token`, header `X-Glasslab-Internal-Token`)
+on every non-health route; they fail closed with 401/503 without it. Provision
+the Secret and roll out `workflow-api` (the caller) before the enforcing agent
+images. See [`internal-service-auth-rollout.md`](internal-service-auth-rollout.md)
+for the full callers-first order and rollback procedure.
+
 ## 5. Enable One Agent At A Time
 
 Turn on only one integration flag at a time and restart `workflow-api`.
