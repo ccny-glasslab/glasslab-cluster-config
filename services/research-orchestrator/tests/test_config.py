@@ -526,7 +526,6 @@ SAFE_COMMANDS = (
     'wc -l report.md',
     'grep -n result report.md',
     'rg result .',
-    'find . -name "*.py"',
     'sort report.txt',
     'uniq report.txt',
     'diff a.txt b.txt',
@@ -534,22 +533,27 @@ SAFE_COMMANDS = (
     'git status',
     'git diff HEAD~1',
     'git log --oneline',
+    'git add -A',
+    'git commit -m "implement candidate"',
+    'git show HEAD',
+    'git rev-parse HEAD',
     'pytest -q tests',
     'python3 -m pytest -q tests',
-    'make test',
     'jq . data.json',
-    'sed -n 1,5p report.md',
-    'awk "{print $1}" report.md',
-    'xargs -r wc -l',
     'mkdir -p out',
     'cp a.txt b.txt',
     'mv a.txt b.txt',
     'rm -f scratch.txt',
     'touch marker',
     'echo hello',
-    'tee out.txt',
-    'tar -czf out.tgz src',
-    'unzip bundle.zip',
+)
+
+# Legitimate absolute-path reads inside the run directory must stay allowed:
+# the deny is scoped to /proc and the control-plane secret mount, not to every
+# absolute path.
+SAFE_ABSOLUTE_PATH_COMMANDS = (
+    'cat /mnt/artifacts/research-orchestrator/runs/run-1/reports/report.md',
+    'grep -n result /mnt/artifacts/research-orchestrator/runs/run-1/evidence.json',
 )
 
 DENIED_COMMANDS = (
@@ -575,6 +579,33 @@ DENIED_COMMANDS = (
     'cat < /dev/tcp/10.0.0.1/443',
     'cat /dev/tcp/10.0.0.1/443',
     "sh -c 'cat < /dev/tcp/10.0.0.1/443'",
+)
+
+# Issue #597 F2: each entry is a real bypass of the pre-fix allowlist. Every
+# one must classify deny.
+BYPASS_COMMANDS = (
+    'awk \'BEGIN{system("id")}\'',
+    'find . -exec sh -c id ;',
+    "sed -e '1e id'",
+    'xargs sh -c id',
+    'make -f evil.mk',
+    "git -c core.pager='sh -c id' log",
+    "git config alias.x '!sh -c id'",
+    'tar --checkpoint-action=exec=sh bundle.tgz',
+    'unzip -o bundle.zip',
+    'tee /tmp/x',
+    'cat /etc/glasslab-*/GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN',
+    'cat /etc/glasslab-secrets/GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN',
+    'cat "/etc/glasslab-secrets/GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN"',
+    'cat /proc/1/environ',
+    'cat /proc/self/environ',
+    'grep TOKEN /proc/1/environ',
+    'head -n 1 /proc/1/environ',
+    'tail /proc/self/environ',
+    'jq . /etc/glasslab-secrets/x',
+    'rg x /etc/glasslab-secrets',
+    'wc -c /etc/glasslab-secrets/x',
+    'head /etc/glasslab-*/GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN',
 )
 
 
@@ -612,10 +643,46 @@ def test_bash_allowlist_allows_every_documented_safe_command() -> None:
         assert _classify(rules, command) == 'allow', command
 
 
+def test_bash_allowlist_allows_run_directory_absolute_paths() -> None:
+    rules = _bash_rules(AgentName.BEAKER, enabled=True)
+    for command in SAFE_ABSOLUTE_PATH_COMMANDS:
+        assert _classify(rules, command) == 'allow', command
+
+
 def test_bash_allowlist_denies_interpreters_shells_and_egress() -> None:
     rules = _bash_rules(AgentName.BEAKER, enabled=True)
     for command in DENIED_COMMANDS:
         assert _classify(rules, command) == 'deny', command
+
+
+def test_bash_allowlist_denies_every_reported_bypass() -> None:
+    rules = _bash_rules(AgentName.BEAKER, enabled=True)
+    for command in BYPASS_COMMANDS:
+        assert _classify(rules, command) == 'deny', command
+
+
+def test_bash_allowlist_denies_secret_reads_for_every_reader_command() -> None:
+    rules = _bash_rules(AgentName.BEAKER, enabled=True)
+    for reader in (
+        'cat',
+        'head',
+        'tail',
+        'wc',
+        'grep',
+        'rg',
+        'sort',
+        'uniq',
+        'diff',
+        'jq',
+        'tree',
+    ):
+        secret_read = (
+            f'{reader} /etc/glasslab-secrets/'
+            'GLASSLAB_ORCHESTRATOR_LINK_SIGNING_SECRET'
+        )
+        assert _classify(rules, secret_read) == 'deny', secret_read
+        proc_read = f'{reader} /proc/1/environ'
+        assert _classify(rules, proc_read) == 'deny', proc_read
 
 
 def test_bash_allowlist_denies_git_push_for_both_agents() -> None:
@@ -632,10 +699,13 @@ def test_bash_allowlist_honeydew_cannot_mutate_repository() -> None:
 
     beaker = _bash_rules(AgentName.BEAKER, enabled=True)
     assert _classify(beaker, 'git commit -m x') == 'allow'
+    assert _classify(beaker, 'git status') == 'allow'
 
 
-def test_bash_allowlist_is_off_by_default() -> None:
-    assert Settings().agent_bash_allowlist_enabled is False
+def test_bash_allowlist_is_on_by_default() -> None:
+    # Fail closed: an unconfigured deployment gets the default-deny allowlist,
+    # not the legacy denylist that permits interpreters.
+    assert Settings().agent_bash_allowlist_enabled is True
 
 
 def test_secrets_dir_from_environment_enables_file_loading(

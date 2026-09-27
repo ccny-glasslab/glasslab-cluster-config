@@ -1,21 +1,26 @@
 """Manifest invariants for the research-orchestrator secret/egress boundary.
 
-Issue #597 (CRITICAL): the orchestrator runs uvicorn (PID 1) and spawns the
+Issue #597 (CRITICAL): the orchestrator runs uvicorn (PID 1) and spawned the
 same-UID ``opencode serve`` child in one container, so any control-plane
-secret left in the orchestrator's environment is readable by the agent through
-``/proc/1/environ``. These tests pin the immediate mitigation:
+secret left in the orchestrator's environment was readable by the agent through
+``/proc/1/environ``. The deployment now splits the agent runtime into a
+separate ``opencode`` sidecar container that runs as a different UID and does
+not mount the ``glasslab-research-orchestrator`` Secret; the orchestrator
+forks opencode only through the sidecar's loopback broker.
 
-* the ``glasslab-research-orchestrator`` Secret is projected as a read-only
-  file volume (mode 0400) under ``/etc/glasslab-secrets`` and is no longer
+These tests pin the boundary:
+
+* the Secret is projected as a read-only file volume (mode 0400) under
+  ``/etc/glasslab-secrets`` on the orchestrator container only, and is never
   referenced from ``envFrom``/``env``;
 * the deployment points ``GLASSLAB_ORCHESTRATOR_SECRETS_DIR`` at that mount;
+* the agent-runtime container runs as a different UID and does not mount the
+  Secret or reference it from its environment, while keeping the artifacts
+  volume and the model-provider auth mount;
 * an egress NetworkPolicy default-denies everything except DNS, the
   in-namespace data services, the local exo endpoints, and TCP 443 (the
   documented residual);
 * the rollout script applies the egress policy.
-
-The second-container UID split is a follow-up; these tests only cover the
-immediate, mergeable mitigation.
 """
 
 from __future__ import annotations
@@ -61,6 +66,11 @@ def deployment() -> dict:
 def orchestrator_container() -> dict:
     containers = deployment()["spec"]["template"]["spec"]["containers"]
     return next(item for item in containers if item["name"] == "orchestrator")
+
+
+def agent_runtime_container() -> dict:
+    containers = deployment()["spec"]["template"]["spec"]["containers"]
+    return next(item for item in containers if item["name"] == "opencode")
 
 
 def env_by_name(container: dict) -> dict[str, dict]:
@@ -141,6 +151,75 @@ class DeploymentSecretVolumeTests(unittest.TestCase):
     def test_service_account_token_is_not_automounted(self) -> None:
         pod_spec = deployment()["spec"]["template"]["spec"]
         self.assertIs(pod_spec["automountServiceAccountToken"], False)
+
+
+class AgentRuntimeContainerSplitTests(unittest.TestCase):
+    def test_agent_runtime_runs_as_a_different_uid(self) -> None:
+        orchestrator = orchestrator_container()["securityContext"]
+        agent = agent_runtime_container()["securityContext"]
+        self.assertNotEqual(
+            agent["runAsUser"],
+            orchestrator["runAsUser"],
+            "the agent runtime must not share the orchestrator UID",
+        )
+        self.assertNotEqual(agent["runAsUser"], 10001)
+        self.assertTrue(agent["runAsNonRoot"])
+
+    def test_agent_runtime_does_not_mount_control_plane_secrets(self) -> None:
+        agent = agent_runtime_container()
+        mounts = {mount["name"] for mount in agent.get("volumeMounts", [])}
+        self.assertNotIn("control-plane-secrets", mounts)
+        paths = {
+            mount["mountPath"] for mount in agent.get("volumeMounts", [])
+        }
+        self.assertNotIn(SECRETS_MOUNT_PATH, paths)
+
+    def test_agent_runtime_does_not_reference_the_secret_from_env(self) -> None:
+        agent = agent_runtime_container()
+        for ref in agent.get("envFrom", []):
+            secret_ref = ref.get("secretRef")
+            if secret_ref is not None:
+                self.assertNotEqual(secret_ref.get("name"), SECRET_NAME)
+        for key in CONTROL_PLANE_KEYS:
+            self.assertNotIn(key, env_by_name(agent))
+        for name, entry in env_by_name(agent).items():
+            secret_ref = entry.get("valueFrom", {}).get("secretKeyRef", {})
+            self.assertNotEqual(
+                secret_ref.get("name"),
+                SECRET_NAME,
+                f"{name} still projects the orchestrator secret into the "
+                "agent runtime environment",
+            )
+
+    def test_agent_runtime_keeps_artifacts_and_model_auth_mounts(self) -> None:
+        agent = agent_runtime_container()
+        mounts = {mount["name"]: mount for mount in agent.get("volumeMounts", [])}
+        self.assertIn("artifacts-volume", mounts)
+        self.assertIn("opencode-auth", mounts)
+        self.assertTrue(
+            mounts["opencode-auth"].get("readOnly"),
+            "the model-provider auth mount must stay read-only",
+        )
+
+    def test_agent_runtime_is_hardened(self) -> None:
+        agent = agent_runtime_container()["securityContext"]
+        self.assertFalse(agent["allowPrivilegeEscalation"])
+        self.assertTrue(agent["readOnlyRootFilesystem"])
+        self.assertTrue(agent["runAsNonRoot"])
+        self.assertEqual(agent["capabilities"]["drop"], ["ALL"])
+
+    def test_orchestrator_retains_the_secret_mount(self) -> None:
+        mounts = {
+            mount["mountPath"]
+            for mount in orchestrator_container().get("volumeMounts", [])
+        }
+        self.assertIn(SECRETS_MOUNT_PATH, mounts)
+
+    def test_pod_does_not_share_the_process_namespace(self) -> None:
+        # A shared PID namespace would let the sidecar see the orchestrator's
+        # processes; command-line/environ introspection must stay impossible.
+        pod_spec = deployment()["spec"]["template"]["spec"]
+        self.assertFalse(pod_spec.get("shareProcessNamespace", False))
 
 
 class EgressNetworkPolicyTests(unittest.TestCase):

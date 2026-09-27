@@ -56,6 +56,7 @@ CONFIGMAP_DATA = load_configmap_data(CONFIGMAP_PATH)
 CONFIGMAP_KEYS = tuple(sorted(CONFIGMAP_DATA))
 
 TURN_TIMEOUT_KEY = 'GLASSLAB_ORCHESTRATOR_OPENCODE_TURN_TIMEOUT_SECONDS'
+BASH_ALLOWLIST_KEY = 'GLASSLAB_ORCHESTRATOR_AGENT_BASH_ALLOWLIST_ENABLED'
 
 
 _P = 'GLASSLAB_ORCHESTRATOR_'
@@ -299,6 +300,19 @@ OVERRIDES: dict[str, Override] = dict(
                 allowed=frozenset({'prompt'}),
             ),
         ),
+        # --- split agent runtime (issue #597) ---
+        (
+            _P + 'OPENCODE_SPAWN_BACKEND',
+            Override(
+                'eq',
+                'Split agent runtime: the code default forks opencode in-process '
+                '(local development and tests); the deployment forks it in the '
+                'separate uid-10002 sidecar container through the loopback '
+                'broker so the agent runtime never shares the orchestrator UID '
+                'or its control-plane secret mount.',
+                expected='sidecar',
+            ),
+        ),
         # --- live operator link front door ---
         (
             _P + 'PUBLIC_BASE_URL',
@@ -355,6 +369,18 @@ def test_env_example_mirrors_turn_timeout_default() -> None:
 )
 def test_configmap_key_respects_default_invariant(key: str) -> None:
     assert key not in VIOLATIONS, VIOLATIONS[key]
+
+
+def test_deployed_bash_allowlist_is_pinned_true() -> None:
+    # Issue #597 F1: the allowlist was inert because the tracked ConfigMap
+    # never set the key, so the deployed pod silently kept the permissive code
+    # default. Pin the key and its secure value here.
+    assert BASH_ALLOWLIST_KEY in CONFIGMAP_DATA, (
+        f'{CONFIGMAP_PATH} must set {BASH_ALLOWLIST_KEY}; an absent key falls '
+        'back to a code default and can silently disable the allowlist.'
+    )
+    assert CONFIGMAP_DATA[BASH_ALLOWLIST_KEY] == 'true'
+    assert Settings().agent_bash_allowlist_enabled is True
 
 
 def test_unknown_configmap_key_is_flagged() -> None:

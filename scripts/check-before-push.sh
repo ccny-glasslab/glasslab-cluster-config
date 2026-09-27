@@ -79,6 +79,7 @@ run_secret_boundary_tests() {
     tests.security.test_node_maintenance_wrappers \
     tests.security.test_orchestrator_network_policy \
     tests.security.test_orchestrator_infra_hardening \
+    tests.security.test_orchestrator_secret_isolation \
     tests.security.test_internal_service_auth_manifests \
     services/research-orchestrator/tests/scripts/test_orchestrator_ui_proxy.py \
     -v
