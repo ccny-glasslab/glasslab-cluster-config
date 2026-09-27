@@ -2,8 +2,9 @@
 
 Boundary design (security/bounded-source-fetch): deterministic queries
 against ``export.arxiv.org/api/query``, a category allowlist enforced before
-any network I/O, per-entry size caps enforced before and during download,
-and digest-verified payloads so re-runs can skip already-ingested sources.
+any network I/O, an arXiv-only https download allowlist for feed-supplied
+PDF URLs, per-entry size caps enforced before and during download, and
+digest-verified payloads so re-runs can skip already-ingested sources.
 Stdlib only (urllib + xml.etree); no new dependencies.
 """
 
@@ -18,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 ALLOWED_CATEGORIES = frozenset({'cs.LG', 'stat.ML', 'cs.CL', 'cs.AI'})
+ALLOWED_PDF_HOSTS = frozenset({'arxiv.org', 'export.arxiv.org', 'www.arxiv.org'})
 MAX_PDF_BYTES = 20 * 1024 * 1024  # 20 MiB per preprint
 _DOWNLOAD_TIMEOUT_SECONDS = 90
 _RETRIES = 2
@@ -25,12 +27,17 @@ _API_ENDPOINT = 'https://export.arxiv.org/api/query'
 _ATOM_NS = 'http://www.w3.org/2005/Atom'
 _ARXIV_NS = 'http://arxiv.org/schemas/atom'
 _USER_AGENT = 'GlasslabResearchPrototype/0.1'
+_HTTPS_DEFAULT_PORT = 443
 
 Urlopen = Callable[..., Any]
 
 
 class PdfTooLargeError(ValueError):
     """Raised when a PDF payload exceeds the configured size cap."""
+
+
+class PdfUrlNotAllowedError(ValueError):
+    """Raised when a feed-supplied PDF URL is outside the download allowlist."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +162,26 @@ def fetch_entries(
     return entries
 
 
+def _pdf_download_url(url: str) -> str:
+    # Feed-supplied: a poisoned feed must not steer the fetch to arbitrary
+    # hosts (cloud metadata, internal addresses), a non-https scheme, or a
+    # non-default port.
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != 'https':
+        raise PdfUrlNotAllowedError(f'pdf url must use https: {url!r}')
+    if parsed.hostname not in ALLOWED_PDF_HOSTS:
+        raise PdfUrlNotAllowedError(f'pdf url host is not allowlisted: {url!r}')
+    if parsed.username is not None or parsed.password is not None:
+        raise PdfUrlNotAllowedError(f'pdf url must not carry userinfo: {url!r}')
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise PdfUrlNotAllowedError(f'pdf url has an invalid port: {url!r}') from exc
+    if port not in (None, _HTTPS_DEFAULT_PORT):
+        raise PdfUrlNotAllowedError(f'pdf url port is not allowlisted: {url!r}')
+    return url
+
+
 def download_pdf(
     entry: ArxivEntry,
     *,
@@ -165,15 +192,18 @@ def download_pdf(
 ) -> tuple[bytes, str]:
     """Download one PDF, size-capped and digest-verified.
 
-    Returns ``(payload, sha256)``. The cap is enforced twice: against the
-    declared ``Content-Length`` before reading the body, and against the
-    accumulated stream while reading (a lying server cannot exceed the cap).
-    Retries mirror ``fetch_corpus.py``; the payload must start with ``%PDF``.
+    Returns ``(payload, sha256)``. The feed-supplied URL must be https on an
+    allowlisted arXiv host at the default port; a rejected URL is a
+    deterministic failure, never a retried transport error. The cap is
+    enforced twice: against the declared ``Content-Length`` before reading the
+    body, and against the accumulated stream while reading (a lying server
+    cannot exceed the cap). Retries mirror ``fetch_corpus.py``; the payload
+    must start with ``%PDF``.
     """
     if urlopen is None:
         urlopen = urllib.request.urlopen
     request = urllib.request.Request(
-        entry.pdf_url, headers={'User-Agent': _USER_AGENT}
+        _pdf_download_url(entry.pdf_url), headers={'User-Agent': _USER_AGENT}
     )
     last_error: Exception | None = None
     for _attempt in range(retries + 1):

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def utc_now() -> datetime:
@@ -128,13 +128,22 @@ class CorpusManifestEntry(BaseModel):
 
     model_config = ConfigDict(extra='forbid')
 
-    id: str = Field(min_length=1)
+    # The id becomes the on-disk basename (<dest>/<id>.pdf and <dest>/<id>.json),
+    # so it must be one safe path component: no separators, no '..' traversal.
+    id: str = Field(min_length=1, pattern=r'^[A-Za-z0-9._-]+$')
     title: str
     url: str
     sha256: str | None = None
     license_note: str | None = None
     skip: bool = False
     skip_reason: str | None = None
+
+    @field_validator('id')
+    @classmethod
+    def _reject_parent_directory(cls, value: str) -> str:
+        if '..' in value:
+            raise ValueError('id must not contain ".."')
+        return value
 
 
 class BenchmarkQuestion(BaseModel):
