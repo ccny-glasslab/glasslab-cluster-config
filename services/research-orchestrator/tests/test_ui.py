@@ -1091,6 +1091,238 @@ def test_cited_source_omits_iframe_when_unresolvable(
     assert '<iframe' in present.text
 
 
+def test_ui_cited_source_renders_stored_text_when_pdf_missing(
+    orchestrator_bundle,
+) -> None:
+    """A source with no servable PDF falls back to its extracted rag chunks."""
+    settings, _, _, _, engine = orchestrator_bundle
+    source = _seed_chat_corpus(engine)
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'source': source.source_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    viewer = response.text.split('id="viewer"', 1)[1]
+    # No dead-end iframe and no dead-end message: the stored text renders in
+    # the viewer with the source title and the chunk's provenance line.
+    assert '<iframe' not in viewer
+    assert '<div class="source-text">' in viewer
+    assert f'<p class="source-title">{_CHAT_TITLE}</p>' in viewer
+    assert f'<p class="chunk-text">{_CHAT_CHUNK_TEXT}</p>' in viewer
+    assert '<p class="chunk-meta muted">page 3</p>' in viewer
+    assert 'The cited source document is not available.' not in response.text
+
+
+def test_ui_cited_source_text_orders_chunks_by_chunk_index(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    source = KnowledgeSource(
+        source_type=SourceType.PAPER,
+        canonical_uri='repo://docs/two-chunks.md',
+        digest='d' * 64,
+        title='Two chunks',
+    )
+    engine.store.save_knowledge_source(source)
+    # Inserted out of order: the store's (source_id, chunk_index) ordering
+    # must put the reader back in chunk-index order.
+    engine.store.replace_rag_chunks(
+        source.source_id,
+        [
+            RagChunkRecord(
+                chunk_id=f'{source.source_id}::c1',
+                source_id=source.source_id,
+                kind='evidence_span',
+                chunk_index=1,
+                text='second chunk',
+                digest=sha256(b'second chunk').hexdigest(),
+                token_count=2,
+            ),
+            RagChunkRecord(
+                chunk_id=f'{source.source_id}::c0',
+                source_id=source.source_id,
+                kind='evidence_span',
+                chunk_index=0,
+                text='first chunk',
+                digest=sha256(b'first chunk').hexdigest(),
+                token_count=2,
+            ),
+        ],
+    )
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'source': source.source_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    text = response.text
+    assert 'first chunk' in text
+    assert 'second chunk' in text
+    assert text.index('first chunk') < text.index('second chunk')
+
+
+def test_ui_cited_source_text_truncates_past_the_chunk_cap(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    monkeypatch.setattr('app.ui._MAX_SOURCE_TEXT_CHUNKS', 3)
+    source = KnowledgeSource(
+        source_type=SourceType.PAPER,
+        canonical_uri='repo://docs/long.md',
+        digest='e' * 64,
+        title='Long source',
+    )
+    engine.store.save_knowledge_source(source)
+    engine.store.replace_rag_chunks(
+        source.source_id,
+        [
+            RagChunkRecord(
+                chunk_id=f'{source.source_id}::c{index}',
+                source_id=source.source_id,
+                kind='evidence_span',
+                chunk_index=index,
+                text=f'chunk number {index}',
+                digest=sha256(f'chunk number {index}'.encode()).hexdigest(),
+                token_count=3,
+            )
+            for index in range(5)
+        ],
+    )
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'source': source.source_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    text = response.text
+    # Exactly the cap renders, in chunk-index order, and the overflow is
+    # disclosed instead of silently dropped.
+    assert text.count('<article class="source-chunk">') == 3
+    for index in range(3):
+        assert f'chunk number {index}' in text
+    for index in range(3, 5):
+        assert f'chunk number {index}' not in text
+    assert (
+        'Showing the first 3 extracted chunks; this source has more.' in text
+    )
+    assert '<script' not in text
+
+
+def test_ui_cited_source_text_marks_the_cited_excerpt(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    source = _seed_chat_corpus(engine)
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={
+                'source': source.source_id,
+                'excerpt': 'STABILITY OF SMALL SAMPLES',
+            },
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    text = response.text
+    # The callout quotes the excerpt; the case-insensitive match inside the
+    # chunk text is wrapped in a server-rendered mark, never a script.
+    assert '<div class="excerpt-callout">' in text
+    assert '<strong>Cited excerpt</strong>' in text
+    assert '<p class="excerpt-text">STABILITY OF SMALL SAMPLES</p>' in text
+    assert '<mark>stability of small samples</mark>' in text
+    assert '<script' not in text
+    assert re.search(r'\sstyle="', text) is None
+
+
+def test_ui_cited_source_without_chunks_states_no_text_stored(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    source = KnowledgeSource(
+        source_type=SourceType.DOCUMENTATION,
+        canonical_uri='repo://docs/empty.md',
+        digest='c' * 64,
+        title='Empty source',
+    )
+    engine.store.save_knowledge_source(source)
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'source': source.source_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert 'No extracted text is stored for this source.' in response.text
+    assert 'The cited source document is not available.' in response.text
+    assert '<iframe' not in response.text
+
+
+def test_ui_cited_source_text_viewer_stays_zero_js(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    source = _seed_chat_corpus(engine)
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={
+                'source': source.source_id,
+                'excerpt': _CHAT_CHUNK_TEXT,
+            },
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    text = response.text
+    assert '<script' not in text
+    assert '<noscript' not in text
+    # All CSS is in the nonced stylesheet: no element carries style="…" and no
+    # element carries an event-handler attribute.
+    assert re.search(r'\sstyle="', text) is None
+    assert re.search(r'\son(click|change|load|error|focus|submit)=', text) is None
+
+
+def test_ui_cited_source_text_escapes_hostile_chunk_and_excerpt(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    payload = '<script>alert(1)</script>'
+    source = _seed_chat_corpus(engine, text=f'Extracted text {payload} here')
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'source': source.source_id, 'excerpt': payload},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    text = response.text
+    assert '<script' not in text
+    # Both the callout and the marked body span carry escaped text only.
+    assert (
+        '<p class="excerpt-text">&lt;script&gt;alert(1)&lt;/script&gt;</p>'
+        in text
+    )
+    assert '<mark>&lt;script&gt;alert(1)&lt;/script&gt;</mark>' in text
+
+
 def test_ui_citation_omits_page_when_chunk_has_no_page(
     orchestrator_bundle,
 ) -> None:

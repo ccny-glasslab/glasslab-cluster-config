@@ -14,9 +14,11 @@ notebook over durable orchestrator state:
   markers with a CSS-only hover/focus preview card (no end-of-answer
   reference list, no script);
 * the **Viewer** column shows the selected content: the cited source's
-  same-origin PDF viewer iframe, or the selected run's artifact tree (folders
-  are native ``<details>``/``<summary>``) with the digest-verified text
-  preview of the selected file.
+  same-origin PDF viewer iframe, or -- when no PDF is servable -- the
+  source's stored extracted text with the cited excerpt marked, or the
+  selected run's artifact tree (folders are native
+  ``<details>``/``<summary>``) with the digest-verified text preview of the
+  selected file.
 
 The page fills the viewport: the title is a static header and each column
 scrolls internally, so the document body never grows tall with content. Below
@@ -57,7 +59,7 @@ from dataclasses import dataclass, field
 import html
 import re
 import secrets
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, Query
@@ -90,6 +92,11 @@ if TYPE_CHECKING:
 # A browser text pane is not a download surface: the preview is capped well
 # below the signed-link ceiling so one large artifact cannot stall the page.
 MAXIMUM_UI_DOCUMENT_BYTES = 2 * 1024 * 1024
+
+# The extracted-text reader is bounded like the artifact preview: chunk counts
+# per source run to a 141-chunk p99 with one live outlier at 6,796 chunks
+# (~4.3 MB), which must never become a single response.
+_MAX_SOURCE_TEXT_CHUNKS = 200
 
 _CITATION_BADGES: dict[CitationClass, str] = {
     'exact': '✓ exact',
@@ -313,6 +320,27 @@ flex-direction:column;margin:.5rem 0 0}
 .pdf-viewer iframe{display:block;flex:1 1 auto;min-block-size:0;
 inline-size:100%;border:1px solid var(--line);border-radius:var(--radius-sm);
 background:var(--well)}
+/* Extracted-text reader: the fallback when a cited source has no servable
+   PDF. It mirrors the PDF viewer geometry -- the wrapper fills the viewer
+   column's body and scrolls internally -- and its <mark> spans come from a
+   server-side excerpt match, never from script or inline style. */
+.source-text{flex:1 1 auto;min-block-size:0;overflow:auto;
+overscroll-behavior:contain;scrollbar-gutter:stable;margin:.5rem 0 0}
+.source-title{margin:.55rem 0 0;color:var(--text);font-weight:600}
+.excerpt-callout{margin:.75rem 0;padding:.7rem .85rem;background:var(--well);
+border:1px solid var(--accent-dim);border-radius:var(--radius-sm)}
+.excerpt-callout strong{display:block;font-size:.6875rem;font-weight:600;
+letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}
+.excerpt-text{margin:.4rem 0 0;font-size:.8125rem;line-height:1.62;
+white-space:pre-wrap;overflow-wrap:anywhere}
+.source-chunk{margin:.85rem 0;padding:.75rem .9rem;background:var(--well);
+border:1px solid var(--line-faint);border-radius:var(--radius-sm);
+box-shadow:inset 0 2px 10px rgba(0,0,0,.25)}
+.chunk-text{margin:0;font-size:.8125rem;line-height:1.62;
+white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text-2)}
+.chunk-meta{margin:.5rem 0 0;font-size:.75rem}
+mark{background:rgba(139,147,255,.3);color:var(--text);border-radius:3px;
+padding:0 .08em}
 ::selection{background:rgba(113,112,255,.35);color:var(--text)}
 /* Below 1100px the notebook stacks into one column (chat first) and every
    section returns to document flow instead of internal scrolling. */
@@ -684,6 +712,116 @@ def _pdf_viewer_url(
     return '/ui/pdf/assets/web/highlight.html?' + urlencode(parameters)
 
 
+def _highlight_escaped(text: str, needle: str | None) -> str:
+    """Escape ``text`` and wrap case-insensitive ``needle`` matches in mark.
+
+    The match runs over the raw text and each matched span is escaped
+    independently, so ``html.escape`` (a character-wise transform) still
+    escapes every byte; a hostile excerpt can never smuggle markup through
+    the highlight wrapper, and only matched plain-text spans gain a ``<mark>``.
+    """
+    text = str(text)
+    if not needle:
+        return _escape(text)
+    rendered: list[str] = []
+    cursor = 0
+    for match in re.finditer(re.escape(needle), text, re.IGNORECASE):
+        rendered.append(_escape(text[cursor : match.start()]))
+        rendered.append(f'<mark>{_escape(match.group(0))}</mark>')
+        cursor = match.end()
+    rendered.append(_escape(text[cursor:]))
+    return ''.join(rendered)
+
+
+def _render_chunk_provenance(chunk: dict[str, Any]) -> str:
+    """The muted page/section line under one rendered chunk, when stored."""
+    parts: list[str] = []
+    page_start = chunk.get('page_start')
+    if page_start is not None:
+        parts.append(f'page {_escape(page_start)}')
+    section_path = chunk.get('section_path')
+    if section_path:
+        parts.append(f'section {_escape(section_path)}')
+    if not parts:
+        return ''
+    return f'<p class="chunk-meta muted">{" · ".join(parts)}</p>'
+
+
+def _render_cited_source_text(
+    engine: ResearchOrchestrator,
+    selection: UiRequest,
+) -> str:
+    """Render the stored extracted text when no PDF can be served.
+
+    Most corpus sources are not file-backed, and selecting one used to show
+    only a dead end. The store already holds their extracted rag chunks, so
+    this reader renders them as escaped, newline-preserving paragraphs with
+    their page/section provenance. The store orders chunks by
+    ``(source_id, chunk_index)``. At most :data:`_MAX_SOURCE_TEXT_CHUNKS`
+    chunks are rendered, with a muted truncation note when more exist, so one
+    outlier source cannot turn into a multi-megabyte response. The citation
+    excerpt is redacted and shown as a callout, and its case-insensitive
+    matches inside the body text are wrapped in ``<mark>`` -- escape-first
+    everywhere, so neither the corpus nor the excerpt can inject markup.
+    """
+    source_id = selection.source_id or ''
+    # One extra chunk distinguishes "exactly at the cap" from "over the cap"
+    # without a second count query.
+    chunks = engine.store.list_rag_chunks(
+        source_ids=[source_id],
+        limit=_MAX_SOURCE_TEXT_CHUNKS + 1,
+    )
+    truncated = len(chunks) > _MAX_SOURCE_TEXT_CHUNKS
+    if truncated:
+        chunks = chunks[:_MAX_SOURCE_TEXT_CHUNKS]
+    try:
+        title = engine.store.get_knowledge_source(source_id).title
+    except RecordNotFound:
+        title = None
+    if not chunks:
+        return (
+            '<h3>Cited source</h3>'
+            '<p class="muted">The cited source document is not available. '
+            'No extracted text is stored for this source.</p>'
+        )
+    excerpt = (
+        redact_free_text(selection.excerpt)
+        if selection.excerpt and selection.excerpt.strip()
+        else None
+    )
+    rendered = [
+        '<h3>Cited source</h3>',
+        '<div class="source-text">',
+        '<p class="muted">The cited source PDF file is unavailable; '
+        'showing its stored extracted text instead.</p>',
+    ]
+    if title:
+        rendered.append(f'<p class="source-title">{_escape(title)}</p>')
+    if excerpt:
+        rendered.append(
+            '<div class="excerpt-callout">'
+            '<strong>Cited excerpt</strong>'
+            f'<p class="excerpt-text">{_escape(excerpt)}</p>'
+            '</div>'
+        )
+    for chunk in chunks:
+        rendered.append(
+            '<article class="source-chunk">'
+            f'<p class="chunk-text">'
+            f'{_highlight_escaped(chunk.get("text", ""), excerpt)}</p>'
+            f'{_render_chunk_provenance(chunk)}'
+            '</article>'
+        )
+    if truncated:
+        rendered.append(
+            f'<p class="muted">Showing the first '
+            f'{_MAX_SOURCE_TEXT_CHUNKS} extracted chunks; this source has '
+            'more.</p>'
+        )
+    rendered.append('</div>')
+    return ''.join(rendered)
+
+
 def _render_cited_source(
     engine: ResearchOrchestrator,
     settings: Settings,
@@ -692,11 +830,7 @@ def _render_cited_source(
     if not selection.source_id:
         return ''
     if not document_is_resolvable(engine, settings, selection.source_id):
-        return (
-            '<h3>Cited source</h3>'
-            '<p class="muted">The cited source document is not '
-            'available.</p>'
-        )
+        return _render_cited_source_text(engine, selection)
     excerpt = (
         redact_free_text(selection.excerpt) if selection.excerpt else None
     )
