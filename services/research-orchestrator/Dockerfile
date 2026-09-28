@@ -60,6 +60,11 @@ LABEL org.opencontainers.image.source="https://github.com/ccny-glasslab/glasslab
 LABEL io.glasslab.build-source="${GLASSLAB_BUILD_SOURCE}"
 
 COPY services/research-orchestrator/app ./app
+# Vendored generic pdf.js dist (#618), served same-origin by the corpus UI so
+# no browser needs a CDN. build/ and web/ stay siblings because pdf.js resolves
+# its assets relatively (../build/pdf.worker.mjs, ../web/cmaps/,
+# ../web/standard_fonts/, ../web/wasm/, ../web/iccs/).
+COPY services/research-orchestrator/static ./static
 COPY services/research-orchestrator/prompts ./prompts
 COPY services/research-orchestrator/evaluation-contracts ./evaluation-contracts
 # Versioned routing evidence/table read at runtime by app/model_routing.py (#433).
