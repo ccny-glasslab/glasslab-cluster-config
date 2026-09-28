@@ -47,35 +47,35 @@ EXCLUDED_SUFFIXES = frozenset(
     {
         ".7z",
         ".avi",
-        ".bcmap",
         ".bmp",
         ".gif",
         ".gz",
         ".ico",
-        ".icc",
         ".jpeg",
         ".jpg",
         ".mkv",
         ".mov",
         ".mp3",
         ".mp4",
-        ".otf",
         ".pdf",
-        ".pfb",
         ".png",
         ".svg",
         ".tar",
         ".tgz",
         ".tif",
         ".tiff",
-        ".ttf",
-        ".wasm",
         ".webm",
         ".webp",
-        ".woff",
-        ".woff2",
         ".zip",
     }
+)
+# The vendored pdf.js distribution is third-party build output (binary fonts,
+# wasm, cmaps). It is excluded by path prefix, not by suffix, so a binary
+# elsewhere in the repository still fails closed as "scan-error-file-read"
+# instead of being silently skipped. The whole vendored subtree -- including
+# its text .mjs/.html/.css/.json -- is third-party dist and is not scanned.
+VENDORED_ASSET_PREFIXES = (
+    Path("services/research-orchestrator/static/pdfjs"),
 )
 # The first digest is a harmless fixture sentinel. The remaining fingerprints
 # are historical exposed values, retained only as irreversible SHA-256 digests.
@@ -123,6 +123,11 @@ def _is_excluded_path(relative_path: Path) -> bool:
     if any(part in EXCLUDED_DIRECTORY_NAMES for part in parts[:-1]):
         return True
     if any("whatsapp" in part for part in parts):
+        return True
+    if any(
+        relative_path.is_relative_to(prefix)
+        for prefix in VENDORED_ASSET_PREFIXES
+    ):
         return True
     return relative_path.suffix.lower() in EXCLUDED_SUFFIXES
 

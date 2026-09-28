@@ -227,6 +227,44 @@ class CredentialHygieneScannerTests(unittest.TestCase):
 
         self.assertEqual(findings, [])
 
+    def test_non_vendored_binary_fails_closed(self):
+        """A binary outside the vendored pdf.js tree must still be scan-error."""
+        scanner = load_scanner()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            asset = root / "assets" / "font.woff2"
+            asset.parent.mkdir(parents=True, exist_ok=True)
+            asset.write_bytes(b"\x00\xff\xfe\x00not utf-8")
+            findings = scanner.scan_tree(root)
+
+        self.assertEqual(
+            {finding.rule_id for finding in findings},
+            {"scan-error-file-read"},
+        )
+
+    def test_vendored_pdfjs_tree_is_skipped(self):
+        """The third-party pdf.js dist is excluded by path, not by suffix."""
+        scanner = load_scanner()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            vendored = (
+                root
+                / "services"
+                / "research-orchestrator"
+                / "static"
+                / "pdfjs"
+                / "build"
+            )
+            vendored.mkdir(parents=True, exist_ok=True)
+            (vendored / "pdf.worker.mjs").write_bytes(b"\x00\xff\xfe\x00binary")
+            (vendored / "secret.yaml").write_text(
+                "kind: Secret\nstringData:\n  TOKEN: change-me\n",
+                encoding="utf-8",
+            )
+            findings = scanner.scan_tree(root)
+
+        self.assertEqual(findings, [])
+
     def test_ignores_disposable_lab_agent_worktrees(self):
         """Ignored agent worktrees must not duplicate scans or consume a full CPU core."""
         self.assertEqual(
