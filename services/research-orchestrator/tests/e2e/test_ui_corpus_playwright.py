@@ -43,6 +43,11 @@ pytest.importorskip('playwright.sync_api')
 
 from playwright.sync_api import Frame, Page, expect, sync_playwright
 
+# Importing the fixture registers it in this module's namespace; it lives in a
+# plain module rather than a second conftest.py so its basename cannot shadow
+# the shared tests/conftest.py that the rest of the suite imports.
+from ui_qa import ui_qa  # noqa: F401
+
 # Console text that marks a Content-Security-Policy violation in Chromium.
 # Chromium prefixes every blocked-resource report with "Refused to ..."; the
 # bare phrase "Content Security Policy" also appears in benign notices (for
