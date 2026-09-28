@@ -11,14 +11,20 @@ traversal guard, and the viewer route carries the viewer CSP.
 
 from __future__ import annotations
 
+import html
 from hashlib import sha256
 from pathlib import Path
+import re
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.testclient import TestClient
 import pymupdf
 
+from app.corpus_rag.chat import CorpusChatService
+from app.corpus_rag.contracts import RagChunkRecord
 from app.schemas import KnowledgeSource, SourceType
+from app.ui import register_ui_routes
 from app.ui_pdf import register_ui_pdf_routes
 
 OPERATOR_TOKEN = 'test-operator-token'
@@ -70,6 +76,37 @@ def _make_pdf(path: Path, text: str = _PDF_TEXT) -> bytes:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return data
+
+
+def _make_multipage_pdf(path: Path, page_texts: list[str]) -> bytes:
+    """Write a PDF with one distinct text line per page (one-based order)."""
+    document = pymupdf.open()
+    for text in page_texts:
+        page = document.new_page()
+        page.insert_text((72, 72), text)
+    data = document.tobytes()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return data
+
+
+def _ui_and_pdf_client(settings, engine, chat_service) -> TestClient:
+    """One app exposing both surfaces, so page bases can be cross-checked."""
+    app = FastAPI()
+    register_ui_routes(
+        app,
+        engine=engine,
+        settings=settings,
+        require_operator=_require_operator_token,
+        chat_service=chat_service,
+    )
+    register_ui_pdf_routes(
+        app,
+        engine=engine,
+        settings=settings,
+        require_operator=_require_operator_token,
+    )
+    return TestClient(app)
 
 
 def _register_source(engine, path: Path) -> KnowledgeSource:
@@ -189,7 +226,7 @@ def test_boxes_returns_rects_and_empty_on_absent(
             '/ui/pdf/boxes',
             params={
                 'source': source.source_id,
-                'page': 0,
+                'page': 1,
                 'excerpt': 'Hello',
             },
             headers=AUTH_HEADERS,
@@ -198,7 +235,7 @@ def test_boxes_returns_rects_and_empty_on_absent(
             '/ui/pdf/boxes',
             params={
                 'source': source.source_id,
-                'page': 0,
+                'page': 1,
                 'excerpt': 'zzzznotfound',
             },
             headers=AUTH_HEADERS,
@@ -206,14 +243,150 @@ def test_boxes_returns_rects_and_empty_on_absent(
 
     assert found.status_code == 200
     body = found.json()
-    assert body['page'] == 0
+    assert body['page'] == 1
     assert body['page_size'] == [595.0, 842.0]
     assert len(body['boxes']) >= 1
     x0, y0, x1, y1 = body['boxes'][0]
     assert x1 > x0
     assert y1 > y0
+    # The box is in PDF user space (origin bottom-left): text drawn near the
+    # top of the page must report a y range near the page bottom, or the
+    # pdf.js viewport draws the highlight mirrored.
+    assert y0 > body['page_size'][1] / 2
     assert absent.status_code == 200
     assert absent.json()['boxes'] == []
+
+
+def test_boxes_page_is_one_based(orchestrator_bundle, tmp_path) -> None:
+    """The ``page`` request is 1-based: it indexes ``document[page - 1]``.
+
+    Distinct text per page makes an off-by-one observable: searching page 1
+    for page 1's text must find boxes, page 2 for page 2's text must find
+    boxes, and page 2 for page 1's text must find nothing.
+    """
+    settings, _, _, _, engine = orchestrator_bundle
+    raw_root = tmp_path / 'rag-raw'
+    settings = _raw_settings(settings, raw_root)
+    pdf_path = raw_root / 'two-pages.pdf'
+    _make_multipage_pdf(pdf_path, ['alpha page one', 'beta page two'])
+    source = _register_source(engine, pdf_path)
+
+    with _client(settings, engine) as client:
+        first = client.get(
+            '/ui/pdf/boxes',
+            params={
+                'source': source.source_id,
+                'page': 1,
+                'excerpt': 'alpha',
+            },
+            headers=AUTH_HEADERS,
+        )
+        second = client.get(
+            '/ui/pdf/boxes',
+            params={
+                'source': source.source_id,
+                'page': 2,
+                'excerpt': 'beta',
+            },
+            headers=AUTH_HEADERS,
+        )
+        off_by_one = client.get(
+            '/ui/pdf/boxes',
+            params={
+                'source': source.source_id,
+                'page': 2,
+                'excerpt': 'alpha',
+            },
+            headers=AUTH_HEADERS,
+        )
+        out_of_range = client.get(
+            '/ui/pdf/boxes',
+            params={
+                'source': source.source_id,
+                'page': 3,
+                'excerpt': 'alpha',
+            },
+            headers=AUTH_HEADERS,
+        )
+
+    assert first.status_code == 200
+    assert first.json()['page'] == 1
+    assert first.json()['boxes']
+    assert second.status_code == 200
+    assert second.json()['page'] == 2
+    assert second.json()['boxes']
+    assert off_by_one.status_code == 200
+    assert off_by_one.json()['boxes'] == []
+    assert out_of_range.status_code == 400
+
+
+def test_rendered_citation_page_and_boxes_page_agree(
+    orchestrator_bundle,
+    tmp_path,
+) -> None:
+    """The page the chat link asks the viewer to render is the one boxes uses.
+
+    A 0-based ``page_start`` must reach both the viewer URL and the boxes
+    route as the same 1-based human page, so the highlight lands on the
+    rendered page.
+    """
+    settings, _, _, _, engine = orchestrator_bundle
+    raw_root = tmp_path / 'rag-raw'
+    settings = _raw_settings(settings, raw_root)
+    pdf_path = raw_root / 'cited.pdf'
+    cited_text = 'Resampling improves stability of small samples.'
+    _make_multipage_pdf(pdf_path, [cited_text, 'an unrelated second page'])
+    source = _register_source(engine, pdf_path)
+    engine.store.replace_rag_chunks(
+        source.source_id,
+        [
+            RagChunkRecord(
+                chunk_id=f'{source.source_id}::c0',
+                source_id=source.source_id,
+                kind='evidence_span',
+                chunk_index=0,
+                text=cited_text,
+                digest=sha256(cited_text.encode()).hexdigest(),
+                token_count=max(1, len(cited_text.split())),
+                page_start=0,
+                page_end=0,
+            )
+        ],
+    )
+    chat_service = CorpusChatService(engine.store)
+
+    with _ui_and_pdf_client(settings, engine, chat_service) as client:
+        page = client.get(
+            '/ui/',
+            params={'q': 'resampling stability small samples'},
+            headers=AUTH_HEADERS,
+        )
+        href = re.search(r'href="(/ui/\?[^"]*source=[^"]*)"', page.text)
+        assert href is not None
+        followed = client.get(
+            html.unescape(href.group(1)),
+            headers=AUTH_HEADERS,
+        )
+        match = re.search(r'<iframe[^>]*\bsrc="([^"]+)"[^>]*>', followed.text)
+        assert match is not None
+        frame_src = html.unescape(match.group(1))
+        rendered_page = int(
+            parse_qs(urlsplit(frame_src).query)['page'][0]
+        )
+        boxes = client.get(
+            '/ui/pdf/boxes',
+            params={
+                'source': source.source_id,
+                'page': rendered_page,
+                'excerpt': cited_text,
+            },
+            headers=AUTH_HEADERS,
+        )
+
+    assert rendered_page == 1  # page_start=0 is human page 1
+    assert boxes.status_code == 200
+    assert boxes.json()['page'] == rendered_page
+    assert boxes.json()['boxes']
 
 
 def test_boxes_rejects_bad_page_and_long_excerpt(
@@ -228,22 +401,34 @@ def test_boxes_rejects_bad_page_and_long_excerpt(
     source = _register_source(engine, pdf_path)
 
     with _client(settings, engine) as client:
-        bad_page = client.get(
+        negative_page = client.get(
             '/ui/pdf/boxes',
             params={'source': source.source_id, 'page': -1, 'excerpt': 'Hello'},
+            headers=AUTH_HEADERS,
+        )
+        zero_page = client.get(
+            '/ui/pdf/boxes',
+            params={'source': source.source_id, 'page': 0, 'excerpt': 'Hello'},
+            headers=AUTH_HEADERS,
+        )
+        out_of_range = client.get(
+            '/ui/pdf/boxes',
+            params={'source': source.source_id, 'page': 2, 'excerpt': 'Hello'},
             headers=AUTH_HEADERS,
         )
         long_excerpt = client.get(
             '/ui/pdf/boxes',
             params={
                 'source': source.source_id,
-                'page': 0,
+                'page': 1,
                 'excerpt': 'x' * 401,
             },
             headers=AUTH_HEADERS,
         )
 
-    assert bad_page.status_code == 400
+    assert negative_page.status_code == 400
+    assert zero_page.status_code == 400
+    assert out_of_range.status_code == 400
     assert long_excerpt.status_code == 400
 
 

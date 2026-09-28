@@ -1,0 +1,394 @@
+"""Real-browser end-to-end QA for the ``/ui`` corpus chat and PDF viewer.
+
+Drives headless Chromium through the loopback operator-token-injecting UI
+proxy (``scripts/glasslab-orchestrator-ui-proxy.py``) against a live uvicorn
+``app.main:app`` seeded with a synthetic corpus
+(``scripts/qa/seed_ui_corpus.py``). Nothing here is mocked: the browser talks
+HTTP to the proxy, the proxy injects the operator header, and the app serves
+the chat page, the cited-source iframe, the vendored pdf.js assets, the raw
+PDF bytes, and the live highlight boxes.
+
+Assertions (issues #618/#619):
+
+1. the ask form renders and a GET ``?q=`` submission renders an answer with a
+   citation whose title, excerpt, and verdict badge are visible;
+2. clicking the citation opens the cited-source iframe at the exact
+   ``/ui/pdf/assets/web/highlight.html?source=&page=&excerpt=`` URL, and the
+   iframe is deliberately not sandboxed;
+3. inside the iframe a canvas renders, the wrapper reports the requested page,
+   and at least one highlight rectangle is drawn that overlaps the rendered
+   text region (the cited page and the boxes page must be the same physical
+   page);
+4. zero CSP-violation console errors across the whole flow;
+5. direct (unauthenticated) requests to the app are 401 for ``/ui/`` and
+   ``/ui/pdf/document.pdf``.
+
+Every step captures a screenshot and appends to the action log under
+``/home/gr66ss/tmp-tests/qa-artifacts/``.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import time
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
+
+# The browser stack is installed only in the Playwright venv; the default
+# service test environment must collect this module and skip, not error.
+pytest.importorskip('playwright.sync_api')
+
+from playwright.sync_api import Frame, Page, expect, sync_playwright
+
+# Console text that marks a Content-Security-Policy violation in Chromium.
+# Chromium prefixes every blocked-resource report with "Refused to ..."; the
+# bare phrase "Content Security Policy" also appears in benign notices (for
+# example, "frame-ancestors is ignored when delivered via a <meta> element"),
+# which are not violations and must not be counted as such.
+CSP_VIOLATION_MARKERS = (
+    'refused to load',
+    'refused to execute',
+    'refused to connect',
+    'refused to frame',
+    'refused to apply',
+    'violates the following content security policy',
+)
+
+IFRAME_TITLE = 'Cited source PDF'
+HIGHLIGHT_PATH = '/ui/pdf/assets/web/highlight.html'
+
+
+def _log(env, step: str, action: str, **detail: object) -> None:
+    """Append one action-log entry (JSONL + Markdown) for a QA step."""
+    entry = {'ts': time.time(), 'step': step, 'action': action, **detail}
+    with (env.artifacts_dir / 'action-log.jsonl').open('a', encoding='utf-8') as fh:
+        fh.write(json.dumps(entry, sort_keys=True) + '\n')
+    rendered = ', '.join(f'{key}={value!r}' for key, value in detail.items())
+    with (env.artifacts_dir / 'action-log.md').open('a', encoding='utf-8') as fh:
+        fh.write(f'- **{step}** {action}' + (f' — {rendered}' if rendered else '') + '\n')
+
+
+def _shot(page: Page, env, name: str) -> Path:
+    path = env.artifacts_dir / name
+    page.screenshot(path=str(path), full_page=True)
+    return path
+
+
+def _csp_violations(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    violations = []
+    for message in messages:
+        lowered = message['text'].lower()
+        if any(marker in lowered for marker in CSP_VIOLATION_MARKERS):
+            violations.append(message)
+    return violations
+
+
+def _wait_for_frame(page: Page, prefix: str, timeout_ms: int = 30_000) -> Frame:
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        for frame in page.frames:
+            if frame.url.startswith(prefix):
+                return frame
+        page.wait_for_timeout(100)
+    raise AssertionError(
+        f'no frame with URL prefix {prefix!r}; frames={[f.url for f in page.frames]}'
+    )
+
+
+def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
+    env = ui_qa
+    manifest = env.manifest
+    expected_page = str(manifest['page'])
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context(viewport={'width': 1440, 'height': 1000})
+        page = context.new_page()
+        console_messages: list[dict[str, str]] = []
+        page_errors: list[str] = []
+        page.on(
+            'console',
+            lambda message: console_messages.append(
+                {'type': message.type, 'text': message.text}
+            ),
+        )
+        page.on('pageerror', lambda error: page_errors.append(str(error)))
+
+        # --- 1. the ask form renders through the proxy ---------------------
+        response = page.goto(
+            env.proxy_origin + '/ui/', wait_until='domcontentloaded'
+        )
+        assert response is not None, 'no navigation response for /ui/'
+        assert response.status == 200, f'/ui/ status {response.status}'
+        ask = page.locator('#ask')
+        expect(ask).to_be_visible()
+        expect(ask.locator('h2')).to_have_text('Ask the corpus')
+        form = ask.locator('form.ask-form')
+        assert form.get_attribute('method').lower() == 'get'
+        assert form.get_attribute('action') == '/ui/'
+        question_input = ask.locator('input[name="q"]')
+        expect(question_input).to_be_visible()
+        expect(ask.locator('button[type="submit"]')).to_have_text('Ask')
+        _shot(page, env, '01-ask-form.png')
+        _log(
+            env,
+            'ask-form',
+            'rendered',
+            url=page.url,
+            status=response.status,
+            screenshot='01-ask-form.png',
+        )
+
+        # --- 2. GET ?q= renders the answer and its citation ----------------
+        question_input.fill(manifest['question'])
+        with page.expect_navigation(wait_until='domcontentloaded'):
+            ask.locator('button[type="submit"]').click()
+        assert 'q=' in page.url, f'question missing from URL: {page.url}'
+        turn = page.locator('.chat-turn')
+        expect(turn).to_be_visible()
+        expect(turn).to_contain_text('Question:')
+        expect(turn).to_contain_text(manifest['question'])
+        expect(turn).to_contain_text('Answer:')
+        citations = turn.locator('ul.chat-citations li')
+        assert citations.count() >= 1, 'expected at least one chat citation'
+        first = citations.first
+        link = first.locator('a')
+        expect(link).to_have_text(manifest['title'])
+        expect(first.locator('code')).to_contain_text(manifest['excerpt'])
+        badge = first.locator('span.badge')
+        expect(badge).to_have_text('✓ exact')
+        _shot(page, env, '02-answer-citation.png')
+        _log(
+            env,
+            'answer',
+            'rendered',
+            url=page.url,
+            title=manifest['title'],
+            excerpt=manifest['excerpt'],
+            badge='✓ exact',
+            screenshot='02-answer-citation.png',
+        )
+
+        # --- 3. the citation opens the exact unsandboxed viewer iframe -----
+        with page.expect_navigation(wait_until='domcontentloaded'):
+            link.click()
+        iframe = page.locator(f'iframe[title="{IFRAME_TITLE}"]')
+        expect(iframe).to_be_visible()
+        assert iframe.get_attribute('sandbox') is None, (
+            'the cited-source iframe must not be sandboxed'
+        )
+        src = iframe.get_attribute('src')
+        assert src is not None, 'iframe has no src'
+        parsed = urlsplit(src)
+        assert parsed.path == HIGHLIGHT_PATH, f'iframe path {parsed.path!r}'
+        params = parse_qs(parsed.query)
+        assert params == {
+            'source': [manifest['source_id']],
+            'page': [expected_page],
+            'excerpt': [manifest['excerpt']],
+        }, f'unexpected iframe query: {params}'
+        iframe.scroll_into_view_if_needed()
+        frame = _wait_for_frame(page, env.proxy_origin + HIGHLIGHT_PATH)
+        frame_parsed = urlsplit(frame.url)
+        assert frame_parsed.path == HIGHLIGHT_PATH, frame.url
+        assert parse_qs(frame_parsed.query) == params, frame.url
+        _shot(page, env, '03-cited-source-iframe.png')
+        _log(
+            env,
+            'citation',
+            'opened-iframe',
+            url=page.url,
+            iframe_src=src,
+            sandboxed=False,
+            screenshot='03-cited-source-iframe.png',
+        )
+
+        # --- 4. canvas + requested page + highlight rects inside the iframe -
+        canvas = frame.locator('#page canvas')
+        canvas.wait_for(state='visible', timeout=30_000)
+        expect(canvas).to_have_attribute(
+            'aria-label', f'Page {expected_page} of the cited source'
+        )
+        status = frame.locator('#status')
+        status.wait_for(state='visible', timeout=30_000)
+        expect(status).to_have_attribute('data-tone', 'ok', timeout=30_000)
+        meta_text = frame.locator('#meta').inner_text()
+        assert f'page {expected_page}' in meta_text, meta_text
+        status_text = status.inner_text()
+        assert re.search(
+            rf'Page {expected_page}: \d+ highlights? for the cited excerpt\.',
+            status_text,
+        ), status_text
+
+        canvas_box = canvas.bounding_box()
+        assert canvas_box is not None, 'canvas has no layout box'
+        assert canvas_box['width'] > 0 and canvas_box['height'] > 0, canvas_box
+
+        rects = frame.locator('#page .highlight-layer .highlight-rect')
+        assert rects.count() >= 1, 'no highlight rectangle for the excerpt'
+        rect_box = rects.first.bounding_box()
+        assert rect_box is not None, 'highlight rect has no layout box'
+        assert rect_box['width'] > 0 and rect_box['height'] > 0, rect_box
+
+        # Both boxes are measured inside the iframe document so the viewer's
+        # own scroll position cannot skew the comparison.
+        geometry = frame.evaluate(
+            """() => {
+                const canvas = document.querySelector('#page canvas');
+                const rect = document.querySelector(
+                    '#page .highlight-layer .highlight-rect'
+                );
+                if (!canvas || !rect) {
+                    return null;
+                }
+                const canvasRect = canvas.getBoundingClientRect();
+                const highlightRect = rect.getBoundingClientRect();
+                const context = canvas.getContext('2d');
+                const data = context.getImageData(
+                    0, 0, canvas.width, canvas.height
+                ).data;
+                const { width, height } = canvas;
+                let dark = 0;
+                let minX = width, minY = height, maxX = -1, maxY = -1;
+                for (let i = 0; i < data.length; i += 4) {
+                    if (data[i] < 128 && data[i + 1] < 128 && data[i + 2] < 128) {
+                        dark += 1;
+                        const pixel = i / 4;
+                        const x = pixel % width;
+                        const y = Math.floor(pixel / width);
+                        if (x < minX) minX = x;
+                        if (y < minY) minY = y;
+                        if (x > maxX) maxX = x;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+                if (maxX < 0) {
+                    return { dark: 0, text: null, highlight: null, overlap: false };
+                }
+                const scaleX = canvas.clientWidth / width;
+                const scaleY = canvas.clientHeight / height;
+                const text = {
+                    x: minX * scaleX,
+                    y: minY * scaleY,
+                    width: (maxX - minX + 1) * scaleX,
+                    height: (maxY - minY + 1) * scaleY,
+                };
+                const highlight = {
+                    x: highlightRect.left - canvasRect.left,
+                    y: highlightRect.top - canvasRect.top,
+                    width: highlightRect.width,
+                    height: highlightRect.height,
+                };
+                const overlap =
+                    highlight.x < text.x + text.width &&
+                    highlight.x + highlight.width > text.x &&
+                    highlight.y < text.y + text.height &&
+                    highlight.y + highlight.height > text.y;
+                return { dark, text, highlight, overlap };
+            }"""
+        )
+        assert geometry is not None, 'no rendered page or highlight rectangle'
+        dark_pixels = geometry['dark']
+        text_box = geometry['text']
+        assert dark_pixels > 0, 'canvas rendered no dark (text) pixels'
+        assert text_box is not None, 'dark pixels had no bounding box'
+        # A rect merely existing is not enough: the highlight must land on the
+        # rendered text. This is the assertion that fails if the page the
+        # viewer renders and the page the boxes route searches diverge.
+        assert geometry['overlap'], (
+            f"highlight {geometry['highlight']} does not overlap rendered "
+            f"text {text_box}"
+        )
+        # Record the raw boxes payload the wrapper consumed: the coordinates
+        # are the evidence for the highlight geometry (see the QA report).
+        boxes_response = context.request.get(
+            env.proxy_origin + '/ui/pdf/boxes',
+            params={
+                'source': manifest['source_id'],
+                'page': expected_page,
+                'excerpt': manifest['excerpt'],
+            },
+        )
+        assert boxes_response.status == 200, boxes_response.status
+        boxes_payload = boxes_response.json()
+        assert boxes_payload['boxes'], boxes_payload
+        frame.locator('#page').screenshot(
+            path=str(env.artifacts_dir / '04-iframe-page-highlight.png')
+        )
+        _shot(page, env, '04-iframe-highlight.png')
+        _log(
+            env,
+            'iframe',
+            'rendered',
+            frame_url=frame.url,
+            meta=meta_text,
+            status=status_text,
+            canvas={'width': canvas_box['width'], 'height': canvas_box['height']},
+            dark_pixels=dark_pixels,
+            highlight_rects=rects.count(),
+            highlight_rect_box={
+                'x': rect_box['x'],
+                'y': rect_box['y'],
+                'width': rect_box['width'],
+                'height': rect_box['height'],
+            },
+            text_box=text_box,
+            boxes=boxes_payload['boxes'],
+            screenshot='04-iframe-highlight.png',
+        )
+
+        # --- 5. zero CSP-violation console errors --------------------------
+        (env.artifacts_dir / 'console-log.jsonl').write_text(
+            '\n'.join(json.dumps(message, sort_keys=True) for message in console_messages)
+            + '\n',
+            encoding='utf-8',
+        )
+        violations = _csp_violations(console_messages)
+        _log(
+            env,
+            'console',
+            'checked',
+            console_messages=len(console_messages),
+            csp_violations=len(violations),
+            page_errors=len(page_errors),
+        )
+        assert page_errors == [], f'uncaught page errors: {page_errors}'
+        assert violations == [], f'CSP violations: {violations}'
+
+        browser.close()
+
+
+def test_ui_requires_operator_token_direct(ui_qa) -> None:
+    env = ui_qa
+    with sync_playwright() as playwright:
+        request = playwright.request.new_context()
+        try:
+            ui = request.get(env.app_origin + '/ui/')
+            assert ui.status == 401, f'direct /ui/ status {ui.status}'
+            document = request.get(
+                env.app_origin + '/ui/pdf/document.pdf',
+                params={'source': env.manifest['source_id']},
+            )
+            assert document.status == 401, (
+                f'direct /ui/pdf/document.pdf status {document.status}'
+            )
+            # Contrast: the same paths through the token-injecting proxy are
+            # authorized, so the 401s above are the auth boundary, not a
+            # missing route.
+            proxied = request.get(env.proxy_origin + '/ui/')
+            assert proxied.status == 200, f'proxied /ui/ status {proxied.status}'
+            _log(
+                env,
+                'auth',
+                'checked',
+                direct_ui=ui.status,
+                direct_ui_body=ui.text()[:200],
+                direct_pdf=document.status,
+                direct_pdf_body=document.text()[:200],
+                proxied_ui=proxied.status,
+            )
+        finally:
+            request.dispose()

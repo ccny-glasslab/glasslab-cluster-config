@@ -525,7 +525,9 @@ def _render_chat_citations(
         href = _page_url(
             q=question,
             source=citation.source_id,
-            page=str(citation.page) if citation.page is not None else None,
+            # citation.page is the 0-based chunk page_start; the viewer URL and
+            # the boxes route both use the 1-based human page number.
+            page=str(citation.page + 1) if citation.page is not None else None,
             excerpt=excerpt,
         )
         items.append(

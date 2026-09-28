@@ -571,7 +571,9 @@ def test_ui_citation_link_preserves_q_and_targets_source_panel(
     citation_query = parse_qs(urlsplit(citation_href).query)
     assert citation_query['q'] == [_CHAT_QUESTION]
     assert citation_query['source'] == [source.source_id]
-    assert citation_query['page'] == ['3']
+    # The chunk is 0-based (page_start=3); the emitted HTTP page is the
+    # 1-based human page number the viewer and boxes route agree on.
+    assert citation_query['page'] == ['4']
     assert citation_query['excerpt'] == [_CHAT_CHUNK_TEXT]
 
     # Selecting the citation selects the cited source in the side panel: the
@@ -586,7 +588,28 @@ def test_ui_citation_link_preserves_q_and_targets_source_panel(
     assert frame_src.startswith('/ui/pdf/assets/web/highlight.html?')
     frame_query = parse_qs(urlsplit(frame_src).query)
     assert frame_query['source'] == [source.source_id]
-    assert frame_query['page'] == ['3']
+    assert frame_query['page'] == ['4']
     assert frame_query['excerpt'] == [_CHAT_CHUNK_TEXT]
     assert 'knowledge://' not in followed.text
     assert 'artifact://' not in followed.text
+
+
+def test_ui_citation_omits_page_when_chunk_has_no_page(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    _seed_chat_corpus(engine, page_start=None)
+    chat_service = CorpusChatService(engine.store)
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        page = client.get(
+            '/ui/',
+            params={'q': _CHAT_QUESTION},
+            headers=AUTH_HEADERS,
+        )
+
+    assert page.status_code == 200
+    match = re.search(r'href="(/ui/\?[^"]*source=[^"]*)"', page.text)
+    assert match is not None
+    citation_query = parse_qs(urlsplit(html.unescape(match.group(1))).query)
+    assert 'page' not in citation_query

@@ -176,8 +176,11 @@ def register_ui_pdf_routes(
         excerpt: str | None = Query(default=None),
         _: None = Depends(require_operator),
     ) -> dict[str, object]:
-        if page < 0:
-            raise HTTPException(status_code=400, detail='page must be >= 0')
+        # The HTTP boundary is 1-based (human page number); the viewer and the
+        # chat citation link both pass that number. The PyMuPDF document is
+        # 0-based, so index page - 1 and reject page < 1 or beyond the count.
+        if page < 1:
+            raise HTTPException(status_code=400, detail='page must be >= 1')
         if excerpt is not None and len(excerpt) > _MAX_EXCERPT_CHARS:
             raise HTTPException(
                 status_code=400,
@@ -187,18 +190,29 @@ def register_ui_pdf_routes(
         import pymupdf
 
         with pymupdf.open(str(path)) as document:
-            if page >= document.page_count:
+            if page > document.page_count:
                 raise HTTPException(
                     status_code=400,
                     detail='page out of range',
                 )
-            pdf_page = document[page]
+            pdf_page = document[page - 1]
             page_size = [pdf_page.rect.width, pdf_page.rect.height]
             boxes: list[list[float]] = []
             if excerpt:
+                page_height = pdf_page.rect.height
                 for quad in pdf_page.search_for(excerpt, quads=True):
                     rect = quad.rect
-                    boxes.append([rect.x0, rect.y0, rect.x1, rect.y1])
+                    # search_for returns top-left page coordinates; the pdf.js
+                    # viewport consumes PDF user space (origin bottom-left), so
+                    # flip y or the highlight renders mirrored.
+                    boxes.append(
+                        [
+                            rect.x0,
+                            page_height - rect.y1,
+                            rect.x1,
+                            page_height - rect.y0,
+                        ]
+                    )
         return {'page': page, 'page_size': page_size, 'boxes': boxes}
 
     @app.get('/ui/pdf/assets/{path:path}')

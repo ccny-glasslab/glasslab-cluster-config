@@ -3,7 +3,9 @@
 The operator ``/ui`` page must never emit a ``knowledge://`` evidence URI or
 a filesystem path: a citation is reduced to the opaque ``source_id``, a
 human-readable ``title``, the quoted ``excerpt``, its grounding ``verdict``,
-and the 0-based ``page``. :class:`ChatCitation` therefore has no URI or path
+and the 0-based ``page``. The ``/ui`` boundary converts that ``page`` to the
+1-based human page number the PDF viewer and boxes route use.
+:class:`ChatCitation` therefore has no URI or path
 field at all, and :class:`ChatAnswer` forbids extra fields, so a future
 adapter cannot accidentally widen the leak surface without a contract change
 here.

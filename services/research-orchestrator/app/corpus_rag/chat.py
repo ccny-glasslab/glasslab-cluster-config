@@ -14,6 +14,8 @@ The emitted :class:`~app.ui_chat.ChatCitation` contract has no URI or path
 field: the operator page forbids emitting ``knowledge://`` URIs or filesystem
 paths, so only the opaque ``source_id``, the store-resolved ``title``, the
 quoted ``excerpt``, its ``verdict``, and the 0-based ``page`` are exposed.
+The ``/ui`` boundary converts that ``page`` to the 1-based human page number
+the PDF viewer and boxes route use.
 
 :func:`app.citation_locator.classify_citation` is imported lazily inside the
 citation builder: importing it eagerly would pull ``app.knowledge_manager`` ->
