@@ -152,6 +152,19 @@ class Settings(BaseSettings):
         '/workspace/cluster-config/docs',
         '/workspace/cluster-config/services/research-orchestrator/evaluation-contracts',
     ]
+    # Corpus-RAG storage and the read-only corpus UI (issues #618/#619). The raw
+    # root holds downloaded/uploaded source documents before chunking; the store
+    # path points at an on-disk vector/index store and stays None so the service
+    # derives its location from the raw root unless a deployment relocates it.
+    corpus_rag_raw_root: str = '/tmp/glasslab-research-orchestrator/rag/raw'
+    corpus_rag_store_path: str | None = None
+    # Feature flags for the corpus UI and the optional LLM-backed RAG lane. Chat
+    # and PDF surfaces default on; the dense-chat mode and the LLM lane default
+    # off so local/test never reach an external model provider.
+    ui_chat_enabled: bool = True
+    ui_chat_dense: bool = False
+    ui_pdf_enabled: bool = True
+    rag_llm_enabled: bool = False
     evidence_excerpt_max_bytes: int = 32 * 1024
     # Verbatim tier for evaluator failures/metrics (larger than the general
     # excerpt cap); the whole snapshot is bounded by the snapshot cap.
