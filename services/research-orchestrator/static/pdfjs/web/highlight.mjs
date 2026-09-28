@@ -102,14 +102,13 @@ function normalizeBoxes(payload) {
 }
 
 async function fetchHighlightBoxes() {
-  if (!excerpt) {
-    return { boxes: [], section: null };
-  }
   const query = new URLSearchParams({
     source,
     page: String(pageNumber),
-    excerpt,
   });
+  if (excerpt) {
+    query.set('excerpt', excerpt);
+  }
   const response = await fetch(`/ui/pdf/boxes?${query}`, {
     headers: { Accept: 'application/json' },
     credentials: 'same-origin',

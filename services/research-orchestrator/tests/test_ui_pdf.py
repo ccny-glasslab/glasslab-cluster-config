@@ -521,6 +521,52 @@ def test_boxes_whitespace_only_excerpt_returns_empty(
     assert response.json()['boxes'] == []
 
 
+def test_boxes_without_excerpt_returns_section_and_no_boxes(
+    orchestrator_bundle,
+    tmp_path,
+) -> None:
+    """A page-only request returns the section with an empty box list.
+
+    A citation may carry a page with no excerpt; the wrapper still fetches
+    boxes so the cited section renders. The route accepts the absent excerpt
+    and returns ``section`` beside ``boxes == []``.
+    """
+    settings, _, _, _, engine = orchestrator_bundle
+    raw_root = tmp_path / 'rag-raw'
+    settings = _raw_settings(settings, raw_root)
+    pdf_path = raw_root / 'sectioned.pdf'
+    _make_multipage_pdf(pdf_path, ['alpha one', 'beta two'])
+    source = _register_source(engine, pdf_path)
+    document = RagDocumentRecord(
+        source_id=source.source_id,
+        doc_type='paper',
+        title='Sectioned',
+        extraction_version='v1',
+    )
+    engine.store.upsert_rag_document(document)
+    engine.store.replace_rag_sections(
+        document.doc_id,
+        [
+            RagSectionRecord(
+                doc_id=document.doc_id, path='1', level=1, title='Intro',
+                page_start=0, page_end=0,
+            ),
+        ],
+    )
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/pdf/boxes',
+            params={'source': source.source_id, 'page': 1},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['boxes'] == []
+    assert body['section'] == {'path': '1', 'title': 'Intro'}
+
+
 def test_boxes_rejects_bad_page_and_long_excerpt(
     orchestrator_bundle,
     tmp_path,

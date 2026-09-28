@@ -131,8 +131,9 @@ def test_highlight_renders_section_into_meta() -> None:
     """The cited section title is appended to the ``#meta`` line.
 
     The boxes payload carries the section beside ``boxes``; the wrapper must
-    capture it and render ``source · page · title`` with ``textContent`` only,
-    since the page CSP forbids inline script and ``innerHTML``.
+    compose ``source … · page … · <title>`` (and ``source … · page …`` when
+    there is no title) with ``textContent`` only, since the page CSP forbids
+    inline script and ``innerHTML``.
     """
     source = _read(HIGHLIGHT_MODULE)
     assert "innerHTML" not in source, (
@@ -141,11 +142,30 @@ def test_highlight_renders_section_into_meta() -> None:
     assert "metaLine.textContent" in source, (
         "the #meta line must be set from the resolved payload"
     )
-    assert "section" in source, (
-        "the module must capture the section from the boxes payload"
+    assert "`source ${source} · page ${pageNumber} · ${title}`" in source, (
+        "the composed #meta format must append the section title"
     )
-    assert ".title" in source, (
-        "the section title must reach the #meta line"
+    assert "`source ${source} · page ${pageNumber}`" in source, (
+        "the #meta fallback must omit the title"
+    )
+
+
+def test_highlight_boxes_lookup_does_not_require_excerpt() -> None:
+    """A citation with a page but no excerpt still resolves its section.
+
+    The boxes route returns ``section`` beside empty ``boxes`` when no
+    excerpt is supplied, so the wrapper must look up boxes whenever a source
+    and page are present and attach ``excerpt`` only when there is one. The
+    old ``if (!excerpt)`` early return left the section unrendered whenever a
+    citation had no excerpt (issue #619 item 5).
+    """
+    source = _read(HIGHLIGHT_MODULE)
+    assert "if (!excerpt)" not in source, (
+        "the excerpt must not gate the boxes lookup; the section renders "
+        "on its own"
+    )
+    assert "query.set('excerpt', excerpt)" in source, (
+        "the excerpt must be attached only when present"
     )
 
 
