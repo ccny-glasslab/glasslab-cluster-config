@@ -42,6 +42,7 @@ from .storage import RecordNotFound
 
 if TYPE_CHECKING:
     from .config import Settings
+    from .corpus_rag.contracts import RagSectionRecord
     from .engine import ResearchOrchestrator
 
 # The vendored pdf.js tree is baked into the service image; it is the only
@@ -131,6 +132,51 @@ def _resolve_document(
     return resolved
 
 
+def _section_for_page(
+    sections: list[RagSectionRecord],
+    page: int,
+) -> dict[str, str] | None:
+    target = page - 1
+
+    def span(section: RagSectionRecord) -> float:
+        if section.page_start is None or section.page_end is None:
+            return float('inf')
+        return section.page_end - section.page_start
+
+    containing = [
+        section
+        for section in sections
+        if section.page_start is not None
+        and section.page_end is not None
+        and section.page_start <= target <= section.page_end
+    ]
+    if not containing:
+        preceding = [
+            (section.page_start, section)
+            for section in sections
+            if section.page_start is not None and section.page_start <= target
+        ]
+        if not preceding:
+            return None
+        nearest = max(start for start, _ in preceding)
+        containing = [
+            section for start, section in preceding if start == nearest
+        ]
+    # Nested sections overlap: the smallest page span is the most specific
+    # (most deeply nested) node, and the path tie-break keeps the pick stable.
+    smallest = min(span(section) for section in containing)
+    selected = max(
+        (section for section in containing if span(section) == smallest),
+        key=lambda section: section.path,
+    )
+    title = (
+        selected.title
+        if selected.title is not None
+        else f'Section {selected.path}'
+    )
+    return {'path': selected.path, 'title': title}
+
+
 def _resolve_asset(path: str) -> Path:
     """Resolve an asset path inside the vendored pdf.js tree, or 404."""
     root = _PDFJS_ROOT.resolve()
@@ -215,7 +261,21 @@ def register_ui_pdf_routes(
                             page_height - rect.y0,
                         ]
                     )
-        return {'page': page, 'page_size': page_size, 'boxes': boxes}
+        try:
+            rag_document = engine.store.get_rag_document(source)
+        except RecordNotFound:
+            section = None
+        else:
+            section = _section_for_page(
+                engine.store.list_rag_sections(rag_document.doc_id),
+                page,
+            )
+        return {
+            'page': page,
+            'page_size': page_size,
+            'boxes': boxes,
+            'section': section,
+        }
 
     @app.get('/ui/pdf/assets/{path:path}')
     def pdf_asset(

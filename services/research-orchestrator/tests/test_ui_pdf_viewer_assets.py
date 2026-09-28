@@ -127,6 +127,28 @@ def test_highlight_bootstraps_vendored_pdfjs_same_origin() -> None:
     )
 
 
+def test_highlight_renders_section_into_meta() -> None:
+    """The cited section title is appended to the ``#meta`` line.
+
+    The boxes payload carries the section beside ``boxes``; the wrapper must
+    capture it and render ``source · page · title`` with ``textContent`` only,
+    since the page CSP forbids inline script and ``innerHTML``.
+    """
+    source = _read(HIGHLIGHT_MODULE)
+    assert "innerHTML" not in source, (
+        "the meta line must be built with textContent, never innerHTML"
+    )
+    assert "metaLine.textContent" in source, (
+        "the #meta line must be set from the resolved payload"
+    )
+    assert "section" in source, (
+        "the module must capture the section from the boxes payload"
+    )
+    assert ".title" in source, (
+        "the section title must reach the #meta line"
+    )
+
+
 def test_highlight_theme_is_dark_tokens() -> None:
     css = _read(THEME_CSS)
     compact = "".join(css.split())

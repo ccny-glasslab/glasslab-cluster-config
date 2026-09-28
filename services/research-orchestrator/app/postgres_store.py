@@ -729,6 +729,9 @@ class PostgresStore:
             for section in sections:
                 conn.execute('INSERT INTO orchestrator_rag_sections (section_id, doc_id, payload) VALUES (%s,%s,%s)', (section.section_id, section.doc_id, self._payload(section)))
         return len(sections)
+    def list_rag_sections(self, doc_id: str) -> list[RagSectionRecord]:
+        with self._connect() as conn: rows = conn.execute('SELECT payload FROM orchestrator_rag_sections WHERE doc_id=%s', (doc_id,)).fetchall()
+        return [RagSectionRecord.model_validate(row['payload']) for row in rows]
     def replace_rag_chunks(self, source_id: str, chunks: list[RagChunkRecord]) -> int:
         # Lexical parity note: PostgreSQL has no separate FTS shadow table;
         # the GIN to_tsvector index on orchestrator_rag_chunks tracks the

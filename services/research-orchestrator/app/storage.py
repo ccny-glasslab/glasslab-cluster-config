@@ -1922,6 +1922,16 @@ class SqliteStore:
                 )
         return len(sections)
 
+    def list_rag_sections(self, doc_id: str) -> list[RagSectionRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT payload FROM rag_sections WHERE doc_id = ?',
+                (doc_id,),
+            ).fetchall()
+        return [
+            RagSectionRecord.model_validate_json(row['payload']) for row in rows
+        ]
+
     def replace_rag_chunks(
         self,
         source_id: str,

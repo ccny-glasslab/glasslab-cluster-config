@@ -49,6 +49,7 @@ pageView.div.append(canvas, overlay);
 const state = {
   page: null,
   boxes: [],
+  section: null,
   renderTask: null,
   stageWidth: 0,
 };
@@ -59,10 +60,12 @@ function setStatus(message, tone = 'info') {
 }
 
 /**
- * Accept the boxes route's JSON as a bare list or a `{ boxes: [...] }` /
- * `{ rects: [...] }` envelope; each entry is either a four-number array or an
- * `{ x0, y0, x1, y1 }` object. Corners are PDF user-space coordinates
- * (origin bottom-left), which is what the viewport expects.
+ * Accept the boxes route's JSON envelope ``{ boxes: [...], section: {...} }``
+ * (box entries are four-number arrays or ``{ x0, y0, x1, y1 }`` objects) and
+ * return the normalized rectangles beside the cited section. Corners are PDF
+ * user-space coordinates (origin bottom-left), which is what the viewport
+ * expects. A bare list or ``{ rects: [...] }`` envelope is still accepted and
+ * has no section.
  */
 function normalizeBoxes(payload) {
   const raw = Array.isArray(payload)
@@ -72,7 +75,7 @@ function normalizeBoxes(payload) {
       : Array.isArray(payload?.rects)
         ? payload.rects
         : [];
-  return raw.flatMap((entry) => {
+  const boxes = raw.flatMap((entry) => {
     const corners =
       Array.isArray(entry) && entry.length >= 4
         ? [entry[0], entry[1], entry[2], entry[3]]
@@ -88,11 +91,16 @@ function normalizeBoxes(payload) {
     }
     return [{ x0, y0, x1, y1 }];
   });
+  const section =
+    payload && !Array.isArray(payload) && payload.section
+      ? payload.section
+      : null;
+  return { boxes, section };
 }
 
 async function fetchHighlightBoxes() {
   if (!excerpt) {
-    return [];
+    return { boxes: [], section: null };
   }
   const query = new URLSearchParams({
     source,
@@ -107,6 +115,16 @@ async function fetchHighlightBoxes() {
     throw new Error(`highlight lookup failed: ${response.status}`);
   }
   return normalizeBoxes(await response.json());
+}
+
+function renderMeta() {
+  const title =
+    state.section && typeof state.section.title === 'string'
+      ? state.section.title.trim()
+      : '';
+  metaLine.textContent = title
+    ? `source ${source} · page ${pageNumber} · ${title}`
+    : `source ${source} · page ${pageNumber}`;
 }
 
 function fitViewport(stageWidth) {
@@ -208,9 +226,8 @@ async function start() {
     setStatus('Missing source in the viewer URL.', 'error');
     return;
   }
-  metaLine.textContent = `source ${source} · page ${pageNumber}`;
+  renderMeta();
   setStatus('Loading the document…');
-
   let pdfDocument = null;
   try {
     pdfDocument = await pdfjsLib.getDocument({
@@ -238,13 +255,17 @@ async function start() {
 
   let highlightFailure = false;
   try {
-    state.boxes = await fetchHighlightBoxes();
+    const highlight = await fetchHighlightBoxes();
+    state.boxes = highlight.boxes;
+    state.section = highlight.section;
   } catch (error) {
     console.error(error);
     state.boxes = [];
+    state.section = null;
     highlightFailure = true;
   }
 
+  renderMeta();
   state.stageWidth = Math.round(stage.clientWidth);
   resizeObserver.observe(stage);
   await renderPage();

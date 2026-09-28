@@ -23,7 +23,11 @@ from fastapi.testclient import TestClient
 import pymupdf
 
 from app.corpus_rag.chat import CorpusChatService
-from app.corpus_rag.contracts import RagChunkRecord
+from app.corpus_rag.contracts import (
+    RagChunkRecord,
+    RagDocumentRecord,
+    RagSectionRecord,
+)
 from app.schemas import KnowledgeSource, SourceType
 from app.ui import register_ui_routes
 from app.ui_pdf import register_ui_pdf_routes
@@ -388,6 +392,102 @@ def test_rendered_citation_page_and_boxes_page_agree(
     assert boxes.status_code == 200
     assert boxes.json()['page'] == rendered_page
     assert boxes.json()['boxes']
+
+
+def test_boxes_includes_section_for_matched_page(
+    orchestrator_bundle,
+    tmp_path,
+) -> None:
+    """The boxes payload names the section under the 1-based page.
+
+    Section pages are 0-based while the boxes route is 1-based, so the route
+    compares against ``page - 1``. Nested sections overlap: the most specific
+    (smallest page span) wins, and a missing/None title falls back to
+    ``Section <path>``.
+    """
+    settings, _, _, _, engine = orchestrator_bundle
+    raw_root = tmp_path / 'rag-raw'
+    settings = _raw_settings(settings, raw_root)
+    pdf_path = raw_root / 'sectioned.pdf'
+    _make_multipage_pdf(
+        pdf_path,
+        ['alpha one', 'beta two', 'gamma three', 'delta four'],
+    )
+    source = _register_source(engine, pdf_path)
+    document = RagDocumentRecord(
+        source_id=source.source_id,
+        doc_type='paper',
+        title='Sectioned',
+        extraction_version='v1',
+    )
+    engine.store.upsert_rag_document(document)
+    engine.store.replace_rag_sections(
+        document.doc_id,
+        [
+            RagSectionRecord(
+                doc_id=document.doc_id, path='1', level=1, title='Intro',
+                page_start=0, page_end=0,
+            ),
+            RagSectionRecord(
+                doc_id=document.doc_id, path='1.1', level=2, title='Deep',
+                page_start=1, page_end=1,
+            ),
+            RagSectionRecord(
+                doc_id=document.doc_id, path='2', level=1, title=None,
+                page_start=2, page_end=2,
+            ),
+            RagSectionRecord(
+                doc_id=document.doc_id, path='0', level=1, title='NoPages',
+                page_start=None, page_end=None,
+            ),
+        ],
+    )
+
+    # A second source with no rag document: the route must not fail the boxes
+    # lookup just because no section tree exists.
+    orphan_path = raw_root / 'orphan.pdf'
+    _make_pdf(orphan_path, 'orphan text')
+    orphan = _register_source(engine, orphan_path)
+
+    with _client(settings, engine) as client:
+        contained = client.get(
+            '/ui/pdf/boxes',
+            params={'source': source.source_id, 'page': 2, 'excerpt': 'beta'},
+            headers=AUTH_HEADERS,
+        )
+        fallback = client.get(
+            '/ui/pdf/boxes',
+            params={'source': source.source_id, 'page': 4, 'excerpt': 'delta'},
+            headers=AUTH_HEADERS,
+        )
+        untitled = client.get(
+            '/ui/pdf/boxes',
+            params={'source': source.source_id, 'page': 3, 'excerpt': 'gamma'},
+            headers=AUTH_HEADERS,
+        )
+        first_page = client.get(
+            '/ui/pdf/boxes',
+            params={'source': source.source_id, 'page': 1, 'excerpt': 'alpha'},
+            headers=AUTH_HEADERS,
+        )
+        orphaned = client.get(
+            '/ui/pdf/boxes',
+            params={'source': orphan.source_id, 'page': 1, 'excerpt': 'orphan'},
+            headers=AUTH_HEADERS,
+        )
+
+    assert contained.status_code == 200
+    # page 2 is 0-based 1: both '1' (0-0) and '1.1' (1-1) are candidates; the
+    # smallest span wins.
+    assert contained.json()['section'] == {'path': '1.1', 'title': 'Deep'}
+    # page 4 is 0-based 3: no section contains it, so the nearest preceding one
+    # ('2' at 2-2) is chosen.
+    assert fallback.json()['section'] == {'path': '2', 'title': 'Section 2'}
+    # A None title falls back to the path-derived label.
+    assert untitled.json()['section'] == {'path': '2', 'title': 'Section 2'}
+    assert first_page.json()['section'] == {'path': '1', 'title': 'Intro'}
+    assert orphaned.status_code == 200
+    assert orphaned.json()['section'] is None
 
 
 def test_boxes_rejects_bad_page_and_long_excerpt(
