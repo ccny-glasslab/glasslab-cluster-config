@@ -57,6 +57,7 @@ from .links import (
 )
 from .redaction import redact_free_text
 from .storage import RecordNotFound
+from .ui_pdf import document_is_resolvable
 
 if TYPE_CHECKING:
     from .config import Settings
@@ -382,9 +383,19 @@ def _pdf_viewer_url(
     return '/ui/pdf/assets/web/highlight.html?' + urlencode(parameters)
 
 
-def _render_cited_source(selection: UiRequest) -> str:
+def _render_cited_source(
+    engine: ResearchOrchestrator,
+    settings: Settings,
+    selection: UiRequest,
+) -> str:
     if not selection.source_id:
         return ''
+    if not document_is_resolvable(engine, settings, selection.source_id):
+        return (
+            '<h3>Cited source</h3>'
+            '<p class="muted">The cited source document is not '
+            'available.</p>'
+        )
     excerpt = (
         redact_free_text(selection.excerpt) if selection.excerpt else None
     )
@@ -403,7 +414,7 @@ def _render_document_pane(
     settings: Settings,
     selection: UiRequest,
 ) -> str:
-    viewer = _render_cited_source(selection)
+    viewer = _render_cited_source(engine, settings, selection)
     if not selection.run_id:
         return (
             viewer

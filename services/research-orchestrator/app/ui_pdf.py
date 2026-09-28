@@ -177,6 +177,24 @@ def _section_for_page(
     return {'path': selected.path, 'title': title}
 
 
+def document_is_resolvable(
+    engine: ResearchOrchestrator,
+    settings: Settings,
+    source_id: str,
+) -> bool:
+    """Whether a source id resolves to a servable, contained PDF.
+
+    A probe for the UI: it reuses the document route's exact containment logic
+    and turns every rejection into ``False`` instead of a 404, so the page can
+    omit the viewer iframe for a source it could not open.
+    """
+    try:
+        _resolve_document(engine, settings, source_id)
+    except HTTPException:
+        return False
+    return True
+
+
 def _resolve_asset(path: str) -> Path:
     """Resolve an asset path inside the vendored pdf.js tree, or 404."""
     root = _PDFJS_ROOT.resolve()

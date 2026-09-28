@@ -92,11 +92,12 @@ def _seed_chat_corpus(
     title: str = _CHAT_TITLE,
     text: str = _CHAT_CHUNK_TEXT,
     page_start: int | None = 3,
+    canonical_uri: str = 'repo://docs/resampling.md',
 ) -> KnowledgeSource:
     """One titled source with one retrievable chunk for the chat to cite."""
     source = KnowledgeSource(
         source_type=SourceType.DOCUMENTATION,
-        canonical_uri='repo://docs/resampling.md',
+        canonical_uri=canonical_uri,
         digest=sha256(title.encode()).hexdigest(),
         title=title,
     )
@@ -551,9 +552,17 @@ def test_ui_chat_escapes_and_redacts_question_and_answer(
 
 def test_ui_citation_link_preserves_q_and_targets_source_panel(
     orchestrator_bundle,
+    tmp_path,
 ) -> None:
     settings, _, _, _, engine = orchestrator_bundle
-    source = _seed_chat_corpus(engine)
+    raw_root = tmp_path / 'rag-raw'
+    settings = settings.model_copy(
+        update={'corpus_rag_raw_root': str(raw_root)}
+    )
+    pdf_path = raw_root / 'resampling.pdf'
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf_path.write_bytes(b'%PDF-1.4\n%%EOF\n')
+    source = _seed_chat_corpus(engine, canonical_uri=pdf_path.as_uri())
     chat_service = CorpusChatService(engine.store)
 
     with _client(settings, engine, chat_service=chat_service) as client:
@@ -592,6 +601,58 @@ def test_ui_citation_link_preserves_q_and_targets_source_panel(
     assert frame_query['excerpt'] == [_CHAT_CHUNK_TEXT]
     assert 'knowledge://' not in followed.text
     assert 'artifact://' not in followed.text
+
+
+def test_cited_source_omits_iframe_when_unresolvable(
+    orchestrator_bundle,
+    tmp_path,
+) -> None:
+    """A cited source that cannot resolve must not emit a dead viewer iframe.
+
+    The iframe points at the viewer wrapper, which would then fetch a 404
+    document; instead the page states that the document is unavailable.
+    """
+    settings, _, _, _, engine = orchestrator_bundle
+    raw_root = tmp_path / 'rag-raw'
+    settings = settings.model_copy(
+        update={'corpus_rag_raw_root': str(raw_root)}
+    )
+    unresolvable = KnowledgeSource(
+        source_type=SourceType.PAPER,
+        canonical_uri='upload://x',
+        digest='a' * 64,
+        title='Uploaded paper',
+    )
+    engine.store.save_knowledge_source(unresolvable)
+    pdf_path = raw_root / 'ok.pdf'
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf_path.write_bytes(b'%PDF-1.4\n%%EOF\n')
+    resolvable = KnowledgeSource(
+        source_type=SourceType.PAPER,
+        canonical_uri=pdf_path.as_uri(),
+        digest='b' * 64,
+        title='Local paper',
+    )
+    engine.store.save_knowledge_source(resolvable)
+
+    with _client(settings, engine) as client:
+        missing = client.get(
+            '/ui/',
+            params={'source': unresolvable.source_id},
+            headers=AUTH_HEADERS,
+        )
+        present = client.get(
+            '/ui/',
+            params={'source': resolvable.source_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert missing.status_code == 200
+    assert '<iframe' not in missing.text
+    assert 'The cited source document is not available.' in missing.text
+    assert 'upload://' not in missing.text
+    assert present.status_code == 200
+    assert '<iframe' in present.text
 
 
 def test_ui_citation_omits_page_when_chunk_has_no_page(
