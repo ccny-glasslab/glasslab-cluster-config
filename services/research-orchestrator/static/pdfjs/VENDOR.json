@@ -1,5 +1,10 @@
 {
   "file_count": 406,
+  "first_party": [
+    "web/highlight.html",
+    "web/highlight.mjs",
+    "web/theme.css"
+  ],
   "license": "Apache-2.0",
   "name": "pdfjs-dist",
   "omitted": [

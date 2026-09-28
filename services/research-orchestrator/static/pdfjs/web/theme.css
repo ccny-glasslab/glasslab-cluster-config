@@ -1,0 +1,194 @@
+/* Glasslab corpus PDF viewer - dark token layer (#619).
+   Mirrors the read-only /ui palette: near-black canvas, darker surface
+   chrome, one indigo accent. The page renders a white PDF sheet, so the
+   surround stays quiet and the highlight is the only saturated element.
+   System font stack only: no external import, no remote URL, no web font. */
+
+:root {
+  color-scheme: dark;
+  --bg: #08090a;
+  --surface: #0e0f11;
+  --well: #0a0b0c;
+  --raised: rgba(255, 255, 255, 0.06);
+  --line: rgba(255, 255, 255, 0.08);
+  --line-faint: rgba(255, 255, 255, 0.05);
+  --text: #f7f8f8;
+  --text-2: #d0d6e0;
+  --text-muted: #8a8f98;
+  --accent: #8b93ff;
+  --accent-hover: #a3aaff;
+  --accent-dim: rgba(139, 147, 255, 0.42);
+  --ok-fg: #57d9a3;
+  --warn-fg: #f0b849;
+  --bad-fg: #fb7185;
+  --hl-fill: rgba(139, 147, 255, 0.28);
+  --hl-line: rgba(139, 147, 255, 0.78);
+  --hl-glow: rgba(113, 112, 255, 0.45);
+  --radius: 10px;
+  --radius-sm: 7px;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+html {
+  background-color: var(--bg);
+  background-image: radial-gradient(
+    1100px 520px at 4rem -10rem,
+    rgba(113, 112, 255, 0.13),
+    rgba(113, 112, 255, 0) 68%
+  );
+  background-repeat: no-repeat;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: transparent;
+  color: var(--text-2);
+  font-family: var(--sans);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: 0 12px 28px -24px rgba(0, 0, 0, 0.95);
+}
+
+.toolbar::before {
+  content: "";
+  flex: none;
+  inline-size: 0.5rem;
+  block-size: 0.5rem;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 14px 2px rgba(113, 112, 255, 0.55);
+}
+
+.brand {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.status {
+  margin: 0;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--line-faint);
+  background: var(--well);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.status:empty {
+  display: none;
+}
+
+.status[data-tone="ok"] {
+  color: var(--ok-fg);
+}
+
+.status[data-tone="warn"] {
+  color: var(--warn-fg);
+}
+
+.status[data-tone="error"] {
+  color: var(--bad-fg);
+}
+
+.stage {
+  display: flex;
+  justify-content: center;
+  padding: 1.25rem;
+}
+
+.page {
+  position: relative;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  overflow: hidden;
+  box-shadow: 0 32px 64px -40px rgba(0, 0, 0, 0.95);
+}
+
+.page canvas {
+  display: block;
+}
+
+.highlight-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.highlight-rect {
+  position: absolute;
+  border-radius: 2px;
+  background: var(--hl-fill);
+  box-shadow: inset 0 0 0 1px var(--hl-line), 0 0 18px var(--hl-glow);
+  animation: highlight-in 0.18s ease-out both;
+}
+
+@keyframes highlight-in {
+  from {
+    opacity: 0;
+    transform: scaleY(0.6);
+    transform-origin: 50% 50%;
+  }
+  to {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+}
+
+::selection {
+  background: rgba(113, 112, 255, 0.35);
+  color: var(--text);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .highlight-rect {
+    animation: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .stage {
+    padding: 0.75rem;
+  }
+
+  .toolbar {
+    padding: 0.5rem 0.75rem;
+  }
+}

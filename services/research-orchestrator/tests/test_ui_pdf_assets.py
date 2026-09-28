@@ -139,9 +139,24 @@ def test_vendor_manifest_hashes_match_tree() -> None:
     assert manifest["source_url"] == PDFJS_SOURCE_URL
 
     recorded: dict[str, str] = manifest["sha256"]
+    # First-party wrapper files live beside the vendored tree (same origin and
+    # serving root) but are ours, not upstream bytes. VENDOR.json must list them
+    # so they are never mistaken for vendored files or hashed as such.
+    first_party = {str(name) for name in manifest.get("first_party", [])}
+    assert first_party, (
+        "VENDOR.json must list the first-party wrapper files added under the "
+        "vendored tree"
+    )
+    assert first_party.isdisjoint(recorded), (
+        "first-party files must not appear in the upstream sha256 manifest"
+    )
+    for name in sorted(first_party):
+        assert (PDFJS_ROOT / name).is_file(), f"first-party file missing: {name}"
+
     on_disk = {
         path.relative_to(PDFJS_ROOT).as_posix(): path
         for path in _vendored_files()
+        if path.relative_to(PDFJS_ROOT).as_posix() not in first_party
     }
     assert set(recorded) == set(on_disk), (
         "VENDOR.json does not cover the vendored tree: "
