@@ -719,6 +719,10 @@ class PostgresStore:
         with self.transaction() as conn:
             conn.execute('INSERT INTO orchestrator_rag_documents (doc_id, source_id, payload) VALUES (%s,%s,%s) ON CONFLICT (doc_id) DO UPDATE SET source_id=EXCLUDED.source_id, payload=EXCLUDED.payload', (record.doc_id, record.source_id, self._payload(record)))
         return record
+    def get_rag_document(self, source_id: str) -> RagDocumentRecord:
+        with self._connect() as conn: row = conn.execute('SELECT payload FROM orchestrator_rag_documents WHERE source_id=%s', (source_id,)).fetchone()
+        if not row: raise RecordNotFound(source_id)
+        return RagDocumentRecord.model_validate(row['payload'])
     def replace_rag_sections(self, doc_id: str, sections: list[RagSectionRecord]) -> int:
         with self.transaction() as conn:
             conn.execute('DELETE FROM orchestrator_rag_sections WHERE doc_id=%s', (doc_id,))
