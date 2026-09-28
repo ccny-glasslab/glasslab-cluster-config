@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from fastapi.testclient import TestClient
 import yaml
 
 from app.config import Settings
+from app.main import create_app
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 CONFIGMAP_PATH = (
@@ -57,3 +59,62 @@ def test_ui_and_rag_flags_default() -> None:
 
 def test_configmap_sets_corpus_raw_root_container_path() -> None:
     assert _configmap_data()[CORPUS_RAG_RAW_ROOT_KEY] == CONTAINER_RAW_ROOT
+
+
+def _flag_client(settings, engine, **overrides) -> TestClient:
+    configured = settings.model_copy(
+        update={'require_operator_auth': False, **overrides}
+    )
+    return TestClient(create_app(configured, engine=engine, start_watcher=False))
+
+
+def test_ui_pdf_routes_absent_when_disabled(orchestrator_bundle) -> None:
+    """ui_pdf_enabled=false removes the whole /ui/pdf/** route group."""
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _flag_client(settings, engine, ui_pdf_enabled=False) as client:
+        assert client.get('/ui/').status_code == 200
+        assert client.get('/ui/pdf/viewer.html').status_code == 404
+        assert (
+            client.get(
+                '/ui/pdf/document.pdf', params={'source': 'missing'}
+            ).status_code
+            == 404
+        )
+        assert (
+            client.get(
+                '/ui/pdf/boxes', params={'source': 'missing', 'page': 1}
+            ).status_code
+            == 404
+        )
+
+
+def test_ui_pdf_routes_present_when_enabled(orchestrator_bundle) -> None:
+    """The disabled-route assertion is only meaningful if enabled serves."""
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _flag_client(settings, engine, ui_pdf_enabled=True) as client:
+        assert client.get('/ui/pdf/viewer.html').status_code == 200
+
+
+def test_ui_chat_section_absent_when_disabled(orchestrator_bundle) -> None:
+    """ui_chat_enabled=false renders /ui/ without the Ask the corpus pane."""
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _flag_client(settings, engine, ui_chat_enabled=False) as client:
+        response = client.get('/ui/')
+
+    assert response.status_code == 200
+    assert 'Ask the corpus' not in response.text
+    assert 'id="ask"' not in response.text
+
+
+def test_ui_chat_section_present_when_enabled(orchestrator_bundle) -> None:
+    """The disabled assertion is only meaningful if enabled renders the pane."""
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _flag_client(settings, engine, ui_chat_enabled=True) as client:
+        response = client.get('/ui/')
+
+    assert response.status_code == 200
+    assert '<h2>Ask the corpus</h2>' in response.text

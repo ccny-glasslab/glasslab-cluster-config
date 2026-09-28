@@ -1846,22 +1846,30 @@ def create_app(
     # so the escape-first no-JS page contract and its CSP stay with the
     # implementation; the route inherits this app's operator-token dependency.
     # The corpus chat service is built here from the engine's store and the
-    # deployment settings, then injected so the UI module never constructs it.
+    # deployment settings; when ``ui_chat_enabled`` is false the /ui page is
+    # still served but carries no Ask the corpus pane.
     register_ui_routes(
         app,
         engine=engine,
         settings=settings,
         require_operator=require_operator,
-        chat_service=CorpusChatService(engine.store),
+        chat_service=(
+            CorpusChatService(engine.store)
+            if settings.ui_chat_enabled
+            else None
+        ),
     )
     # Same-origin PDF viewer surface (issue #619): the raw document, the
     # vendored pdf.js assets, the viewer shell, and the live highlight boxes.
-    register_ui_pdf_routes(
-        app,
-        engine=engine,
-        settings=settings,
-        require_operator=require_operator,
-    )
+    # Disabled entirely when ``ui_pdf_enabled`` is false so every /ui/pdf/*
+    # path 404s rather than serving.
+    if settings.ui_pdf_enabled:
+        register_ui_pdf_routes(
+            app,
+            engine=engine,
+            settings=settings,
+            require_operator=require_operator,
+        )
 
     return app
 

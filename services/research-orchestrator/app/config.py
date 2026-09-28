@@ -158,9 +158,12 @@ class Settings(BaseSettings):
     # derives its location from the raw root unless a deployment relocates it.
     corpus_rag_raw_root: str = '/tmp/glasslab-research-orchestrator/rag/raw'
     corpus_rag_store_path: str | None = None
-    # Feature flags for the corpus UI and the optional LLM-backed RAG lane. Chat
-    # and PDF surfaces default on; the dense-chat mode and the LLM lane default
-    # off so local/test never reach an external model provider.
+    # Feature flags for the corpus UI and the optional LLM-backed RAG lane.
+    # ``ui_chat_enabled`` gates the Ask the corpus pane; ``ui_pdf_enabled``
+    # gates the whole /ui/pdf/** route group. Both default on.
+    # ``ui_chat_dense`` and ``rag_llm_enabled`` are RESERVED and deliberately
+    # unwired: no code reads them yet, so flipping them has no effect until
+    # the dense-chat and LLM lanes land.
     ui_chat_enabled: bool = True
     ui_chat_dense: bool = False
     ui_pdf_enabled: bool = True
