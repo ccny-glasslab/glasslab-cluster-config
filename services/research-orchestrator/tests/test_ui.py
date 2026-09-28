@@ -1,11 +1,19 @@
-"""Read-only corpus UI page: panes, escaping, citation badges, and CSP.
+"""Read-only corpus UI page: panes, chat, escaping, citation badges, and CSP.
 
-The page is server-rendered with no client JavaScript and no external
-resource, so these tests drive it with ``TestClient`` and assert on the
-escaped HTML: injected ``<script>`` payloads stay inert, ranked-source URIs
-and filesystem paths are never emitted, and the evidence badge comes from the
-deterministic citation locator rather than the stored (tautological)
+The page is server-rendered with no client JavaScript of its own and no
+external resource, so these tests drive it with ``TestClient`` and assert on
+the escaped HTML: injected ``<script>`` payloads stay inert, ranked-source
+URIs and filesystem paths are never emitted, and the evidence badge comes from
+the deterministic citation locator rather than the stored (tautological)
 ``ranked_sources[].verified`` flag.
+
+The corpus chat is a same-origin ``GET`` form (the loopback UI proxy forwards
+only ``GET``/``HEAD`` and injects the operator token), so ``?q=…`` renders the
+answer into the same page. Citation links preserve the question and select the
+cited source in the side panel, which embeds the same-origin PDF viewer
+iframe. The CSP tests pin the two deliberate deltas: ``form-action 'self'``
+and ``frame-src 'self'``; everything else still denies by default, and the
+document still carries no script and no external origin.
 
 The tests use the repository's ``orchestrator_bundle`` fixture: a real
 SqliteStore engine with a fake runtime, no live cluster, and no network.
@@ -13,13 +21,18 @@ SqliteStore engine with a fake runtime, no live cluster, and no network.
 
 from __future__ import annotations
 
+import html
+import re
 from hashlib import sha256
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.testclient import TestClient
 import pytest
 
+from app.corpus_rag.chat import CorpusChatService
+from app.corpus_rag.contracts import RagChunkRecord
 from app.schemas import (
     AgentName,
     ArtifactRecord,
@@ -37,6 +50,9 @@ AUTH_HEADERS = {'X-Glasslab-Operator-Token': OPERATOR_TOKEN}
 REPORT_REF = 'reports/report.md'
 _BLOCK = 'The quick brown fox jumps over the lazy dog'
 _ABSENT_EXCERPT = 'this excerpt appears in no context block'
+_CHAT_QUESTION = 'resampling stability small samples'
+_CHAT_CHUNK_TEXT = 'Resampling improves stability of small samples.'
+_CHAT_TITLE = 'Resampling Handbook'
 
 
 def _require_operator_token(
@@ -54,19 +70,53 @@ def _require_operator_token(
         )
 
 
-def _ui_app(settings, engine) -> FastAPI:
+def _ui_app(settings, engine, **route_options) -> FastAPI:
     app = FastAPI()
     register_ui_routes(
         app,
         engine=engine,
         settings=settings,
         require_operator=_require_operator_token,
+        **route_options,
     )
     return app
 
 
-def _client(settings, engine) -> TestClient:
-    return TestClient(_ui_app(settings, engine))
+def _client(settings, engine, **route_options) -> TestClient:
+    return TestClient(_ui_app(settings, engine, **route_options))
+
+
+def _seed_chat_corpus(
+    engine,
+    *,
+    title: str = _CHAT_TITLE,
+    text: str = _CHAT_CHUNK_TEXT,
+    page_start: int | None = 3,
+) -> KnowledgeSource:
+    """One titled source with one retrievable chunk for the chat to cite."""
+    source = KnowledgeSource(
+        source_type=SourceType.DOCUMENTATION,
+        canonical_uri='repo://docs/resampling.md',
+        digest=sha256(title.encode()).hexdigest(),
+        title=title,
+    )
+    engine.store.save_knowledge_source(source)
+    engine.store.replace_rag_chunks(
+        source.source_id,
+        [
+            RagChunkRecord(
+                chunk_id=f'{source.source_id}::c0',
+                source_id=source.source_id,
+                kind='evidence_span',
+                chunk_index=0,
+                text=text,
+                digest=sha256(text.encode()).hexdigest(),
+                token_count=max(1, len(text.split())),
+                page_start=page_start,
+            )
+        ],
+    )
+    return source
 
 
 def _write_report(settings, run_id: str, body: bytes) -> ArtifactRecord:
@@ -381,6 +431,12 @@ def test_ui_csp_nonce_and_no_external_resources(orchestrator_bundle) -> None:
     assert 'unsafe-inline' not in csp
     assert 'http://' not in csp
     assert 'https://' not in csp
+    # Deliberate deltas: the chat form submits a same-origin GET and the
+    # cited-source PDF viewer is framed same-origin. Neither reopens a remote
+    # origin, and form-action is no longer 'none'.
+    assert "form-action 'self'" in csp
+    assert "form-action 'none'" not in csp
+    assert "frame-src 'self'" in csp
     assert response.headers['x-content-type-options'] == 'nosniff'
     assert response.headers['referrer-policy'] == 'no-referrer'
 
@@ -392,3 +448,145 @@ def test_ui_csp_nonce_and_no_external_resources(orchestrator_bundle) -> None:
     nonce = csp.split("'nonce-", 1)[1].split("'", 1)[0]
     assert nonce
     assert f'<style nonce="{nonce}">' in response.text
+
+
+def test_ui_ask_form_is_get_and_get_driven(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    _seed_chat_corpus(engine)
+    chat_service = CorpusChatService(engine.store)
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        page = client.get('/ui/', headers=AUTH_HEADERS)
+        answered = client.get(
+            '/ui/',
+            params={'q': _CHAT_QUESTION},
+            headers=AUTH_HEADERS,
+        )
+
+    assert page.status_code == 200
+    assert '<section class="pane" id="ask">' in page.text
+    assert '<h2>Ask the corpus</h2>' in page.text
+    assert '<form method="get" action="/ui/"' in page.text
+    assert 'name="q"' in page.text
+    # GET-driven: the answer is rendered into the same page from ?q=… alone;
+    # the question never needs a POST, which the loopback proxy would reject.
+    assert answered.status_code == 200
+    assert _CHAT_CHUNK_TEXT not in page.text
+    assert _CHAT_CHUNK_TEXT in answered.text
+
+
+def test_ui_chat_renders_source_title_excerpt_and_badge(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    _seed_chat_corpus(engine)
+    chat_service = CorpusChatService(engine.store)
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        response = client.get(
+            '/ui/',
+            params={'q': _CHAT_QUESTION},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    # The citation links the store-resolved title, quotes the excerpt, and
+    # carries the live locator verdict badge.
+    assert f'{_CHAT_TITLE}</a>' in response.text
+    assert _CHAT_CHUNK_TEXT in response.text
+    assert '✓ exact' in response.text
+    assert 'knowledge://' not in response.text
+
+
+def test_ui_chat_empty_corpus_shows_no_evidence(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    chat_service = CorpusChatService(engine.store)
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        response = client.get(
+            '/ui/',
+            params={'q': _CHAT_QUESTION},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert (
+        'No corpus evidence is available to answer that question.'
+        in response.text
+    )
+    assert 'class="badge' not in response.text
+
+
+def test_ui_chat_escapes_and_redacts_question_and_answer(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    # Assembled at runtime so the synthetic key is never a literal credential
+    # in the test source itself.
+    secret = 'gh' + 'p_' + 'b' * 36
+    payload = '<script>alert(1)</script>'
+    _seed_chat_corpus(
+        engine,
+        text=f'Resampling {payload} improves stability of {secret} samples.',
+    )
+    chat_service = CorpusChatService(engine.store)
+    question = f'{payload} resampling stability with {secret}'
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        response = client.get(
+            '/ui/',
+            params={'q': question},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert '<script' not in response.text
+    assert '&lt;script&gt;alert(1)&lt;/script&gt;' in response.text
+    assert secret not in response.text
+    assert '[REDACTED]' in response.text
+    # Ordinary prose around the payload and the secret survives unchanged.
+    assert 'resampling stability with' in response.text
+    assert 'improves stability of' in response.text
+
+
+def test_ui_citation_link_preserves_q_and_targets_source_panel(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    source = _seed_chat_corpus(engine)
+    chat_service = CorpusChatService(engine.store)
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        page = client.get(
+            '/ui/',
+            params={'q': _CHAT_QUESTION},
+            headers=AUTH_HEADERS,
+        )
+        match = re.search(r'href="(/ui/\?[^"]*source=[^"]*)"', page.text)
+        assert match is not None
+        citation_href = html.unescape(match.group(1))
+        followed = client.get(citation_href, headers=AUTH_HEADERS)
+
+    assert page.status_code == 200
+    citation_query = parse_qs(urlsplit(citation_href).query)
+    assert citation_query['q'] == [_CHAT_QUESTION]
+    assert citation_query['source'] == [source.source_id]
+    assert citation_query['page'] == ['3']
+    assert citation_query['excerpt'] == [_CHAT_CHUNK_TEXT]
+
+    # Selecting the citation selects the cited source in the side panel: the
+    # page embeds the same-origin PDF viewer iframe at the cited page and
+    # excerpt. The iframe is deliberately unsandboxed (the vendored viewer
+    # needs same-origin module workers and blob URLs) and root-relative.
+    assert followed.status_code == 200
+    frame = re.search(r'<iframe[^>]*\bsrc="([^"]+)"[^>]*>', followed.text)
+    assert frame is not None
+    assert 'sandbox' not in frame.group(0)
+    frame_src = html.unescape(frame.group(1))
+    assert frame_src.startswith('/ui/pdf/assets/web/highlight.html?')
+    frame_query = parse_qs(urlsplit(frame_src).query)
+    assert frame_query['source'] == [source.source_id]
+    assert frame_query['page'] == ['3']
+    assert frame_query['excerpt'] == [_CHAT_CHUNK_TEXT]
+    assert 'knowledge://' not in followed.text
+    assert 'artifact://' not in followed.text

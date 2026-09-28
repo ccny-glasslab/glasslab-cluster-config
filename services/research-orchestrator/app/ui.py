@@ -8,14 +8,22 @@ locates a supplied excerpt inside a ``ContextPacket``'s exact supplied text
 using :mod:`app.citation_locator` (never the tautological stored
 ``ranked_sources[].verified`` flag).
 
+When a corpus-chat service is injected, a full-width ``Ask the corpus``
+section renders above the panes. It is a same-origin ``GET`` form (the
+loopback UI proxy forwards only ``GET``/``HEAD``), so ``?q=…`` re-renders the
+page with the answer; every citation links back with
+``?q=&source=&page=&excerpt=``, and selecting one embeds the same-origin PDF
+viewer iframe for the cited source. The page itself still emits no script and
+no external resource.
+
 The page is escape-first: every interpolated value passes through
 :func:`html.escape`, the document body is shown as escaped text inside
 ``<pre>`` (never rendered markdown or HTML), and ranked-source URIs and
 filesystem paths are never emitted. Links are root-relative so the page works
-unchanged through the loopback UI proxy. The response carries a strict
-Content-Security-Policy whose per-response nonce authorizes only the page's
-own ``<style>`` block; no script tag or external resource is ever emitted, so
-the page renders with JavaScript disabled.
+unchanged through the loopback UI proxy. The Content-Security-Policy keeps
+``default-src 'none'`` and a per-response style nonce, and widens only
+``form-action`` to ``'self'`` (the chat form) and adds ``frame-src 'self'``
+(the viewer iframe); no remote origin can load.
 """
 
 from __future__ import annotations
@@ -52,8 +60,10 @@ from .storage import RecordNotFound
 
 if TYPE_CHECKING:
     from .config import Settings
+    from .corpus_rag.chat import CorpusChatService
     from .engine import ResearchOrchestrator
     from .schemas import ArtifactRecord, ContextPacket
+    from .ui_chat import ChatCitation
 
 # A browser text pane is not a download surface: the preview is capped well
 # below the signed-link ceiling so one large artifact cannot stall the page.
@@ -163,22 +173,55 @@ color:var(--ok-fg)}
 color:var(--warn-fg)}
 .badge-none{background:var(--bad-bg);border-color:var(--bad-line);
 color:var(--bad-fg)}
+#ask{margin:0 0 1.25rem}
+.ask-form{display:flex;flex-wrap:wrap;align-items:flex-end;gap:.6rem;
+margin:0}
+.ask-form label{flex:none;padding-bottom:.62rem;font-size:.6875rem;
+font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+color:var(--text-muted)}
+.ask-form input[type=text]{flex:1 1 18rem;min-width:0;
+padding:.62rem .8rem;background:var(--well);border:1px solid var(--line);
+border-radius:var(--radius-sm);color:var(--text);font:inherit;
+font-size:.875rem}
+.ask-form input[type=text]:focus-visible{outline:2px solid var(--accent);
+outline-offset:2px;border-color:transparent}
+.ask-form button{padding:.62rem 1.15rem;background:var(--accent);
+border:1px solid transparent;border-radius:var(--radius-sm);color:#0b0c12;
+font:inherit;font-size:.8125rem;font-weight:600;cursor:pointer;
+transition:background-color .15s ease}
+.ask-form button:hover{background:var(--accent-hover)}
+.chat-turn{margin:1rem 0 0;padding:.9rem 1.05rem;background:var(--well);
+border:1px solid var(--line-faint);border-radius:var(--radius-sm)}
+.chat-citations{margin-top:.55rem}
+.chat-citations p{margin:.35rem 0 0}
+.viewer{margin:.6rem 0 0}
+.viewer iframe{display:block;inline-size:100%;
+block-size:min(78vh,860px);border:1px solid var(--line);
+border-radius:var(--radius-sm);background:var(--well)}
 ::selection{background:rgba(113,112,255,.35);color:var(--text)}
 @media (max-width:1100px){.panes{grid-template-columns:1fr}}
 @media (max-width:640px){body{padding:1.6rem .9rem 2.8rem}
 h1{font-size:1.2rem}.pane{padding:1rem 1rem 1.15rem}}
-@media (prefers-reduced-motion:reduce){a{transition:none}}
+@media (prefers-reduced-motion:reduce){a,button{transition:none}}
 """.strip()
 
 
 @dataclass(frozen=True, slots=True)
 class UiRequest:
-    """One ``GET /ui/`` request: the optional selection plus its CSP nonce."""
+    """One ``GET /ui/`` request: the optional selection plus its CSP nonce.
+
+    ``question`` drives the chat answer; ``source_id``/``page`` select the
+    cited source shown in the PDF viewer, with ``excerpt`` supplying the
+    exact-span highlight text.
+    """
 
     run_id: str | None = None
     ref: str | None = None
     packet_id: str | None = None
     excerpt: str | None = None
+    question: str | None = None
+    source_id: str | None = None
+    page: int | None = None
     nonce: str = ''
 
 
@@ -326,13 +369,47 @@ def _render_document_body(
     )
 
 
+def _pdf_viewer_url(
+    source_id: str,
+    page: int | None,
+    excerpt: str | None,
+) -> str:
+    parameters = {'source': source_id}
+    if page is not None:
+        parameters['page'] = str(page)
+    if excerpt:
+        parameters['excerpt'] = excerpt
+    return '/ui/pdf/assets/web/highlight.html?' + urlencode(parameters)
+
+
+def _render_cited_source(selection: UiRequest) -> str:
+    if not selection.source_id:
+        return ''
+    excerpt = (
+        redact_free_text(selection.excerpt) if selection.excerpt else None
+    )
+    url = _pdf_viewer_url(selection.source_id, selection.page, excerpt)
+    return (
+        '<h3>Cited source</h3>'
+        '<div class="viewer">'
+        f'<iframe src="{_escape(url)}" title="Cited source PDF" '
+        'loading="lazy"></iframe>'
+        '</div>'
+    )
+
+
 def _render_document_pane(
     engine: ResearchOrchestrator,
     settings: Settings,
     selection: UiRequest,
 ) -> str:
+    viewer = _render_cited_source(selection)
     if not selection.run_id:
-        return '<p class="muted">Select a run to list its linkable artifacts.</p>'
+        return (
+            viewer
+            + '<p class="muted">Select a run to list its linkable artifacts.'
+            '</p>'
+        )
     linkable = _linkable_artifacts(engine.store.list_artifacts(selection.run_id))
     artifact_items = '\n'.join(
         '<li>'
@@ -345,10 +422,15 @@ def _render_document_pane(
     listing = f'<h3>Linkable artifacts</h3><ul>{artifact_items}</ul>'
     if not selection.ref:
         return (
-            '<p class="muted">Select an artifact to preview its text.</p>'
+            viewer
+            + '<p class="muted">Select an artifact to preview its text.</p>'
             + listing
         )
-    return _render_document_body(settings, selection, linkable) + listing
+    return (
+        viewer
+        + _render_document_body(settings, selection, linkable)
+        + listing
+    )
 
 
 def _render_citation(packet: ContextPacket, excerpt: str | None) -> str:
@@ -431,10 +513,75 @@ def _render_evidence_pane(
     )
 
 
+def _render_chat_citations(
+    question: str,
+    citations: list[ChatCitation],
+) -> str:
+    if not citations:
+        return ''
+    items = []
+    for citation in citations:
+        excerpt = redact_free_text(citation.excerpt)
+        href = _page_url(
+            q=question,
+            source=citation.source_id,
+            page=str(citation.page) if citation.page is not None else None,
+            excerpt=excerpt,
+        )
+        items.append(
+            '<li>'
+            f'{_link(href, citation.title)} '
+            f'<span class="badge badge-{citation.verdict}">'
+            f'{_escape(_CITATION_BADGES[citation.verdict])}</span>'
+            f'<p><code>{_escape(excerpt)}</code></p>'
+            '</li>'
+        )
+    return '<ul class="chat-citations">' + '\n'.join(items) + '</ul>'
+
+
+def _render_ask_section(
+    chat_service: CorpusChatService | None,
+    selection: UiRequest,
+) -> str:
+    if chat_service is None:
+        return ''
+    question = selection.question or ''
+    display_question = redact_free_text(question)
+    form = (
+        '<form method="get" action="/ui/" class="ask-form">'
+        '<label for="ask-question">Question</label>'
+        f'<input id="ask-question" type="text" name="q" '
+        f'value="{_escape(display_question)}" '
+        'placeholder="Ask about the corpus" autocomplete="off">'
+        '<button type="submit">Ask</button>'
+        '</form>'
+    )
+    if not question.strip():
+        body = form
+    else:
+        answer = chat_service.answer(question)
+        body = (
+            form
+            + '<div class="chat-turn">'
+            f'<p><strong>Question:</strong> {_escape(display_question)}</p>'
+            f'<p><strong>Answer:</strong> '
+            f'{_escape(redact_free_text(answer.answer))}</p>'
+            f'{_render_chat_citations(display_question, answer.citations)}'
+            '</div>'
+        )
+    return (
+        '<section class="pane" id="ask">'
+        '<h2>Ask the corpus</h2>'
+        f'{body}'
+        '</section>'
+    )
+
+
 def render_ui_page(
     engine: ResearchOrchestrator,
     settings: Settings,
     request: UiRequest,
+    chat_service: CorpusChatService | None = None,
 ) -> str:
     """Render the whole read-only page as one escaped HTML string."""
     return (
@@ -445,27 +592,33 @@ def render_ui_page(
         f'<style nonce="{_escape(request.nonce)}">{_PAGE_STYLES}</style>'
         '</head><body>'
         '<h1>Glasslab corpus and reports</h1>'
-        '<main class="panes">'
+        '<main>'
+        f'{_render_ask_section(chat_service, request)}'
+        '<div class="panes">'
         '<section class="pane" id="sources">'
         f'<h2>Sources</h2>{_render_sources_pane(engine, request)}</section>'
         '<section class="pane" id="document">'
-        f'<h2>Document</h2>'
+        '<h2>Document</h2>'
         f'{_render_document_pane(engine, settings, request)}</section>'
         '<section class="pane" id="evidence">'
-        f'<h2>Evidence inspector</h2>'
+        '<h2>Evidence inspector</h2>'
         f'{_render_evidence_pane(engine, request)}</section>'
+        '</div>'
         '</main></body></html>'
     )
 
 
 def _ui_headers(nonce: str) -> dict[str, str]:
     # default-src 'none' plus a per-response style nonce: the only permitted
-    # resource is this page's own style block. No script, font, image, or
-    # network origin can load, so a corpus-authored string can never execute.
+    # subresources are this page's own style block, its same-origin GET chat
+    # form (form-action 'self'), and the same-origin cited-source PDF viewer
+    # iframe (frame-src 'self'). No script, font, image, or remote origin can
+    # load, so a corpus-authored string can never execute.
     return {
         'Content-Security-Policy': (
             "default-src 'none'; style-src 'nonce-" + nonce + "'; "
-            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+            "base-uri 'none'; form-action 'self'; frame-src 'self'; "
+            "frame-ancestors 'none'"
         ),
         'X-Content-Type-Options': 'nosniff',
         'Referrer-Policy': 'no-referrer',
@@ -478,12 +631,16 @@ def register_ui_routes(
     engine: ResearchOrchestrator,
     settings: Settings,
     require_operator: Callable[..., None],
+    chat_service: CorpusChatService | None = None,
 ) -> None:
     """Register the single operator-gated ``GET /ui/`` page route.
 
     ``require_operator`` is the host application's header-auth dependency (a
     closure over its settings in ``main.create_app``), so it is injected
     rather than imported; the UI module never reads the operator token.
+    ``chat_service`` is likewise injected by the host -- a
+    :class:`~app.corpus_rag.chat.CorpusChatService`, or ``None`` when the chat
+    is disabled -- and this module only calls its ``answer`` method.
     """
 
     @app.get('/ui/', response_class=HTMLResponse)
@@ -492,6 +649,9 @@ def register_ui_routes(
         ref: str | None = Query(default=None),
         packet: str | None = Query(default=None),
         excerpt: str | None = Query(default=None),
+        q: str | None = Query(default=None),
+        source: str | None = Query(default=None),
+        page: int | None = Query(default=None),
         _: None = Depends(require_operator),
     ) -> HTMLResponse:
         request = UiRequest(
@@ -499,9 +659,12 @@ def register_ui_routes(
             ref=ref,
             packet_id=packet,
             excerpt=excerpt,
+            question=q,
+            source_id=source,
+            page=page,
             nonce=secrets.token_urlsafe(16),
         )
         return HTMLResponse(
-            content=render_ui_page(engine, settings, request),
+            content=render_ui_page(engine, settings, request, chat_service),
             headers=_ui_headers(request.nonce),
         )
