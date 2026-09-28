@@ -4,9 +4,10 @@
 Builds a synthetic two-page PDF with PyMuPDF under a raw root, registers a
 :class:`~app.schemas.KnowledgeSource` whose ``canonical_uri`` is that file's
 ``file://`` URI, stores a :class:`~app.corpus_rag.contracts.RagDocumentRecord`
-plus one retrievable :class:`~app.corpus_rag.contracts.RagChunkRecord`, and
-writes a JSON manifest the Playwright test reads (source id, question, cited
-excerpt, page, and the expected viewer query).
+plus one retrievable :class:`~app.corpus_rag.contracts.RagChunkRecord` and the
+:class:`~app.corpus_rag.contracts.RagSectionRecord` the cited page falls under,
+and writes a JSON manifest the Playwright test reads (source id, question,
+cited excerpt, page, section title, and the expected viewer query).
 
 The chunk text leads with the distinctive sentence, so the chat's extractive
 first-sentence citation is exactly that sentence; the manifest records the
@@ -37,7 +38,11 @@ if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
 
 from app.corpus_rag.chat import _first_sentence
-from app.corpus_rag.contracts import RagChunkRecord, RagDocumentRecord
+from app.corpus_rag.contracts import (
+    RagChunkRecord,
+    RagDocumentRecord,
+    RagSectionRecord,
+)
 from app.schemas import KnowledgeSource, SourceType
 from app.storage import SqliteStore
 
@@ -51,6 +56,8 @@ SEARCHABLE_PHRASE = (
 )
 CHUNK_TEXT = f'{DISTINCTIVE_SENTENCE} {SEARCHABLE_PHRASE}'
 TITLE = 'Resampling Handbook (QA)'
+# The section the cited page falls under; the viewer renders it beside the page.
+SECTION_TITLE = 'Resampling Methods'
 QUESTION = 'resampling stability small samples'
 # The cited chunk is the 0-based page index; the manifest records the 1-based
 # human page number the /ui citation link and the viewer URL use. The cited
@@ -113,6 +120,16 @@ def seed(db_path: Path, raw_root: Path, manifest_path: Path) -> dict:
     )
     store.replace_rag_chunks(source.source_id, [chunk])
 
+    section = RagSectionRecord(
+        doc_id=document.doc_id,
+        path='1',
+        title=SECTION_TITLE,
+        level=1,
+        page_start=PAGE_INDEX,
+        page_end=PAGE_INDEX,
+    )
+    store.replace_rag_sections(document.doc_id, [section])
+
     excerpt = _first_sentence(CHUNK_TEXT)
     assert excerpt == DISTINCTIVE_SENTENCE, (
         f'chat first-sentence excerpt drifted: {excerpt!r}'
@@ -123,6 +140,7 @@ def seed(db_path: Path, raw_root: Path, manifest_path: Path) -> dict:
         'title': TITLE,
         'question': QUESTION,
         'excerpt': excerpt,
+        'section_title': SECTION_TITLE,
         'page': PAGE_INDEX + 1,
         'page_count': PAGE_COUNT,
         'chunk_text': CHUNK_TEXT,

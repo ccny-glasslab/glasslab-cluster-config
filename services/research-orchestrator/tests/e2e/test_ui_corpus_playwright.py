@@ -251,6 +251,7 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
         expect(status).to_have_attribute('data-tone', 'ok', timeout=30_000)
         meta_text = frame.locator('#meta').inner_text()
         assert f'page {expected_page}' in meta_text, meta_text
+        assert manifest['section_title'] in meta_text, meta_text
         status_text = status.inner_text()
         assert re.search(
             rf'Page {expected_page}: \d+ highlights? for the cited excerpt\.',
