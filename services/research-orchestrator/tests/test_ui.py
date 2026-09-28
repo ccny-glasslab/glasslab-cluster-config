@@ -419,6 +419,16 @@ def test_ui_document_refuses_out_of_policy_ref(
     assert 'private runtime session state' not in response.text
 
 
+def test_ui_head_200(orchestrator_bundle) -> None:
+    """HEAD on the page route answers 200, matching the GET-only read route."""
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.head('/ui/', headers=AUTH_HEADERS)
+
+    assert response.status_code == 200
+
+
 def test_ui_csp_nonce_and_no_external_resources(orchestrator_bundle) -> None:
     settings, _, _, _, engine = orchestrator_bundle
 

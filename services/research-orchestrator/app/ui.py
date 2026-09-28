@@ -657,7 +657,11 @@ def register_ui_routes(
     is disabled -- and this module only calls its ``answer`` method.
     """
 
-    @app.get('/ui/', response_class=HTMLResponse)
+    @app.api_route(
+        '/ui/',
+        methods=['GET', 'HEAD'],
+        response_class=HTMLResponse,
+    )
     def corpus_ui(
         run: str | None = Query(default=None),
         ref: str | None = Query(default=None),

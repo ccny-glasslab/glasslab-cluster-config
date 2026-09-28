@@ -564,6 +564,35 @@ def test_boxes_rejects_bad_page_and_long_excerpt(
     assert long_excerpt.status_code == 400
 
 
+def test_document_pdf_head_200(orchestrator_bundle, tmp_path) -> None:
+    """HEAD on the read routes answers 200, like the GET-only routes they wrap.
+
+    The loopback UI proxy forwards GET and HEAD; a 405 on HEAD would break a
+    proxy health probe even though the page itself is GET-only.
+    """
+    settings, _, _, _, engine = orchestrator_bundle
+    raw_root = tmp_path / 'rag-raw'
+    settings = _raw_settings(settings, raw_root)
+    pdf_path = raw_root / 'paper.pdf'
+    _make_pdf(pdf_path)
+    source = _register_source(engine, pdf_path)
+
+    with _client(settings, engine) as client:
+        document = client.head(
+            '/ui/pdf/document.pdf',
+            params={'source': source.source_id},
+            headers=AUTH_HEADERS,
+        )
+        asset = client.head(
+            '/ui/pdf/assets/web/viewer.css',
+            headers=AUTH_HEADERS,
+        )
+
+    assert document.status_code == 200
+    assert document.headers['content-type'] == 'application/pdf'
+    assert asset.status_code == 200
+
+
 def test_asset_mjs_mime_and_no_traversal(orchestrator_bundle) -> None:
     settings, _, _, _, engine = orchestrator_bundle
 

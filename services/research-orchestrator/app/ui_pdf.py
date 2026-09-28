@@ -218,7 +218,10 @@ def register_ui_pdf_routes(
     rather than imported; this module never reads the operator token.
     """
 
-    @app.get('/ui/pdf/document.pdf')
+    @app.api_route(
+        '/ui/pdf/document.pdf',
+        methods=['GET', 'HEAD'],
+    )
     def document_pdf(
         source: str = Query(...),
         _: None = Depends(require_operator),
@@ -296,7 +299,10 @@ def register_ui_pdf_routes(
             'section': section,
         }
 
-    @app.get('/ui/pdf/assets/{path:path}')
+    @app.api_route(
+        '/ui/pdf/assets/{path:path}',
+        methods=['GET', 'HEAD'],
+    )
     def pdf_asset(
         path: str,
         _: None = Depends(require_operator),
