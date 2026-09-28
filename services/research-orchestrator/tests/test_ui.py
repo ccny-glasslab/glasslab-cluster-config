@@ -451,6 +451,26 @@ def test_ui_csp_nonce_and_no_external_resources(orchestrator_bundle) -> None:
     assert f'<style nonce="{nonce}">' in response.text
 
 
+def test_ui_csp_sign_off_directives(orchestrator_bundle) -> None:
+    """Pin the exact page CSP signed off for the corpus chat (#618).
+
+    The chat is a zero-JS same-origin GET form, so ``form-action 'self'`` is
+    required; the cited-source iframe needs ``frame-src 'self'``. Everything
+    else stays default-deny, and there is deliberately no ``script-src``.
+    """
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.get('/ui/', headers=AUTH_HEADERS)
+
+    assert response.status_code == 200
+    csp = response.headers['content-security-policy']
+    assert "default-src 'none'" in csp
+    assert "form-action 'self'" in csp
+    assert "frame-src 'self'" in csp
+    assert 'script-src' not in csp
+
+
 def test_ui_ask_form_is_get_and_get_driven(orchestrator_bundle) -> None:
     settings, _, _, _, engine = orchestrator_bundle
     _seed_chat_corpus(engine)

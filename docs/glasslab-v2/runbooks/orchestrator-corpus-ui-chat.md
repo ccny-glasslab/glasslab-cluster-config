@@ -109,6 +109,23 @@ allowed. The PDF routes carry their own tighter policies: the raw document is
 served under `default-src 'none'; frame-ancestors 'self'`, and the viewer shell
 may load only same-origin scripts, workers, styles, and fonts.
 
+### CSP sign-off
+
+The page CSP is signed off with exactly two deliberate deltas from
+`default-src 'none'`:
+
+| Directive | Value | Why `'none'` breaks it |
+| --- | --- | --- |
+| `form-action` | `'self'` | `'none'` blocks the zero-JS `GET` chat form, so the Ask the corpus form can never submit and the chat is dead. |
+| `frame-src` | `'self'` | `'none'` (or an unlisted source under `default-src 'none'`) blocks the same-origin cited-source PDF iframe, so selecting a citation shows a blank pane. |
+
+Everything else stays default-deny. There is deliberately no `script-src`:
+the page itself runs no JavaScript, and the only script that runs is inside
+the first-party same-origin viewer iframe, which carries its own policy. The
+guard test `test_ui_csp_sign_off_directives` pins these four facts, so a
+future edit that loosens the base policy (or strips `form-action`/`frame-src`)
+fails review.
+
 ## The PDF viewer
 
 - **Vendored pdf.js 6.3.289**, served same-origin from `/ui/pdf/assets/**`. The

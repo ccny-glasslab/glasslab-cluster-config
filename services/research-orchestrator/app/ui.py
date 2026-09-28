@@ -622,11 +622,12 @@ def render_ui_page(
 
 
 def _ui_headers(nonce: str) -> dict[str, str]:
-    # default-src 'none' plus a per-response style nonce: the only permitted
-    # subresources are this page's own style block, its same-origin GET chat
-    # form (form-action 'self'), and the same-origin cited-source PDF viewer
-    # iframe (frame-src 'self'). No script, font, image, or remote origin can
-    # load, so a corpus-authored string can never execute.
+    # CSP sign-off (#618): default-src 'none' plus a per-response style nonce,
+    # and exactly two deliberate deltas. form-action 'self' is required for the
+    # zero-JS GET chat form ('none' blocks the submission, so the chat cannot
+    # work), and frame-src 'self' is required for the same-origin cited-source
+    # PDF iframe. Everything else stays default-deny, including script: there
+    # is no script-src at all, so a corpus-authored string can never execute.
     return {
         'Content-Security-Policy': (
             "default-src 'none'; style-src 'nonce-" + nonce + "'; "
