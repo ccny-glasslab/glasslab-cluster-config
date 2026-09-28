@@ -290,6 +290,11 @@ rollout_rabbitmq() {
     statefulset/glasslab-rabbitmq --timeout=300s
 }
 
+# The parser below consumes the positional parameters. Save them so a
+# post-sync re-exec can carry the same options into the newly checked-out
+# script instead of silently falling back to the defaults.
+ROLLOUT_ARGS=("$@")
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --service)
@@ -358,9 +363,19 @@ fi
 
 if [[ "$SYNC" == true ]]; then
   printf '[rollout-research-services] fast-forwarding to origin/main\n'
+  SYNC_BEFORE="$(git rev-parse HEAD)"
   git fetch origin main
   git checkout main
   git merge --ff-only origin/main
+  SYNC_AFTER="$(git rev-parse HEAD)"
+  if [[ "$SYNC_BEFORE" != "$SYNC_AFTER" ]]; then
+    # bash already parsed the old function bodies; re-exec the newly
+    # checked-out script so the rest of the run uses the new logic. The
+    # HEAD guard keeps the second run's no-op merge from re-execing forever.
+    printf '[rollout-research-services] checkout advanced %s -> %s; re-executing with the newly checked-out script\n' \
+      "$SYNC_BEFORE" "$SYNC_AFTER" >&2
+    exec "$ROOT_DIR/scripts/rollout-research-services.sh" "${ROLLOUT_ARGS[@]}"
+  fi
 fi
 
 if [[ -z "$IMAGE_TAG" ]]; then
