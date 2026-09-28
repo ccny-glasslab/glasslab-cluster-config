@@ -633,10 +633,16 @@ def test_document_pdf_head_200(orchestrator_bundle, tmp_path) -> None:
             '/ui/pdf/assets/web/viewer.css',
             headers=AUTH_HEADERS,
         )
+        boxes = client.head(
+            '/ui/pdf/boxes',
+            params={'source': source.source_id, 'page': 1},
+            headers=AUTH_HEADERS,
+        )
 
     assert document.status_code == 200
     assert document.headers['content-type'] == 'application/pdf'
     assert asset.status_code == 200
+    assert boxes.status_code == 200
 
 
 def test_asset_mjs_mime_and_no_traversal(orchestrator_bundle) -> None:

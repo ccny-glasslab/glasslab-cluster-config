@@ -151,6 +151,9 @@ def _section_for_page(
         and section.page_start <= target <= section.page_end
     ]
     if not containing:
+        # No section contains the page: rank the sections that begin at or
+        # before it by page_start and take the nearest preceding one, then let
+        # the smallest-span/path tie-break below choose among equal starts.
         preceding = [
             (section.page_start, section)
             for section in sections
@@ -238,7 +241,10 @@ def register_ui_pdf_routes(
             },
         )
 
-    @app.get('/ui/pdf/boxes')
+    @app.api_route(
+        '/ui/pdf/boxes',
+        methods=['GET', 'HEAD'],
+    )
     def pdf_boxes(
         source: str = Query(...),
         page: int = Query(...),
