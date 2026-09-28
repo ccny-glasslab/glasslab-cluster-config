@@ -1895,6 +1895,16 @@ class SqliteStore:
             )
         return record
 
+    def get_rag_document(self, source_id: str) -> RagDocumentRecord:
+        with self._connect() as connection:
+            row = connection.execute(
+                'SELECT payload FROM rag_documents WHERE source_id = ?',
+                (source_id,),
+            ).fetchone()
+        if row is None:
+            raise RecordNotFound(source_id)
+        return RagDocumentRecord.model_validate_json(row['payload'])
+
     def replace_rag_sections(
         self,
         doc_id: str,
@@ -1911,6 +1921,16 @@ class SqliteStore:
                     (section.section_id, section.doc_id, _dump(section)),
                 )
         return len(sections)
+
+    def list_rag_sections(self, doc_id: str) -> list[RagSectionRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT payload FROM rag_sections WHERE doc_id = ?',
+                (doc_id,),
+            ).fetchall()
+        return [
+            RagSectionRecord.model_validate_json(row['payload']) for row in rows
+        ]
 
     def replace_rag_chunks(
         self,

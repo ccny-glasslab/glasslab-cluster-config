@@ -152,6 +152,28 @@ class Settings(BaseSettings):
         '/workspace/cluster-config/docs',
         '/workspace/cluster-config/services/research-orchestrator/evaluation-contracts',
     ]
+    # Corpus-RAG storage and the read-only corpus UI (issues #618/#619). The raw
+    # root holds downloaded/uploaded source documents before chunking.
+    # ``corpus_rag_store_path`` applies only to the corpus ingestion CLIs
+    # (scripts/corpus_rag/*.py), which resolve their store through
+    # app/store_factory.build_store. The running service builds its store
+    # inline in app/main.py and ignores this setting, so setting it never
+    # relocates the live orchestrator store; it stays None so the CLIs fall
+    # back to ``database_path`` until a deployment sets
+    # GLASSLAB_ORCHESTRATOR_CORPUS_RAG_STORE_PATH.
+    corpus_rag_raw_root: str = '/tmp/glasslab-research-orchestrator/rag/raw'
+    corpus_rag_store_path: str | None = None
+    # Feature flags for the corpus UI and the optional LLM-backed RAG lane.
+    # ``ui_chat_enabled`` gates the Ask the corpus pane; ``ui_pdf_enabled``
+    # gates the whole /ui/pdf/** route group. Both default on.
+    # ``ui_chat_dense`` and ``rag_llm_enabled`` are RESERVED with NO CONSUMER
+    # anywhere in the app: nothing reads them, so flipping either has no effect
+    # until the dense-chat and LLM lanes land and wire them. The no-consumer
+    # invariant is pinned by tests/test_reserved_config.py.
+    ui_chat_enabled: bool = True
+    ui_chat_dense: bool = False
+    ui_pdf_enabled: bool = True
+    rag_llm_enabled: bool = False
     evidence_excerpt_max_bytes: int = 32 * 1024
     # Verbatim tier for evaluator failures/metrics (larger than the general
     # excerpt cap); the whole snapshot is bounded by the snapshot cap.

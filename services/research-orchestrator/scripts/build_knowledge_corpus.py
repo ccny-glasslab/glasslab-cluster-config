@@ -32,7 +32,7 @@ from app.corpus_rag.contracts import CorpusManifestEntry  # noqa: E402
 from app.knowledge_dense import build_dense_index  # noqa: E402
 from app.knowledge_manager import KnowledgeManager  # noqa: E402
 from app.schemas import SourceType  # noqa: E402
-from app.storage import SqliteStore  # noqa: E402
+from app.store_factory import build_store  # noqa: E402
 
 _BOOK_IDS = frozenset({'islr2', 'esl'})
 
@@ -50,6 +50,9 @@ class _BuildSettings:
 
     def __init__(self, database_path: str, allowlist_root: str) -> None:
         self.database_path = database_path
+        self.store_backend = 'sqlite'
+        self.store_postgres_dsn = None
+        self.corpus_rag_store_path = database_path
         self.knowledge_allowlist_roots = [allowlist_root]
         self.knowledge_chunk_size = 1500
         self.knowledge_chunk_overlap = 150
@@ -115,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         database_path=args.store,
         allowlist_root=str(raw_dir),
     )
-    store = SqliteStore(settings.database_path)
+    store = build_store(settings)
     knowledge_root = Path(settings.database_path).parent / 'knowledge'
     knowledge_root.mkdir(parents=True, exist_ok=True)
     km = KnowledgeManager(

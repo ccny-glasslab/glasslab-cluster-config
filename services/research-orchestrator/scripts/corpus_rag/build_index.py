@@ -21,7 +21,14 @@ _PG_DSN_ENV = 'CORPUS_RAG_PG_DSN'
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--store', required=True)
+    parser.add_argument(
+        '--store',
+        default=None,
+        help=(
+            'SQLite override for local runs; omit to use the configured '
+            'store (GLASSLAB_ORCHESTRATOR_STORE_BACKEND)'
+        ),
+    )
     parser.add_argument('--source-id', action='append', dest='source_ids')
     parser.add_argument('--corpus', default=None)
     parser.add_argument(
@@ -35,10 +42,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--force', action='store_true')
     args = parser.parse_args(argv)
 
+    from app.config import Settings
     from app.corpus_rag.pipeline import build_index
-    from app.storage import SqliteStore
+    from app.store_factory import build_store
 
-    store = SqliteStore(args.store)
+    settings = (
+        Settings(store_backend='sqlite', corpus_rag_store_path=args.store)
+        if args.store
+        else Settings()
+    )
+    store = build_store(settings)
     source_ids = list(args.source_ids or [])
     if not source_ids and args.corpus:
         from app.corpus_rag.corpora import CorpusService

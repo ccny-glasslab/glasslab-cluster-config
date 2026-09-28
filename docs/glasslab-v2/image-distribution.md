@@ -55,7 +55,8 @@ cd /home/glasslab/cluster-config
 The script:
 
 1. refuses a tracked dirty checkout
-2. optionally fast-forwards to `origin/main`
+2. optionally fast-forwards to `origin/main`; if the checkout advances,
+   the script re-executes itself so the run uses the newly checked-out logic
 3. uses the checked-out full commit SHA as the image tag
 4. applies service configuration and policy manifests
 5. atomically renders each Deployment with the selected image

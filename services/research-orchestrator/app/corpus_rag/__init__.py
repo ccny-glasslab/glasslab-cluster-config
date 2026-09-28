@@ -4,6 +4,9 @@ Re-exports the shared shapes from :mod:`.contracts` so callers can import the
 whole surface from one package root: ``from app.corpus_rag import CorpusRecord``.
 """
 
+from app.ui_chat import ChatAnswer, ChatCitation
+
+from .chat import CorpusChatService
 from .contracts import (
     ADVISORY_TOKEN_BUDGET,
     EMBED_DIM,
@@ -38,8 +41,11 @@ __all__ = [
     'RRF_K',
     'AdvisoryResult',
     'BenchmarkQuestion',
+    'ChatAnswer',
+    'ChatCitation',
     'ChunkVectorMeta',
     'Citation',
+    'CorpusChatService',
     'CorpusManifestEntry',
     'CorpusRecord',
     'InsufficientCorpusAdvisory',

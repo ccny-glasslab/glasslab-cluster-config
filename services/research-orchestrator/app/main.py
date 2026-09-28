@@ -47,6 +47,7 @@ from .cluster import FakeClusterExecutor, WorkflowApiClusterExecutor
 from .config import SERVICE_ROOT, Settings, get_settings, read_secret_file
 from .contract_candidates import ContractCandidateManager
 from .contracts import ContractIntegrityError, EvaluationContractResolver
+from .corpus_rag import CorpusChatService
 from .corpus_rag.pdf_backend import UnsupportedDocumentError
 from .discord_adapter import (
     DisabledDiscordAdapter,
@@ -115,6 +116,7 @@ from .storage import ConcurrencyConflict, RecordNotFound, SqliteStore
 from .postgres_store import PostgresStore
 from .turn_inspection import DEFAULT_TURN_LIMIT, MAXIMUM_TURN_LIMIT, summarize_turns
 from .ui import register_ui_routes
+from .ui_pdf import register_ui_pdf_routes
 from .task_bundles import (
     TaskBundleError,
     TaskBundleManager,
@@ -1843,12 +1845,31 @@ def create_app(
     # Read-only corpus/reports page (issue #592): registered by its own module
     # so the escape-first no-JS page contract and its CSP stay with the
     # implementation; the route inherits this app's operator-token dependency.
+    # The corpus chat service is built here from the engine's store and the
+    # deployment settings; when ``ui_chat_enabled`` is false the /ui page is
+    # still served but carries no Ask the corpus pane.
     register_ui_routes(
         app,
         engine=engine,
         settings=settings,
         require_operator=require_operator,
+        chat_service=(
+            CorpusChatService(engine.store)
+            if settings.ui_chat_enabled
+            else None
+        ),
     )
+    # Same-origin PDF viewer surface (issue #619): the raw document, the
+    # vendored pdf.js assets, the viewer shell, and the live highlight boxes.
+    # Disabled entirely when ``ui_pdf_enabled`` is false so every /ui/pdf/*
+    # path 404s rather than serving.
+    if settings.ui_pdf_enabled:
+        register_ui_pdf_routes(
+            app,
+            engine=engine,
+            settings=settings,
+            require_operator=require_operator,
+        )
 
     return app
 

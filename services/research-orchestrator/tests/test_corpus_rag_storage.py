@@ -177,6 +177,15 @@ def _scenario_corpus_membership_and_documents(store) -> None:
         ),
     ]
     assert store.replace_rag_sections(document.doc_id, sections) == 2
+    listed = store.list_rag_sections(document.doc_id)
+    assert {section.section_id for section in listed} == {
+        section.section_id for section in sections
+    }
+    assert {section.path for section in listed} == {'1', '1.1'}
+    assert all(section.doc_id == document.doc_id for section in listed)
+    # An unknown doc id is an empty list, not an error: the UI treats a missing
+    # section tree as "no section".
+    assert store.list_rag_sections(f'{document.doc_id}-missing') == []
 
     chunks = [
         _chunk(source.source_id, 0, 'membership evidence alpha'),

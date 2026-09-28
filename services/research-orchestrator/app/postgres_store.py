@@ -719,12 +719,25 @@ class PostgresStore:
         with self.transaction() as conn:
             conn.execute('INSERT INTO orchestrator_rag_documents (doc_id, source_id, payload) VALUES (%s,%s,%s) ON CONFLICT (doc_id) DO UPDATE SET source_id=EXCLUDED.source_id, payload=EXCLUDED.payload', (record.doc_id, record.source_id, self._payload(record)))
         return record
+    def get_rag_document(self, source_id: str) -> RagDocumentRecord:
+        with self._connect() as conn: row = conn.execute('SELECT payload FROM orchestrator_rag_documents WHERE source_id=%s', (source_id,)).fetchone()
+        if not row: raise RecordNotFound(source_id)
+        return RagDocumentRecord.model_validate(row['payload'])
     def replace_rag_sections(self, doc_id: str, sections: list[RagSectionRecord]) -> int:
         with self.transaction() as conn:
             conn.execute('DELETE FROM orchestrator_rag_sections WHERE doc_id=%s', (doc_id,))
             for section in sections:
                 conn.execute('INSERT INTO orchestrator_rag_sections (section_id, doc_id, payload) VALUES (%s,%s,%s)', (section.section_id, section.doc_id, self._payload(section)))
         return len(sections)
+    def list_rag_sections(self, doc_id: str) -> list[RagSectionRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                'SELECT payload FROM orchestrator_rag_sections WHERE doc_id=%s',
+                (doc_id,),
+            ).fetchall()
+        return [
+            RagSectionRecord.model_validate(row['payload']) for row in rows
+        ]
     def replace_rag_chunks(self, source_id: str, chunks: list[RagChunkRecord]) -> int:
         # Lexical parity note: PostgreSQL has no separate FTS shadow table;
         # the GIN to_tsvector index on orchestrator_rag_chunks tracks the
