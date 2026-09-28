@@ -187,7 +187,6 @@ def test_ingest_corpus_cli_smoke(
     manifest = tmp_path / 'manifest.jsonl'
     manifest.write_text(json.dumps(entries[0]) + '\n')
     monkeypatch.setattr(cli, '_MANIFEST_PATH', manifest)
-    monkeypatch.setattr(cli, 'default_store_path', lambda: str(tmp_path / 'cli.db'))
 
     code = cli.main(
         [

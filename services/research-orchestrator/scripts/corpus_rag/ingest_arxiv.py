@@ -38,10 +38,6 @@ from app.corpus_rag.pipeline import (  # noqa: E402
 _UNSAFE_NAME_CHARS = re.compile(r'[^A-Za-z0-9._-]')
 
 
-def default_store_path() -> str:
-    return '/home/gr66ss/rag-data/orchestrator-rag.db'
-
-
 def staged_name(arxiv_id: str) -> str:
     """Return a filesystem-safe staged name for an arXiv id/URL."""
     tail = arxiv_id.rstrip('/').rsplit('/', 1)[-1]

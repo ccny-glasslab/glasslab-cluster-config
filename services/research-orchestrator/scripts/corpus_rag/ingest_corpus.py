@@ -1,4 +1,4 @@
-"""Batch-ingest staged corpus PDFs into a SQLite store (optionally index).
+"""Batch-ingest staged corpus PDFs into the configured corpus store (optionally index).
 
 Reads the eval manifest, ingests every non-skipped entry found under
 --raw-dir as <id>.pdf with sha256 verification, registers corpus membership,
@@ -19,10 +19,6 @@ sys.path.insert(0, str(_SERVICE_DIR))
 from app.corpus_rag.pipeline import build_index, ingest_corpus  # noqa: E402
 
 _MANIFEST_PATH = _SERVICE_DIR / 'eval' / 'corpus_rag' / 'manifest.jsonl'
-
-
-def default_store_path() -> str:
-    return '/home/gr66ss/rag-data/orchestrator-rag.db'
 
 
 def main(argv: list[str] | None = None) -> int:
