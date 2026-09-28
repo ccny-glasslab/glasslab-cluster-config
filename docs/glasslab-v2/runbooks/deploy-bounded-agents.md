@@ -77,6 +77,12 @@ kubectl -n glasslab-v2 rollout status deployment/glasslab-schedule-worker --time
 kubectl -n glasslab-v2 get deploy,svc | egrep 'agent|workflow-api'
 ```
 
+The bounded stage agents and `schedule-worker` are deployed at one replica by
+design, so a plain deploy must leave their `READY` column at `1/1`.
+`kubectl rollout status` succeeds even at zero replicas, so check `READY`
+explicitly; a `0/0` agent means the manifests regressed to `replicas: 0`.
+Feature flags, not replica counts, decide whether a stage is used.
+
 ## 4. Keep Feature Flags Off By Default
 
 The `workflow-api` ConfigMap keeps all four agent integrations disabled by
@@ -99,6 +105,10 @@ images. See [`internal-service-auth-rollout.md`](internal-service-auth-rollout.m
 for the full callers-first order and rollback procedure.
 
 ## 5. Enable One Agent At A Time
+
+Enabling a stage is a feature-flag action against the `workflow-api` ConfigMap,
+not a scale operation: the agent already runs at one replica from the plain
+deploy. Never use a deploy or `kubectl scale` to turn a stage on or off.
 
 Turn on only one integration flag at a time and restart `workflow-api`.
 

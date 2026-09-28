@@ -4,7 +4,10 @@ metadata:
   name: glasslab-intake-agent
   namespace: glasslab-v2
 spec:
-  replicas: 0
+  # workflow-api feature flags gate calls to this agent, not its replica count;
+  # replicas: 0 let a plain deploy take an enabled stage agent down, which then
+  # needed a manual kubectl scale before the stage could run.
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: glasslab-intake-agent
