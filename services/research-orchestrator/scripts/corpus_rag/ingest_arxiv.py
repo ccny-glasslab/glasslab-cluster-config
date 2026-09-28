@@ -116,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         staged_uri = (raw_root / f'{name}.pdf').resolve().as_uri()
         if any(
             source.canonical_uri == staged_uri
+            or source.metadata.get('source_url') == entry.pdf_url
             for source in store.list_knowledge_sources()
         ):
             skipped_existing.append(entry.arxiv_id)

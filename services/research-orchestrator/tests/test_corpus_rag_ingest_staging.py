@@ -193,6 +193,70 @@ def test_ingest_arxiv_removes_staged_pdf_when_ingest_rejected(
     assert list(raw_root.iterdir()) == []
 
 
+def test_ingest_arxiv_skips_legacy_https_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A legacy https-URI source is recognized by its ``source_url``.
+
+    ``canonical_uri`` moved from the remote https URL to a staged ``file://``
+    URI, so a store holding a pre-move row would otherwise re-download and
+    insert a duplicate. The pre-download skip check matches the entry's
+    ``pdf_url`` against an existing source's ``metadata['source_url']``.
+    """
+    monkeypatch.syspath_prepend(str(CORPUS_SCRIPT_DIR))
+    import ingest_arxiv
+
+    from app.corpus_rag.arxiv import ArxivEntry
+    from app.schemas import KnowledgeSource, SourceType
+
+    raw_root = tmp_path / 'raw'
+    store_path = tmp_path / 'arxiv-legacy.db'
+    monkeypatch.setenv('GLASSLAB_ORCHESTRATOR_STORE_BACKEND', 'sqlite')
+    monkeypatch.setenv(
+        'GLASSLAB_ORCHESTRATOR_CORPUS_RAG_STORE_PATH', str(store_path)
+    )
+    monkeypatch.setenv('GLASSLAB_ORCHESTRATOR_CORPUS_RAG_RAW_ROOT', str(raw_root))
+
+    entry = ArxivEntry(
+        arxiv_id='http://arxiv.org/abs/2401.00003v1',
+        title='Resampling Methods for Evaluation',
+        authors=('Ada Author',),
+        published=_dt.date(2024, 1, 1),
+        pdf_url='https://arxiv.org/pdf/2401.00003v1',
+    )
+    legacy = KnowledgeSource(
+        source_type=SourceType.PAPER,
+        canonical_uri='https://arxiv.org/abs/2401.00003v1',
+        digest='0' * 64,
+        title='Legacy arXiv source',
+        metadata={
+            'source_url': entry.pdf_url,
+            'arxiv_id': entry.arxiv_id,
+        },
+    )
+    SqliteStore(str(store_path)).save_knowledge_source(legacy)
+
+    downloads: list[str] = []
+
+    def fake_download(e, **kwargs: object) -> tuple[bytes, str]:
+        downloads.append(e.arxiv_id)
+        pdf = _make_pdf()
+        return pdf, hashlib.sha256(pdf).hexdigest()
+
+    monkeypatch.setattr(ingest_arxiv, 'fetch_entries', lambda query: [entry])
+    monkeypatch.setattr(ingest_arxiv, 'download_pdf', fake_download)
+
+    assert ingest_arxiv.main(['--days', '1']) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert downloads == []
+    assert payload['reports'] == []
+    assert entry.arxiv_id in payload['skipped_existing']
+    assert len(SqliteStore(str(store_path)).list_knowledge_sources()) == 1
+
+
 def test_stage_raw_pdf_overwrites_atomically(tmp_path: Path) -> None:
     raw_root = tmp_path / 'raw'
     first = pipeline.stage_raw_pdf(b'%PDF-1.4\nfirst\n', raw_root, 'paper')
