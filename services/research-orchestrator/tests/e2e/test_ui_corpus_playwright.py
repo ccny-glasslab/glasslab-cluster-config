@@ -10,8 +10,9 @@ PDF bytes, and the live highlight boxes.
 
 Assertions (issues #618/#619):
 
-1. the ask form renders and a GET ``?q=`` submission renders an answer with a
-   citation whose title, excerpt, and verdict badge are visible;
+1. the ask form renders and a GET ``?q=`` submission renders an answer whose
+   citation is an inline superscript marker with a CSS-only hover preview
+   card (source title, verdict badge, "View source") and no footnote list;
 2. clicking the citation opens the cited-source iframe at the exact
    ``/ui/pdf/assets/web/highlight.html?source=&page=&excerpt=`` URL, and the
    iframe is deliberately not sandboxed;
@@ -176,7 +177,7 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
             screenshot='01-ask-form.png',
         )
 
-        # --- 2. GET ?q= renders the answer and its citation ----------------
+        # --- 2. GET ?q= renders the answer and its inline citation --------
         question_input.fill(manifest['question'])
         with page.expect_navigation(wait_until='domcontentloaded'):
             ask.locator('button[type="submit"]').click()
@@ -186,15 +187,24 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
         expect(turn).to_contain_text('Question:')
         expect(turn).to_contain_text(manifest['question'])
         expect(turn).to_contain_text('Answer:')
-        citations = turn.locator('ul.chat-citations li')
-        assert citations.count() >= 1, 'expected at least one chat citation'
-        first = citations.first
-        link = first.locator('a')
-        expect(link).to_have_text(manifest['title'])
-        expect(first.locator('code')).to_contain_text(manifest['excerpt'])
-        badge = first.locator('span.badge')
-        expect(badge).to_have_text('✓ exact')
-        _shot(page, env, '02-answer-citation.png')
+        # NotebookLM-style inline citation: a superscript marker in the answer
+        # text, no end-of-answer reference list, and a CSS-only hover card.
+        markers = turn.locator('a.cite')
+        assert markers.count() >= 1, 'expected at least one inline citation'
+        assert turn.locator('ul.chat-citations').count() == 0, (
+            'the end-of-answer footnote list must be gone'
+        )
+        assert page.locator('script').count() == 0, 'the page must be script-free'
+        marker = markers.first
+        expect(marker.locator('sup')).to_have_text('1')
+        card = marker.locator('.cite-card')
+        expect(card).to_be_hidden()
+        marker.hover()
+        expect(card).to_be_visible()
+        expect(card.locator('.cite-title')).to_have_text(manifest['title'])
+        expect(card.locator('.cite-badge')).to_have_text('✓ exact')
+        expect(card.locator('.cite-cta')).to_contain_text('View source')
+        _shot(page, env, '02-answer-citation-hover.png')
         _log(
             env,
             'answer',
@@ -203,12 +213,14 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
             title=manifest['title'],
             excerpt=manifest['excerpt'],
             badge='✓ exact',
-            screenshot='02-answer-citation.png',
+            superscript='1',
+            footnote_list=False,
+            screenshot='02-answer-citation-hover.png',
         )
 
         # --- 3. the citation opens the exact unsandboxed viewer iframe -----
         with page.expect_navigation(wait_until='domcontentloaded'):
-            link.click()
+            marker.click()
         iframe = page.locator(f'iframe[title="{IFRAME_TITLE}"]')
         expect(iframe).to_be_visible()
         assert iframe.get_attribute('sandbox') is None, (
