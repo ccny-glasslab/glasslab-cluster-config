@@ -37,7 +37,14 @@ def default_store_path() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--store', default=default_store_path())
+    parser.add_argument(
+        '--store',
+        default=None,
+        help=(
+            'SQLite override for local runs; omit to use the configured '
+            'store (GLASSLAB_ORCHESTRATOR_STORE_BACKEND)'
+        ),
+    )
     parser.add_argument('--corpus', default='arxiv-preprints')
     parser.add_argument(
         '--categories',
@@ -60,8 +67,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--force-index', action='store_true')
     args = parser.parse_args(argv)
 
-    from app.storage import SqliteStore
-
     date_from = _dt.date.today() - _dt.timedelta(days=args.days)
     query = ArxivQuery(
         categories=tuple(args.categories),
@@ -71,7 +76,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     entries = fetch_entries(query)
 
-    store = SqliteStore(str(args.store))
+    from app.config import Settings
+    from app.store_factory import build_store
+
+    settings = (
+        Settings(store_backend='sqlite', corpus_rag_store_path=args.store)
+        if args.store
+        else Settings()
+    )
+    store = build_store(settings)
     reports = []
     errors: list[str] = []
     skipped_existing: list[str] = []

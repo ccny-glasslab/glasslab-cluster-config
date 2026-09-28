@@ -23,9 +23,10 @@ from typing import Any
 _SERVICE_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_SERVICE_DIR))
 
+from app.config import Settings  # noqa: E402
 from app.corpus_rag import CorpusManifestEntry, CorpusRecord  # noqa: E402
 from app.corpus_rag.documents import ingest_document_bytes  # noqa: E402
-from app.storage import SqliteStore  # noqa: E402
+from app.store_factory import build_store  # noqa: E402
 
 _BOOK_IDS = frozenset({'islr2', 'esl'})
 _DOWNLOAD_TIMEOUT_SECONDS = 90
@@ -66,7 +67,9 @@ def _download(url: str, target: Path, timeout: int) -> None:
 def _register(
     store_path: Path, corpus_slug: str, fetched: list[Path]
 ) -> int:
-    store = SqliteStore(str(store_path))
+    store = build_store(
+        Settings(store_backend='sqlite', corpus_rag_store_path=str(store_path))
+    )
     corpus = store.get_corpus(corpus_slug)
     if corpus is None:
         corpus = store.create_corpus(CorpusRecord(slug=corpus_slug))
@@ -92,16 +95,18 @@ def main(argv: list[str] | None = None) -> int:
         '--manifest',
         default=str(_SERVICE_DIR / 'eval' / 'corpus_rag' / 'manifest.jsonl'),
     )
-    parser.add_argument('--dest', default='/home/gr66ss/rag-data/raw')
+    parser.add_argument('--dest', default=None, help='staged PDF root; defaults to settings.corpus_rag_raw_root')
     parser.add_argument('--only', action='append', dest='only_ids')
     parser.add_argument('--timeout', type=int, default=_DOWNLOAD_TIMEOUT_SECONDS)
-    parser.add_argument('--register', default=None, help='SQLite store path')
+    parser.add_argument('--register', default=None, help='SQLite store path for registration')
     parser.add_argument('--corpus', default='statistical-learning-methods')
     parser.add_argument('--strict', action='store_true')
     args = parser.parse_args(argv)
 
     manifest_path = Path(args.manifest)
-    dest = Path(args.dest)
+    dest = (
+        Path(args.dest) if args.dest else Path(Settings().corpus_rag_raw_root)
+    )
     dest.mkdir(parents=True, exist_ok=True)
     entries = [
         CorpusManifestEntry.model_validate(json.loads(line))

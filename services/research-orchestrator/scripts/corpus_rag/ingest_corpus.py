@@ -27,8 +27,19 @@ def default_store_path() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--store', default=default_store_path())
-    parser.add_argument('--raw-dir', default='/home/gr66ss/rag-data/raw')
+    parser.add_argument(
+        '--store',
+        default=None,
+        help=(
+            'SQLite override for local/benchmark runs; omit to use the '
+            'configured store (GLASSLAB_ORCHESTRATOR_STORE_BACKEND)'
+        ),
+    )
+    parser.add_argument(
+        '--raw-dir',
+        default=None,
+        help='staged PDF root; defaults to settings.corpus_rag_raw_root',
+    )
     parser.add_argument('--corpus', default='statistical-learning-methods')
     parser.add_argument('--manifest', default=str(_MANIFEST_PATH))
     parser.add_argument('--with-index', action='store_true')
@@ -40,13 +51,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--force-index', action='store_true')
     args = parser.parse_args(argv)
 
-    from app.storage import SqliteStore
+    from app.config import Settings
+    from app.store_factory import build_store
 
-    store = SqliteStore(str(args.store))
+    settings = (
+        Settings(store_backend='sqlite', corpus_rag_store_path=args.store)
+        if args.store
+        else Settings()
+    )
+    store = build_store(settings)
+    raw_dir = (
+        Path(args.raw_dir) if args.raw_dir else Path(settings.corpus_rag_raw_root)
+    )
     reports, errors = ingest_corpus(
         store=store,
         corpus_slug=args.corpus,
-        raw_dir=Path(args.raw_dir),
+        raw_dir=raw_dir,
         manifest_path=Path(args.manifest),
     )
 
