@@ -381,6 +381,19 @@ class ServiceImageSupplyChainTests(unittest.TestCase):
             "the schedule-worker CronJob POSTs to the Service and needs a running pod",
         )
 
+    def test_bounded_stage_agents_run_a_pod_so_enabling_a_stage_needs_no_manual_scale(self):
+        for service, path in BOUNDED_SERVICE_DEPLOYMENTS.items():
+            with self.subTest(service=service):
+                deployment = next(
+                    item for item in documents(path) if item["kind"] == "Deployment"
+                )
+                self.assertGreaterEqual(
+                    deployment["spec"]["replicas"],
+                    1,
+                    f"{service} must stay deployed: a plain deploy with replicas: 0 "
+                    "scaled an enabled stage agent to zero until an operator scaled it back",
+                )
+
     def test_service_image_pipeline_publishes_every_service_at_the_git_sha(self):
         jobs = yaml.safe_load(SERVICE_IMAGE_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
         for service in PUBLISHED_SERVICES:
