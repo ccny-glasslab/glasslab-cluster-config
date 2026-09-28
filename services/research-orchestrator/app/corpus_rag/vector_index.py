@@ -141,7 +141,7 @@ class NumpyVectorIndex:
         q_unit = _as_unit_row(query)
         scores = matrix @ q_unit
 
-        mask = np.ones(len(ids), dtype=bool)
+        mask: np.ndarray = np.ones(len(ids), dtype=bool)
         if source_ids:
             allowed = set(source_ids)
             mask = np.array(
