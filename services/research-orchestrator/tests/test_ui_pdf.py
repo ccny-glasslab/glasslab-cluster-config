@@ -490,6 +490,37 @@ def test_boxes_includes_section_for_matched_page(
     assert orphaned.json()['section'] is None
 
 
+def test_boxes_whitespace_only_excerpt_returns_empty(
+    orchestrator_bundle,
+    tmp_path,
+) -> None:
+    """A whitespace-only excerpt is not a highlight request.
+
+    PyMuPDF matches the spaces between words, so an unstripped ``'   '`` would
+    return spurious rectangles; the route must strip and treat it as absent.
+    """
+    settings, _, _, _, engine = orchestrator_bundle
+    raw_root = tmp_path / 'rag-raw'
+    settings = _raw_settings(settings, raw_root)
+    pdf_path = raw_root / 'paper.pdf'
+    _make_pdf(pdf_path)
+    source = _register_source(engine, pdf_path)
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/pdf/boxes',
+            params={
+                'source': source.source_id,
+                'page': 1,
+                'excerpt': '   ',
+            },
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert response.json()['boxes'] == []
+
+
 def test_boxes_rejects_bad_page_and_long_excerpt(
     orchestrator_bundle,
     tmp_path,

@@ -255,6 +255,7 @@ def register_ui_pdf_routes(
         path = _resolve_document(engine, settings, source)
         import pymupdf
 
+        needle = excerpt.strip() if excerpt is not None else None
         with pymupdf.open(str(path)) as document:
             if page > document.page_count:
                 raise HTTPException(
@@ -264,9 +265,9 @@ def register_ui_pdf_routes(
             pdf_page = document[page - 1]
             page_size = [pdf_page.rect.width, pdf_page.rect.height]
             boxes: list[list[float]] = []
-            if excerpt:
+            if needle:
                 page_height = pdf_page.rect.height
-                for quad in pdf_page.search_for(excerpt, quads=True):
+                for quad in pdf_page.search_for(needle, quads=True):
                     rect = quad.rect
                     # search_for returns top-left page coordinates; the pdf.js
                     # viewport consumes PDF user space (origin bottom-left), so

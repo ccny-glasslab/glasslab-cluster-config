@@ -89,6 +89,9 @@ function normalizeBoxes(payload) {
     if (![x0, y0, x1, y1].every(Number.isFinite)) {
       return [];
     }
+    if (Math.abs(x1 - x0) < 0.5 || Math.abs(y1 - y0) < 0.5) {
+      return [];
+    }
     return [{ x0, y0, x1, y1 }];
   });
   const section =
