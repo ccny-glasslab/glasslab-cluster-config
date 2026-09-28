@@ -29,6 +29,7 @@ DSN_KEY = 'GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN'
 
 CORPUS_INGEST_PATH = JOBS_DIR / 'corpus-ingest.yaml'
 ARXIV_SYNC_PATH = JOBS_DIR / 'corpus-arxiv-sync.yaml'
+RAG_BACKFILL_PATH = JOBS_DIR / 'rag-backfill.yaml'
 POSTGRES_POLICY_PATH = (
     REPO_ROOT / 'kubeadm' / 'glasslab-v2' / 'postgres' / '50-network-policy.yaml'
 )
@@ -187,9 +188,34 @@ def test_corpus_arxiv_sync_uses_configured_store_and_raw_root() -> None:
     assert PVC_NAME in claims
 
 
+def test_rag_backfill_job_uses_postgres_and_pins_the_release_image() -> None:
+    docs = _load(RAG_BACKFILL_PATH)
+    job = next(doc for doc in docs if doc.get('kind') == 'Job')
+    container = _container(job)
+    command = _command_text(container)
+    env = _env(container)
+
+    assert 'backfill_rag_from_knowledge.py' in command
+    assert '--apply' in command
+    assert '--store' not in command
+
+    assert _env_value(env, 'GLASSLAB_ORCHESTRATOR_STORE_BACKEND') == 'postgres'
+    assert _env_value(
+        env, 'GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN'
+    ) == {'secretKeyRef': {'name': DSN_SECRET, 'key': DSN_KEY}}
+
+    pod_spec = _pod_spec(job)
+    assert pod_spec.get('automountServiceAccountToken') is False
+    assert pod_spec.get('serviceAccountName')
+    assert pod_spec['securityContext']['fsGroup'] == 10001
+    assert container['securityContext']['runAsUser'] == 10001
+    assert container['securityContext']['runAsGroup'] == 10001
+    assert _PINNED_IMAGE_RE.search(container['image']), container['image']
+
+
 def test_corpus_job_pods_are_admitted_by_the_postgres_ingress_policy() -> None:
     allowed = _postgres_ingress_allowed_names()
-    for path in (CORPUS_INGEST_PATH, ARXIV_SYNC_PATH):
+    for path in (CORPUS_INGEST_PATH, ARXIV_SYNC_PATH, RAG_BACKFILL_PATH):
         doc = _load(path)[0]
         name = _pod_template_labels(doc).get('app.kubernetes.io/name')
         assert name, f'{path.name} pod template has no app.kubernetes.io/name label'

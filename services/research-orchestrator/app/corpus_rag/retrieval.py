@@ -268,19 +268,21 @@ class HybridRetriever:
                 dense_channels.append([chunk_id for chunk_id, _ in found])
             timings['dense'] = _elapsed_ms(stage)
 
-        # Hydrate every referenced chunk through ONE table pass; missing
-        # rows are skipped rather than invented.
         referenced = {
             chunk_id
             for channel in (*lexical_channels, *dense_channels)
             for chunk_id in channel
         }
+        # Hydrate only referenced chunks through one targeted fetch; missing
+        # rows are skipped rather than invented. Loading the whole store here
+        # made every query O(corpus).
         table: dict[str, RagChunkRecord] = {}
         if referenced:
-            for row in self._store.list_rag_chunks(
-                source_ids=scope, kinds=None, limit=None
-            ):
-                table[row['chunk_id']] = RagChunkRecord.model_validate(row)
+            for row in self._store.get_rag_chunks(sorted(referenced)):
+                chunk = RagChunkRecord.model_validate(row)
+                if scope is not None and chunk.source_id not in scope:
+                    continue
+                table[chunk.chunk_id] = chunk
 
         # (d) FUSE: RRF over the channels the mode selects.
         stage = time.perf_counter()
@@ -338,6 +340,16 @@ class HybridRetriever:
         extras: list[RagChunkRecord] = []
         if options.expand:
             stage = time.perf_counter()
+            known = set(table)
+            sibling_sources = sorted({table[cid].source_id for cid in selected})
+            for row in self._store.list_rag_chunks(
+                source_ids=sibling_sources, kinds=None, limit=None
+            ):
+                sibling_id = row['chunk_id']
+                if sibling_id in known:
+                    continue
+                table[sibling_id] = RagChunkRecord.model_validate(row)
+                known.add(sibling_id)
             chosen = set(selected)
             for chunk_id in selected:
                 anchor = table[chunk_id]

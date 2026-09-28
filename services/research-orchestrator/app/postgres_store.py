@@ -782,6 +782,21 @@ class PostgresStore:
             rows = conn.execute(query, params).fetchall()
         return [dict(RagChunkRecord.model_validate(r['payload']).model_dump(mode='json')) for r in rows]
 
+    def get_rag_chunks(self, chunk_ids: Sequence[str]) -> list[dict[str, Any]]:
+        if not chunk_ids:
+            return []
+        placeholders = ', '.join('%s' for _ in chunk_ids)
+        query = (
+            'SELECT payload FROM orchestrator_rag_chunks'
+            f' WHERE chunk_id IN ({placeholders})'
+        )
+        with self._connect() as conn:
+            rows = conn.execute(query, list(chunk_ids)).fetchall()
+        return [
+            dict(RagChunkRecord.model_validate(r['payload']).model_dump(mode='json'))
+            for r in rows
+        ]
+
     def upsert_rag_chunk_vectors(self, meta: ChunkVectorMeta, vec_bytes: bytes) -> None:
         # The halfvec embedding column is populated by the dense-indexing
         # wave; this surface stores opaque vector bytes plus provenance.
