@@ -8,6 +8,8 @@ spec:
   ttlSecondsAfterFinished: 7200
   template:
     spec:
+      serviceAccountName: glasslab-gpu-runner
+      automountServiceAccountToken: false
       restartPolicy: Never
       imagePullSecrets:
         - name: glasslab-ghcr-pull

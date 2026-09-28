@@ -114,6 +114,8 @@ def test_corpus_ingest_job_uses_postgres_and_stages_raw() -> None:
     ) == {'secretKeyRef': {'name': DSN_SECRET, 'key': DSN_KEY}}
 
     pod_spec = _pod_spec(job)
+    assert pod_spec.get('automountServiceAccountToken') is False
+    assert pod_spec.get('serviceAccountName')
     assert pod_spec['securityContext']['fsGroup'] == 10001
     assert container['securityContext']['runAsUser'] == 10001
     assert container['securityContext']['runAsGroup'] == 10001
@@ -145,6 +147,8 @@ def test_corpus_arxiv_sync_uses_configured_store_and_raw_root() -> None:
     ) == {'secretKeyRef': {'name': DSN_SECRET, 'key': DSN_KEY}}
 
     pod_spec = _pod_spec(cron)
+    assert pod_spec.get('automountServiceAccountToken') is False
+    assert pod_spec.get('serviceAccountName')
     assert pod_spec['securityContext']['fsGroup'] == 10001
     assert container['securityContext']['runAsUser'] == 10001
     assert container['securityContext']['runAsGroup'] == 10001
