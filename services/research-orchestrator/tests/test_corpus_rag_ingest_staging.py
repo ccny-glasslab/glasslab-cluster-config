@@ -134,6 +134,63 @@ def test_ingest_arxiv_uses_file_uri_not_https(
     assert resolved.name == '2401.00001v1.pdf'
     assert resolved.read_bytes().startswith(b'%PDF')
     assert source.metadata['source_url'] == 'https://arxiv.org/pdf/2401.00001v1'
+    assert resolved.is_file()
+
+
+def test_ingest_arxiv_removes_staged_pdf_when_ingest_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A rejected ingestion must not leave its staged PDF on disk.
+
+    ``stage_raw_pdf`` writes the file before ``ingest_document`` scans the
+    extracted text for secrets, so a rejection would otherwise leave bytes
+    that the persisted source's ``canonical_uri`` still resolves to -- and
+    ``/ui/pdf/document.pdf?source=<id>`` would serve them. The per-entry
+    failure path deletes the staged file so the URI resolves to nothing.
+    """
+    monkeypatch.syspath_prepend(str(CORPUS_SCRIPT_DIR))
+    import ingest_arxiv
+
+    from app.corpus_rag.arxiv import ArxivEntry
+    from app.knowledge_manager import KnowledgeError
+
+    raw_root = tmp_path / 'raw'
+    store_path = tmp_path / 'arxiv-reject.db'
+    monkeypatch.setenv('GLASSLAB_ORCHESTRATOR_STORE_BACKEND', 'sqlite')
+    monkeypatch.setenv(
+        'GLASSLAB_ORCHESTRATOR_CORPUS_RAG_STORE_PATH', str(store_path)
+    )
+    monkeypatch.setenv('GLASSLAB_ORCHESTRATOR_CORPUS_RAG_RAW_ROOT', str(raw_root))
+
+    pdf = _make_pdf()
+    entry = ArxivEntry(
+        arxiv_id='http://arxiv.org/abs/2401.00002v1',
+        title='Resampling Methods for Evaluation',
+        authors=('Ada Author',),
+        published=_dt.date(2024, 1, 1),
+        pdf_url='https://arxiv.org/pdf/2401.00002v1',
+    )
+    monkeypatch.setattr(ingest_arxiv, 'fetch_entries', lambda query: [entry])
+    monkeypatch.setattr(
+        ingest_arxiv,
+        'download_pdf',
+        lambda e, **kwargs: (pdf, hashlib.sha256(pdf).hexdigest()),
+    )
+
+    def reject(**kwargs: object) -> None:
+        raise KnowledgeError('document matches secret pattern')
+
+    monkeypatch.setattr(ingest_arxiv, 'ingest_document', reject)
+
+    assert ingest_arxiv.main(['--days', '1']) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload['reports'] == []
+    assert payload['errors'] and 'secret' in payload['errors'][0]
+    assert not (raw_root / '2401.00002v1.pdf').exists()
+    assert list(raw_root.iterdir()) == []
 
 
 def test_stage_raw_pdf_overwrites_atomically(tmp_path: Path) -> None:

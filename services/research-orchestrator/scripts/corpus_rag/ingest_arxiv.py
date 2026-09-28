@@ -124,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         ):
             skipped_existing.append(entry.arxiv_id)
             continue
+        staged: Path | None = None
         try:
             data, digest = download_pdf(
                 entry,
@@ -157,6 +158,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         except Exception as exc:  # noqa: BLE001 - per-source isolation
+            # Fail-closed: the source row persists in ingest_document before
+            # its extracted-text secret scan rejects the document, so a
+            # rejected source's canonical_uri must resolve to nothing.
+            if staged is not None:
+                staged.unlink(missing_ok=True)
             errors.append(f'{entry.arxiv_id}: {exc}')
             print(f'[ingest-arxiv] failure {entry.arxiv_id}: {exc}', file=sys.stderr)
 
