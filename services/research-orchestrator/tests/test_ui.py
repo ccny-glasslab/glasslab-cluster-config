@@ -11,11 +11,14 @@ citation locator rather than the stored (tautological)
 
 The corpus chat is a same-origin ``GET`` form (the loopback UI proxy forwards
 only ``GET``/``HEAD`` and injects the operator token), so ``?q=…`` renders the
-answer into the same page. Citation links preserve the question and select the
-cited source in the side panel, which embeds the same-origin PDF viewer
-iframe. The CSP tests pin the two deliberate deltas: ``form-action 'self'``
-and ``frame-src 'self'``; everything else still denies by default, and the
-document still carries no script and no external origin.
+answer into the same page. The answer's valid ``[n]`` ordinals become inline
+superscript citation markers (there is no end-of-answer reference list), each
+with a CSS-only hover/focus preview card that carries the source title, the
+verdict badge, and a "View source" affordance. The marker's link preserves the
+question and selects the cited source in the side panel, which embeds the
+same-origin PDF viewer iframe. The CSP tests pin the two deliberate deltas:
+``form-action 'self'`` and ``frame-src 'self'``; everything else still denies
+by default, and the document still carries no script and no external origin.
 
 The tests use the repository's ``orchestrator_bundle`` fixture: a real
 SqliteStore engine with a fake runtime, no live cluster, and no network.
@@ -45,7 +48,8 @@ from app.schemas import (
     SourceType,
     TurnKind,
 )
-from app.ui import register_ui_routes
+from app.ui import _render_chat_answer, register_ui_routes
+from app.ui_chat import ChatAnswer, ChatCitation
 
 OPERATOR_TOKEN = 'test-operator-token'
 AUTH_HEADERS = {'X-Glasslab-Operator-Token': OPERATOR_TOKEN}
@@ -766,12 +770,167 @@ def test_ui_chat_renders_source_title_excerpt_and_badge(
         )
 
     assert response.status_code == 200
-    # The citation links the store-resolved title, quotes the excerpt, and
-    # carries the live locator verdict badge.
-    assert f'{_CHAT_TITLE}</a>' in response.text
+    # The marker's preview card links the store-resolved title, carries the
+    # live locator verdict badge and the "View source" affordance; the excerpt
+    # is quoted inline in the answer itself.
+    assert f'<span class="cite-title">{_CHAT_TITLE}</span>' in response.text
+    assert '<sup>1</sup>' in response.text
     assert _CHAT_CHUNK_TEXT in response.text
-    assert '✓ exact' in response.text
+    assert '>✓ exact</span>' in response.text
     assert 'knowledge://' not in response.text
+
+
+def test_ui_chat_inline_markers_replace_the_footnote_list(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    _seed_chat_corpus(engine)
+    chat_service = CorpusChatService(engine.store)
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        response = client.get(
+            '/ui/',
+            params={'q': _CHAT_QUESTION},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    text = response.text
+    # NotebookLM-style inline citation: the ordinal renders as a superscript
+    # marker inside the marker anchor, right at the ``[1]`` position in the
+    # answer text, and the old end-of-answer reference list is gone.
+    assert re.search(
+        r'<a class="cite" href="[^"]+"><sup>1</sup>', text
+    ) is not None
+    assert 'chat-citations' not in text
+    assert '<ul class="chat-citations">' not in text
+    # The raw bracketed ordinal is never emitted as literal answer text.
+    assert '[1]' not in text
+    # The card is revealed by CSS only, and the page still carries no script.
+    assert '.cite:hover .cite-card,.cite:focus-within .cite-card' in text
+    assert '<script' not in text
+
+
+def test_ui_chat_marker_card_carries_title_badge_and_view_source(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    _seed_chat_corpus(engine)
+    chat_service = CorpusChatService(engine.store)
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        response = client.get(
+            '/ui/',
+            params={'q': _CHAT_QUESTION},
+            headers=AUTH_HEADERS,
+        )
+
+    text = response.text
+    assert 'class="cite-card"' in text
+    assert f'<span class="cite-title">{_CHAT_TITLE}</span>' in text
+    assert 'class="cite-badge badge-exact"' in text
+    assert '<span class="cite-cta">View source</span>' in text
+    # No inline style may carry the card geometry: all CSS stays in the
+    # nonced stylesheet.
+    assert re.search(r'\sstyle="', text) is None
+
+
+def test_ui_chat_escapes_malicious_citation_title(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    _seed_chat_corpus(engine, title='"><img src=x onerror=alert(1)>')
+    chat_service = CorpusChatService(engine.store)
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        response = client.get(
+            '/ui/',
+            params={'q': _CHAT_QUESTION},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert '<img' not in response.text
+    assert '&lt;img src=x onerror=alert(1)&gt;' in response.text
+    assert re.search(r'onerror="', response.text) is None
+    assert '<script' not in response.text
+
+
+def test_render_chat_answer_maps_valid_ordinals_and_keeps_invalid_literal(
+) -> None:
+    answer = ChatAnswer(
+        answer='[1] "alpha" [2] "beta" [3] "gamma" [0] "zero" [999] "x" [9x]',
+        citations=[
+            ChatCitation(
+                source_id='src-a',
+                title='Alpha',
+                excerpt='alpha',
+                verdict='exact',
+                page=0,
+            ),
+            ChatCitation(
+                source_id='src-b',
+                title='Beta',
+                excerpt='beta',
+                verdict='fuzzy',
+                page=4,
+            ),
+        ],
+    )
+
+    rendered = _render_chat_answer('why?', answer)
+
+    assert rendered.count('<a class="cite"') == 2
+    assert '<sup>1</sup>' in rendered
+    assert '<sup>2</sup>' in rendered
+    # Out-of-range ordinals and malformed brackets stay literal text.
+    for literal in ('[3]', '[0]', '[999]', '[9x]'):
+        assert literal in rendered
+    # [2] links to citations[1] with its 1-based human page number.
+    second = re.search(
+        r'<a class="cite" href="([^"]+)"><sup>2</sup>', rendered
+    )
+    assert second is not None
+    query = parse_qs(urlsplit(html.unescape(second.group(1))).query)
+    assert query['q'] == ['why?']
+    assert query['source'] == ['src-b']
+    assert query['page'] == ['5']
+    assert query['excerpt'] == ['beta']
+    # [1] carries the first citation's title and verdict in its card.
+    first_card = re.search(
+        r'<a class="cite" href="[^"]+"><sup>1</sup>(.*?)</a>', rendered
+    )
+    assert first_card is not None
+    assert '<span class="cite-title">Alpha</span>' in first_card.group(1)
+    assert 'class="cite-badge badge-exact"' in first_card.group(1)
+    # With no citations there is no valid ordinal: the bracket stays literal.
+    assert (
+        _render_chat_answer('q', ChatAnswer(answer='[1] no citations'))
+        == '[1] no citations'
+    )
+
+
+def test_render_chat_answer_escapes_hostile_citation_fields() -> None:
+    payload = '<script>alert(1)</script>'
+    answer = ChatAnswer(
+        answer=f'[1] "safe" {payload}',
+        citations=[
+            ChatCitation(
+                source_id='src-a',
+                title='</span><img src=x onerror=alert(1)>',
+                excerpt=f'quote {payload}',
+                verdict='exact',
+                page=0,
+            )
+        ],
+    )
+
+    rendered = _render_chat_answer('q', answer)
+
+    assert '<script' not in rendered
+    assert '<img' not in rendered
+    assert '<a class="cite" href=' in rendered
+    assert '&lt;script&gt;alert(1)&lt;/script&gt;' in rendered
+    assert '&lt;/span&gt;&lt;img src=x onerror=alert(1)&gt;' in rendered
+    assert re.search(r'onerror="', rendered) is None
 
 
 def test_ui_chat_empty_corpus_shows_no_evidence(orchestrator_bundle) -> None:

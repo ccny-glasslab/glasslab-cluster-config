@@ -9,8 +9,10 @@ notebook over durable orchestrator state:
   run's context packets, with the evidence inspector -- the packet's ranked
   sources plus the locator-classified citation -- folded into its Context
   packets tab;
-* the **Ask the corpus** column holds the same-origin ``GET`` chat form, the
-  answer, and its citation links;
+* the **Ask the corpus** column holds the same-origin ``GET`` chat form and
+  the answer, whose ``[n]`` citation positions render as inline superscript
+  markers with a CSS-only hover/focus preview card (no end-of-answer
+  reference list, no script);
 * the **Viewer** column shows the selected content: the cited source's
   same-origin PDF viewer iframe, or the selected run's artifact tree (folders
   are native ``<details>``/``<summary>``) with the digest-verified text
@@ -23,10 +25,12 @@ usable.
 
 When a corpus-chat service is injected, the center column answers ``?q=…``
 from a same-origin ``GET`` form (the loopback UI proxy forwards only
-``GET``/``HEAD``); every citation links back with
+``GET``/``HEAD``); every valid ``[n]`` ordinal in the answer becomes an inline
+``<sup>`` citation marker whose anchor links back with
 ``?q=&source=&page=&excerpt=``, and selecting one embeds the same-origin PDF
-viewer iframe for the cited source. The page itself still emits no script and
-no external resource.
+viewer iframe for the cited source. Hovering or keyboard-focusing a marker
+reveals its preview card (title, verdict badge, "View source") through CSS
+only. The page itself still emits no script and no external resource.
 
 The page is escape-first: every interpolated value passes through
 :func:`html.escape`, the document body is shown as escaped text inside
@@ -36,7 +40,8 @@ unchanged through the loopback UI proxy. The Content-Security-Policy keeps
 ``default-src 'none'`` and a per-response style nonce, and widens only
 ``form-action`` to ``'self'`` (the chat form) and adds ``frame-src 'self'``
 (the viewer iframe); no remote origin can load. There is deliberately no
-``script-src`` at all, so the tabs and the file tree are pure HTML and CSS.
+``script-src`` at all, so the tabs, the file tree, and the citation hover
+cards are pure HTML and CSS.
 """
 
 from __future__ import annotations
@@ -50,6 +55,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 import html
+import re
 import secrets
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode
@@ -79,7 +85,7 @@ if TYPE_CHECKING:
     from .corpus_rag.chat import CorpusChatService
     from .engine import ResearchOrchestrator
     from .schemas import ArtifactRecord, ContextPacket
-    from .ui_chat import ChatCitation
+    from .ui_chat import ChatAnswer, ChatCitation
 
 # A browser text pane is not a download surface: the preview is capped well
 # below the signed-link ceiling so one large artifact cannot stall the page.
@@ -90,6 +96,12 @@ _CITATION_BADGES: dict[CitationClass, str] = {
     'fuzzy': '≈ fuzzy',
     'none': '✗ unverified',
 }
+
+# An inline citation ordinal in the extractive answer: ``[n]`` selects
+# ``citations[n-1]``. The digit run is bounded so a hostile corpus string can
+# never make ``int()`` parse a pathologically long number, and a non-matching
+# or out-of-range ``[n]`` stays escaped literal text.
+_CITATION_ORDINAL_RE = re.compile(r'\[(\d{1,3})\]')
 
 # The Sources tab strip: (radio id, label text, panel id). The panel id is
 # derived from the radio id suffix so the CSS sibling selectors, the labels,
@@ -268,8 +280,34 @@ transition:background-color .15s ease}
 .ask-form button:hover{background:var(--accent-hover)}
 .chat-turn{margin:1rem 0 0;padding:.9rem 1.05rem;background:var(--well);
 border:1px solid var(--line-faint);border-radius:var(--radius-sm)}
-.chat-citations{margin-top:.55rem}
-.chat-citations p{margin:.35rem 0 0}
+/* Inline citations: a superscript ordinal marker whose preview card is a
+   CSS-only hover/focus popover (no script, no inline style). The card opens
+   downward, inside the chat column's scroll area, so it is not clipped by
+   the column overflow at the common top-of-answer hover position. */
+.cite{position:relative;display:inline-block;margin:0 .16rem;
+font-weight:600;color:var(--accent);text-decoration:none;cursor:pointer}
+.cite sup{font-size:.7em;line-height:0}
+.cite:hover{color:var(--accent-hover)}
+.cite:focus-visible{outline:2px solid var(--accent);outline-offset:2px;
+border-radius:3px}
+.cite-card{position:absolute;top:calc(100% + .5rem);left:0;z-index:4;
+display:block;inline-size:max-content;max-inline-size:min(17rem,80vw);
+padding:.6rem .72rem;background:var(--surface);border:1px solid var(--line);
+border-radius:var(--radius-sm);box-shadow:0 18px 36px -20px rgba(0,0,0,.95);
+font-size:.8125rem;font-weight:400;line-height:1.45;text-align:left;
+white-space:normal;visibility:hidden;opacity:0;pointer-events:none;
+transition:opacity .12s ease}
+.cite:hover .cite-card,.cite:focus-within .cite-card{visibility:visible;
+opacity:1}
+.cite-title{display:block;color:var(--accent);font-weight:600;
+text-decoration:underline;text-decoration-color:var(--accent-dim);
+text-underline-offset:2.5px}
+.cite-badge{display:inline-block;margin-top:.4rem;padding:.1rem .5rem;
+border:1px solid;border-radius:999px;font-size:.6875rem;font-weight:600;
+line-height:1.4;white-space:nowrap}
+.cite-cta{display:block;margin-top:.4rem;color:var(--text-muted);
+font-size:.75rem}
+.cite-cta::after{content:" →"}
 .pdf-viewer{flex:1 1 auto;min-block-size:0;display:flex;
 flex-direction:column;margin:.5rem 0 0}
 .pdf-viewer iframe{display:block;flex:1 1 auto;min-block-size:0;
@@ -292,7 +330,7 @@ main{display:flex;flex-direction:column}
 }
 @media (max-width:640px){body{padding:1.2rem .8rem 2.2rem}
 h1{font-size:1.2rem}.pane{padding:.95rem .95rem 1.05rem}}
-@media (prefers-reduced-motion:reduce){a,button{transition:none}}
+@media (prefers-reduced-motion:reduce){a,button,.cite-card{transition:none}}
 """.strip()
 
 
@@ -759,32 +797,57 @@ def _render_citation(packet: ContextPacket, excerpt: str | None) -> str:
     )
 
 
-def _render_chat_citations(
+def _render_citation_marker(
     question: str,
-    citations: list[ChatCitation],
+    ordinal: int,
+    citation: ChatCitation,
 ) -> str:
-    if not citations:
-        return ''
-    items = []
-    for citation in citations:
-        excerpt = redact_free_text(citation.excerpt)
-        href = _page_url(
-            q=question,
-            source=citation.source_id,
-            # citation.page is the 0-based chunk page_start; the viewer URL and
-            # the boxes route both use the 1-based human page number.
-            page=str(citation.page + 1) if citation.page is not None else None,
-            excerpt=excerpt,
+    """One inline superscript marker and its CSS-only hover preview card."""
+    excerpt = redact_free_text(citation.excerpt)
+    href = _page_url(
+        q=question,
+        source=citation.source_id,
+        # citation.page is the 0-based chunk page_start; the viewer URL and
+        # the boxes route both use the 1-based human page number.
+        page=str(citation.page + 1) if citation.page is not None else None,
+        excerpt=excerpt,
+    )
+    return (
+        f'<a class="cite" href="{_escape(href)}">'
+        f'<sup>{ordinal}</sup>'
+        '<span class="cite-card">'
+        f'<span class="cite-title">{_escape(citation.title)}</span>'
+        f'<span class="cite-badge badge-{citation.verdict}">'
+        f'{_escape(_CITATION_BADGES[citation.verdict])}</span>'
+        '<span class="cite-cta">View source</span>'
+        '</span>'
+        '</a>'
+    )
+
+
+def _render_chat_answer(question: str, answer: ChatAnswer) -> str:
+    """Render the answer with inline superscript citation markers.
+
+    Escape-first: every literal segment is escaped and only a valid ``[n]``
+    ordinal (``1 <= n <= len(answer.citations)``) becomes the controlled marker
+    element. There is no end-of-answer reference block; the quoted excerpts
+    are already inline in the answer text.
+    """
+    text = redact_free_text(answer.answer)
+    citations = answer.citations
+    rendered: list[str] = []
+    cursor = 0
+    for match in _CITATION_ORDINAL_RE.finditer(text):
+        ordinal = int(match.group(1))
+        if not 1 <= ordinal <= len(citations):
+            continue
+        rendered.append(_escape(text[cursor : match.start()]))
+        rendered.append(
+            _render_citation_marker(question, ordinal, citations[ordinal - 1])
         )
-        items.append(
-            '<li>'
-            f'{_link(href, citation.title)} '
-            f'<span class="badge badge-{citation.verdict}">'
-            f'{_escape(_CITATION_BADGES[citation.verdict])}</span>'
-            f'<p><code>{_escape(excerpt)}</code></p>'
-            '</li>'
-        )
-    return '<ul class="chat-citations">' + '\n'.join(items) + '</ul>'
+        cursor = match.end()
+    rendered.append(_escape(text[cursor:]))
+    return ''.join(rendered)
 
 
 def _render_chat_panel(
@@ -815,8 +878,7 @@ def _render_chat_panel(
                 f'<p><strong>Question:</strong> '
                 f'{_escape(display_question)}</p>'
                 f'<p><strong>Answer:</strong> '
-                f'{_escape(redact_free_text(answer.answer))}</p>'
-                f'{_render_chat_citations(display_question, answer.citations)}'
+                f'{_render_chat_answer(display_question, answer)}</p>'
                 '</div>'
             )
     return (
