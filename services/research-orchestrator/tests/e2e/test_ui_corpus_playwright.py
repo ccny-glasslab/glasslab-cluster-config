@@ -24,24 +24,34 @@ Assertions (issues #618/#619):
    ``/ui/pdf/document.pdf``.
 
 Every step captures a screenshot and appends to the action log under
-``/home/gr66ss/tmp-tests/qa-artifacts/``.
+``<tempdir>/glasslab-ui-qa/artifacts/`` (see ``ui_qa.ARTIFACTS_DIR``).
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
+import tempfile
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-# The browser stack is installed only in the Playwright venv; the default
-# service test environment must collect this module and skip, not error.
-pytest.importorskip('playwright.sync_api')
+if TYPE_CHECKING:
+    from playwright.sync_api import Frame, Page
 
-from playwright.sync_api import Frame, Page, expect, sync_playwright
+# The browser stack is installed only in the Playwright venv. The module must
+# still collect -- and its portability guard must still run -- in the default
+# service test environment, so the browser tests skip by marker rather than
+# through a module-level importorskip.
+PLAYWRIGHT_INSTALLED = importlib.util.find_spec('playwright') is not None
+PLAYWRIGHT_SKIP = pytest.mark.skipif(
+    not PLAYWRIGHT_INSTALLED,
+    reason='the playwright package is installed only in the Playwright venv',
+)
 
 # Importing the fixture registers it in this module's namespace; it lives in a
 # plain module rather than a second conftest.py so its basename cannot shadow
@@ -103,7 +113,26 @@ def _wait_for_frame(page: Page, prefix: str, timeout_ms: int = 30_000) -> Frame:
     )
 
 
+def test_ui_qa_defaults_are_portable() -> None:
+    """The QA defaults must live under the temp dir, never a user home path."""
+    from ui_qa import DEFAULT_ARTIFACTS_DIR, DEFAULT_SCRATCH_ROOT
+
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    for name, default in (
+        ('DEFAULT_ARTIFACTS_DIR', DEFAULT_ARTIFACTS_DIR),
+        ('DEFAULT_SCRATCH_ROOT', DEFAULT_SCRATCH_ROOT),
+    ):
+        resolved = default.resolve()
+        assert '/home/' not in str(resolved), f'{name} is user-specific: {resolved}'
+        assert resolved.is_relative_to(temp_root), (
+            f'{name}={resolved} is not under the temp dir {temp_root}'
+        )
+
+
+@PLAYWRIGHT_SKIP
 def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
+    from playwright.sync_api import expect, sync_playwright
+
     env = ui_qa
     manifest = env.manifest
     expected_page = str(manifest['page'])
@@ -366,7 +395,10 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
         browser.close()
 
 
+@PLAYWRIGHT_SKIP
 def test_ui_requires_operator_token_direct(ui_qa) -> None:
+    from playwright.sync_api import sync_playwright
+
     env = ui_qa
     with sync_playwright() as playwright:
         request = playwright.request.new_context()

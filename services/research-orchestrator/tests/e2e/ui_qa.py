@@ -11,10 +11,10 @@ interpreter that can import the service dependencies. ``GLASSLAB_QA_APP_PYTHON``
 overrides the auto-detection (the Playwright venv itself is tried first, then
 ``python3``).
 
-Scratch state lives under ``/home/gr66ss/tmp-tests/qa-run`` and artifacts under
-``/home/gr66ss/tmp-tests/qa-artifacts`` (both overridable by environment
-variables); nothing is written to the repository or to ``/tmp`` beyond the
-process temp dir.
+Scratch state lives under ``<tempdir>/glasslab-ui-qa/run`` and artifacts under
+``<tempdir>/glasslab-ui-qa/artifacts`` (both overridable through the
+``GLASSLAB_QA_SCRATCH`` and ``GLASSLAB_QA_ARTIFACTS`` environment variables);
+nothing is written to the repository.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -42,11 +43,14 @@ SEED_SCRIPT = SERVICE_ROOT / 'scripts' / 'qa' / 'seed_ui_corpus.py'
 OPERATOR_TOKEN = 'qa-operator-token-618-619'
 TOKEN_ENV = 'GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN'
 
+DEFAULT_ARTIFACTS_DIR = Path(tempfile.gettempdir()) / 'glasslab-ui-qa' / 'artifacts'
+DEFAULT_SCRATCH_ROOT = Path(tempfile.gettempdir()) / 'glasslab-ui-qa' / 'run'
+
 ARTIFACTS_DIR = Path(
-    os.environ.get('GLASSLAB_QA_ARTIFACTS', '/home/gr66ss/tmp-tests/qa-artifacts')
+    os.environ.get('GLASSLAB_QA_ARTIFACTS', str(DEFAULT_ARTIFACTS_DIR))
 )
 SCRATCH_ROOT = Path(
-    os.environ.get('GLASSLAB_QA_SCRATCH', '/home/gr66ss/tmp-tests/qa-run')
+    os.environ.get('GLASSLAB_QA_SCRATCH', str(DEFAULT_SCRATCH_ROOT))
 )
 
 _ARTIFACT_FILES = (
