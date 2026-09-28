@@ -27,15 +27,20 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.corpus_rag.contracts import RetrievedHit
-from app.corpus_rag.retrieval import HybridRetriever, RetrievalOptions
+from app.corpus_rag.retrieval import HybridRetriever, Mode, RetrievalOptions
 from app.redaction import redact_free_text
 from app.ui_chat import ChatAnswer, ChatCitation
 
+if TYPE_CHECKING:
+    from app.corpus_rag.vector_index import VectorIndex
+
 DEFAULT_TOP_K = 5
 DEFAULT_MAX_QUESTION_CHARS = 2000
+DEFAULT_RETRIEVAL_MODE: Mode = 'lexical'
+_DENSE_MODES = ('dense', 'hybrid', 'hybrid+rerank')
 _EXCERPT_CHARS = 240
 _INSUFFICIENT_ANSWER = (
     'No corpus evidence is available to answer that question.'
@@ -67,12 +72,40 @@ class CorpusChatService:
         top_k: int = DEFAULT_TOP_K,
         max_question_chars: int = DEFAULT_MAX_QUESTION_CHARS,
         llm: Any = None,
+        retrieval_mode: Mode = DEFAULT_RETRIEVAL_MODE,
+        vector_index: VectorIndex | None = None,
+        embedding_provider: Any = None,
+        reranker: Any = None,
     ) -> None:
         self._store = store
         self._top_k = top_k
         self._max_question_chars = max_question_chars
         self._llm = llm
-        self._retriever = HybridRetriever(store)
+        # Dense/hybrid retrieval requires both a vector index and a query
+        # embedder. When the mode asks for dense but either is missing the
+        # service degrades to lexical rather than returning zero hits (the
+        # dense channel is fused by rank, so an absent channel is empty).
+        requested = retrieval_mode if retrieval_mode in (
+            'lexical', 'dense', 'hybrid', 'hybrid+rerank'
+        ) else DEFAULT_RETRIEVAL_MODE
+        self._retrieval_mode: Mode = (
+            'lexical'
+            if requested in _DENSE_MODES
+            and (vector_index is None or embedding_provider is None)
+            else requested
+        )
+        self._retriever = HybridRetriever(
+            store,
+            vector_index=vector_index,
+            embedding_provider=embedding_provider,
+            reranker=reranker,
+            model_id=getattr(embedding_provider, 'model_id', 'offline-deterministic'),
+        )
+
+    @property
+    def retrieval_mode(self) -> Mode:
+        """The effective mode after the dense-availability fallback."""
+        return self._retrieval_mode
 
     def answer(self, question: str) -> ChatAnswer:
         prepared = self._prepare_question(question)
@@ -80,7 +113,9 @@ class CorpusChatService:
             return ChatAnswer(answer=_INSUFFICIENT_ANSWER, insufficient=True)
         result = self._retriever.retrieve(
             prepared,
-            options=RetrievalOptions(mode='lexical', k_final=self._top_k),
+            options=RetrievalOptions(
+                mode=self._retrieval_mode, k_final=self._top_k
+            ),
         )
         hits = list(result.hits)
         if not hits:
@@ -174,3 +209,50 @@ class CorpusChatService:
             )
         except Exception:  # noqa: BLE001 - any provider failure must fall back
             return None
+
+
+def build_corpus_chat_service(
+    store: Any,
+    settings: Any,
+    *,
+    top_k: int = DEFAULT_TOP_K,
+    llm: Any = None,
+) -> CorpusChatService:
+    """Build the ``/ui`` chat service under the configured retrieval mode.
+
+    ``lexical`` (the default) needs no embedding backend. ``dense``/``hybrid``
+    build the provider and vector index; any failure degrades to lexical, so
+    app startup never depends on the dense lane being ready.
+    """
+    mode = getattr(settings, 'ui_chat_retrieval_mode', DEFAULT_RETRIEVAL_MODE)
+    vector_index: VectorIndex | None = None
+    embedding_provider: Any = None
+    if mode in _DENSE_MODES:
+        try:
+            from app.knowledge_dense import create_embedding_provider
+
+            from app.corpus_rag.dense import (
+                open_rag_vector_index,
+                rag_dense_ready,
+            )
+
+            provider = create_embedding_provider(
+                settings.knowledge_embedding_model,
+                revision=settings.knowledge_embedding_revision,
+            )
+            if rag_dense_ready(store, provider):
+                vector_index = open_rag_vector_index(
+                    store, provider, pg_dsn=settings.knowledge_dense_pg_dsn
+                )
+                embedding_provider = provider
+        except Exception:  # noqa: BLE001 - dense is additive
+            vector_index = None
+            embedding_provider = None
+    return CorpusChatService(
+        store,
+        top_k=top_k,
+        llm=llm,
+        retrieval_mode=mode,
+        vector_index=vector_index,
+        embedding_provider=embedding_provider,
+    )

@@ -52,7 +52,7 @@ def test_corpus_rag_store_path_defaults_none() -> None:
 def test_ui_and_rag_flags_default() -> None:
     settings = Settings()
     assert settings.ui_chat_enabled is True
-    assert settings.ui_chat_dense is False
+    assert settings.ui_chat_retrieval_mode == 'lexical'
     assert settings.ui_pdf_enabled is True
     assert settings.ui_upload_enabled is True
     assert settings.rag_llm_enabled is False
