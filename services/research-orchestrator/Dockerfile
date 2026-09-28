@@ -5,20 +5,21 @@ ARG OPENCODE_VERSION=1.18.14
 # default branch: the current bootstrap requires the repo's pm/ tooling,
 # which no release tag carries, so a branch/tag pin breaks the build.
 ARG HERMES_COMMIT=6e69a8933adda7dbbff7cf3009a259a4524477e9
-# Issue #603: the Hermes bootstrap below is fetched and executed as root. Pin
-# its exact bytes (curl the URL, review the diff, then update this hash) so a
-# changed upstream script fails the build at sha256sum -c instead of silently
-# executing new code. A hash mismatch is intentional; bump it deliberately.
-ARG HERMES_INSTALL_SHA256=abca7d8aed691fe608d794bd44e33ffc6f68513c5b4e9270d176701e16afccd9
+# Issue #603/#611: the Hermes bootstrap is vendored in-tree and executed as
+# root. Pin the vendored bytes (review changes against vendor/VENDOR.md, then
+# update this hash) so any edit fails the build at sha256sum -c instead of
+# silently executing new code. The build no longer fetches the installer
+# over the network; it COPYs the reviewed file into the image.
+ARG HERMES_INSTALL_SHA256=eabdc86a11edc4dd4386215d927677f9a5be40318e20817d101af98b78a1f3b2
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+COPY services/research-orchestrator/vendor/install-hermes.sh /tmp/install-hermes.sh
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git nodejs npm ca-certificates curl xz-utils libatomic1 \
     && npm install --global "opencode-ai@${OPENCODE_VERSION}" \
-    && curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/install-hermes.sh \
     && echo "${HERMES_INSTALL_SHA256}  /tmp/install-hermes.sh" | sha256sum -c - \
     # The orchestrator does not use Hermes' browser tooling; the pinned
     # bootstrap supports --skip-browser. It no longer carries the npm-workspace
