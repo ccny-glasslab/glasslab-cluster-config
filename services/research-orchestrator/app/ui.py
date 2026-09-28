@@ -1,17 +1,29 @@
-"""Read-only, server-rendered corpus and reports page for the operator UI.
+"""Read-only, server-rendered corpus and reports notebook for the operator UI.
 
-One operator-gated route (``GET /ui/``) renders a no-JavaScript, three-pane
-view over durable orchestrator state: the sources index (runs, corpus
-sources, and the selected run's context packets), a digest-verified text
-preview of a linkable run artifact, and a server-side citation inspector that
-locates a supplied excerpt inside a ``ContextPacket``'s exact supplied text
-using :mod:`app.citation_locator` (never the tautological stored
-``ranked_sources[].verified`` flag).
+One operator-gated route (``GET /ui/``) renders a no-JavaScript, three-column
+notebook over durable orchestrator state:
 
-When a corpus-chat service is injected, a full-width ``Ask the corpus``
-section renders above the panes. It is a same-origin ``GET`` form (the
-loopback UI proxy forwards only ``GET``/``HEAD``), so ``?q=…`` re-renders the
-page with the answer; every citation links back with
+* the **Sources** column is the navigational index: a CSS-only tab strip
+  (visually hidden radio inputs, ``<label>`` tabs, and ``:checked`` sibling
+  selectors) over the run list, the corpus source table, and the selected
+  run's context packets, with the evidence inspector -- the packet's ranked
+  sources plus the locator-classified citation -- folded into its Context
+  packets tab;
+* the **Ask the corpus** column holds the same-origin ``GET`` chat form, the
+  answer, and its citation links;
+* the **Viewer** column shows the selected content: the cited source's
+  same-origin PDF viewer iframe, or the selected run's artifact tree (folders
+  are native ``<details>``/``<summary>``) with the digest-verified text
+  preview of the selected file.
+
+The page fills the viewport: the title is a static header and each column
+scrolls internally, so the document body never grows tall with content. Below
+1100px the grid stacks into one column (chat first) and every section stays
+usable.
+
+When a corpus-chat service is injected, the center column answers ``?q=…``
+from a same-origin ``GET`` form (the loopback UI proxy forwards only
+``GET``/``HEAD``); every citation links back with
 ``?q=&source=&page=&excerpt=``, and selecting one embeds the same-origin PDF
 viewer iframe for the cited source. The page itself still emits no script and
 no external resource.
@@ -23,17 +35,20 @@ filesystem paths are never emitted. Links are root-relative so the page works
 unchanged through the loopback UI proxy. The Content-Security-Policy keeps
 ``default-src 'none'`` and a per-response style nonce, and widens only
 ``form-action`` to ``'self'`` (the chat form) and adds ``frame-src 'self'``
-(the viewer iframe); no remote origin can load.
+(the viewer iframe); no remote origin can load. There is deliberately no
+``script-src`` at all, so the tabs and the file tree are pure HTML and CSS.
 """
 
 from __future__ import annotations
 
-# allow: SIZE_OK — this is one escaped HTML/CSS response builder; most lines
-# are literal markup and splitting the panes across modules would scatter a
-# single response contract without reducing what a reviewer must hold.
+# allow: SIZE_OK — this is one escaped HTML/CSS response builder; almost all
+# of its lines are literal markup and CSS token tables, and splitting the
+# columns across modules would scatter a single response contract (the nonce,
+# the escaping, the root-relative URL scheme) without reducing what a
+# reviewer must hold.
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import html
 import secrets
 from typing import TYPE_CHECKING
@@ -76,6 +91,15 @@ _CITATION_BADGES: dict[CitationClass, str] = {
     'none': '✗ unverified',
 }
 
+# The Sources tab strip: (radio id, label text, panel id). The panel id is
+# derived from the radio id suffix so the CSS sibling selectors, the labels,
+# and the tests all agree on one naming scheme.
+_SOURCES_TABS = (
+    ('tab-runs', 'Runs', 'panel-runs'),
+    ('tab-corpus', 'Corpus sources', 'panel-corpus'),
+    ('tab-packets', 'Context packets', 'panel-packets'),
+)
+
 _PAGE_STYLES = """
 /* Dark token layer: near-black canvas, one indigo accent, semantic status
    colors. Text ramps stay at or above a 4.5:1 contrast ratio on pane
@@ -103,35 +127,45 @@ color-scheme:dark;
 --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,
 "Liberation Mono",monospace;
 }
-html{background-color:var(--bg);background-repeat:no-repeat;background-image:
+html{height:100%;background-color:var(--bg);background-repeat:no-repeat;
+background-image:
 radial-gradient(1100px 520px at 4rem -10rem,rgba(113,112,255,.13),
 rgba(113,112,255,0) 68%),
 radial-gradient(880px 460px at 100% -8rem,rgba(94,106,210,.07),
 rgba(94,106,210,0) 62%)}
-body{max-width:1400px;margin:0 auto;padding:2.5rem 1.25rem 4rem;
+/* Fixed-viewport notebook: the masthead is static and each of the three
+   columns scrolls its own body, so the document never grows with content. */
+body{box-sizing:border-box;block-size:100vh;block-size:100dvh;margin:0;
+padding:1.35rem 1.25rem 1.25rem;display:flex;flex-direction:column;overflow:hidden;
 font-family:var(--sans);font-size:.9375rem;line-height:1.58;
 color:var(--text-2);-webkit-font-smoothing:antialiased}
+.masthead{flex:none}
 h1,h2,h3{text-wrap:balance}
 p,li{text-wrap:pretty}
-h1{display:flex;align-items:center;gap:.6rem;margin:0 0 1.6rem;
+h1{display:flex;align-items:center;gap:.6rem;margin:0 0 1.1rem;
 font-size:1.375rem;font-weight:600;line-height:1.25;letter-spacing:-.02em;
 color:var(--text)}
 h1::before{content:"";flex:none;inline-size:.5rem;block-size:.5rem;
 border-radius:50%;background:var(--accent);
 box-shadow:0 0 14px 2px rgba(113,112,255,.55)}
-h2{margin:0 0 .95rem;padding-bottom:.6rem;border-bottom:1px solid var(--line);
-font-size:.6875rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
-color:var(--text-muted)}
-h3{margin:1.4rem 0 .55rem;font-size:.8125rem;font-weight:600;
-letter-spacing:.005em;color:var(--text-2)}
-h3:first-of-type{margin-top:.6rem}
-.panes{display:grid;align-items:start;gap:1.25rem;
-grid-template-columns:minmax(250px,1fr) minmax(0,2fr) minmax(0,1.5fr)}
-.pane{min-width:0;padding:1.15rem 1.25rem 1.4rem;border:1px solid var(--line);
+main{flex:1 1 auto;min-block-size:0;display:grid;gap:1rem;
+grid-template-columns:minmax(258px,.82fr) minmax(0,1.06fr) minmax(0,1.32fr)}
+.pane{min-inline-size:0;min-block-size:0;display:flex;flex-direction:column;
+overflow:hidden;padding:1.05rem 1.15rem 1.2rem;border:1px solid var(--line);
 border-radius:var(--radius);background:
 linear-gradient(180deg,rgba(255,255,255,.025),rgba(255,255,255,0) 6rem),
 var(--surface);box-shadow:0 24px 48px -38px rgba(0,0,0,.95),
 inset 0 1px 0 rgba(255,255,255,.03)}
+.column-head{flex:none}
+h2{margin:0 0 .8rem;padding-bottom:.55rem;border-bottom:1px solid var(--line);
+font-size:.6875rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+color:var(--text-muted)}
+h3{margin:1.2rem 0 .5rem;font-size:.8125rem;font-weight:600;
+letter-spacing:.005em;color:var(--text-2)}
+h3:first-of-type{margin-top:.4rem}
+.column-body{flex:1 1 auto;min-block-size:0;overflow:auto;
+overscroll-behavior:contain;scrollbar-gutter:stable}
+.column-body.is-fill{display:flex;flex-direction:column;overflow:hidden}
 p{margin:.7rem 0}
 strong{color:var(--text);font-weight:600}
 a{color:var(--accent);text-decoration:underline;
@@ -174,13 +208,54 @@ color:var(--ok-fg)}
 color:var(--warn-fg)}
 .badge-none{background:var(--bad-bg);border-color:var(--bad-line);
 color:var(--bad-fg)}
-#ask{margin:0 0 1.25rem}
+/* Zero-script tabs: the radios are visually hidden but stay focusable (Tab
+   reaches the checked one, arrow keys move the selection), the labels are
+   the visible tabs, and :checked sibling selectors swap panels and light
+   the active label. No script and no inline style is required. */
+.tabs{position:relative;flex:1 1 auto;min-block-size:0;display:flex;
+flex-direction:column}
+.tab-input{position:absolute;inline-size:1px;block-size:1px;margin:0;
+opacity:0;clip-path:inset(50%);pointer-events:none}
+.tab-strip{flex:none;display:flex;gap:.2rem;margin:0 0 .55rem;
+border-bottom:1px solid var(--line);overflow-x:auto}
+.tab{flex:none;margin-bottom:-1px;padding:.4rem .58rem;
+border:1px solid transparent;border-bottom:0;
+border-radius:var(--radius-sm) var(--radius-sm) 0 0;font-size:.75rem;
+font-weight:600;color:var(--text-muted);cursor:pointer;
+white-space:nowrap;user-select:none}
+.tab:hover{color:var(--text-2)}
+.tab-panels{flex:1 1 auto;min-block-size:0;overflow:auto;
+overscroll-behavior:contain}
+.tab-panel{display:none}
+#tab-runs:checked ~ .tab-panels > #panel-runs,
+#tab-corpus:checked ~ .tab-panels > #panel-corpus,
+#tab-packets:checked ~ .tab-panels > #panel-packets{display:block}
+#tab-runs:checked ~ .tab-strip > label[for="tab-runs"],
+#tab-corpus:checked ~ .tab-strip > label[for="tab-corpus"],
+#tab-packets:checked ~ .tab-strip > label[for="tab-packets"]{color:var(--text);
+background:var(--raised);border-color:var(--line);
+border-bottom-color:transparent}
+#tab-runs:focus-visible ~ .tab-strip > label[for="tab-runs"],
+#tab-corpus:focus-visible ~ .tab-strip > label[for="tab-corpus"],
+#tab-packets:focus-visible ~ .tab-strip > label[for="tab-packets"]{outline:2px solid var(--accent);outline-offset:2px}
+li.is-current,tr.is-current td{background:rgba(139,147,255,.09)}
+a[aria-current="page"]{color:var(--text);text-decoration-color:currentColor}
+/* Recursive artifact tree: folders are native <details> disclosures and
+   files are links (only under the linkable prefixes) or muted labels. */
+ul.tree{margin:0;padding:0}
+ul.tree li{padding:.16rem 0;border-bottom:0}
+ul.tree ul.tree{margin-inline-start:.7rem;padding-inline-start:.6rem;
+border-inline-start:1px solid var(--line-faint)}
+details.tree-folder>summary{padding:.12rem 0;font-size:.8125rem;
+font-weight:600;color:var(--text-2);cursor:pointer}
+details.tree-folder>summary:hover{color:var(--text)}
+.tree-meta{font-size:.75rem}
 .ask-form{display:flex;flex-wrap:wrap;align-items:flex-end;gap:.6rem;
 margin:0}
 .ask-form label{flex:none;padding-bottom:.62rem;font-size:.6875rem;
 font-weight:600;letter-spacing:.08em;text-transform:uppercase;
 color:var(--text-muted)}
-.ask-form input[type=text]{flex:1 1 18rem;min-width:0;
+.ask-form input[type=text]{flex:1 1 12rem;min-width:0;
 padding:.62rem .8rem;background:var(--well);border:1px solid var(--line);
 border-radius:var(--radius-sm);color:var(--text);font:inherit;
 font-size:.875rem}
@@ -195,14 +270,28 @@ transition:background-color .15s ease}
 border:1px solid var(--line-faint);border-radius:var(--radius-sm)}
 .chat-citations{margin-top:.55rem}
 .chat-citations p{margin:.35rem 0 0}
-.viewer{margin:.6rem 0 0}
-.viewer iframe{display:block;inline-size:100%;
-block-size:min(78vh,860px);border:1px solid var(--line);
-border-radius:var(--radius-sm);background:var(--well)}
+.pdf-viewer{flex:1 1 auto;min-block-size:0;display:flex;
+flex-direction:column;margin:.5rem 0 0}
+.pdf-viewer iframe{display:block;flex:1 1 auto;min-block-size:0;
+inline-size:100%;border:1px solid var(--line);border-radius:var(--radius-sm);
+background:var(--well)}
 ::selection{background:rgba(113,112,255,.35);color:var(--text)}
-@media (max-width:1100px){.panes{grid-template-columns:1fr}}
-@media (max-width:640px){body{padding:1.6rem .9rem 2.8rem}
-h1{font-size:1.2rem}.pane{padding:1rem 1rem 1.15rem}}
+/* Below 1100px the notebook stacks into one column (chat first) and every
+   section returns to document flow instead of internal scrolling. */
+@media (max-width:1100px){
+body{block-size:auto;min-block-size:100vh;overflow:visible;
+padding:1.6rem .9rem 2.8rem}
+main{display:flex;flex-direction:column}
+#ask{order:1}
+#sources{order:2}
+#viewer{order:3}
+.pane{overflow:visible}
+.column-body,.tab-panels{overflow:visible}
+.column-body.is-fill{display:block;overflow:visible}
+.pdf-viewer iframe{block-size:70vh;flex:none}
+}
+@media (max-width:640px){body{padding:1.2rem .8rem 2.2rem}
+h1{font-size:1.2rem}.pane{padding:.95rem .95rem 1.05rem}}
 @media (prefers-reduced-motion:reduce){a,button{transition:none}}
 """.strip()
 
@@ -213,7 +302,9 @@ class UiRequest:
 
     ``question`` drives the chat answer; ``source_id``/``page`` select the
     cited source shown in the PDF viewer, with ``excerpt`` supplying the
-    exact-span highlight text.
+    exact-span highlight text. ``run_id``/``ref`` select the run whose file
+    tree is shown and the file previewed in the viewer; ``packet_id``
+    selects the packet inspected in the Sources column.
     """
 
     run_id: str | None = None
@@ -224,6 +315,14 @@ class UiRequest:
     source_id: str | None = None
     page: int | None = None
     nonce: str = ''
+
+
+@dataclass(slots=True)
+class _TreeFolder:
+    """One directory level of a run's artifact tree while it is rendered."""
+
+    folders: dict[str, _TreeFolder] = field(default_factory=dict)
+    files: list[str] = field(default_factory=list)
 
 
 def _escape(value: object) -> str:
@@ -237,8 +336,9 @@ def _page_url(**parameters: str | None) -> str:
     return f'/ui/?{urlencode(present)}'
 
 
-def _link(url: str, label: str) -> str:
-    return f'<a href="{_escape(url)}">{_escape(label)}</a>'
+def _link(url: str, label: str, *, current: bool = False) -> str:
+    marker = ' aria-current="page"' if current else ''
+    return f'<a href="{_escape(url)}"{marker}>{_escape(label)}</a>'
 
 
 def _digest_prefix(value: object, width: int = 12) -> str:
@@ -254,30 +354,74 @@ def _format_score(value: object) -> str:
     return '' if value is None else str(value)
 
 
-def _render_sources_pane(
+def _active_sources_tab(selection: UiRequest) -> str:
+    """Return the radio id the server marks checked on this render.
+
+    The radio group is the whole tab mechanism, so the initial selection must
+    come from the request: an inspected packet lands on the packets tab, a
+    cited/selected source on the corpus tab, and everything else (including a
+    selected run and a previewed file) on the runs tab.
+    """
+    if selection.packet_id:
+        return 'tab-packets'
+    if selection.source_id:
+        return 'tab-corpus'
+    return 'tab-runs'
+
+
+def _render_tab_inputs(selection: UiRequest) -> str:
+    active = _active_sources_tab(selection)
+    inputs = []
+    for tab_id, _, _ in _SOURCES_TABS:
+        checked = ' checked' if tab_id == active else ''
+        inputs.append(
+            '<input class="tab-input" type="radio" name="sources-tab" '
+            f'id="{tab_id}"{checked}>'
+        )
+    return '\n'.join(inputs)
+
+
+def _render_sources_panel(
     engine: ResearchOrchestrator,
     selection: UiRequest,
 ) -> str:
     runs = engine.store.list_runs()
     run_items = '\n'.join(
-        '<li>'
-        f'{_link(_page_url(run=run.run_id), run.run_id)} '
-        f'<span class="muted">{_escape(run.state)}</span> '
-        f'{_escape(run.objective)}'
-        '</li>'
+        '<li' + (' class="is-current"' if run.run_id == selection.run_id else '')
+        + '>'
+        + _link(
+            _page_url(run=run.run_id),
+            run.run_id,
+            current=run.run_id == selection.run_id,
+        )
+        + f' <span class="muted">{_escape(run.state)}</span> '
+        + _escape(run.objective)
+        + '</li>'
         for run in runs
     ) or '<li class="muted">no runs recorded</li>'
 
     corpus = engine.store.list_knowledge_sources()
     source_rows = '\n'.join(
-        '<tr>'
-        f'<td>{_escape(source.title or source.source_id)}</td>'
-        f'<td class="nowrap"><code>{_escape(source.source_type)}</code>'
-        f'<br><span class="muted">{_escape(source.run_scope or "shared")}'
-        '</span></td>'
-        f'<td class="nowrap">'
-        f'<code>{_escape(_digest_prefix(source.digest, 8))}</code></td>'
-        '</tr>'
+        '<tr'
+        + (
+            ' class="is-current"'
+            if source.source_id == selection.source_id
+            else ''
+        )
+        + '>'
+        + '<td>'
+        + _link(
+            _page_url(source=source.source_id),
+            source.title or source.source_id,
+            current=source.source_id == selection.source_id,
+        )
+        + '</td>'
+        + f'<td class="nowrap"><code>{_escape(source.source_type)}</code>'
+        + f'<br><span class="muted">{_escape(source.run_scope or "shared")}'
+        + '</span></td>'
+        + '<td class="nowrap">'
+        + f'<code>{_escape(_digest_prefix(source.digest, 8))}</code></td>'
+        + '</tr>'
         for source in corpus
     ) or '<tr><td colspan="3" class="muted">no corpus sources</td></tr>'
 
@@ -287,48 +431,167 @@ def _render_sources_pane(
             packets = engine.store.list_context_packets(selection.run_id)
         except RecordNotFound:
             packets = []
-    packet_links = [
-        _link(
+    packet_items = '\n'.join(
+        '<li'
+        + (
+            ' class="is-current"'
+            if packet.packet_id == selection.packet_id
+            else ''
+        )
+        + '>'
+        + _link(
             _page_url(run=selection.run_id, packet=packet.packet_id),
             packet.packet_id,
+            current=packet.packet_id == selection.packet_id,
         )
+        + f' <span class="muted">{_escape(packet.agent)} '
+        + f'turn {packet.turn_number} ({_escape(packet.turn_kind)})</span> '
+        + _escape(redact_free_text(packet.query))
+        + '</li>'
         for packet in packets
-    ]
-    packet_items = '\n'.join(
-        '<li>'
-        f'{link} <span class="muted">{_escape(packet.agent)} '
-        f'turn {packet.turn_number} ({_escape(packet.turn_kind)})</span> '
-        f'{_escape(redact_free_text(packet.query))}</li>'
-        for link, packet in zip(packet_links, packets, strict=True)
     ) or (
         '<li class="muted">select a run to list its context packets</li>'
         if not selection.run_id
         else '<li class="muted">no context packets for this run</li>'
     )
 
-    return (
-        '<h3>Runs</h3>'
-        f'<ul>{run_items}</ul>'
-        '<h3>Corpus sources</h3>'
+    panels = (
+        f'<section class="tab-panel" id="panel-runs">{run_items}</section>',
+        '<section class="tab-panel" id="panel-corpus">'
         '<table><tr><th>title</th><th>type / scope</th><th>digest</th>'
-        f'</tr>{source_rows}</table>'
-        '<h3>Context packets</h3>'
-        f'<ul>{packet_items}</ul>'
+        f'</tr>{source_rows}</table></section>',
+        '<section class="tab-panel" id="panel-packets">'
+        f'{packet_items}{_render_evidence_inspector(engine, selection)}'
+        '</section>',
+    )
+    tab_strip = '\n'.join(
+        f'<label class="tab" for="{tab_id}">{_escape(label)}</label>'
+        for tab_id, label, _ in _SOURCES_TABS
+    )
+    return (
+        '<aside class="pane" id="sources" aria-label="Sources">'
+        '<div class="column-head"><h2>Sources</h2></div>'
+        '<div class="tabs">'
+        f'{_render_tab_inputs(selection)}'
+        f'<div class="tab-strip">{tab_strip}</div>'
+        f'<div class="tab-panels">{"".join(panels)}</div>'
+        '</div>'
+        '</aside>'
     )
 
 
-def _linkable_artifacts(
+def _render_evidence_inspector(
+    engine: ResearchOrchestrator,
+    selection: UiRequest,
+) -> str:
+    heading = '<h3>Evidence inspector</h3>'
+    if not selection.packet_id:
+        return (
+            heading
+            + '<p class="muted">Select a context packet to inspect its '
+            'ranked sources and citation.</p>'
+        )
+    try:
+        packet = engine.store.get_context_packet(selection.packet_id)
+    except RecordNotFound:
+        return heading + '<p class="muted">Packet unavailable.</p>'
+    ranked_rows = '\n'.join(
+        '<tr>'
+        f'<td class="nowrap">{index}</td>'
+        f'<td><code>{_escape(source.get("source_id", ""))}</code></td>'
+        f'<td class="nowrap">'
+        f'<code>{_escape(_digest_prefix(source.get("digest"), 8))}</code></td>'
+        f'<td class="nowrap">'
+        f'{_escape(_format_score(source.get("score")))}</td>'
+        '</tr>'
+        for index, source in enumerate(packet.ranked_sources, start=1)
+    ) or '<tr><td colspan="4" class="muted">no ranked sources</td></tr>'
+    return (
+        heading
+        + f'<p><strong>Packet:</strong> '
+        f'<code>{_escape(packet.packet_id)}</code> · '
+        f'{_escape(packet.agent)} · turn {packet.turn_number} '
+        f'({_escape(packet.turn_kind)})</p>'
+        f'<p><strong>Query:</strong> {_escape(redact_free_text(packet.query))}'
+        '</p>'
+        '<h3>Ranked sources</h3>'
+        '<table><tr><th>#</th><th>source_id</th><th>digest</th>'
+        f'<th>score</th></tr>{ranked_rows}</table>'
+        + _render_citation(packet, selection.excerpt)
+    )
+
+
+def _artifact_refs(
     artifacts: list[ArtifactRecord],
 ) -> dict[str, ArtifactRecord]:
-    # Latest record wins, mirroring signed-link redemption and delivery dedup;
-    # only refs under LINKABLE_ARTIFACT_PREFIXES are ever previewable.
+    # Latest record wins, mirroring signed-link redemption and delivery dedup.
+    # The tree shows every run-relative artifact ref; only refs under
+    # LINKABLE_ARTIFACT_PREFIXES become preview links.
     latest: dict[str, ArtifactRecord] = {}
     for artifact in artifacts:
         ref = run_relative_ref(artifact.uri, artifact.run_id)
-        if ref is None or not ref.startswith(LINKABLE_ARTIFACT_PREFIXES):
+        if ref is None:
+            continue
+        try:
+            validate_ref(ref)
+        except LinkError:
             continue
         latest[ref] = artifact
     return latest
+
+
+def _render_tree_children(
+    folder: _TreeFolder,
+    refs: dict[str, ArtifactRecord],
+    selection: UiRequest,
+) -> str:
+    items = []
+    for name in sorted(folder.folders):
+        items.append(
+            '<li>'
+            '<details class="tree-folder" open>'
+            f'<summary>{_escape(name)}/</summary>'
+            '<ul class="tree">'
+            f'{_render_tree_children(folder.folders[name], refs, selection)}'
+            '</ul>'
+            '</details>'
+            '</li>'
+        )
+    for ref in sorted(folder.files):
+        artifact = refs[ref]
+        name = ref.rsplit('/', 1)[-1]
+        current = ref == selection.ref
+        if ref.startswith(LINKABLE_ARTIFACT_PREFIXES):
+            target = _link(
+                _page_url(run=selection.run_id, ref=ref),
+                name,
+                current=current,
+            )
+            meta = f'{artifact.type} · {_digest_prefix(artifact.sha256, 8)}'
+        else:
+            target = f'<span class="muted">{_escape(name)}</span>'
+            meta = 'text preview unavailable'
+        item_class = ' class="is-current"' if current else ''
+        items.append(
+            f'<li{item_class}>{target} '
+            f'<span class="tree-meta muted">{_escape(meta)}</span></li>'
+        )
+    return '\n'.join(items)
+
+
+def _render_artifact_tree(
+    refs: dict[str, ArtifactRecord],
+    selection: UiRequest,
+) -> str:
+    if not refs:
+        return '<p class="muted">no artifacts recorded for this run</p>'
+    root = _TreeFolder()
+    for ref in sorted(refs):
+        node = root
+        for part in ref.split('/')[:-1]:
+            node = node.folders.setdefault(part, _TreeFolder())
+        node.files.append(ref)
+    return f'<ul class="tree">{_render_tree_children(root, refs, selection)}</ul>'
 
 
 def _render_document_body(
@@ -402,45 +665,55 @@ def _render_cited_source(
     url = _pdf_viewer_url(selection.source_id, selection.page, excerpt)
     return (
         '<h3>Cited source</h3>'
-        '<div class="viewer">'
+        '<div class="pdf-viewer">'
         f'<iframe src="{_escape(url)}" title="Cited source PDF" '
         'loading="lazy"></iframe>'
         '</div>'
     )
 
 
-def _render_document_pane(
+def _render_run_view(
     engine: ResearchOrchestrator,
     settings: Settings,
     selection: UiRequest,
 ) -> str:
-    viewer = _render_cited_source(engine, settings, selection)
-    if not selection.run_id:
-        return (
-            viewer
-            + '<p class="muted">Select a run to list its linkable artifacts.'
-            '</p>'
+    refs = _artifact_refs(engine.store.list_artifacts(selection.run_id or ''))
+    if selection.ref:
+        preview = (
+            '<h3>Preview</h3>'
+            + _render_document_body(settings, selection, refs)
         )
-    linkable = _linkable_artifacts(engine.store.list_artifacts(selection.run_id))
-    artifact_items = '\n'.join(
-        '<li>'
-        f'{_link(_page_url(run=selection.run_id, ref=ref), ref)} '
-        f'<span class="muted">{_escape(artifact.type)} · '
-        f'{_escape(_digest_prefix(artifact.sha256))}</span>'
-        '</li>'
-        for ref, artifact in linkable.items()
-    ) or '<li class="muted">no linkable artifacts for this run</li>'
-    listing = f'<h3>Linkable artifacts</h3><ul>{artifact_items}</ul>'
-    if not selection.ref:
-        return (
-            viewer
-            + '<p class="muted">Select an artifact to preview its text.</p>'
-            + listing
+    else:
+        preview = (
+            '<p class="muted">Select a file in the tree to preview its '
+            'digest-verified text.</p>'
         )
     return (
-        viewer
-        + _render_document_body(settings, selection, linkable)
-        + listing
+        preview
+        + '<h3>Run files</h3>'
+        + _render_artifact_tree(refs, selection)
+    )
+
+
+def _render_viewer_panel(
+    engine: ResearchOrchestrator,
+    settings: Settings,
+    selection: UiRequest,
+) -> str:
+    if selection.source_id:
+        body_class = 'column-body is-fill'
+        body = _render_cited_source(engine, settings, selection)
+    elif selection.run_id:
+        body_class = 'column-body'
+        body = _render_run_view(engine, settings, selection)
+    else:
+        body_class = 'column-body'
+        body = '<p class="muted">Select a source or run.</p>'
+    return (
+        '<section class="pane" id="viewer">'
+        '<div class="column-head"><h2>Viewer</h2></div>'
+        f'<div class="{body_class}">{body}</div>'
+        '</section>'
     )
 
 
@@ -486,44 +759,6 @@ def _render_citation(packet: ContextPacket, excerpt: str | None) -> str:
     )
 
 
-def _render_evidence_pane(
-    engine: ResearchOrchestrator,
-    selection: UiRequest,
-) -> str:
-    if not selection.packet_id:
-        return (
-            '<p class="muted">Select a context packet to inspect a citation.'
-            '</p>'
-        )
-    try:
-        packet = engine.store.get_context_packet(selection.packet_id)
-    except RecordNotFound:
-        return '<p class="muted">Packet unavailable.</p>'
-    ranked_rows = '\n'.join(
-        '<tr>'
-        f'<td class="nowrap">{index}</td>'
-        f'<td><code>{_escape(source.get("source_id", ""))}</code></td>'
-        f'<td class="nowrap">'
-        f'<code>{_escape(_digest_prefix(source.get("digest"), 8))}</code></td>'
-        f'<td class="nowrap">'
-        f'{_escape(_format_score(source.get("score")))}</td>'
-        '</tr>'
-        for index, source in enumerate(packet.ranked_sources, start=1)
-    ) or '<tr><td colspan="4" class="muted">no ranked sources</td></tr>'
-    return (
-        f'<p><strong>Packet:</strong> '
-        f'<code>{_escape(packet.packet_id)}</code> · '
-        f'{_escape(packet.agent)} · turn {packet.turn_number} '
-        f'({_escape(packet.turn_kind)})</p>'
-        f'<p><strong>Query:</strong> {_escape(redact_free_text(packet.query))}'
-        '</p>'
-        '<h3>Ranked sources</h3>'
-        '<table><tr><th>#</th><th>source_id</th><th>digest</th>'
-        f'<th>score</th></tr>{ranked_rows}</table>'
-        + _render_citation(packet, selection.excerpt)
-    )
-
-
 def _render_chat_citations(
     question: str,
     citations: list[ChatCitation],
@@ -552,40 +787,42 @@ def _render_chat_citations(
     return '<ul class="chat-citations">' + '\n'.join(items) + '</ul>'
 
 
-def _render_ask_section(
+def _render_chat_panel(
     chat_service: CorpusChatService | None,
     selection: UiRequest,
 ) -> str:
     if chat_service is None:
-        return ''
-    question = selection.question or ''
-    display_question = redact_free_text(question)
-    form = (
-        '<form method="get" action="/ui/" class="ask-form">'
-        '<label for="ask-question">Question</label>'
-        f'<input id="ask-question" type="text" name="q" '
-        f'value="{_escape(display_question)}" '
-        'placeholder="Ask about the corpus" autocomplete="off">'
-        '<button type="submit">Ask</button>'
-        '</form>'
-    )
-    if not question.strip():
-        body = form
-    else:
-        answer = chat_service.answer(question)
         body = (
-            form
-            + '<div class="chat-turn">'
-            f'<p><strong>Question:</strong> {_escape(display_question)}</p>'
-            f'<p><strong>Answer:</strong> '
-            f'{_escape(redact_free_text(answer.answer))}</p>'
-            f'{_render_chat_citations(display_question, answer.citations)}'
-            '</div>'
+            '<p class="muted">Corpus chat is not enabled on this '
+            'deployment.</p>'
         )
+    else:
+        question = selection.question or ''
+        display_question = redact_free_text(question)
+        body = (
+            '<form method="get" action="/ui/" class="ask-form">'
+            '<label for="ask-question">Question</label>'
+            f'<input id="ask-question" type="text" name="q" '
+            f'value="{_escape(display_question)}" '
+            'placeholder="Ask about the corpus" autocomplete="off">'
+            '<button type="submit">Ask</button>'
+            '</form>'
+        )
+        if question.strip():
+            answer = chat_service.answer(question)
+            body += (
+                '<div class="chat-turn">'
+                f'<p><strong>Question:</strong> '
+                f'{_escape(display_question)}</p>'
+                f'<p><strong>Answer:</strong> '
+                f'{_escape(redact_free_text(answer.answer))}</p>'
+                f'{_render_chat_citations(display_question, answer.citations)}'
+                '</div>'
+            )
     return (
         '<section class="pane" id="ask">'
-        '<h2>Ask the corpus</h2>'
-        f'{body}'
+        '<div class="column-head"><h2>Ask the corpus</h2></div>'
+        f'<div class="column-body">{body}</div>'
         '</section>'
     )
 
@@ -596,7 +833,7 @@ def render_ui_page(
     request: UiRequest,
     chat_service: CorpusChatService | None = None,
 ) -> str:
-    """Render the whole read-only page as one escaped HTML string."""
+    """Render the whole read-only notebook as one escaped HTML string."""
     return (
         '<!doctype html>'
         '<html lang="en"><head><meta charset="utf-8">'
@@ -604,20 +841,15 @@ def render_ui_page(
         '<title>Glasslab corpus</title>'
         f'<style nonce="{_escape(request.nonce)}">{_PAGE_STYLES}</style>'
         '</head><body>'
+        '<header class="masthead">'
         '<h1>Glasslab corpus and reports</h1>'
-        '<main>'
-        f'{_render_ask_section(chat_service, request)}'
-        '<div class="panes">'
-        '<section class="pane" id="sources">'
-        f'<h2>Sources</h2>{_render_sources_pane(engine, request)}</section>'
-        '<section class="pane" id="document">'
-        '<h2>Document</h2>'
-        f'{_render_document_pane(engine, settings, request)}</section>'
-        '<section class="pane" id="evidence">'
-        '<h2>Evidence inspector</h2>'
-        f'{_render_evidence_pane(engine, request)}</section>'
-        '</div>'
-        '</main></body></html>'
+        '</header>'
+        '<main class="notebook">'
+        f'{_render_sources_panel(engine, request)}'
+        f'{_render_chat_panel(chat_service, request)}'
+        f'{_render_viewer_panel(engine, settings, request)}'
+        '</main>'
+        '</body></html>'
     )
 
 

@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Seed a throwaway SQLite corpus for the ``/ui`` chat + PDF viewer QA.
+"""Seed a throwaway SQLite corpus for the ``/ui`` notebook QA.
 
 Builds a synthetic two-page PDF with PyMuPDF under a raw root, registers a
 :class:`~app.schemas.KnowledgeSource` whose ``canonical_uri`` is that file's
 ``file://`` URI, stores a :class:`~app.corpus_rag.contracts.RagDocumentRecord`
 plus one retrievable :class:`~app.corpus_rag.contracts.RagChunkRecord` and the
 :class:`~app.corpus_rag.contracts.RagSectionRecord` the cited page falls under,
-and writes a JSON manifest the Playwright test reads (source id, question,
+and writes a JSON manifest the Playwright tests read (source id, question,
 cited excerpt, page, section title, and the expected viewer query).
+
+It also seeds one completed run with digest-verified artifacts so the
+three-column notebook's file tree and text preview have real content: a
+linkable ``reports/report.md`` plus ``protocol/``, ``beacon/``, and
+``shared-artifacts/`` entries. Artifact files are written under the run root
+(the app's shared mount root in the QA environment).
 
 The chunk text leads with the distinctive sentence, so the chat's extractive
 first-sentence citation is exactly that sentence; the manifest records the
@@ -18,7 +24,8 @@ truth.
 Run with the service interpreter (needs the app dependencies and PyMuPDF):
 
     python scripts/qa/seed_ui_corpus.py \
-        --db <path> --raw-root <dir> --manifest <path>
+        --db <path> --raw-root <dir> --run-root <shared-mount-root> \
+        --manifest <path>
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import pymupdf
 
@@ -43,7 +51,14 @@ from app.corpus_rag.contracts import (
     RagDocumentRecord,
     RagSectionRecord,
 )
-from app.schemas import KnowledgeSource, SourceType
+from app.schemas import (
+    ArtifactRecord,
+    KnowledgeSource,
+    RunRecord,
+    RunState,
+    SourceType,
+    utc_now,
+)
 from app.storage import SqliteStore
 
 # The cited sentence: short enough to sit on one PDF line, so PyMuPDF's
@@ -67,6 +82,19 @@ PAGE_COUNT = 2
 PAGE_INDEX = 0
 OTHER_PAGE_TEXT = 'This second page does not contain the cited sentence.'
 
+RUN_OBJECTIVE = 'QA run: artifact tree, verified preview, and cited source'
+RUN_REPORT_REF = 'reports/report.md'
+RUN_REPORT_TEXT = (
+    '# QA report\n\nThe artifact tree is rendered from durable artifact '
+    'records.\n'
+)
+RUN_ARTIFACTS = (
+    (RUN_REPORT_REF, RUN_REPORT_TEXT, 'report'),
+    ('shared-artifacts/evaluation-contract-proposal.json', '{}\n', 'contract'),
+    ('protocol/plan.md', '# Protocol draft\n\n- bounded workload\n', 'protocol'),
+    ('beacon/heartbeat.txt', 'heartbeat\n', 'beacon'),
+)
+
 
 def build_pdf(path: Path) -> bytes:
     """Write a two-page PDF; only page 1 carries the cited sentence/phrase."""
@@ -83,7 +111,61 @@ def build_pdf(path: Path) -> bytes:
     return data
 
 
-def seed(db_path: Path, raw_root: Path, manifest_path: Path) -> dict:
+def seed_run(store: SqliteStore, run_root: Path) -> dict:
+    """Insert one completed run whose artifact tree the notebook can render."""
+    now = utc_now()
+    run_id = uuid4().hex
+    store.create_run(
+        RunRecord(
+            run_id=run_id,
+            objective=RUN_OBJECTIVE,
+            state=RunState.COMPLETE,
+            evaluation_contract_id='qa-contract',
+            evaluation_contract_version='1',
+            evaluation_contract_digest='c' * 64,
+            beaker_workspace=f'runs/{run_id}/beaker-worktree',
+            honeydew_workspace=f'runs/{run_id}/honeydew-worktree',
+            shared_artifacts_path=f'runs/{run_id}/shared-artifacts',
+            reports_path=f'runs/{run_id}/reports',
+            maximum_turns=20,
+            maximum_runtime_seconds=3600,
+            maximum_parallel_jobs=1,
+            created_at=now,
+            updated_at=now,
+        ),
+        one_active_run=False,
+    )
+    refs = []
+    for ref, text, artifact_type in RUN_ARTIFACTS:
+        path = run_root / run_id / ref
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = text.encode()
+        path.write_bytes(data)
+        store.save_artifact(
+            ArtifactRecord(
+                run_id=run_id,
+                type=artifact_type,
+                uri=f'artifact://{run_id}/{ref}',
+                sha256=hashlib.sha256(data).hexdigest(),
+                metadata={'path': str(path)},
+            )
+        )
+        refs.append(ref)
+    return {
+        'run_id': run_id,
+        'objective': RUN_OBJECTIVE,
+        'report_ref': RUN_REPORT_REF,
+        'report_text': RUN_REPORT_TEXT,
+        'artifact_refs': refs,
+    }
+
+
+def seed(
+    db_path: Path,
+    raw_root: Path,
+    run_root: Path,
+    manifest_path: Path,
+) -> dict:
     """Build the PDF, seed the store, and write the manifest."""
     pdf_path = raw_root / 'qa-resampling-handbook.pdf'
     data = build_pdf(pdf_path)
@@ -134,8 +216,10 @@ def seed(db_path: Path, raw_root: Path, manifest_path: Path) -> dict:
     assert excerpt == DISTINCTIVE_SENTENCE, (
         f'chat first-sentence excerpt drifted: {excerpt!r}'
     )
+    run = seed_run(store, run_root)
 
     manifest = {
+        'run': run,
         'source_id': source.source_id,
         'title': TITLE,
         'question': QUESTION,
@@ -160,9 +244,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--db', required=True, type=Path)
     parser.add_argument('--raw-root', required=True, type=Path)
+    parser.add_argument('--run-root', required=True, type=Path)
     parser.add_argument('--manifest', required=True, type=Path)
     args = parser.parse_args()
-    manifest = seed(args.db, args.raw_root, args.manifest)
+    manifest = seed(args.db, args.raw_root, args.run_root, args.manifest)
     print(json.dumps(manifest, indent=2))
     return 0
 

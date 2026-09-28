@@ -366,7 +366,9 @@ def test_rendered_citation_page_and_boxes_page_agree(
             params={'q': 'resampling stability small samples'},
             headers=AUTH_HEADERS,
         )
-        href = re.search(r'href="(/ui/\?[^"]*source=[^"]*)"', page.text)
+        # The chat citation is the source link that also carries the question;
+        # the corpus index links a bare source without q or page.
+        href = re.search(r'href="(/ui/\?[^"]*q=[^"]*source=[^"]*)"', page.text)
         assert href is not None
         followed = client.get(
             html.unescape(href.group(1)),

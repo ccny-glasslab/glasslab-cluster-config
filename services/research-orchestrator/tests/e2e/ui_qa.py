@@ -214,6 +214,8 @@ def ui_qa() -> UiQaEnvironment:
             str(db_path),
             '--raw-root',
             str(raw_root),
+            '--run-root',
+            str(scratch),
             '--manifest',
             str(manifest_path),
         ],
