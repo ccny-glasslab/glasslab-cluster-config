@@ -74,7 +74,7 @@ def test_ui_pdf_routes_absent_when_disabled(orchestrator_bundle) -> None:
 
     with _flag_client(settings, engine, ui_pdf_enabled=False) as client:
         assert client.get('/ui/').status_code == 200
-        assert client.get('/ui/pdf/viewer.html').status_code == 404
+        assert client.get('/ui/pdf/assets/web/viewer.css').status_code == 404
         assert (
             client.get(
                 '/ui/pdf/document.pdf', params={'source': 'missing'}
@@ -94,7 +94,7 @@ def test_ui_pdf_routes_present_when_enabled(orchestrator_bundle) -> None:
     settings, _, _, _, engine = orchestrator_bundle
 
     with _flag_client(settings, engine, ui_pdf_enabled=True) as client:
-        assert client.get('/ui/pdf/viewer.html').status_code == 200
+        assert client.get('/ui/pdf/assets/web/viewer.css').status_code == 200
 
 
 def test_ui_chat_section_absent_when_disabled(orchestrator_bundle) -> None:

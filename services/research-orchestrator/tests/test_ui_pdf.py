@@ -1,12 +1,13 @@
 """Operator-gated same-origin PDF serving and highlight-box endpoints.
 
 The corpus UI embeds the vendored pdf.js viewer in a same-origin iframe. These
-tests drive the four ``/ui/pdf/**`` routes with ``TestClient`` against a real
+tests drive the ``/ui/pdf/**`` routes with ``TestClient`` against a real
 ``SqliteStore`` engine and a real PDF written under the configured raw root:
 the document route serves the exact bytes with Range support and no
 compression, the boxes route derives highlight rectangles live from the raw
-PDF, the asset route serves the vendored tree with an explicit MIME map and a
-traversal guard, and the viewer route carries the viewer CSP.
+PDF, and the asset route serves the vendored tree with an explicit MIME map
+and a traversal guard. The removed ``/ui/pdf/viewer.html`` shell route is
+asserted to 404: the product iframe loads ``highlight.html`` instead.
 """
 
 from __future__ import annotations
@@ -450,15 +451,57 @@ def test_asset_mjs_mime_and_no_traversal(orchestrator_bundle) -> None:
     assert traversal.status_code == 404
 
 
-def test_viewer_html_csp_frame_ancestors_self(orchestrator_bundle) -> None:
+def test_viewer_html_route_is_removed(orchestrator_bundle) -> None:
+    """The upstream viewer shell is not routable; the product uses highlight.html.
+
+    ``/ui/pdf/viewer.html`` named a shell whose relative refs cannot resolve
+    through this service's route shape, so it is removed rather than redirected.
+    """
     settings, _, _, _, engine = orchestrator_bundle
 
     with _client(settings, engine) as client:
         response = client.get('/ui/pdf/viewer.html', headers=AUTH_HEADERS)
 
+    assert response.status_code == 404
+
+
+def test_asset_subresources_resolve(orchestrator_bundle) -> None:
+    """Every relative ref the highlight wrapper emits resolves to a real asset.
+
+    ``highlight.html`` links ``viewer.css`` and imports ``pdf.mjs`` and the
+    locale catalog relative to itself; if any 404s the viewer renders blank.
+    """
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        css = client.get('/ui/pdf/assets/web/viewer.css', headers=AUTH_HEADERS)
+        module = client.get('/ui/pdf/assets/build/pdf.mjs', headers=AUTH_HEADERS)
+        locale = client.get(
+            '/ui/pdf/assets/web/locale/locale.json',
+            headers=AUTH_HEADERS,
+        )
+
+    assert css.status_code == 200
+    assert css.headers['content-type'].startswith('text/css')
+    assert module.status_code == 200
+    assert module.headers['content-type'].startswith('text/javascript')
+    assert locale.status_code == 200
+    assert locale.headers['content-type'].startswith('application/json')
+
+
+def test_asset_pdf_served_as_application_pdf(orchestrator_bundle) -> None:
+    """A ``.pdf`` under the vendored tree must be ``application/pdf``.
+
+    The MIME map is explicit because the browser refuses a viewer subresource
+    served with the wrong type; a pdf must not fall back to octet-stream.
+    """
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/pdf/assets/web/compressed.tracemonkey-pldi-09.pdf',
+            headers=AUTH_HEADERS,
+        )
+
     assert response.status_code == 200
-    assert response.headers['content-type'].startswith('text/html')
-    csp = response.headers['content-security-policy']
-    assert "default-src 'none'" in csp
-    assert "frame-ancestors 'self'" in csp
-    assert "script-src 'self' 'wasm-unsafe-eval'" in csp
+    assert response.headers['content-type'] == 'application/pdf'

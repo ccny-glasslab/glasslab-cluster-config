@@ -69,7 +69,6 @@ proxy the token is injected for you; a direct request without the token gets
 | `GET /ui/pdf/document.pdf?source=<source-id>` | The raw corpus PDF as a Starlette `FileResponse`. Honors HTTP Range requests and advertises `Accept-Ranges: bytes`. |
 | `GET /ui/pdf/boxes?source=<source-id>&page=<n>&excerpt=<text>` | JSON highlight rectangles for `excerpt` on the 1-based `page`. `excerpt` is optional and capped at 400 characters. |
 | `GET /ui/pdf/assets/{path}` | Vendored pdf.js assets under `static/pdfjs`, served with an explicit MIME map. |
-| `GET /ui/pdf/viewer.html` | The upstream pdf.js viewer shell, served same-origin with the viewer CSP. |
 | `GET /ui/pdf/assets/web/highlight.html?...` | The first-party wrapper the `/ui/` cited-source iframe actually loads: a thin dark page that fetches the document and asks `/ui/pdf/boxes` for geometry. |
 
 The page itself still emits no script. The only JavaScript that runs is inside
@@ -121,8 +120,9 @@ may load only same-origin scripts, workers, styles, and fonts.
 - **The cited-source wrapper** is a thin first-party page,
   `/ui/pdf/assets/web/highlight.html`, that the `/ui/` iframe loads. It imports
   the vendored pdf.js module, fetches the document from the same-origin
-  endpoint, and asks `/ui/pdf/boxes` for highlight geometry. `/ui/pdf/viewer.html`
-  serves the unmodified upstream viewer shell from the same tree.
+  endpoint, and asks `/ui/pdf/boxes` for highlight geometry. The upstream
+  `viewer.html` shell is **not** served: its relative refs cannot resolve
+  through this service's route shape, so no `/ui/pdf/viewer.html` route exists.
 - **Module worker and `.mjs` MIME.** pdf.js loads its worker as an ES module
   (`pdf.worker.mjs`). The asset route serves `.mjs` as `text/javascript`, or the
   browser refuses the module worker and the viewer stays blank.

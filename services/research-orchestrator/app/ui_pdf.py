@@ -3,9 +3,11 @@
 The corpus UI embeds the vendored pdf.js viewer in a same-origin iframe, so
 every byte the browser needs is served from this service: the raw corpus PDF
 (``GET /ui/pdf/document.pdf``), the vendored viewer assets
-(``GET /ui/pdf/assets/{path}``), the viewer shell
-(``GET /ui/pdf/viewer.html``), and the live highlight rectangles
-(``GET /ui/pdf/boxes``).
+(``GET /ui/pdf/assets/{path}``), and the live highlight rectangles
+(``GET /ui/pdf/boxes``). The product iframe loads the first-party
+``highlight.html`` wrapper from the asset route; the upstream ``viewer.html``
+shell is deliberately not routable here because its relative refs cannot
+resolve through this service's route shape.
 
 Two boundaries are enforced here and nowhere else:
 
@@ -45,7 +47,6 @@ if TYPE_CHECKING:
 # The vendored pdf.js tree is baked into the service image; it is the only
 # directory the asset route may read from.
 _PDFJS_ROOT = SERVICE_ROOT / 'static' / 'pdfjs'
-_VIEWER_HTML = _PDFJS_ROOT / 'web' / 'viewer.html'
 
 # The viewer needs same-origin module workers, blob URLs, and same-origin
 # fetches; the policy below is the minimum that permits them and nothing else.
@@ -72,6 +73,7 @@ _ASSET_MEDIA_TYPES: dict[str, str] = {
     '.js': 'text/javascript',
     '.wasm': 'application/wasm',
     '.html': 'text/html',
+    '.pdf': 'application/pdf',
     '.css': 'text/css',
     '.json': 'application/json',
     '.svg': 'image/svg+xml',
@@ -229,16 +231,3 @@ def register_ui_pdf_routes(
         if media_type == 'text/html':
             headers['Content-Security-Policy'] = _VIEWER_CSP
         return FileResponse(asset, media_type=media_type, headers=headers)
-
-    @app.get('/ui/pdf/viewer.html')
-    def pdf_viewer(
-        _: None = Depends(require_operator),
-    ) -> FileResponse:
-        return FileResponse(
-            _VIEWER_HTML,
-            media_type='text/html',
-            headers={
-                'Content-Security-Policy': _VIEWER_CSP,
-                'X-Content-Type-Options': 'nosniff',
-            },
-        )
