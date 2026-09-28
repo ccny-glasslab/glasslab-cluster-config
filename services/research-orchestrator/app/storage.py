@@ -2055,6 +2055,18 @@ class SqliteStore:
             rows = connection.execute(query, parameters).fetchall()
         return [json.loads(row['payload']) for row in rows]
 
+    def get_rag_chunks(self, chunk_ids: Sequence[str]) -> list[dict[str, Any]]:
+        if not chunk_ids:
+            return []
+        placeholders = ','.join('?' for _ in chunk_ids)
+        query = (
+            'SELECT payload FROM rag_chunks'
+            f' WHERE chunk_id IN ({placeholders})'
+        )
+        with self._connect() as connection:
+            rows = connection.execute(query, list(chunk_ids)).fetchall()
+        return [json.loads(row['payload']) for row in rows]
+
     def upsert_rag_chunk_vectors(self, meta: ChunkVectorMeta, vec_bytes: bytes) -> None:
         with self.transaction() as connection:
             connection.execute(

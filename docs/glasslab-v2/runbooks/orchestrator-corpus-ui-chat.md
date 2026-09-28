@@ -262,6 +262,7 @@ operator-gated and that the proxy is the intended path.
 | Symptom | Cause and fix |
 | --- | --- |
 | Chat reports no corpus evidence | The store holds no ingested corpus, or the raw PDFs are not staged. Complete the infra prerequisite, then reload. |
+| Chat cites a source but the PDF pane is empty | The source is an operator `upload://` row: uploads discard the raw bytes, so the viewer can never serve a PDF for them. Only `file://` PDFs (staged under the raw root) render. See [Feed The Knowledge Corpus](knowledge-corpus.md#making-operator-uploaded-sources-citable-in-ui-backfill). |
 | `405 Method Not Allowed` on submit | The chat was submitted as `POST`. It must be a `GET`; the proxy is `GET`/`HEAD`-only. |
 | Blank PDF pane | The viewer assets are missing from the image, or `.mjs` is served with the wrong MIME type and the module worker is rejected. Check the browser console and the asset route's `Content-Type`. |
 | Viewer loads the first page but will not seek | The PDF route is compressed or not returning ranges. Confirm no compression middleware wraps the PDF routes and that a `Range` request returns `206`. |

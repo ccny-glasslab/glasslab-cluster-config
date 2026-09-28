@@ -148,6 +148,57 @@ no script ConfigMap is required. Both Jobs run as uid/gid 10001 to match the
 orchestrator, and the raw root is shared with it so the chat/PDF viewer can
 resolve citations.
 
+## Making operator-uploaded sources citable in `/ui` (backfill)
+
+The operator upload path (`POST /knowledge/sources/upload`) stores only the
+extracted text plus a sha256 digest of the original bytes; it does **not**
+retain the raw file. Every such source is recorded with
+`canonical_uri=upload://<name>`. The `/ui` chat and PDF viewer read a different
+store — the corpus-RAG tables (`orchestrator_rag_*`) — and the viewer serves
+only `file://` PDFs under `corpus_rag_raw_root`. Two consequences:
+
+- `upload://` sources are invisible to `/ui` until their retained text is
+  projected into the `orchestrator_rag_*` tables.
+- The PDF viewer can never open an `upload://` source: there is no raw file to
+  serve and the canonical URI is not a `file:` PDF. Re-scraping LibreTexts
+  (above) reproduces the **text**, not a PDF, so it does not change this.
+
+Project the retained knowledge text into the rag store so the lexical `/ui`
+chat can cite it:
+
+```bash
+kubectl apply -f kubeadm/glasslab-v2/jobs/rag-backfill.yaml
+kubectl -n glasslab-v2 logs job/rag-backfill -f
+```
+
+The Job runs `scripts/corpus_rag/backfill_rag_from_knowledge.py --apply`, which
+is dry-run by default and idempotent (a source that already has a
+`rag_document` is skipped, so re-runs add nothing). The projection keeps each
+knowledge `chunk_id` and `digest` and stamps rows with
+`index_version`/`extraction_version = knowledge-backfill-v1`, and it records no
+page geometry, so a backfilled citation carries no PDF link. The CLI also
+accepts `--source-id <id>` (repeatable) and `--limit N` for a staged rollout.
+
+Retrieval hydrates only the chunks its channels reference, so the `/ui` chat
+cost tracks the candidate set rather than the whole store; this is what keeps a
+corpus of tens of thousands of backfilled chunks responsive.
+
+The projection is reversible: every row it writes carries the
+`knowledge-backfill-v1` marker, so removing the `live-knowledge` corpus and the
+marked rows returns the store to its pre-backfill state without touching
+sources ingested by the PDF pipeline.
+
+```sql
+DELETE FROM orchestrator_rag_corpus_sources
+ WHERE corpus_id = (SELECT corpus_id FROM orchestrator_rag_corpora
+                     WHERE slug = 'live-knowledge');
+DELETE FROM orchestrator_rag_chunks
+ WHERE payload->>'index_version' = 'knowledge-backfill-v1';
+DELETE FROM orchestrator_rag_documents
+ WHERE payload->>'extraction_version' = 'knowledge-backfill-v1';
+DELETE FROM orchestrator_rag_corpora WHERE slug = 'live-knowledge';
+```
+
 ## Scanned books (OCR)
 
 The upload endpoint stays born-digital-only so a 500-page scan can never

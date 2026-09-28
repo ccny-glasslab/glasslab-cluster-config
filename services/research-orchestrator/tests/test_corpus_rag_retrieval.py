@@ -479,3 +479,46 @@ def test_ask_cli_insufficient_corpus_exit_zero(tmp_path: Path, capsys) -> None:
     # The --json-out contract holds on EVERY exit path, including insufficiency.
     assert json_out.exists()
     assert json.loads(json_out.read_text())['kind'] == 'insufficient_evidence'
+
+
+class _NoFullScanStore(SqliteStore):
+    """SqliteStore that fails a retrieval path which scans every chunk."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self.rag_chunk_get_calls: list[list[str]] = []
+
+    def list_rag_chunks(self, *, source_ids=None, kinds=None, limit=None):
+        if not source_ids:
+            raise AssertionError('retrieval performed a full rag_chunks scan')
+        return super().list_rag_chunks(
+            source_ids=source_ids, kinds=kinds, limit=limit
+        )
+
+    def get_rag_chunks(self, chunk_ids):
+        self.rag_chunk_get_calls.append(list(chunk_ids))
+        return super().get_rag_chunks(chunk_ids)
+
+
+def test_lexical_retrieval_hydrates_only_referenced_chunks(
+    tmp_path: Path,
+) -> None:
+    store = _NoFullScanStore(str(tmp_path / 'hydrate.db'))
+    source = _source('repo://docs/hydrate.md')
+    store.save_knowledge_source(source)
+    store.replace_rag_chunks(
+        source.source_id,
+        [
+            _chunk(source.source_id, i, f'resampling stability estimate {i}')
+            for i in range(5)
+        ],
+    )
+
+    retriever = HybridRetriever(store)
+    result = retriever.retrieve(
+        'resampling stability',
+        options=RetrievalOptions(mode='lexical', k_final=3, expand=False),
+    )
+
+    assert result.hits
+    assert store.rag_chunk_get_calls, 'targeted chunk hydration was not used'
