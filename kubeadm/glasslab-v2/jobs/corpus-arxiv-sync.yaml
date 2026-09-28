@@ -14,6 +14,12 @@ spec:
       backoffLimit: 1
       ttlSecondsAfterFinished: 7200
       template:
+        metadata:
+          labels:
+            # Admitted by the glasslab-postgres-ingress allow-list, which
+            # otherwise only permits the orchestrator/workflow-api/
+            # schedule-worker/gpu-runner pods to reach Postgres on 5432.
+            app.kubernetes.io/name: corpus-arxiv-sync
         spec:
           serviceAccountName: glasslab-gpu-runner
           automountServiceAccountToken: false
@@ -26,11 +32,13 @@ spec:
             # job must write as the group that owns that volume.
             fsGroup: 10001
             fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: ingest-arxiv
               # The orchestrator image bundles app/ and scripts/ in-image, so
               # the job needs no script ConfigMap. Pin the release commit.
-              image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:d2033ff8b683edaa9b5c3125b50e3a98a402bacc
+              image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:e6000d38538c9cf625aa5c6cf1f13ace547b0e58
               imagePullPolicy: IfNotPresent
               workingDir: /app
               command:

@@ -7,6 +7,12 @@ spec:
   backoffLimit: 1
   ttlSecondsAfterFinished: 7200
   template:
+    metadata:
+      labels:
+        # Admitted by the glasslab-postgres-ingress allow-list, which otherwise
+        # only permits the orchestrator/workflow-api/schedule-worker/gpu-runner
+        # pods to reach Postgres on 5432.
+        app.kubernetes.io/name: corpus-ingest
     spec:
       serviceAccountName: glasslab-gpu-runner
       automountServiceAccountToken: false
@@ -18,11 +24,13 @@ spec:
         # by the service that serves the chat and PDF viewer.
         fsGroup: 10001
         fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: ingest-corpus
           # Orchestrator image: app/ and scripts/ ship in-image, so no script
           # ConfigMap is required. Pin the release commit.
-          image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:d2033ff8b683edaa9b5c3125b50e3a98a402bacc
+          image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:e6000d38538c9cf625aa5c6cf1f13ace547b0e58
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command:
