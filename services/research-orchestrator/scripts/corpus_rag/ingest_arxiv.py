@@ -14,6 +14,7 @@ import argparse
 import dataclasses
 import datetime as _dt
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -28,11 +29,24 @@ from app.corpus_rag.arxiv import (  # noqa: E402
     fetch_entries,
     is_oversized,
 )
-from app.corpus_rag.pipeline import build_index, ingest_document  # noqa: E402
+from app.corpus_rag.pipeline import (  # noqa: E402
+    build_index,
+    ingest_document,
+    stage_raw_pdf,
+)
+
+_UNSAFE_NAME_CHARS = re.compile(r'[^A-Za-z0-9._-]')
 
 
 def default_store_path() -> str:
     return '/home/gr66ss/rag-data/orchestrator-rag.db'
+
+
+def staged_name(arxiv_id: str) -> str:
+    """Return a filesystem-safe staged name for an arXiv id/URL."""
+    tail = arxiv_id.rstrip('/').rsplit('/', 1)[-1]
+    safe = _UNSAFE_NAME_CHARS.sub('_', tail).strip('.')
+    return safe or 'arxiv'
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,6 +60,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument('--corpus', default='arxiv-preprints')
+    parser.add_argument(
+        '--raw-root',
+        default=None,
+        help='staged PDF root; defaults to settings.corpus_rag_raw_root',
+    )
     parser.add_argument(
         '--categories',
         nargs='+',
@@ -85,6 +104,9 @@ def main(argv: list[str] | None = None) -> int:
         else Settings()
     )
     store = build_store(settings)
+    raw_root = (
+        Path(args.raw_root) if args.raw_root else Path(settings.corpus_rag_raw_root)
+    )
     reports = []
     errors: list[str] = []
     skipped_existing: list[str] = []
@@ -94,7 +116,12 @@ def main(argv: list[str] | None = None) -> int:
         if is_oversized(entry, query.max_pdf_bytes):
             skipped_oversized.append(entry.arxiv_id)
             continue
-        if any(source.canonical_uri == entry.pdf_url for source in store.list_knowledge_sources()):
+        name = staged_name(entry.arxiv_id)
+        staged_uri = (raw_root / f'{name}.pdf').resolve().as_uri()
+        if any(
+            source.canonical_uri == staged_uri
+            for source in store.list_knowledge_sources()
+        ):
             skipped_existing.append(entry.arxiv_id)
             continue
         try:
@@ -103,20 +130,30 @@ def main(argv: list[str] | None = None) -> int:
                 max_pdf_bytes=query.max_pdf_bytes,
                 timeout=args.timeout,
             )
-            if store.find_knowledge_source(digest=digest, canonical_uri=entry.pdf_url) is not None:
+            if (
+                store.find_knowledge_source(
+                    digest=digest, canonical_uri=staged_uri
+                )
+                is not None
+            ):
                 skipped_existing.append(entry.arxiv_id)
                 continue
+            staged = stage_raw_pdf(data, raw_root, name)
             reports.append(
                 ingest_document(
                     store=store,
                     data=data,
-                    canonical_uri=entry.pdf_url,
+                    canonical_uri=staged.resolve().as_uri(),
                     title=entry.title,
                     doc_type='paper',
                     authors=list(entry.authors),
                     year=entry.published.year,
                     doi_isbn_url=entry.arxiv_id,
                     corpus_slug=args.corpus,
+                    metadata={
+                        'source_url': entry.pdf_url,
+                        'arxiv_id': entry.arxiv_id,
+                    },
                 )
             )
         except Exception as exc:  # noqa: BLE001 - per-source isolation

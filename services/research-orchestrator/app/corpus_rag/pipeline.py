@@ -10,10 +10,13 @@ cross-encoder rerankers (RAM discipline on CPU-only hosts).
 from __future__ import annotations
 
 import bisect
+import contextlib
 import hashlib
 import json
+import os
 import sqlite3
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,6 +37,41 @@ def _sha256_of(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b''):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def stage_raw_pdf(data: bytes, raw_root: Path, name: str) -> Path:
+    """Atomically persist ``data`` as ``<raw_root>/<name>.pdf``.
+
+    ``name`` must be a single, safe filename component: a manifest id or
+    source label that carries a path separator or a ``..`` component would
+    otherwise escape the configured raw root. The bytes are written to a
+    temporary sibling and ``os.replace``d into place so a crash mid-write
+    never leaves a truncated PDF the ingester would later trust.
+    """
+    if (
+        not name
+        or name in {'.', '..'}
+        or Path(name).name != name
+        or '/' in name
+        or '\\' in name
+        or '\x00' in name
+    ):
+        raise ValueError(f'unsafe raw-pdf name: {name!r}')
+    root = Path(raw_root)
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / f'{name}.pdf'
+    handle_fd, temporary = tempfile.mkstemp(
+        prefix=f'.{name}.', suffix='.pdf.tmp', dir=root
+    )
+    try:
+        with os.fdopen(handle_fd, 'wb') as handle:
+            handle.write(data)
+        os.replace(temporary, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+    return target
 
 
 @dataclass
@@ -76,6 +114,7 @@ def ingest_document(
     doi_isbn_url: str | None = None,
     corpus_slug: str | None = None,
     extractor: Any | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> IngestReport:
     """Extract, chunk, and persist one document; vectors are added separately."""
     from app.corpus_rag.chunking import build_chunks
@@ -98,6 +137,12 @@ def ingest_document(
         doi_isbn_url=doi_isbn_url,
         corpus_slug=corpus_slug,
     )
+    if metadata:
+        store.save_knowledge_source(
+            source.model_copy(
+                update={'metadata': {**source.metadata, **metadata}}
+            )
+        )
     backend = extractor if extractor is not None else PyMuPdfBackend()
     document = backend.extract(data)
     # Fail-closed: scan EXTRACTED text before any derived content persists.
