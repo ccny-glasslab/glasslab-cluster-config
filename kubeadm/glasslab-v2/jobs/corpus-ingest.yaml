@@ -1,0 +1,73 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: corpus-ingest
+  namespace: glasslab-v2
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 7200
+  template:
+    spec:
+      serviceAccountName: glasslab-gpu-runner
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: glasslab-ghcr-pull
+      securityContext:
+        # Match the orchestrator so staged raw PDFs on the NFS PVC are readable
+        # by the service that serves the chat and PDF viewer.
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: ingest-corpus
+          # Orchestrator image: app/ and scripts/ ship in-image, so no script
+          # ConfigMap is required. Pin the release commit.
+          image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:d2033ff8b683edaa9b5c3125b50e3a98a402bacc
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command:
+            - /bin/sh
+            - -c
+            - >
+              python /app/scripts/corpus_rag/ingest_corpus.py
+              --corpus statistical-learning-methods
+              --manifest /mnt/artifacts/research-orchestrator/rag/manifest.jsonl
+              --raw-dir /mnt/artifacts/research-orchestrator/rag/raw
+          env:
+            # The configured store is Postgres; raw PDFs stage under the
+            # mounted artifacts PVC at the same root the orchestrator reads.
+            - name: GLASSLAB_ORCHESTRATOR_STORE_BACKEND
+              value: postgres
+            - name: GLASSLAB_ORCHESTRATOR_CORPUS_RAG_RAW_ROOT
+              value: /mnt/artifacts/research-orchestrator/rag/raw
+            - name: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-research-orchestrator
+                  key: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            limits:
+              memory: 4Gi
+              cpu: "2"
+            requests:
+              memory: 2Gi
+              cpu: "1"
+          volumeMounts:
+            - name: artifacts
+              mountPath: /mnt/artifacts
+            - name: temporary
+              mountPath: /tmp
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: glasslab-shared-artifacts
+        - name: temporary
+          emptyDir: {}

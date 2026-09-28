@@ -69,6 +69,33 @@ EXCLUDED_SUFFIXES = frozenset(
         ".zip",
     }
 )
+# The vendored pdf.js distribution is third-party build output (binary fonts,
+# wasm, cmaps). It is excluded by path prefix, not by suffix, so a binary
+# elsewhere in the repository still fails closed as "scan-error-file-read"
+# instead of being silently skipped. Third-party dist text (.mjs/.html/.css/
+# .json) under the prefix is excluded too.
+VENDORED_ASSET_PREFIXES = (
+    Path("services/research-orchestrator/static/pdfjs"),
+)
+# Wrapper files under the vendored prefix that this repository maintains
+# rather than copying from the distribution. Hard-coded from
+# static/pdfjs/VENDOR.json "first_party" so scanning an arbitrary root never
+# has to read a repository file; a guard test keeps it in sync. These paths,
+# and the directories leading to them, are scanned like any other first-party
+# file -- a credential cannot hide in first-party code behind the vendored
+# prefix.
+VENDORED_FIRST_PARTY_RELATIVE_PATHS = frozenset(
+    {
+        Path("web/highlight.html"),
+        Path("web/highlight.mjs"),
+        Path("web/theme.css"),
+    }
+)
+VENDORED_FIRST_PARTY_PATHS = frozenset(
+    prefix / relative_path
+    for prefix in VENDORED_ASSET_PREFIXES
+    for relative_path in VENDORED_FIRST_PARTY_RELATIVE_PATHS
+)
 # The first digest is a harmless fixture sentinel. The remaining fingerprints
 # are historical exposed values, retained only as irreversible SHA-256 digests.
 KNOWN_EXPOSED_VALUE_SHA256 = frozenset(
@@ -110,11 +137,27 @@ class DuplicateYamlKeyError(yaml.YAMLError):
         super().__init__("duplicate YAML mapping key")
 
 
+def _is_vendored_excluded_path(relative_path: Path) -> bool:
+    """Exclude third-party dist, but keep first-party files and their parent dirs."""
+    if not any(
+        relative_path.is_relative_to(prefix) for prefix in VENDORED_ASSET_PREFIXES
+    ):
+        return False
+    if relative_path in VENDORED_FIRST_PARTY_PATHS:
+        return False
+    return not any(
+        first_party.is_relative_to(relative_path)
+        for first_party in VENDORED_FIRST_PARTY_PATHS
+    )
+
+
 def _is_excluded_path(relative_path: Path) -> bool:
     parts = tuple(part.lower() for part in relative_path.parts)
     if any(part in EXCLUDED_DIRECTORY_NAMES for part in parts[:-1]):
         return True
     if any("whatsapp" in part for part in parts):
+        return True
+    if _is_vendored_excluded_path(relative_path):
         return True
     return relative_path.suffix.lower() in EXCLUDED_SUFFIXES
 

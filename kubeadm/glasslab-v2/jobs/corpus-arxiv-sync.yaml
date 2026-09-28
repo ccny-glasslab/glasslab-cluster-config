@@ -20,23 +20,49 @@ spec:
           restartPolicy: Never
           imagePullSecrets:
             - name: glasslab-ghcr-pull
+          securityContext:
+            # Same uid/gid as the orchestrator (10001): staged raw PDFs land on
+            # the shared NFS PVC and the orchestrator reads them back, so the
+            # job must write as the group that owns that volume.
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
           containers:
             - name: ingest-arxiv
-              # CPU variant of the same pinned commit-derived tag family as
-              # corpus-gpu-embed.yaml; bump both together when the runner
-              # image changes.
-              image: ghcr.io/ccny-glasslab/glasslab-research-workspace-runner:sha-bfe70da6dffcabd833411a0d19ca857a112c370d-benchmark-cpu
+              # The orchestrator image bundles app/ and scripts/ in-image, so
+              # the job needs no script ConfigMap. Pin the release commit.
+              image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:d2033ff8b683edaa9b5c3125b50e3a98a402bacc
+              imagePullPolicy: IfNotPresent
+              workingDir: /app
               command:
                 - /bin/sh
                 - -c
                 - >
-                  python /mnt/scripts/corpus_rag/ingest_arxiv.py
+                  python /app/scripts/corpus_rag/ingest_arxiv.py
                   --categories cs.LG stat.ML cs.CL cs.AI
                   --days 1
                   --max-results 50
-                  --store /mnt/artifacts/research-orchestrator/rag/orchestrator-rag.db
                   --corpus arxiv-preprints
-                  --with-index
+              env:
+                # Postgres is the configured store. Raw PDFs stage under the
+                # mounted artifacts PVC; no SQLite path and no vector index
+                # (lexical chat needs no embeddings).
+                - name: GLASSLAB_ORCHESTRATOR_STORE_BACKEND
+                  value: postgres
+                - name: GLASSLAB_ORCHESTRATOR_CORPUS_RAG_RAW_ROOT
+                  value: /mnt/artifacts/research-orchestrator/rag/raw
+                - name: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+                  valueFrom:
+                    secretKeyRef:
+                      name: glasslab-research-orchestrator
+                      key: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 10001
+                runAsGroup: 10001
+                capabilities:
+                  drop: ["ALL"]
               resources:
                 limits:
                   memory: 4Gi
@@ -44,22 +70,14 @@ spec:
                 requests:
                   memory: 2Gi
                   cpu: "1"
-              env:
-                - name: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
-                  valueFrom:
-                    secretKeyRef:
-                      name: glasslab-research-orchestrator
-                      key: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
               volumeMounts:
-                - name: scripts
-                  mountPath: /mnt/scripts
                 - name: artifacts
                   mountPath: /mnt/artifacts
+                - name: temporary
+                  mountPath: /tmp
           volumes:
-            - name: scripts
-              configMap:
-                name: corpus-arxiv-sync-script
-                defaultMode: 0444
             - name: artifacts
               persistentVolumeClaim:
                 claimName: glasslab-shared-artifacts
+            - name: temporary
+              emptyDir: {}

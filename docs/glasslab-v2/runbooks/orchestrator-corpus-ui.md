@@ -131,11 +131,15 @@ source id, digest, and score, then the matched block text.
 
 The page and its proxy never mutate state. In particular:
 
-- No live chat or agent turn control. Reading a run does not pause, resume,
-  cancel, or retry it.
+- No agent turn control. Reading a run does not pause, resume, cancel, or
+  retry it. The corpus chat pane is a read-only question-and-answer path, not a
+  control surface; see
+  [Corpus Chat And In-Browser PDF Viewer](orchestrator-corpus-ui-chat.md).
 - No approves, rejections, contract promotion, or dataset or corpus changes.
-- No PDF page highlighting. PDFs are previewed only as their extracted text,
-  if they are a linkable artifact.
+- No in-page PDF rendering on this base view. A PDF that is a linkable
+  artifact is previewed only as its extracted text here. The in-browser PDF
+  viewer and exact-span highlighting are covered by
+  [Corpus Chat And In-Browser PDF Viewer](orchestrator-corpus-ui-chat.md).
 - No write methods. The proxy forwards `GET` and `HEAD` only by default.
 
 The page reads only durable orchestrator records (runs, corpus sources,

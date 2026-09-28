@@ -103,9 +103,10 @@ for ~10k chunks). For bulk batches, embed on a cluster GPU with a bounded
 Job — the verified path:
 
 ```bash
-# 1. Stage the embed script into a ConfigMap:
-kubectl -n glasslab-v2 create configmap corpus-embed-script \
-  --from-file=corpus_gpu_embed.py=services/research-orchestrator/scripts/corpus_gpu_embed.py
+# 1. The embed-script ConfigMap is tracked in-repo (it mirrors
+#    scripts/corpus_gpu_embed.py byte-for-byte; a unit test fails if the two
+#    drift), so apply it with the Job:
+kubectl apply -f kubeadm/glasslab-v2/jobs/corpus-embed-script-configmap.yaml
 
 # 2. Run the Job (kubeadm/glasslab-v2/jobs/corpus-gpu-embed.yaml):
 kubectl apply -f kubeadm/glasslab-v2/jobs/corpus-gpu-embed.yaml
@@ -122,6 +123,30 @@ already populated by the orchestrator; vectors are written with the same
 model/revision/dims lineage so the orchestrator's numpy index reloads and
 serves them without any service change. The orchestrator in-process CPU path
 remains the small-batch fallback.
+
+## Batch ingestion into the configured store (cluster Jobs)
+
+The local CLI path (`fetch_corpus.py` -> `ingest_corpus.py`) defaults its
+staging root to `GLASSLAB_ORCHESTRATOR_CORPUS_RAG_RAW_ROOT`, so raw PDFs land
+where the orchestrator serves them from. For cluster-scale batches, run the
+same code as bounded Jobs against the configured Postgres store:
+
+```bash
+kubectl apply -f kubeadm/glasslab-v2/jobs/corpus-ingest.yaml
+kubectl -n glasslab-v2 logs job/corpus-ingest -f
+```
+
+`corpus-ingest.yaml` reads a manifest at
+`/mnt/artifacts/research-orchestrator/rag/manifest.jsonl` and the staged PDFs
+under `/mnt/artifacts/research-orchestrator/rag/raw` on the shared-artifacts
+PVC, writing records to the Postgres store (never a SQLite file). The daily
+`corpus-arxiv-sync` CronJob does the same for fresh preprints: it downloads
+each PDF, stages it under the raw root, and records the staged `file://` URI
+as the canonical URI (the original https URL is kept in record metadata). It
+runs the orchestrator image, which bundles `app/` and `scripts/` in-image, so
+no script ConfigMap is required. Both Jobs run as uid/gid 10001 to match the
+orchestrator, and the raw root is shared with it so the chat/PDF viewer can
+resolve citations.
 
 ## Scanned books (OCR)
 

@@ -145,6 +145,10 @@ OVERRIDES: dict[str, Override] = dict(
             '/mnt/artifacts/research-orchestrator/datasets/catalog.json',
         ),
         _container_path(
+            _P + 'CORPUS_RAG_RAW_ROOT',
+            '/mnt/artifacts/research-orchestrator/rag/raw',
+        ),
+        _container_path(
             _P + 'OPENCODE_SHARED_CACHE_ROOT',
             '/mnt/artifacts/research-orchestrator/opencode-cache',
         ),
