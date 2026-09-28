@@ -2,6 +2,7 @@
 
 import base64
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -15,6 +16,7 @@ import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SCANNER_PATH = REPOSITORY_ROOT / "scripts" / "check-credential-hygiene.py"
+VENDORED_PREFIX = Path("services") / "research-orchestrator" / "static" / "pdfjs"
 
 
 def load_scanner():
@@ -242,28 +244,61 @@ class CredentialHygieneScannerTests(unittest.TestCase):
             {"scan-error-file-read"},
         )
 
+    def test_first_party_files_under_vendored_prefix_are_scanned(self):
+        """A credential in a first-party wrapper file must not hide behind the prefix."""
+        for relative_path in (
+            Path("web/highlight.html"),
+            Path("web/highlight.mjs"),
+            Path("web/theme.css"),
+        ):
+            with self.subTest(relative_path=str(relative_path)):
+                findings = self.scan_fixture(
+                    {
+                        str(VENDORED_PREFIX / relative_path): (
+                            "ssh" + "pass -p 'REDACTED' ssh host\n"
+                        )
+                    }
+                )
+
+                self.assertEqual(
+                    [
+                        (finding.path, finding.line, finding.rule_id)
+                        for finding in findings
+                    ],
+                    [(VENDORED_PREFIX / relative_path, 1, "sshpass-password")],
+                )
+
     def test_vendored_pdfjs_tree_is_skipped(self):
-        """The third-party pdf.js dist is excluded by path, not by suffix."""
+        """Third-party pdf.js dist files stay excluded, even next to first-party files."""
         scanner = load_scanner()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            vendored = (
-                root
-                / "services"
-                / "research-orchestrator"
-                / "static"
-                / "pdfjs"
-                / "build"
-            )
-            vendored.mkdir(parents=True, exist_ok=True)
-            (vendored / "pdf.worker.mjs").write_bytes(b"\x00\xff\xfe\x00binary")
-            (vendored / "secret.yaml").write_text(
-                "kind: Secret\nstringData:\n  TOKEN: change-me\n",
-                encoding="utf-8",
-            )
+            fixtures = {
+                "build/pdf.worker.mjs": "ssh" + "pass -p 'REDACTED' ssh host\n",
+                "build/secret.yaml": "kind: Secret\nstringData:\n  TOKEN: change-me\n",
+                "web/viewer.mjs": "ssh" + "pass -p 'REDACTED' ssh host\n",
+            }
+            for name, contents in fixtures.items():
+                path = root / VENDORED_PREFIX / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(contents, encoding="utf-8")
             findings = scanner.scan_tree(root)
 
         self.assertEqual(findings, [])
+
+    def test_first_party_policy_matches_vendor_manifest(self):
+        """The hard-coded first-party policy must track the vendored manifest."""
+        scanner = load_scanner()
+        manifest = json.loads(
+            (REPOSITORY_ROOT / VENDORED_PREFIX / "VENDOR.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(
+            {Path(relative) for relative in manifest["first_party"]},
+            set(scanner.VENDORED_FIRST_PARTY_RELATIVE_PATHS),
+        )
 
     def test_ignores_disposable_lab_agent_worktrees(self):
         """Ignored agent worktrees must not duplicate scans or consume a full CPU core."""
