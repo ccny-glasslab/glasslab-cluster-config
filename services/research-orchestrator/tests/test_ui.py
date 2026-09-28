@@ -1168,6 +1168,57 @@ def test_ui_cited_source_text_orders_chunks_by_chunk_index(
     assert text.index('first chunk') < text.index('second chunk')
 
 
+def test_ui_cited_source_text_truncates_past_the_chunk_cap(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    monkeypatch.setattr('app.ui._MAX_SOURCE_TEXT_CHUNKS', 3)
+    source = KnowledgeSource(
+        source_type=SourceType.PAPER,
+        canonical_uri='repo://docs/long.md',
+        digest='e' * 64,
+        title='Long source',
+    )
+    engine.store.save_knowledge_source(source)
+    engine.store.replace_rag_chunks(
+        source.source_id,
+        [
+            RagChunkRecord(
+                chunk_id=f'{source.source_id}::c{index}',
+                source_id=source.source_id,
+                kind='evidence_span',
+                chunk_index=index,
+                text=f'chunk number {index}',
+                digest=sha256(f'chunk number {index}'.encode()).hexdigest(),
+                token_count=3,
+            )
+            for index in range(5)
+        ],
+    )
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'source': source.source_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    text = response.text
+    # Exactly the cap renders, in chunk-index order, and the overflow is
+    # disclosed instead of silently dropped.
+    assert text.count('<article class="source-chunk">') == 3
+    for index in range(3):
+        assert f'chunk number {index}' in text
+    for index in range(3, 5):
+        assert f'chunk number {index}' not in text
+    assert (
+        'Showing the first 3 extracted chunks; this source has more.' in text
+    )
+    assert '<script' not in text
+
+
 def test_ui_cited_source_text_marks_the_cited_excerpt(
     orchestrator_bundle,
 ) -> None:

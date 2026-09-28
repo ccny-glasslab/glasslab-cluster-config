@@ -93,6 +93,11 @@ if TYPE_CHECKING:
 # below the signed-link ceiling so one large artifact cannot stall the page.
 MAXIMUM_UI_DOCUMENT_BYTES = 2 * 1024 * 1024
 
+# The extracted-text reader is bounded like the artifact preview: chunk counts
+# per source run to a 141-chunk p99 with one live outlier at 6,796 chunks
+# (~4.3 MB), which must never become a single response.
+_MAX_SOURCE_TEXT_CHUNKS = 200
+
 _CITATION_BADGES: dict[CitationClass, str] = {
     'exact': '✓ exact',
     'fuzzy': '≈ fuzzy',
@@ -752,13 +757,23 @@ def _render_cited_source_text(
     only a dead end. The store already holds their extracted rag chunks, so
     this reader renders them as escaped, newline-preserving paragraphs with
     their page/section provenance. The store orders chunks by
-    ``(source_id, chunk_index)``. The citation excerpt is redacted and shown
-    as a callout, and its case-insensitive matches inside the body text are
-    wrapped in ``<mark>`` -- escape-first everywhere, so neither the corpus
-    nor the excerpt can inject markup.
+    ``(source_id, chunk_index)``. At most :data:`_MAX_SOURCE_TEXT_CHUNKS`
+    chunks are rendered, with a muted truncation note when more exist, so one
+    outlier source cannot turn into a multi-megabyte response. The citation
+    excerpt is redacted and shown as a callout, and its case-insensitive
+    matches inside the body text are wrapped in ``<mark>`` -- escape-first
+    everywhere, so neither the corpus nor the excerpt can inject markup.
     """
     source_id = selection.source_id or ''
-    chunks = engine.store.list_rag_chunks(source_ids=[source_id])
+    # One extra chunk distinguishes "exactly at the cap" from "over the cap"
+    # without a second count query.
+    chunks = engine.store.list_rag_chunks(
+        source_ids=[source_id],
+        limit=_MAX_SOURCE_TEXT_CHUNKS + 1,
+    )
+    truncated = len(chunks) > _MAX_SOURCE_TEXT_CHUNKS
+    if truncated:
+        chunks = chunks[:_MAX_SOURCE_TEXT_CHUNKS]
     try:
         title = engine.store.get_knowledge_source(source_id).title
     except RecordNotFound:
@@ -796,6 +811,12 @@ def _render_cited_source_text(
             f'{_highlight_escaped(chunk.get("text", ""), excerpt)}</p>'
             f'{_render_chunk_provenance(chunk)}'
             '</article>'
+        )
+    if truncated:
+        rendered.append(
+            f'<p class="muted">Showing the first '
+            f'{_MAX_SOURCE_TEXT_CHUNKS} extracted chunks; this source has '
+            'more.</p>'
         )
     rendered.append('</div>')
     return ''.join(rendered)
