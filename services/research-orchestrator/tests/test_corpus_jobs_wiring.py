@@ -29,6 +29,9 @@ DSN_KEY = 'GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN'
 
 CORPUS_INGEST_PATH = JOBS_DIR / 'corpus-ingest.yaml'
 ARXIV_SYNC_PATH = JOBS_DIR / 'corpus-arxiv-sync.yaml'
+POSTGRES_POLICY_PATH = (
+    REPO_ROOT / 'kubeadm' / 'glasslab-v2' / 'postgres' / '50-network-policy.yaml'
+)
 EMBED_CONFIGMAP_PATH = JOBS_DIR / 'corpus-embed-script-configmap.yaml'
 EMBED_SCRIPT_PATH = (
     REPO_ROOT
@@ -50,6 +53,29 @@ def _pod_spec(doc: dict[str, Any]) -> dict[str, Any]:
     if doc['kind'] == 'CronJob':
         return doc['spec']['jobTemplate']['spec']['template']['spec']
     return doc['spec']['template']['spec']
+
+
+def _pod_template_labels(doc: dict[str, Any]) -> dict[str, Any]:
+    if doc['kind'] == 'CronJob':
+        template = doc['spec']['jobTemplate']['spec']['template']
+    else:
+        template = doc['spec']['template']
+    return template.get('metadata', {}).get('labels', {})
+
+
+def _postgres_ingress_allowed_names() -> set[str]:
+    policy = _load(POSTGRES_POLICY_PATH)[0]
+    names: set[str] = set()
+    for rule in policy['spec']['ingress']:
+        for source in rule.get('from', []):
+            name = (
+                source.get('podSelector', {})
+                .get('matchLabels', {})
+                .get('app.kubernetes.io/name')
+            )
+            if name:
+                names.add(name)
+    return names
 
 
 def _container(doc: dict[str, Any], name: str | None = None) -> dict[str, Any]:
@@ -159,6 +185,18 @@ def test_corpus_arxiv_sync_uses_configured_store_and_raw_root() -> None:
         for volume in pod_spec['volumes']
     }
     assert PVC_NAME in claims
+
+
+def test_corpus_job_pods_are_admitted_by_the_postgres_ingress_policy() -> None:
+    allowed = _postgres_ingress_allowed_names()
+    for path in (CORPUS_INGEST_PATH, ARXIV_SYNC_PATH):
+        doc = _load(path)[0]
+        name = _pod_template_labels(doc).get('app.kubernetes.io/name')
+        assert name, f'{path.name} pod template has no app.kubernetes.io/name label'
+        assert name in allowed, (
+            f'{path.name} pod label {name!r} is not admitted by '
+            'glasslab-postgres-ingress, so the Job cannot reach Postgres'
+        )
 
 
 def test_every_job_configmap_reference_is_tracked() -> None:

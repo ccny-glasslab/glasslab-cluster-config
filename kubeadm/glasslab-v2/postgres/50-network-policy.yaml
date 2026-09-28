@@ -35,6 +35,18 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: glasslab-gpu-runner
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: corpus-ingest
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: corpus-arxiv-sync
       ports:
         - protocol: TCP
           port: 5432
