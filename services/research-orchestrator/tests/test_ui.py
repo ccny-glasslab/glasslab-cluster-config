@@ -1,10 +1,12 @@
-"""Read-only corpus UI page: panes, chat, escaping, citation badges, and CSP.
+"""Read-only corpus notebook: columns, tabs, chat, escaping, badges, and CSP.
 
 The page is server-rendered with no client JavaScript of its own and no
 external resource, so these tests drive it with ``TestClient`` and assert on
-the escaped HTML: injected ``<script>`` payloads stay inert, ranked-source
-URIs and filesystem paths are never emitted, and the evidence badge comes from
-the deterministic citation locator rather than the stored (tautological)
+the escaped HTML: the three-column notebook (Sources with CSS-only tabs, Ask
+the corpus, Viewer), the run file tree and digest-verified preview, injected
+``<script>`` payloads staying inert, ranked-source URIs and filesystem paths
+never being emitted, and the evidence badge coming from the deterministic
+citation locator rather than the stored (tautological)
 ``ranked_sources[].verified`` flag.
 
 The corpus chat is a same-origin ``GET`` form (the loopback UI proxy forwards
@@ -120,17 +122,28 @@ def _seed_chat_corpus(
     return source
 
 
-def _write_report(settings, run_id: str, body: bytes) -> ArtifactRecord:
-    path = Path(settings.shared_mount_root) / run_id / REPORT_REF
+def _write_artifact(
+    settings,
+    run_id: str,
+    ref: str,
+    body: bytes,
+    *,
+    artifact_type: str = 'report',
+) -> ArtifactRecord:
+    path = Path(settings.shared_mount_root) / run_id / ref
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(body)
     return ArtifactRecord(
         run_id=run_id,
-        type='report',
-        uri=f'artifact://{run_id}/{REPORT_REF}',
+        type=artifact_type,
+        uri=f'artifact://{run_id}/{ref}',
         sha256=sha256(body).hexdigest(),
         metadata={'path': str(path)},
     )
+
+
+def _write_report(settings, run_id: str, body: bytes) -> ArtifactRecord:
+    return _write_artifact(settings, run_id, REPORT_REF, body)
 
 
 def _packet_text(*blocks: str) -> str:
@@ -167,7 +180,7 @@ def _save_packet(
     return packet
 
 
-def test_ui_requires_operator_token_and_renders_three_panes(
+def test_ui_requires_operator_token_and_renders_three_columns(
     orchestrator_bundle,
 ) -> None:
     settings, _, _, _, engine = orchestrator_bundle
@@ -180,16 +193,248 @@ def test_ui_requires_operator_token_and_renders_three_panes(
     assert unauthenticated.status_code == 401
     assert authenticated.status_code == 200
     assert authenticated.headers['content-type'].startswith('text/html')
+    text = authenticated.text
+    # The NotebookLM-style notebook: a static masthead plus Sources, Ask the
+    # corpus, and Viewer columns in one grid.
+    assert '<main class="notebook">' in text
+    for column in ('id="sources"', 'id="ask"', 'id="viewer"'):
+        assert column in text
     for heading in (
         '<h2>Sources</h2>',
-        '<h2>Document</h2>',
-        '<h2>Evidence inspector</h2>',
+        '<h2>Ask the corpus</h2>',
+        '<h2>Viewer</h2>',
     ):
-        assert heading in authenticated.text
+        assert heading in text
+    # The former top-level Document and Evidence inspector panes are gone; the
+    # artifact/file navigation moved to the Viewer and the evidence inspector
+    # is folded into the Sources column.
+    assert 'id="document"' not in text
+    assert 'id="evidence"' not in text
+    assert '<h2>Document</h2>' not in text
+    assert '<h2>Evidence inspector</h2>' not in text
+    assert '<h3>Evidence inspector</h3>' in text
+    # Default view: the viewer asks for a selection instead of rendering one.
+    assert 'Select a source or run.' in text
     # Links stay root-relative: the page is reached through the loopback proxy,
     # never rewritten to an absolute 127.0.0.1:18080/19090 origin.
-    assert f'/ui/?run={run.run_id}' in authenticated.text
-    assert '127.0.0.1' not in authenticated.text
+    assert f'/ui/?run={run.run_id}' in text
+    assert '127.0.0.1' not in text
+
+
+@pytest.mark.parametrize(
+    ('params', 'checked'),
+    [
+        ({}, 'tab-runs'),
+        ({'run': 'run-placeholder'}, 'tab-runs'),
+        ({'run': 'run-placeholder', 'ref': REPORT_REF}, 'tab-runs'),
+        ({'source': 'source-placeholder'}, 'tab-corpus'),
+        ({'packet': 'packet-placeholder'}, 'tab-packets'),
+    ],
+)
+def test_ui_server_selects_the_initial_sources_tab(
+    orchestrator_bundle,
+    params: dict[str, str],
+    checked: str,
+) -> None:
+    """The checked radio must reflect the selection, since no script can.
+
+    A request for a source or an inspected packet has to land on the tab that
+    renders its content; a run or file selection stays on the runs tab.
+    """
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.get('/ui/', params=params, headers=AUTH_HEADERS)
+
+    assert response.status_code == 200
+    for tab_id in ('tab-runs', 'tab-corpus', 'tab-packets'):
+        marker = f'id="{tab_id}" checked>' if tab_id == checked else f'id="{tab_id}">'
+        assert marker in response.text
+    # The strip is a radio group plus labels: the only mechanism that swaps
+    # panels is the :checked sibling selector in the nonced stylesheet.
+    for tab_id, label, panel_id in (
+        ('tab-runs', 'Runs', 'panel-runs'),
+        ('tab-corpus', 'Corpus sources', 'panel-corpus'),
+        ('tab-packets', 'Context packets', 'panel-packets'),
+    ):
+        assert f'<label class="tab" for="{tab_id}">{label}</label>' in response.text
+        assert f'id="{panel_id}"' in response.text
+    assert '#tab-packets:checked ~ .tab-panels > #panel-packets{display:block}' in (
+        response.text
+    )
+    assert '.tab-panel{display:none}' in response.text
+    assert '<script' not in response.text
+
+
+def test_ui_run_selection_renders_file_tree_and_verified_preview(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='show the artifact tree'))
+    engine.store.save_artifact(
+        _write_report(settings, run.run_id, b'# Findings\n')
+    )
+    engine.store.save_artifact(
+        _write_artifact(
+            settings,
+            run.run_id,
+            'protocol/plan.md',
+            b'# Plan\n',
+            artifact_type='protocol',
+        )
+    )
+    engine.store.save_artifact(
+        _write_artifact(
+            settings,
+            run.run_id,
+            'beacon/heartbeat.txt',
+            b'beating\n',
+            artifact_type='beacon',
+        )
+    )
+    engine.store.save_artifact(
+        _write_artifact(
+            settings,
+            run.run_id,
+            'plots/seed-1/loss.txt',
+            b'0.5\n',
+            artifact_type='plot',
+        )
+    )
+
+    with _client(settings, engine) as client:
+        tree = client.get(
+            '/ui/',
+            params={'run': run.run_id},
+            headers=AUTH_HEADERS,
+        )
+        preview = client.get(
+            '/ui/',
+            params={'run': run.run_id, 'ref': REPORT_REF},
+            headers=AUTH_HEADERS,
+        )
+
+    assert tree.status_code == 200
+    # Folders are native <details> disclosures grouped by path segment; the
+    # tree lives in the Viewer column, not the Sources column.
+    viewer = tree.text.split('id="viewer"', 1)[1]
+    assert '<details class="tree-folder" open>' in viewer
+    for folder in ('reports/', 'protocol/', 'beacon/', 'seed-1/'):
+        assert f'<summary>{folder}</summary>' in viewer
+    # Linkable artifacts are links into the viewer; non-linkable refs are
+    # listed without a preview link (the preview stays policy-gated).
+    assert 'ref=reports%2Freport.md' in viewer
+    assert 'ref=plots%2Fseed-1%2Floss.txt' in viewer
+    assert 'plan.md' in viewer
+    assert 'heartbeat.txt' in viewer
+    assert 'ref=protocol%2Fplan.md' not in viewer
+    assert 'ref=beacon%2Fheartbeat.txt' not in viewer
+    assert (
+        'Select a file in the tree to preview its digest-verified text.'
+        in viewer
+    )
+
+    assert preview.status_code == 200
+    assert '<h3>Preview</h3>' in preview.text
+    assert '# Findings' in preview.text
+    assert 'aria-current="page"' in preview.text
+
+
+def test_ui_source_selection_renders_pdf_iframe_in_viewer(
+    orchestrator_bundle,
+    tmp_path,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    raw_root = tmp_path / 'rag-raw'
+    settings = settings.model_copy(
+        update={'corpus_rag_raw_root': str(raw_root)}
+    )
+    pdf_path = raw_root / 'handbook.pdf'
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf_path.write_bytes(b'%PDF-1.4\n%%EOF\n')
+    source = _seed_chat_corpus(engine, canonical_uri=pdf_path.as_uri())
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'source': source.source_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    viewer = response.text.split('id="viewer"', 1)[1]
+    assert viewer.count('<iframe') == 1
+    assert f'source={source.source_id}' in html.unescape(viewer)
+    assert 'id="tab-corpus" checked>' in response.text
+    # The selected row is marked current in the corpus source table.
+    assert 'aria-current="page"' in response.text
+
+
+def test_ui_evidence_inspector_renders_inside_sources_panel(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='inspect evidence'))
+    packet = _save_packet(
+        engine,
+        run,
+        blocks=[_BLOCK],
+        ranked_sources=[
+            {'source_id': 'src-1', 'digest': 'a' * 64, 'score': 0.75}
+        ],
+    )
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={
+                'run': run.run_id,
+                'packet': packet.packet_id,
+                'excerpt': _BLOCK,
+            },
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    text = response.text
+    panel_start = text.index('id="panel-packets"')
+    panel_end = text.index('</aside>')
+    ask_start = text.index('id="ask"')
+    evidence = text.index('<h3>Evidence inspector</h3>')
+    ranked = text.index('<h3>Ranked sources</h3>')
+    # The evidence inspector is part of the Sources column: between the
+    # Context packets panel and the chat column, never a top-level pane.
+    assert panel_start < evidence < panel_end
+    assert panel_start < ranked < panel_end
+    assert panel_end < ask_start
+    assert 'id="tab-packets" checked>' in text
+    assert '✓ exact' in text
+
+
+def test_ui_page_has_no_script_and_no_inline_style(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='stay script-free'))
+    engine.store.save_artifact(
+        _write_report(settings, run.run_id, b'# Findings\n')
+    )
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'run': run.run_id, 'ref': REPORT_REF, 'q': _CHAT_QUESTION},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    text = response.text
+    assert '<script' not in text
+    assert '<noscript' not in text
+    # All CSS is in the nonced stylesheet: no element carries style="…" and no
+    # element carries an event-handler attribute.
+    assert re.search(r'\sstyle="', text) is None
+    assert re.search(r'\son(click|change|load|error|focus|submit)=', text) is None
 
 
 def test_register_ui_routes_adds_exactly_one_ui_route(orchestrator_bundle) -> None:
@@ -601,7 +846,9 @@ def test_ui_citation_link_preserves_q_and_targets_source_panel(
             params={'q': _CHAT_QUESTION},
             headers=AUTH_HEADERS,
         )
-        match = re.search(r'href="(/ui/\?[^"]*source=[^"]*)"', page.text)
+        # The chat citation is the source link that also carries the question;
+        # the corpus index links a source without q.
+        match = re.search(r'href="(/ui/\?[^"]*q=[^"]*source=[^"]*)"', page.text)
         assert match is not None
         citation_href = html.unescape(match.group(1))
         followed = client.get(citation_href, headers=AUTH_HEADERS)
@@ -700,7 +947,7 @@ def test_ui_citation_omits_page_when_chunk_has_no_page(
         )
 
     assert page.status_code == 200
-    match = re.search(r'href="(/ui/\?[^"]*source=[^"]*)"', page.text)
+    match = re.search(r'href="(/ui/\?[^"]*q=[^"]*source=[^"]*)"', page.text)
     assert match is not None
     citation_query = parse_qs(urlsplit(html.unescape(match.group(1))).query)
     assert 'page' not in citation_query

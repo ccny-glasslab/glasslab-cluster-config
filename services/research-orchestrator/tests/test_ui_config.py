@@ -97,16 +97,19 @@ def test_ui_pdf_routes_present_when_enabled(orchestrator_bundle) -> None:
         assert client.get('/ui/pdf/assets/web/viewer.css').status_code == 200
 
 
-def test_ui_chat_section_absent_when_disabled(orchestrator_bundle) -> None:
-    """ui_chat_enabled=false renders /ui/ without the Ask the corpus pane."""
+def test_ui_chat_form_absent_when_disabled(orchestrator_bundle) -> None:
+    """ui_chat_enabled=false keeps the center column but not the chat form."""
     settings, _, _, _, engine = orchestrator_bundle
 
     with _flag_client(settings, engine, ui_chat_enabled=False) as client:
         response = client.get('/ui/')
 
     assert response.status_code == 200
-    assert 'Ask the corpus' not in response.text
-    assert 'id="ask"' not in response.text
+    assert '<h2>Ask the corpus</h2>' in response.text
+    assert 'id="ask"' in response.text
+    assert 'Corpus chat is not enabled on this deployment.' in response.text
+    assert '<form' not in response.text
+    assert 'name="q"' not in response.text
 
 
 def test_ui_chat_section_present_when_enabled(orchestrator_bundle) -> None:
