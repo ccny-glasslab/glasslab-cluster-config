@@ -30,6 +30,8 @@ DSN_KEY = 'GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN'
 CORPUS_INGEST_PATH = JOBS_DIR / 'corpus-ingest.yaml'
 ARXIV_SYNC_PATH = JOBS_DIR / 'corpus-arxiv-sync.yaml'
 RAG_BACKFILL_PATH = JOBS_DIR / 'rag-backfill.yaml'
+RAG_EMBED_PATH = JOBS_DIR / 'corpus-rag-embed.yaml'
+GPU_EMBED_PATH = JOBS_DIR / 'corpus-gpu-embed.yaml'
 POSTGRES_POLICY_PATH = (
     REPO_ROOT / 'kubeadm' / 'glasslab-v2' / 'postgres' / '50-network-policy.yaml'
 )
@@ -215,7 +217,13 @@ def test_rag_backfill_job_uses_postgres_and_pins_the_release_image() -> None:
 
 def test_corpus_job_pods_are_admitted_by_the_postgres_ingress_policy() -> None:
     allowed = _postgres_ingress_allowed_names()
-    for path in (CORPUS_INGEST_PATH, ARXIV_SYNC_PATH, RAG_BACKFILL_PATH):
+    for path in (
+        CORPUS_INGEST_PATH,
+        ARXIV_SYNC_PATH,
+        RAG_BACKFILL_PATH,
+        RAG_EMBED_PATH,
+        GPU_EMBED_PATH,
+    ):
         doc = _load(path)[0]
         name = _pod_template_labels(doc).get('app.kubernetes.io/name')
         assert name, f'{path.name} pod template has no app.kubernetes.io/name label'
@@ -223,6 +231,34 @@ def test_corpus_job_pods_are_admitted_by_the_postgres_ingress_policy() -> None:
             f'{path.name} pod label {name!r} is not admitted by '
             'glasslab-postgres-ingress, so the Job cannot reach Postgres'
         )
+
+
+def test_corpus_rag_embed_job_runs_the_embed_cli_against_postgres() -> None:
+    docs = _load(RAG_EMBED_PATH)
+    job = next(doc for doc in docs if doc.get('kind') == 'Job')
+    container = _container(job)
+    command = _command_text(container)
+    env = _env(container)
+
+    assert 'embed_rag_chunks.py' in command
+    assert '--apply' in command
+    assert '--store' not in command
+
+    assert _env_value(env, 'GLASSLAB_ORCHESTRATOR_STORE_BACKEND') == 'postgres'
+    assert _env_value(
+        env, 'GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN'
+    ) == {'secretKeyRef': {'name': DSN_SECRET, 'key': DSN_KEY}}
+    assert _env_value(env, 'CORPUS_RAG_PG_DSN') == {
+        'secretKeyRef': {'name': DSN_SECRET, 'key': DSN_KEY}
+    }
+
+    pod_spec = _pod_spec(job)
+    assert pod_spec.get('automountServiceAccountToken') is False
+    assert pod_spec.get('serviceAccountName')
+    assert pod_spec['securityContext']['fsGroup'] == 10001
+    assert container['securityContext']['runAsUser'] == 10001
+    assert container['securityContext']['runAsGroup'] == 10001
+    assert _PINNED_IMAGE_RE.search(container['image']), container['image']
 
 
 def test_every_job_configmap_reference_is_tracked() -> None:

@@ -53,6 +53,18 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: rag-backfill
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: corpus-rag-embed
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: corpus-gpu-embed
       ports:
         - protocol: TCP
           port: 5432

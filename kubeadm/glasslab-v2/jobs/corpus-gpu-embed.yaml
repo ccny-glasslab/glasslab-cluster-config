@@ -7,6 +7,11 @@ spec:
   backoffLimit: 1
   ttlSecondsAfterFinished: 7200
   template:
+    metadata:
+      labels:
+        # Admitted by the glasslab-postgres-ingress allow-list; without this
+        # label the Job cannot reach Postgres on 5432.
+        app.kubernetes.io/name: corpus-gpu-embed
     spec:
       serviceAccountName: glasslab-gpu-runner
       automountServiceAccountToken: false
