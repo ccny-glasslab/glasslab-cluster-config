@@ -1,7 +1,8 @@
-"""Read-only, server-rendered corpus and reports notebook for the operator UI.
+"""Server-rendered corpus and reports notebook for the operator UI.
 
-One operator-gated route (``GET /ui/``) renders a no-JavaScript, three-column
-notebook over durable orchestrator state:
+Two operator-gated routes: ``GET /ui/`` renders a no-JavaScript, three-column
+notebook over durable orchestrator state, and ``POST /ui/sources/upload``
+ingests one operator-supplied PDF from the Sources column into the corpus:
 
 * the **Sources** column is the navigational index: a CSS-only tab strip
   (visually hidden radio inputs, ``<label>`` tabs, and ``:checked`` sibling
@@ -40,7 +41,8 @@ The page is escape-first: every interpolated value passes through
 filesystem paths are never emitted. Links are root-relative so the page works
 unchanged through the loopback UI proxy. The Content-Security-Policy keeps
 ``default-src 'none'`` and a per-response style nonce, and widens only
-``form-action`` to ``'self'`` (the chat form) and adds ``frame-src 'self'``
+``form-action`` to ``'self'`` (the chat and upload forms) and adds
+``frame-src 'self'``
 (the viewer iframe); no remote origin can load. There is deliberately no
 ``script-src`` at all, so the tabs, the file tree, and the citation hover
 cards are pure HTML and CSS.
@@ -55,17 +57,22 @@ from __future__ import annotations
 # reviewer must hold.
 
 from collections.abc import Callable
+import contextlib
 from dataclasses import dataclass, field
+import hashlib
 import html
+import logging
+from pathlib import Path, PurePosixPath
 import re
 import secrets
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO
 from urllib.parse import urlencode
 
-from fastapi import Depends, FastAPI, Query
-from fastapi.responses import HTMLResponse
+from fastapi import Depends, FastAPI, File, Query, UploadFile
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from .artifact_delivery import ArtifactDeliveryError, VerifiedArtifactReader
+from .corpus_rag.pipeline import ingest_document, stage_raw_pdf
 from .citation_locator import (
     CitationClass,
     classify_citation,
@@ -89,6 +96,8 @@ if TYPE_CHECKING:
     from .schemas import ArtifactRecord, ContextPacket
     from .ui_chat import ChatAnswer, ChatCitation
 
+logger = logging.getLogger(__name__)
+
 # A browser text pane is not a download surface: the preview is capped well
 # below the signed-link ceiling so one large artifact cannot stall the page.
 MAXIMUM_UI_DOCUMENT_BYTES = 2 * 1024 * 1024
@@ -97,6 +106,16 @@ MAXIMUM_UI_DOCUMENT_BYTES = 2 * 1024 * 1024
 # per source run to a 141-chunk p99 with one live outlier at 6,796 chunks
 # (~4.3 MB), which must never become a single response.
 _MAX_SOURCE_TEXT_CHUNKS = 200
+
+# Same ceiling as a single signed-link artifact download: a text-sized PDF is
+# an order of magnitude smaller, and the cap bounds one synchronous ingest.
+MAXIMUM_UI_UPLOAD_BYTES = 64 * 1024 * 1024
+
+# Read the multipart body in bounded slices so an oversized upload is rejected
+# without ever materializing more than the cap plus one chunk in memory.
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+_UPLOAD_TITLE_MAX_CHARS = 200
 
 _CITATION_BADGES: dict[CitationClass, str] = {
     'exact': '✓ exact',
@@ -285,6 +304,21 @@ border:1px solid transparent;border-radius:var(--radius-sm);color:#0b0c12;
 font:inherit;font-size:.8125rem;font-weight:600;cursor:pointer;
 transition:background-color .15s ease}
 .ask-form button:hover{background:var(--accent-hover)}
+.upload-form{display:flex;flex-wrap:wrap;align-items:center;gap:.45rem;
+margin:.1rem 0 .65rem}
+.upload-form label{flex:none;font-size:.6875rem;font-weight:600;
+letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)}
+.upload-form input[type=file]{flex:1 1 9rem;min-width:0;padding:.42rem .55rem;
+background:var(--well);border:1px solid var(--line);
+border-radius:var(--radius-sm);color:var(--text-2);font:inherit;
+font-size:.75rem}
+.upload-form input[type=file]:focus-visible{outline:2px solid var(--accent);
+outline-offset:2px;border-color:transparent}
+.upload-form button{flex:none;padding:.5rem .95rem;background:var(--accent);
+border:1px solid transparent;border-radius:var(--radius-sm);color:#0b0c12;
+font:inherit;font-size:.8125rem;font-weight:600;cursor:pointer;
+transition:background-color .15s ease}
+.upload-form button:hover{background:var(--accent-hover)}
 .chat-turn{margin:1rem 0 0;padding:.9rem 1.05rem;background:var(--well);
 border:1px solid var(--line-faint);border-radius:var(--radius-sm)}
 /* Inline citations: a superscript ordinal marker whose preview card is a
@@ -447,8 +481,81 @@ def _render_tab_inputs(selection: UiRequest) -> str:
     return '\n'.join(inputs)
 
 
+def _render_upload_form(settings: Settings) -> str:
+    """The zero-JS multipart upload form, or the disabled note.
+
+    ``form-action 'self'`` already permits the same-origin POST, and the form
+    carries no script and no inline style: the browser's native file picker
+    and submit are the whole interaction.
+    """
+    if not settings.ui_upload_enabled:
+        return (
+            '<p class="muted">Source upload is not enabled on this '
+            'deployment.</p>'
+        )
+    return (
+        '<form method="post" action="/ui/sources/upload" '
+        'enctype="multipart/form-data" class="upload-form">'
+        '<label for="upload-file">Add a PDF source</label>'
+        '<input id="upload-file" type="file" name="file" '
+        'accept="application/pdf">'
+        '<button type="submit">Upload</button>'
+        '</form>'
+    )
+
+
+def _read_upload_bounded(stream: BinaryIO, maximum: int) -> bytes | None:
+    """Read at most ``maximum`` bytes; return ``None`` when the body is larger.
+
+    Chunked so an oversized body is rejected without allocating it whole, and
+    so the decision never trusts a client-supplied Content-Length.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = stream.read(_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > maximum:
+            return None
+        chunks.append(chunk)
+    return b''.join(chunks)
+
+
+def _upload_title(filename: str | None) -> str | None:
+    """The operator-supplied filename as a display title, or ``None``."""
+    if not filename:
+        return None
+    name = PurePosixPath(filename.replace('\\', '/')).name.replace('\x00', '')
+    name = name.strip()
+    return name[:_UPLOAD_TITLE_MAX_CHARS] or None
+
+
+def _render_upload_error(
+    message: str,
+    status_code: int,
+    nonce: str,
+) -> HTMLResponse:
+    # A short, escaped, script-free page: the POST failed, so the client gets
+    # a message and a way back without any internal detail.
+    return HTMLResponse(
+        content=(
+            '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            '<title>Source upload failed</title></head><body>'
+            '<h1>Source upload failed</h1>'
+            f'<p>{_escape(message)}</p>'
+            '<p><a href="/ui/">Back to the corpus</a></p>'
+            '</body></html>'
+        ),
+        status_code=status_code,
+        headers=_ui_headers(nonce),
+    )
+
+
 def _render_sources_panel(
     engine: ResearchOrchestrator,
+    settings: Settings,
     selection: UiRequest,
 ) -> str:
     runs = engine.store.list_runs()
@@ -536,7 +643,8 @@ def _render_sources_panel(
     )
     return (
         '<aside class="pane" id="sources" aria-label="Sources">'
-        '<div class="column-head"><h2>Sources</h2></div>'
+        '<div class="column-head"><h2>Sources</h2>'
+        f'{_render_upload_form(settings)}</div>'
         '<div class="tabs">'
         f'{_render_tab_inputs(selection)}'
         f'<div class="tab-strip">{tab_strip}</div>'
@@ -1029,7 +1137,7 @@ def render_ui_page(
     request: UiRequest,
     chat_service: CorpusChatService | None = None,
 ) -> str:
-    """Render the whole read-only notebook as one escaped HTML string."""
+    """Render the whole notebook as one escaped HTML string."""
     return (
         '<!doctype html>'
         '<html lang="en"><head><meta charset="utf-8">'
@@ -1041,7 +1149,7 @@ def render_ui_page(
         '<h1>Glasslab corpus and reports</h1>'
         '</header>'
         '<main class="notebook">'
-        f'{_render_sources_panel(engine, request)}'
+        f'{_render_sources_panel(engine, settings, request)}'
         f'{_render_chat_panel(chat_service, request)}'
         f'{_render_viewer_panel(engine, settings, request)}'
         '</main>'
@@ -1075,7 +1183,7 @@ def register_ui_routes(
     require_operator: Callable[..., None],
     chat_service: CorpusChatService | None = None,
 ) -> None:
-    """Register the single operator-gated ``GET /ui/`` page route.
+    """Register the operator-gated ``GET /ui/`` page and upload routes.
 
     ``require_operator`` is the host application's header-auth dependency (a
     closure over its settings in ``main.create_app``), so it is injected
@@ -1113,4 +1221,71 @@ def register_ui_routes(
         return HTMLResponse(
             content=render_ui_page(engine, settings, request, chat_service),
             headers=_ui_headers(request.nonce),
+        )
+
+    @app.post('/ui/sources/upload')
+    def upload_source(
+        file: UploadFile = File(...),
+        _: None = Depends(require_operator),
+    ) -> Response:
+        # A sync handler: FastAPI runs it in the threadpool, so the
+        # CPU-bound extraction/chunking never blocks the event loop. On
+        # success the 303 lands on ``?source=<id>`` so the existing selection
+        # logic reopens the page on the corpus tab with the new source row.
+        nonce = secrets.token_urlsafe(16)
+        if not settings.ui_upload_enabled:
+            return _render_upload_error(
+                'Source upload is not enabled on this deployment.',
+                404,
+                nonce,
+            )
+        data = _read_upload_bounded(file.file, MAXIMUM_UI_UPLOAD_BYTES)
+        if data is None:
+            return _render_upload_error(
+                'The file exceeds the upload size limit.',
+                413,
+                nonce,
+            )
+        if not data.startswith(b'%PDF'):
+            return _render_upload_error(
+                'Only PDF files can be uploaded.',
+                415,
+                nonce,
+            )
+        digest = hashlib.sha256(data).hexdigest()
+        try:
+            staged = stage_raw_pdf(
+                data,
+                Path(settings.corpus_rag_raw_root),
+                digest,
+            )
+        except Exception:  # noqa: BLE001 - a store/path detail stays internal
+            logger.exception('ui source upload staging failed')
+            return _render_upload_error(
+                'The upload could not be stored.',
+                500,
+                nonce,
+            )
+        try:
+            report = ingest_document(
+                store=engine.store,
+                data=data,
+                canonical_uri=staged.resolve().as_uri(),
+                title=_upload_title(file.filename),
+                doc_type='book',
+            )
+        except Exception:  # noqa: BLE001 - internal detail stays hidden
+            logger.warning('ui source upload ingest failed', exc_info=True)
+            # Delete the staged bytes so a failed ingest's canonical URI
+            # resolves to nothing instead of serving rejected content.
+            with contextlib.suppress(OSError):
+                staged.unlink()
+            return _render_upload_error(
+                'The document could not be ingested.',
+                400,
+                nonce,
+            )
+        return RedirectResponse(
+            _page_url(source=report.source_id),
+            status_code=303,
         )

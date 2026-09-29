@@ -30,14 +30,17 @@ import html
 import re
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.testclient import TestClient
+import pymupdf
 import pytest
 
 from app.corpus_rag.chat import CorpusChatService
 from app.corpus_rag.contracts import RagChunkRecord
+from app.knowledge_manager import KnowledgeError
 from app.schemas import (
     AgentName,
     ArtifactRecord,
@@ -1342,3 +1345,212 @@ def test_ui_citation_omits_page_when_chunk_has_no_page(
     assert match is not None
     citation_query = parse_qs(urlsplit(html.unescape(match.group(1))).query)
     assert 'page' not in citation_query
+
+
+def _raw_settings(settings, tmp_path):
+    return settings.model_copy(
+        update={'corpus_rag_raw_root': str(tmp_path / 'rag-raw')}
+    )
+
+
+def _make_real_pdf(text: str = 'Bootstrap resampling estimates uncertainty'):
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), text)
+    return document.tobytes()
+
+
+def test_ui_sources_column_renders_zero_js_upload_form(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.get('/ui/', headers=AUTH_HEADERS)
+
+    assert response.status_code == 200
+    text = response.text
+    sources = text.split('id="sources"', 1)[1].split('id="ask"', 1)[0]
+    # The form is a native multipart POST in the Sources column header: no
+    # script, no inline style, and the same-origin form-action already allows
+    # it. The upload CSS lives in the nonced stylesheet like every other rule.
+    assert (
+        '<form method="post" action="/ui/sources/upload" '
+        'enctype="multipart/form-data" class="upload-form">' in sources
+    )
+    assert 'name="file"' in sources
+    assert 'accept="application/pdf"' in sources
+    assert '.upload-form{' in text
+    assert '<script' not in text
+    assert re.search(r'\sstyle="', text) is None
+
+
+def test_ui_upload_requires_operator_token(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.post(
+            '/ui/sources/upload',
+            files={'file': ('book.pdf', b'%PDF-1.4\n%%EOF\n')},
+        )
+
+    assert response.status_code == 401
+
+
+def test_ui_upload_rejects_missing_file(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.post('/ui/sources/upload', headers=AUTH_HEADERS)
+
+    assert response.status_code == 422
+
+
+def test_ui_upload_rejects_non_pdf(orchestrator_bundle, tmp_path) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    settings = _raw_settings(settings, tmp_path)
+
+    with _client(settings, engine) as client:
+        response = client.post(
+            '/ui/sources/upload',
+            files={'file': ('notes.txt', b'not a pdf at all')},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 415
+    assert 'Only PDF files can be uploaded.' in response.text
+    assert not (tmp_path / 'rag-raw').exists()
+
+
+def test_ui_upload_rejects_oversized_body(
+    orchestrator_bundle,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    settings = _raw_settings(settings, tmp_path)
+    monkeypatch.setattr('app.ui.MAXIMUM_UI_UPLOAD_BYTES', 16)
+
+    with _client(settings, engine) as client:
+        response = client.post(
+            '/ui/sources/upload',
+            files={'file': ('big.pdf', b'%PDF-1.4' + b'x' * 32)},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 413
+    assert 'exceeds the upload size limit' in response.text
+    assert not (tmp_path / 'rag-raw').exists()
+
+
+def test_ui_upload_success_redirects_and_calls_ingest(
+    orchestrator_bundle,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    settings = _raw_settings(settings, tmp_path)
+    pdf = b'%PDF-1.4\n%\xe2\xe3\xcf\xd3\ntrailer\n%%EOF\n'
+    calls: list[dict] = []
+
+    def fake_ingest(**kwargs: object) -> SimpleNamespace:
+        calls.append(kwargs)
+        return SimpleNamespace(source_id='src-uploaded')
+
+    monkeypatch.setattr('app.ui.ingest_document', fake_ingest)
+
+    with _client(settings, engine) as client:
+        response = client.post(
+            '/ui/sources/upload',
+            files={'file': ('textbook.pdf', pdf, 'application/pdf')},
+            headers=AUTH_HEADERS,
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    # The corpus tab is selected by the source selection the redirect carries,
+    # so the reload lands on the new source row and its viewer.
+    assert response.headers['location'] == '/ui/?source=src-uploaded'
+    assert len(calls) == 1
+    assert calls[0]['title'] == 'textbook.pdf'
+    assert calls[0]['doc_type'] == 'book'
+    staged = tmp_path / 'rag-raw' / f'{sha256(pdf).hexdigest()}.pdf'
+    assert staged.read_bytes() == pdf
+    assert calls[0]['canonical_uri'] == staged.resolve().as_uri()
+
+
+def test_ui_upload_ingest_failure_removes_staged_bytes(
+    orchestrator_bundle,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    settings = _raw_settings(settings, tmp_path)
+    pdf = b'%PDF-1.4\n%%EOF\n'
+
+    def reject(**kwargs: object) -> None:
+        raise KnowledgeError('document matches secret pattern')
+
+    monkeypatch.setattr('app.ui.ingest_document', reject)
+
+    with _client(settings, engine) as client:
+        response = client.post(
+            '/ui/sources/upload',
+            files={'file': ('book.pdf', pdf, 'application/pdf')},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 400
+    assert 'The document could not be ingested.' in response.text
+    # The internal reason never reaches the client, and the rejected bytes are
+    # deleted so the stored canonical URI cannot serve them.
+    assert 'secret pattern' not in response.text
+    assert list((tmp_path / 'rag-raw').iterdir()) == []
+
+
+def test_ui_upload_ingests_real_pdf_and_lists_openable_source(
+    orchestrator_bundle,
+    tmp_path,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    settings = _raw_settings(settings, tmp_path)
+    pdf = _make_real_pdf()
+
+    with _client(settings, engine) as client:
+        response = client.post(
+            '/ui/sources/upload',
+            files={'file': ('methods.pdf', pdf, 'application/pdf')},
+            headers=AUTH_HEADERS,
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        listing = client.get(
+            response.headers['location'], headers=AUTH_HEADERS
+        )
+
+    assert listing.status_code == 200
+    # The success redirect lands on the corpus tab with the new source row and
+    # a resolvable PDF viewer iframe over the staged bytes.
+    assert 'id="tab-corpus" checked>' in listing.text
+    assert 'methods.pdf' in listing.text
+    assert '<iframe' in listing.text
+
+
+def test_ui_upload_disabled_shows_note_and_refuses_post(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    settings = settings.model_copy(update={'ui_upload_enabled': False})
+
+    with _client(settings, engine) as client:
+        page = client.get('/ui/', headers=AUTH_HEADERS)
+        post = client.post(
+            '/ui/sources/upload',
+            files={'file': ('book.pdf', b'%PDF-1.4\n%%EOF\n')},
+            headers=AUTH_HEADERS,
+        )
+
+    assert page.status_code == 200
+    assert 'Source upload is not enabled on this deployment.' in page.text
+    assert 'action="/ui/sources/upload"' not in page.text
+    assert post.status_code == 404

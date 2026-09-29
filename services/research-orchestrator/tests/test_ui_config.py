@@ -54,6 +54,7 @@ def test_ui_and_rag_flags_default() -> None:
     assert settings.ui_chat_enabled is True
     assert settings.ui_chat_dense is False
     assert settings.ui_pdf_enabled is True
+    assert settings.ui_upload_enabled is True
     assert settings.rag_llm_enabled is False
 
 
@@ -108,7 +109,9 @@ def test_ui_chat_form_absent_when_disabled(orchestrator_bundle) -> None:
     assert '<h2>Ask the corpus</h2>' in response.text
     assert 'id="ask"' in response.text
     assert 'Corpus chat is not enabled on this deployment.' in response.text
-    assert '<form' not in response.text
+    # The Sources-column upload form is independent of the chat flag, so the
+    # assertion is scoped to the ask form rather than the whole document.
+    assert 'class="ask-form"' not in response.text
     assert 'name="q"' not in response.text
 
 
