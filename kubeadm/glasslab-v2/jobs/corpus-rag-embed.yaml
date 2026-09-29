@@ -30,7 +30,7 @@ spec:
           # the CPU torch/sentence-transformers runtime (requirements-dense.txt)
           # plus the canonical vector-index schema. Pin the release commit that
           # contains scripts/corpus_rag/embed_rag_chunks.py.
-          image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:e6000d38538c9cf625aa5c6cf1f13ace547b0e58
+          image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:260c25bd483283d51801245c9c255fe33dad0814
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command:
