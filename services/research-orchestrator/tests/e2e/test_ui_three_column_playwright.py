@@ -18,11 +18,14 @@ Assertions:
 3. selecting the seeded textbook renders the PDF viewer iframe inside the
    Viewer column and lands on the Corpus sources tab;
 4. the page carries no ``<script>`` element, no inline ``style`` attribute,
-   and produces no CSP-violation console error and no page error.
+   and produces no CSP-violation console error and no page error;
+5. at a narrow width (1024x768) a corpus table with the live corpus's order
+   of magnitude of rows still scrolls inside the Sources column instead of
+   stretching the document to tens of thousands of pixels.
 
-Screenshots ``ui-3col-default.png``, ``ui-3col-runtree.png``, and
-``ui-3col-pdf.png`` are written to the QA artifacts directory
-(``ui_qa.ARTIFACTS_DIR``).
+Screenshots ``ui-3col-default.png``, ``ui-3col-runtree.png``,
+``ui-3col-pdf.png``, ``ui-3col-mobile.png``, and ``ui-3col-narrow-corpus.png``
+are written to the QA artifacts directory (``ui_qa.ARTIFACTS_DIR``).
 """
 
 from __future__ import annotations
@@ -317,12 +320,13 @@ def test_ui_notebook_stacks_below_1100px(ui_qa) -> None:
         assert abs(boxes['#ask']['x'] - boxes['#sources']['x']) < 1
         assert abs(boxes['#sources']['x'] - boxes['#viewer']['x']) < 1
         # The stacked page scrolls as one document again (no fixed viewport
-        # height, no internal scrollers), and every section still works.
+        # height) except for the content-sized tab panels, which keep their
+        # internal scroller so a large corpus table cannot grow the document.
         assert page.evaluate('getComputedStyle(document.body).overflowY') == (
             'visible'
         )
         assert _overflow_y(page, '#ask .column-body') == 'visible'
-        assert _overflow_y(page, '#sources .tab-panels') == 'visible'
+        assert _overflow_y(page, '#sources .tab-panels') == 'auto'
         assert _overflow_y(page, '#viewer .column-body') == 'visible'
         expect(page.locator('#panel-runs')).to_be_visible()
         expect(page.locator('.ask-form input[name="q"]')).to_be_visible()
@@ -335,5 +339,89 @@ def test_ui_notebook_stacks_below_1100px(ui_qa) -> None:
             url=page.url,
             columns={key: value for key, value in boxes.items()},
             screenshot='ui-3col-mobile.png',
+        )
+        browser.close()
+
+
+@PLAYWRIGHT_SKIP
+def test_ui_narrow_corpus_tab_stays_bounded(ui_qa) -> None:
+    """At 1024x768 the corpus tab scrolls inside the panel, not the page.
+
+    Regression: the narrow media query returned the tab panels to document
+    flow, so a ~1400-row corpus table grew
+    ``document.documentElement.scrollHeight`` to ~82k px. The panel must keep
+    its internal scroller and the document must stay viewport-relative.
+    """
+    from playwright.sync_api import expect, sync_playwright
+
+    env = ui_qa
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context(viewport={'width': 1024, 'height': 768})
+        page = context.new_page()
+        response = page.goto(
+            env.proxy_origin + '/ui/', wait_until='domcontentloaded'
+        )
+        assert response is not None and response.status == 200
+
+        # Pure CSS tab switch: clicking the label checks the radio.
+        page.locator('label[for="tab-corpus"]').click()
+        assert page.locator('#tab-corpus').is_checked()
+        expect(page.locator('#panel-corpus')).to_be_visible()
+
+        # The QA seed carries one source, so clone its row up to the live
+        # corpus's order of magnitude to make the panel content overflow the
+        # 65vh cap. This is test instrumentation in the browser, not app
+        # markup: the page itself stays script-free.
+        row_count = page.evaluate(
+            """count => {
+                const body = document.querySelector(
+                    '#panel-corpus table'
+                ).tBodies[0];
+                const sample = body.rows[0];
+                for (let i = 0; i < count; i += 1) {
+                    body.appendChild(sample.cloneNode(true));
+                }
+                return body.rows.length;
+            }""",
+            1400,
+        )
+        assert row_count >= 1400, row_count
+
+        viewport_height = page.evaluate('window.innerHeight')
+        document_height = page.evaluate(
+            'document.documentElement.scrollHeight'
+        )
+        assert document_height <= viewport_height * 3, (
+            f'document grew to {document_height}px at a {viewport_height}px '
+            'viewport; the corpus table must scroll inside .tab-panels'
+        )
+        assert _overflow_y(page, '#sources .tab-panels') == 'auto'
+        panel = page.evaluate(
+            """() => {
+                const element = document.querySelector(
+                    '#sources .tab-panels'
+                );
+                return {
+                    clientHeight: element.clientHeight,
+                    scrollHeight: element.scrollHeight,
+                };
+            }"""
+        )
+        assert panel['scrollHeight'] > panel['clientHeight'], panel
+        assert panel['clientHeight'] <= 0.65 * viewport_height + 2, panel
+        assert page.locator('script').count() == 0
+        assert page.locator('[style]').count() == 0
+        _shot(page, env, 'ui-3col-narrow-corpus.png')
+        _log(
+            env,
+            'layout',
+            'narrow-corpus-bounded',
+            url=page.url,
+            rows=row_count,
+            document_height=document_height,
+            viewport_height=viewport_height,
+            panel=panel,
+            screenshot='ui-3col-narrow-corpus.png',
         )
         browser.close()
