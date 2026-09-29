@@ -376,8 +376,12 @@ white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text-2)}
 mark{background:rgba(139,147,255,.3);color:var(--text);border-radius:3px;
 padding:0 .08em}
 ::selection{background:rgba(113,112,255,.35);color:var(--text)}
-/* Below 1100px the notebook stacks into one column (chat first) and every
-   section returns to document flow instead of internal scrolling. */
+/* Below 1100px the notebook stacks into one column (chat first) and the
+   column bodies return to document flow instead of internal scrolling. The
+   two content-sized regions stay self-bounded even here: a thousand-row
+   corpus table (or a 200-chunk extracted-text reader) must scroll inside its
+   own panel instead of stretching the document to tens of thousands of
+   pixels. */
 @media (max-width:1100px){
 body{block-size:auto;min-block-size:100vh;overflow:visible;
 padding:1.6rem .9rem 2.8rem}
@@ -386,7 +390,9 @@ main{display:flex;flex-direction:column}
 #sources{order:2}
 #viewer{order:3}
 .pane{overflow:visible}
-.column-body,.tab-panels{overflow:visible}
+.column-body{overflow:visible}
+.tab-panels{overflow:auto;max-block-size:65vh;overscroll-behavior:contain}
+.source-text{max-block-size:65vh}
 .column-body.is-fill{display:block;overflow:visible}
 .pdf-viewer iframe{block-size:70vh;flex:none}
 }

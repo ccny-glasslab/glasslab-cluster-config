@@ -273,6 +273,34 @@ def test_ui_server_selects_the_initial_sources_tab(
     assert '<script' not in response.text
 
 
+def test_ui_narrow_layout_bounds_the_corpus_and_text_panels(
+    orchestrator_bundle,
+) -> None:
+    """Below 1100px the two content-sized regions keep their internal scroller.
+
+    The narrow media query once returned the tab panels to document flow,
+    which let a ~1400-row corpus table grow the document to tens of thousands
+    of pixels; the panels and the extracted-text reader must stay bounded at
+    every width.
+    """
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.get('/ui/', headers=AUTH_HEADERS)
+
+    assert response.status_code == 200
+    assert (
+        '.tab-panels{overflow:auto;max-block-size:65vh;'
+        'overscroll-behavior:contain}' in response.text
+    )
+    assert '.source-text{max-block-size:65vh}' in response.text
+    assert '.column-body{overflow:visible}' in response.text
+    assert (
+        '.column-body.is-fill{display:block;overflow:visible}' in response.text
+    )
+    assert '.column-body,.tab-panels{overflow:visible}' not in response.text
+
+
 def test_ui_run_selection_renders_file_tree_and_verified_preview(
     orchestrator_bundle,
 ) -> None:
