@@ -161,18 +161,55 @@ an opaque `404`, so the response never reveals whether a path exists.
 ## The chat pane
 
 The chat pane answers a question from indexed corpus chunks. Retrieval is
-lexical over the corpus store and synthesis is extractive: the answer quotes
-the top retrieved passages and renders each one as a citation. The path is
-offline and needs no embedding backend, so an empty corpus produces the
-explicit no-evidence answer instead of an error. Selecting a citation opens the
-PDF viewer at the cited source and drives the exact-span highlight.
+configurable: `lexical` (the default) needs no embedding backend, `dense` uses
+the vector channel only, and `hybrid` fuses lexical and dense with RRF.
+Synthesis is extractive: the answer quotes the top retrieved passages and
+renders each one as a citation. Dense and hybrid additionally require the dense
+index to be built first (see [Dense and hybrid retrieval](#dense-and-hybrid-retrieval)
+below), and both degrade to lexical when the embedding backend or the index is
+unavailable. Selecting a citation opens the PDF viewer at the cited source and
+drives the exact-span highlight.
 
-Two config flags are declared for a future dense retrieval mode and a future
-remote synthesis lane: `GLASSLAB_ORCHESTRATOR_UI_CHAT_DENSE` and
-`GLASSLAB_ORCHESTRATOR_RAG_LLM_ENABLED`. The shipped `/ui/` wiring reads
-neither, and the chat service is built without a synthesis provider, so the
-current chat is always lexical and offline regardless of their values. Treat
-them as reserved surface rather than live switches.
+The only remaining reserved flag is `GLASSLAB_ORCHESTRATOR_RAG_LLM_ENABLED`
+for a future remote synthesis lane. The shipped `/ui/` wiring does not read it,
+and the chat service is built without a synthesis provider, so the current chat
+always answers extractively regardless of its value.
+
+## Dense and hybrid retrieval
+
+Dense retrieval reads `orchestrator_rag_chunk_vectors`; the ~38k corpus chunks
+projected by `scripts/corpus_rag/backfill_rag_from_knowledge.py` carry no
+vectors until the embed step runs. The embed step is idempotent: it embeds only
+evidence-span chunks that lack a vector for the active model lineage, so
+re-running it is a no-op.
+
+Embeddings are produced in-process by the Snowflake arctic-embed provider
+(`sentence-transformers`) from the model weights cached at
+`/mnt/artifacts/research-orchestrator/hf-cache`; the deployment pins the
+resolved HuggingFace revision (`GLASSLAB_ORCHESTRATOR_KNOWLEDGE_EMBEDDING_REVISION`)
+so stored vectors match what the orchestrator queries. The orchestrator image
+ships the CPU torch runtime, so the embed Job runs on CPU and requests no GPU.
+
+Run the embed step as a Job:
+
+```bash
+kubectl apply -f kubeadm/glasslab-v2/jobs/corpus-rag-embed.yaml
+kubectl -n glasslab-v2 logs job/corpus-rag-embed -f
+```
+
+Or run the CLI directly (dry run by default; add `--apply` to write):
+
+```bash
+python services/research-orchestrator/scripts/corpus_rag/embed_rag_chunks.py
+python services/research-orchestrator/scripts/corpus_rag/embed_rag_chunks.py --apply
+```
+
+Then flip the chat mode by setting
+`GLASSLAB_ORCHESTRATOR_UI_CHAT_RETRIEVAL_MODE` in the orchestrator ConfigMap
+(`hybrid` is the recommended first step) and rolling the deployment. The mode
+defaults to `lexical`, so leaving the key unset preserves today's behavior. A
+deployment that selects `dense`/`hybrid` before the vectors exist degrades to
+lexical rather than returning no evidence.
 
 ## Exact-span highlighting
 
@@ -216,7 +253,7 @@ All orchestrator settings use the `GLASSLAB_ORCHESTRATOR_` prefix unless noted.
 | `GLASSLAB_ORCHESTRATOR_CORPUS_RAG_RAW_ROOT` | `/tmp/glasslab-research-orchestrator/rag/raw` (code); the deployment ConfigMap overrides it to `/mnt/artifacts/research-orchestrator/rag/raw` | Directory holding the raw corpus PDFs. |
 | `GLASSLAB_ORCHESTRATOR_CORPUS_RAG_STORE_PATH` | unset | Optional explicit corpus-RAG store path. Leave it unset in production, where the Postgres `orchestrator_rag_*` tables hold the corpus; set it only to relocate the store to an explicit on-disk path. |
 | `GLASSLAB_ORCHESTRATOR_UI_CHAT_ENABLED` | `true` | Gates the chat pane. When `false`, `/ui/` still renders but carries no Ask the corpus section. |
-| `GLASSLAB_ORCHESTRATOR_UI_CHAT_DENSE` | `false` | Reserved, deliberately unwired: no code reads it, so it has no effect. |
+| `GLASSLAB_ORCHESTRATOR_UI_CHAT_RETRIEVAL_MODE` | `lexical` | Chat retrieval mode: `lexical`, `dense`, or `hybrid`. Non-lexical modes require the dense index to be built (`scripts/corpus_rag/embed_rag_chunks.py`) and degrade to lexical when the backend or index is unavailable. |
 | `GLASSLAB_ORCHESTRATOR_UI_PDF_ENABLED` | `true` | Gates the viewer routes. When `false`, no `/ui/pdf/**` route is registered, so every such path returns `404`. |
 | `GLASSLAB_ORCHESTRATOR_RAG_LLM_ENABLED` | `false` | Reserved, deliberately unwired: no code reads it, so it has no effect. It pairs with the `GLASSLAB_RAG_LLM_BASE_URL`, `GLASSLAB_RAG_LLM_MODEL`, and `GLASSLAB_RAG_LLM_API_KEY` endpoint family. The shipped `/ui/` chat builds no provider, so it always answers extractively. |
 

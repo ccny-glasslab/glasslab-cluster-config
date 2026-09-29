@@ -6,7 +6,7 @@ whole surface from one package root: ``from app.corpus_rag import CorpusRecord``
 
 from app.ui_chat import ChatAnswer, ChatCitation
 
-from .chat import CorpusChatService
+from .chat import CorpusChatService, build_corpus_chat_service
 from .contracts import (
     ADVISORY_TOKEN_BUDGET,
     EMBED_DIM,
@@ -56,4 +56,5 @@ __all__ = [
     'RagDocumentRecord',
     'RagSectionRecord',
     'RetrievedHit',
+    'build_corpus_chat_service',
 ]

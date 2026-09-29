@@ -1,0 +1,95 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: corpus-rag-embed
+  namespace: glasslab-v2
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 7200
+  template:
+    metadata:
+      labels:
+        # Admitted by the glasslab-postgres-ingress allow-list, which otherwise
+        # only permits the orchestrator/workflow-api/schedule-worker/gpu-runner
+        # and the other corpus jobs to reach Postgres on 5432.
+        app.kubernetes.io/name: corpus-rag-embed
+    spec:
+      serviceAccountName: glasslab-gpu-runner
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: glasslab-ghcr-pull
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: embed
+          # Orchestrator image: app/ and scripts/ ship in-image, and it carries
+          # the CPU torch/sentence-transformers runtime (requirements-dense.txt)
+          # plus the canonical vector-index schema. Pin the release commit that
+          # contains scripts/corpus_rag/embed_rag_chunks.py.
+          image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:e6000d38538c9cf625aa5c6cf1f13ace547b0e58
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command:
+            - /bin/sh
+            - -c
+            - >
+              python /app/scripts/corpus_rag/embed_rag_chunks.py
+              --apply
+              --embedding settings
+              --vector-backend auto
+          env:
+            - name: GLASSLAB_ORCHESTRATOR_STORE_BACKEND
+              value: postgres
+            - name: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-research-orchestrator
+                  key: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+            # Same DSN for the pgvector halfvec write; the store and the vector
+            # index must agree on the database.
+            - name: CORPUS_RAG_PG_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-research-orchestrator
+                  key: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+            # Pin the embedding lineage to the deployment's resolved revision
+            # so stored vectors match what the running orchestrator queries.
+            - name: GLASSLAB_ORCHESTRATOR_KNOWLEDGE_EMBEDDING_REVISION
+              valueFrom:
+                configMapKeyRef:
+                  name: glasslab-research-orchestrator-config
+                  key: GLASSLAB_ORCHESTRATOR_KNOWLEDGE_EMBEDDING_REVISION
+            # Reuse the model already cached by the orchestrator so the Job
+            # never re-downloads the weights.
+            - name: HF_HOME
+              value: /mnt/artifacts/research-orchestrator/hf-cache
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            limits:
+              memory: 8Gi
+              cpu: "4"
+            requests:
+              memory: 4Gi
+              cpu: "2"
+          volumeMounts:
+            - name: artifacts
+              mountPath: /mnt/artifacts
+            - name: temporary
+              mountPath: /tmp
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: glasslab-shared-artifacts
+        - name: temporary
+          emptyDir: {}

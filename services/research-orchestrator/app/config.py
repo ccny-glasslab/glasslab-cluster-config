@@ -167,12 +167,18 @@ class Settings(BaseSettings):
     # ``ui_chat_enabled`` gates the Ask the corpus pane; ``ui_pdf_enabled``
     # gates the whole /ui/pdf/** route group; ``ui_upload_enabled`` gates the
     # Sources-column PDF upload form and its POST handler. All default on.
-    # ``ui_chat_dense`` and ``rag_llm_enabled`` are RESERVED with NO CONSUMER
-    # anywhere in the app: nothing reads them, so flipping either has no effect
-    # until the dense-chat and LLM lanes land and wire them. The no-consumer
-    # invariant is pinned by tests/test_reserved_config.py.
+    # ``rag_llm_enabled`` is RESERVED with NO CONSUMER anywhere in the app:
+    # nothing reads it, so flipping it has no effect until the LLM lane lands
+    # and wires it. The no-consumer invariant is pinned by
+    # tests/test_reserved_config.py.
     ui_chat_enabled: bool = True
-    ui_chat_dense: bool = False
+    # Retrieval mode for the /ui corpus chat. 'lexical' (the default) needs no
+    # embedding backend; 'dense' uses the vector channel only; 'hybrid' fuses
+    # lexical and dense with RRF. Non-lexical modes require the dense index to
+    # be built (scripts/corpus_rag/embed_rag_chunks.py) and degrade to lexical
+    # when the embedding backend or index is unavailable, so startup never
+    # depends on the dense lane being ready.
+    ui_chat_retrieval_mode: Literal['lexical', 'dense', 'hybrid'] = 'lexical'
     ui_pdf_enabled: bool = True
     ui_upload_enabled: bool = True
     rag_llm_enabled: bool = False
