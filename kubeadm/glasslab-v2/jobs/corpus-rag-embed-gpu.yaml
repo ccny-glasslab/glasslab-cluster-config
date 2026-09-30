@@ -33,7 +33,7 @@ spec:
           # plus a CUDA-enabled torch for the on-GPU embedding pass. CI builds
           # it per commit (service-images.yml, job research-orchestrator-gpu);
           # bump this pin to a commit whose GPU image is published.
-          image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator-gpu:fdf81a5823bb293303acd7203bc7465d839760da
+          image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator-gpu:91c6ecaa3afd02f94c5ece06f6285e68aaddc060
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command:
