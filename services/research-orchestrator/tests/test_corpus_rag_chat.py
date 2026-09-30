@@ -306,6 +306,8 @@ def test_complete_returns_message_content_and_sends_key_in_header(
     def handler(request: httpx.Request) -> httpx.Response:
         seen['url'] = str(request.url)
         seen['auth'] = request.headers.get('authorization', '')
+        seen['session'] = request.headers.get('x-opencode-session', '')
+        seen['user_agent'] = request.headers.get('user-agent', '')
         seen['model'] = json.loads(request.content)['model']
         return _content_response('Grounded provider answer.')
 
@@ -317,6 +319,10 @@ def test_complete_returns_message_content_and_sends_key_in_header(
     assert seen['url'] == 'https://opencode.test/zen/go/v1/chat/completions'
     assert seen['auth'] == f'Bearer {_FAKE_KEY}'
     assert seen['model'] == 'deepseek-v4.1-flash'
+    # The OpenCode Go gateway rejects a request without the routing session
+    # header (400 MissingSessionID); the client must always send it.
+    assert seen['session']
+    assert seen['user_agent']
     # The key travels only in the Authorization header, never in the URL.
     assert _FAKE_KEY not in seen['url']
 
