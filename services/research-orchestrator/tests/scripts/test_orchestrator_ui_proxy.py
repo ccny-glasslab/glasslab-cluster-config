@@ -14,6 +14,8 @@ Covered contracts:
 5. startup is refused when the token environment variable is unset or empty;
 6. only allowlisted HTTP methods reach the upstream (default GET,HEAD);
 7. a rebinding ``Host`` for another name is refused before the upstream.
+8. a state-changing method (``POST``) is refused unless ``Origin``/``Referer``
+   names a loopback origin for the listen port.
 """
 
 from __future__ import annotations
@@ -249,12 +251,65 @@ class ProxyIntegrationTests(unittest.TestCase):
     def test_extra_allowed_method_reaches_upstream(self) -> None:
         server, port = _start_proxy(self.upstream_port, ('--allow-methods', 'GET,HEAD,POST'))
         try:
-            status, _, _ = self._request('POST', '/echo', port=port)
+            status, _, _ = self._request(
+                'POST',
+                '/echo',
+                port=port,
+                headers={'Origin': f'http://127.0.0.1:{port}'},
+            )
             self.assertEqual(200, status)
         finally:
             server.shutdown()
             server.server_close()
         self.assertEqual([('POST', '/echo')], _FakeUpstreamHandler.requests)
+
+    def test_state_changing_request_without_origin_is_rejected(self) -> None:
+        server, port = _start_proxy(self.upstream_port, ('--allow-methods', 'GET,HEAD,POST'))
+        try:
+            status, _, _ = self._request('POST', '/echo', port=port)
+            self.assertEqual(403, status)
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual([], _FakeUpstreamHandler.requests)
+
+    def test_cross_site_origin_is_rejected(self) -> None:
+        server, port = _start_proxy(self.upstream_port, ('--allow-methods', 'GET,HEAD,POST'))
+        try:
+            for origin in ('https://evil.example', 'http://127.0.0.1:1', 'null'):
+                status, _, _ = self._request(
+                    'POST',
+                    '/echo',
+                    port=port,
+                    headers={'Origin': origin},
+                )
+                self.assertEqual(403, status, origin)
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual([], _FakeUpstreamHandler.requests)
+
+    def test_loopback_origin_and_referer_are_accepted(self) -> None:
+        server, port = _start_proxy(self.upstream_port, ('--allow-methods', 'GET,HEAD,POST'))
+        try:
+            for headers in (
+                {'Origin': f'http://127.0.0.1:{port}'},
+                {'Origin': f'http://localhost:{port}'},
+                {'Origin': f'http://[::1]:{port}'},
+                {'Referer': f'http://127.0.0.1:{port}/ui/'},
+            ):
+                _FakeUpstreamHandler.reset_requests()
+                status, _, _ = self._request('POST', '/echo', port=port, headers=headers)
+                self.assertEqual(200, status, headers)
+                self.assertEqual([('POST', '/echo')], _FakeUpstreamHandler.requests)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_get_is_not_subject_to_origin_check(self) -> None:
+        status, _ = self._get('/echo')
+        self.assertEqual(200, status)
+        self.assertEqual([('GET', '/echo')], _FakeUpstreamHandler.requests)
 
     def test_rebinding_host_is_rejected_without_calling_upstream(self) -> None:
         status, _, _ = self._request(
@@ -319,6 +374,19 @@ class ProxyConfigTests(unittest.TestCase):
         self.assertFalse(PROXY.host_header_allowed('127.0.0.1', config))
         self.assertFalse(PROXY.host_header_allowed('evil.example:19090', config))
         self.assertFalse(PROXY.host_header_allowed(None, config))
+
+    def test_origin_header_allowlist_and_referer_fallback(self) -> None:
+        config = self._config(['--listen', '127.0.0.1:19090'])
+        self.assertTrue(PROXY.origin_header_allowed('http://127.0.0.1:19090', None, config))
+        self.assertTrue(PROXY.origin_header_allowed('http://localhost:19090', None, config))
+        self.assertTrue(PROXY.origin_header_allowed('http://[::1]:19090', None, config))
+        self.assertTrue(
+            PROXY.origin_header_allowed(None, 'http://127.0.0.1:19090/ui/', config)
+        )
+        self.assertFalse(PROXY.origin_header_allowed('https://evil.example', None, config))
+        self.assertFalse(PROXY.origin_header_allowed('http://127.0.0.1:19091', None, config))
+        self.assertFalse(PROXY.origin_header_allowed('null', None, config))
+        self.assertFalse(PROXY.origin_header_allowed(None, None, config))
 
     def test_non_loopback_listen_is_refused(self) -> None:
         with self.assertRaises(PROXY.ProxyConfigError):

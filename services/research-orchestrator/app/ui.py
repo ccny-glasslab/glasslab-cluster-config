@@ -1,8 +1,13 @@
 """Server-rendered corpus and reports notebook for the operator UI.
 
-Two operator-gated routes: ``GET /ui/`` renders a no-JavaScript, three-column
-notebook over durable orchestrator state, and ``POST /ui/sources/upload``
-ingests one operator-supplied PDF from the Sources column into the corpus:
+Operator-gated routes: ``GET /ui/`` renders a no-JavaScript, three-column
+notebook over durable orchestrator state; ``POST /ui/sources/upload`` ingests
+one operator-supplied PDF from the Sources column into the corpus; and the
+zero-JS operator control forms ``POST /ui/runs``, ``POST
+/ui/runs/{run_id}/control``, and ``POST /ui/actions/{action_id}/decide``
+launch a run, pause/resume/cancel it, and decide a pending human gate (each
+calls the same engine method as the JSON API and is only reachable when the
+loopback UI proxy forwards ``POST``):
 
 * the **Sources** column is the navigational index: a CSS-only tab strip
   (visually hidden radio inputs, ``<label>`` tabs, and ``:checked`` sibling
@@ -26,14 +31,16 @@ scrolls internally, so the document body never grows tall with content. Below
 1100px the grid stacks into one column (chat first) and every section stays
 usable.
 
-When a corpus-chat service is injected, the center column answers ``?q=…``
-from a same-origin ``GET`` form (the loopback UI proxy forwards only
-``GET``/``HEAD``); every valid ``[n]`` ordinal in the answer becomes an inline
-``<sup>`` citation marker whose anchor links back with
-``?q=&source=&page=&excerpt=``, and selecting one embeds the same-origin PDF
-viewer iframe for the cited source. Hovering or keyboard-focusing a marker
-reveals its preview card (title, verdict badge, "View source") through CSS
-only. The page itself still emits no script and no external resource.
+When a corpus-chat service is injected, the center column is a persistent
+multi-turn conversation. The composer posts a question to ``/ui/chat``, which
+persists the turn and 303-redirects to ``/ui/?c=<conversation-id>#latest``;
+``GET /ui/?c=`` replays the whole conversation. Every valid ``[n]`` ordinal in
+an answer becomes an inline ``<sup>`` citation marker whose anchor links back
+with ``?c=&source=&page=&excerpt=`` (keeping the thread on screen while it
+opens the source), and selecting one embeds the same-origin PDF viewer iframe
+for the cited source. Hovering or keyboard-focusing a marker reveals its
+preview card (title, verdict badge, "View source") through CSS only. The page
+itself still emits no script and no external resource.
 
 The page is escape-first: every interpolated value passes through
 :func:`html.escape`, the document body is shown as escaped text inside
@@ -67,9 +74,11 @@ import re
 import secrets
 from typing import TYPE_CHECKING, Any, BinaryIO
 from urllib.parse import urlencode
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from pydantic import ValidationError
 
 from .artifact_delivery import ArtifactDeliveryError, VerifiedArtifactReader
 from .corpus_rag.pipeline import ingest_document, stage_raw_pdf
@@ -86,15 +95,26 @@ from .links import (
     validate_ref,
 )
 from .redaction import redact_free_text
+from .schemas import (
+    ApprovalStatus,
+    PolicyClassification,
+    RunCreateRequest,
+    RunState,
+    TERMINAL_STATES,
+    UiChatConversation,
+    UiChatTurn,
+    utc_now,
+)
 from .storage import RecordNotFound
+from .ui_chat import ChatAnswer
 from .ui_pdf import document_is_resolvable
 
 if TYPE_CHECKING:
     from .config import Settings
     from .corpus_rag.chat import CorpusChatService
     from .engine import ResearchOrchestrator
-    from .schemas import ArtifactRecord, ContextPacket
-    from .ui_chat import ChatAnswer, ChatCitation
+    from .schemas import ActionRecord, ArtifactRecord, ContextPacket
+    from .ui_chat import ChatCitation
 
 logger = logging.getLogger(__name__)
 
@@ -319,8 +339,42 @@ border:1px solid transparent;border-radius:var(--radius-sm);color:#0b0c12;
 font:inherit;font-size:.8125rem;font-weight:600;cursor:pointer;
 transition:background-color .15s ease}
 .upload-form button:hover{background:var(--accent-hover)}
+/* Operator controls: the launch form and the per-run gate controls. They are
+   ordinary same-origin forms (no script, no inline style); the loopback proxy
+   injects the operator token and enforces a loopback Origin on the POST. */
+details.control-disclosure{margin:.1rem 0 .7rem}
+details.control-disclosure>summary{padding:.1rem 0;font-size:.75rem;
+font-weight:600;color:var(--text-2);cursor:pointer}
+details.control-disclosure>summary:hover{color:var(--text)}
+.control-form{display:flex;flex-wrap:wrap;align-items:flex-end;gap:.5rem;
+margin:.5rem 0 .2rem}
+.control-form label{flex:none;padding-bottom:.55rem;font-size:.6875rem;
+font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+color:var(--text-muted)}
+.control-form input[type=text]{flex:1 1 9rem;min-width:0;padding:.55rem .7rem;
+background:var(--well);border:1px solid var(--line);
+border-radius:var(--radius-sm);color:var(--text);font:inherit;
+font-size:.8125rem}
+.control-form input[type=text]:focus-visible{outline:2px solid var(--accent);
+outline-offset:2px;border-color:transparent}
+.control-form button{flex:none;padding:.55rem 1rem;background:var(--accent);
+border:1px solid transparent;border-radius:var(--radius-sm);color:#0b0c12;
+font:inherit;font-size:.8125rem;font-weight:600;cursor:pointer;
+transition:background-color .15s ease}
+.control-form button:hover{background:var(--accent-hover)}
+.control-form button.secondary{background:var(--raised);color:var(--text-2);
+border-color:var(--line)}
+.control-form button.secondary:hover{background:rgba(255,255,255,.1);
+color:var(--text)}
+.gate{margin:.55rem 0;padding:.65rem .8rem;background:var(--well);
+border:1px solid var(--line-faint);border-radius:var(--radius-sm)}
+.gate-meta{margin:0 0 .45rem;font-size:.75rem}
 .chat-turn{margin:1rem 0 0;padding:.9rem 1.05rem;background:var(--well);
 border:1px solid var(--line-faint);border-radius:var(--radius-sm)}
+/* The chat composer is pinned below the scrolling conversation so it never
+   scrolls away; a 303 redirect to ``#latest`` scrolls the newest turn into
+   view within the column body, with no script and no inline style. */
+.chat-compose{flex:none;margin:.7rem 0 0}
 /* Inline citations: a superscript ordinal marker whose preview card is a
    CSS-only hover/focus popover (no script, no inline style). The card opens
    downward, inside the chat column's scroll area, so it is not clipped by
@@ -406,18 +460,19 @@ h1{font-size:1.2rem}.pane{padding:.95rem .95rem 1.05rem}}
 class UiRequest:
     """One ``GET /ui/`` request: the optional selection plus its CSP nonce.
 
-    ``question`` drives the chat answer; ``source_id``/``page`` select the
-    cited source shown in the PDF viewer, with ``excerpt`` supplying the
-    exact-span highlight text. ``run_id``/``ref`` select the run whose file
-    tree is shown and the file previewed in the viewer; ``packet_id``
-    selects the packet inspected in the Sources column.
+    ``conversation_id`` selects the multi-turn corpus-chat conversation to
+    render. ``source_id``/``page`` select the cited source shown in the PDF
+    viewer, with ``excerpt`` supplying the exact-span highlight text.
+    ``run_id``/``ref`` select the run whose file tree is shown and the file
+    previewed in the viewer; ``packet_id`` selects the packet inspected in the
+    Sources column.
     """
 
     run_id: str | None = None
     ref: str | None = None
     packet_id: str | None = None
     excerpt: str | None = None
-    question: str | None = None
+    conversation_id: str | None = None
     source_id: str | None = None
     page: int | None = None
     nonce: str = ''
@@ -538,18 +593,17 @@ def _upload_title(filename: str | None) -> str | None:
     return name[:_UPLOAD_TITLE_MAX_CHARS] or None
 
 
-def _render_upload_error(
+def _render_ui_error(
+    title: str,
     message: str,
     status_code: int,
     nonce: str,
 ) -> HTMLResponse:
-    # A short, escaped, script-free page: the POST failed, so the client gets
-    # a message and a way back without any internal detail.
     return HTMLResponse(
         content=(
             '<!doctype html><html lang="en"><head><meta charset="utf-8">'
-            '<title>Source upload failed</title></head><body>'
-            '<h1>Source upload failed</h1>'
+            f'<title>{_escape(title)}</title></head><body>'
+            f'<h1>{_escape(title)}</h1>'
             f'<p>{_escape(message)}</p>'
             '<p><a href="/ui/">Back to the corpus</a></p>'
             '</body></html>'
@@ -557,6 +611,131 @@ def _render_upload_error(
         status_code=status_code,
         headers=_ui_headers(nonce),
     )
+
+
+def _render_upload_error(
+    message: str,
+    status_code: int,
+    nonce: str,
+) -> HTMLResponse:
+    # A short, escaped, script-free page: the POST failed, so the client gets
+    # a message and a way back without any internal detail.
+    return _render_ui_error('Source upload failed', message, status_code, nonce)
+
+
+def _render_launch_form() -> str:
+    """The zero-JS form that starts a research run (``POST /ui/runs``)."""
+    return (
+        '<details class="control-disclosure">'
+        '<summary>Start a research run</summary>'
+        '<form method="post" action="/ui/runs" class="control-form">'
+        '<label for="launch-objective">Objective</label>'
+        '<input id="launch-objective" type="text" name="objective" '
+        'placeholder="What should the run investigate?" '
+        'autocomplete="off" required>'
+        '<label for="launch-contract-id">Contract</label>'
+        '<input id="launch-contract-id" type="text" name="contract_id" '
+        'placeholder="contract id (optional)" autocomplete="off">'
+        '<input id="launch-contract-version" type="text" '
+        'name="contract_version" placeholder="version" autocomplete="off" '
+        'aria-label="evaluation contract version">'
+        '<button type="submit">Start</button>'
+        '</form>'
+        '</details>'
+    )
+
+
+def _render_run_controls(
+    engine: ResearchOrchestrator,
+    selection: UiRequest,
+) -> str:
+    """Pause/resume/cancel controls for the selected run, state-aware."""
+    if not selection.run_id:
+        return ''
+    try:
+        run = engine.store.get_run(selection.run_id)
+    except RecordNotFound:
+        return ''
+    terminal = run.state in TERMINAL_STATES
+    buttons: list[str] = []
+    if not terminal and run.state != RunState.PAUSED:
+        buttons.append(
+            '<button type="submit" name="action" value="pause">Pause</button>'
+        )
+    if run.state == RunState.PAUSED:
+        buttons.append(
+            '<button type="submit" name="action" value="resume">Resume</button>'
+        )
+    if not terminal:
+        buttons.append(
+            '<button type="submit" class="secondary" name="action" '
+            'value="cancel">Cancel</button>'
+        )
+    if not buttons:
+        return (
+            '<h3>Run controls</h3>'
+            f'<p class="muted">Run state {_escape(run.state.value)} has no '
+            'controls.</p>'
+        )
+    action_url = f'/ui/runs/{_escape(selection.run_id)}/control'
+    return (
+        '<h3>Run controls</h3>'
+        f'<form method="post" action="{action_url}" class="control-form">'
+        f'{"".join(buttons)}</form>'
+    )
+
+
+def _render_pending_actions(
+    engine: ResearchOrchestrator,
+    selection: UiRequest,
+) -> str:
+    """The selected run's human gates as zero-JS approve/reject forms."""
+    if not selection.run_id:
+        return ''
+    try:
+        actions = engine.store.list_actions(selection.run_id)
+    except RecordNotFound:
+        return ''
+    pending = [
+        action
+        for action in actions
+        if action.approval_status == ApprovalStatus.PENDING
+    ]
+    if not pending:
+        return ''
+    blocks = [f'<h3>Pending approvals ({len(pending)})</h3>']
+    for action in pending:
+        ready = not (
+            action.policy_classification
+            == PolicyClassification.HONEYDEW_AND_HUMAN_APPROVAL
+            and not action.honeydew_approved
+        )
+        meta = (
+            f'<p class="gate-meta"><strong>{_escape(action.type)}</strong> · '
+            f'{_escape(action.proposed_by.value)} · '
+            f'{_escape(action.policy_classification.value)}'
+            + ('' if ready else ' · awaiting Honeydew')
+            + '</p>'
+            '<p class="gate-meta muted">'
+            f'{_escape(redact_free_text(action.reason))}</p>'
+        )
+        form = ''
+        if ready:
+            decide_url = f'/ui/actions/{_escape(action.action_id)}/decide'
+            form = (
+                f'<form method="post" action="{decide_url}" class="control-form">'
+                '<input type="text" name="reviewer" placeholder="reviewer" '
+                'autocomplete="off" required aria-label="reviewer">'
+                '<input type="text" name="reason" placeholder="reason" '
+                'autocomplete="off" aria-label="reason">'
+                '<button type="submit" name="decision" value="approve">'
+                'Approve</button>'
+                '<button type="submit" class="secondary" name="decision" '
+                'value="reject">Reject</button>'
+                '</form>'
+            )
+        blocks.append(f'<article class="gate">{meta}{form}</article>')
+    return ''.join(blocks)
 
 
 def _render_sources_panel(
@@ -635,7 +814,9 @@ def _render_sources_panel(
     )
 
     panels = (
-        f'<section class="tab-panel" id="panel-runs">{run_items}</section>',
+        '<section class="tab-panel" id="panel-runs">'
+        f'{_render_run_controls(engine, selection)}'
+        f'{_render_pending_actions(engine, selection)}{run_items}</section>',
         '<section class="tab-panel" id="panel-corpus">'
         '<table><tr><th>title</th><th>type / scope</th><th>digest</th>'
         f'</tr>{source_rows}</table></section>',
@@ -650,7 +831,7 @@ def _render_sources_panel(
     return (
         '<aside class="pane" id="sources" aria-label="Sources">'
         '<div class="column-head"><h2>Sources</h2>'
-        f'{_render_upload_form(settings)}</div>'
+        f'{_render_upload_form(settings)}{_render_launch_form()}</div>'
         '<div class="tabs">'
         f'{_render_tab_inputs(selection)}'
         f'<div class="tab-strip">{tab_strip}</div>'
@@ -1049,11 +1230,14 @@ def _render_citation_marker(
     question: str,
     ordinal: int,
     citation: ChatCitation,
+    *,
+    conversation_id: str | None = None,
 ) -> str:
     """One inline superscript marker and its CSS-only hover preview card."""
     excerpt = redact_free_text(citation.excerpt)
+    selector = {'c': conversation_id} if conversation_id else {'q': question}
     href = _page_url(
-        q=question,
+        **selector,
         source=citation.source_id,
         # citation.page is the 0-based chunk page_start; the viewer URL and
         # the boxes route both use the 1-based human page number.
@@ -1073,13 +1257,20 @@ def _render_citation_marker(
     )
 
 
-def _render_chat_answer(question: str, answer: ChatAnswer) -> str:
+def _render_chat_answer(
+    question: str,
+    answer: ChatAnswer,
+    *,
+    conversation_id: str | None = None,
+) -> str:
     """Render the answer with inline superscript citation markers.
 
     Escape-first: every literal segment is escaped and only a valid ``[n]``
     ordinal (``1 <= n <= len(answer.citations)``) becomes the controlled marker
     element. There is no end-of-answer reference block; the quoted excerpts
-    are already inline in the answer text.
+    are already inline in the answer text. When ``conversation_id`` is set the
+    marker links back to the conversation, so selecting a citation keeps the
+    thread on screen while it opens the cited source in the viewer.
     """
     text = redact_free_text(answer.answer)
     citations = answer.citations
@@ -1091,7 +1282,12 @@ def _render_chat_answer(question: str, answer: ChatAnswer) -> str:
             continue
         rendered.append(_escape(text[cursor : match.start()]))
         rendered.append(
-            _render_citation_marker(question, ordinal, citations[ordinal - 1])
+            _render_citation_marker(
+                question,
+                ordinal,
+                citations[ordinal - 1],
+                conversation_id=conversation_id,
+            )
         )
         cursor = match.end()
     rendered.append(_escape(text[cursor:]))
@@ -1101,38 +1297,53 @@ def _render_chat_answer(question: str, answer: ChatAnswer) -> str:
 def _render_chat_panel(
     chat_service: CorpusChatService | None,
     selection: UiRequest,
+    engine: ResearchOrchestrator,
 ) -> str:
     if chat_service is None:
         body = (
             '<p class="muted">Corpus chat is not enabled on this '
             'deployment.</p>'
         )
+        compose = ''
     else:
-        question = selection.question or ''
-        display_question = redact_free_text(question)
-        body = (
-            '<form method="get" action="/ui/" class="ask-form">'
+        conversation_id = selection.conversation_id or ''
+        conversation = (
+            engine.store.get_ui_chat_conversation(conversation_id)
+            if conversation_id
+            else None
+        )
+        turns = conversation.turns if conversation is not None else []
+        turns_html: list[str] = []
+        for index, turn in enumerate(turns):
+            anchor = ' id="latest"' if index == len(turns) - 1 else ''
+            answer = ChatAnswer.model_validate(turn.answer)
+            turns_html.append(
+                f'<div class="chat-turn"{anchor}>'
+                '<p><strong>Question:</strong> '
+                f'{_escape(redact_free_text(turn.question))}</p>'
+                '<p><strong>Answer:</strong> '
+                f'{_render_chat_answer(turn.question, answer, conversation_id=conversation_id)}'
+                '</p>'
+                '</div>'
+            )
+        body = ''.join(turns_html) or (
+            '<p class="muted">Ask a question to start a conversation.</p>'
+        )
+        compose = (
+            '<form method="post" action="/ui/chat" '
+            'class="ask-form chat-compose">'
+            f'<input type="hidden" name="c" value="{_escape(conversation_id)}">'
             '<label for="ask-question">Question</label>'
-            f'<input id="ask-question" type="text" name="q" '
-            f'value="{_escape(display_question)}" '
-            'placeholder="Ask about the corpus" autocomplete="off">'
+            '<input id="ask-question" type="text" name="q" '
+            'placeholder="Ask about the corpus" autocomplete="off" required>'
             '<button type="submit">Ask</button>'
             '</form>'
         )
-        if question.strip():
-            answer = chat_service.answer(question)
-            body += (
-                '<div class="chat-turn">'
-                f'<p><strong>Question:</strong> '
-                f'{_escape(display_question)}</p>'
-                f'<p><strong>Answer:</strong> '
-                f'{_render_chat_answer(display_question, answer)}</p>'
-                '</div>'
-            )
     return (
         '<section class="pane" id="ask">'
         '<div class="column-head"><h2>Ask the corpus</h2></div>'
         f'<div class="column-body">{body}</div>'
+        f'{compose}'
         '</section>'
     )
 
@@ -1156,7 +1367,7 @@ def render_ui_page(
         '</header>'
         '<main class="notebook">'
         f'{_render_sources_panel(engine, settings, request)}'
-        f'{_render_chat_panel(chat_service, request)}'
+        f'{_render_chat_panel(chat_service, request, engine)}'
         f'{_render_viewer_panel(engine, settings, request)}'
         '</main>'
         '</body></html>'
@@ -1209,7 +1420,7 @@ def register_ui_routes(
         ref: str | None = Query(default=None),
         packet: str | None = Query(default=None),
         excerpt: str | None = Query(default=None),
-        q: str | None = Query(default=None),
+        c: str | None = Query(default=None),
         source: str | None = Query(default=None),
         page: int | None = Query(default=None),
         _: None = Depends(require_operator),
@@ -1219,7 +1430,7 @@ def register_ui_routes(
             ref=ref,
             packet_id=packet,
             excerpt=excerpt,
-            question=q,
+            conversation_id=c,
             source_id=source,
             page=page,
             nonce=secrets.token_urlsafe(16),
@@ -1227,6 +1438,51 @@ def register_ui_routes(
         return HTMLResponse(
             content=render_ui_page(engine, settings, request, chat_service),
             headers=_ui_headers(request.nonce),
+        )
+
+    @app.post('/ui/chat')
+    def ui_chat_ask(
+        question: str = Form(default='', alias='q'),
+        conversation_id: str = Form(default='', alias='c'),
+        _: None = Depends(require_operator),
+    ) -> Response:
+        nonce = secrets.token_urlsafe(16)
+        if chat_service is None:
+            return _render_ui_error(
+                'Chat unavailable',
+                'Corpus chat is not enabled on this deployment.',
+                404,
+                nonce,
+            )
+        asked = question.strip()
+        if not asked:
+            return _render_ui_error(
+                'Nothing to ask',
+                'Enter a question first.',
+                400,
+                nonce,
+            )
+        conversation_id = conversation_id.strip() or uuid4().hex
+        conversation = engine.store.get_ui_chat_conversation(conversation_id)
+        prior = conversation.turns if conversation is not None else []
+        history = [
+            (turn.question, ChatAnswer.model_validate(turn.answer).answer)
+            for turn in prior
+        ]
+        answer = chat_service.answer(asked, history=history)
+        turn = UiChatTurn(question=asked, answer=answer.model_dump(mode='json'))
+        turns = [*prior, turn]
+        updated = (
+            conversation.model_copy(
+                update={'turns': turns, 'updated_at': utc_now()}
+            )
+            if conversation is not None
+            else UiChatConversation(conversation_id=conversation_id, turns=turns)
+        )
+        engine.store.save_ui_chat_conversation(updated)
+        return RedirectResponse(
+            _page_url(c=conversation_id) + '#latest',
+            status_code=303,
         )
 
     @app.post('/ui/sources/upload')
@@ -1293,5 +1549,132 @@ def register_ui_routes(
             )
         return RedirectResponse(
             _page_url(source=report.source_id),
+            status_code=303,
+        )
+
+    @app.post('/ui/runs')
+    def ui_create_run(
+        objective: str = Form(default=''),
+        contract_id: str = Form(default=''),
+        contract_version: str = Form(default=''),
+        _: None = Depends(require_operator),
+    ) -> Response:
+        # The zero-JS launch form. Pydantic still validates the same model the
+        # JSON API uses, so the objective/contract-pair rules hold; a failure
+        # renders the escaped error page instead of FastAPI's JSON 422.
+        nonce = secrets.token_urlsafe(16)
+        try:
+            request = RunCreateRequest(
+                objective=objective.strip(),
+                evaluation_contract_id=contract_id.strip() or None,
+                evaluation_contract_version=contract_version.strip() or None,
+            )
+        except ValidationError:
+            return _render_ui_error(
+                'Could not start the run',
+                'The objective is required (at least 10 characters), and a '
+                'contract id and version must be supplied together.',
+                400,
+                nonce,
+            )
+        try:
+            run = engine.create_run(request)
+        except Exception:  # noqa: BLE001 - internal detail stays hidden
+            logger.exception('ui run launch failed')
+            return _render_ui_error(
+                'Could not start the run',
+                'The run could not be started.',
+                400,
+                nonce,
+            )
+        return RedirectResponse(_page_url(run=run.run_id), status_code=303)
+
+    @app.post('/ui/runs/{run_id}/control')
+    def ui_run_control(
+        run_id: str,
+        action: str = Form(default=''),
+        _: None = Depends(require_operator),
+    ) -> Response:
+        nonce = secrets.token_urlsafe(16)
+        controls = {
+            'pause': engine.pause_run,
+            'resume': engine.resume_run,
+            'cancel': engine.cancel_run,
+        }
+        control = controls.get(action)
+        if control is None:
+            return _render_ui_error(
+                'Run control not applied',
+                'Unknown run control.',
+                400,
+                nonce,
+            )
+        try:
+            control(run_id, requested_by='ui', reason=None)
+        except Exception:  # noqa: BLE001 - internal detail stays hidden
+            logger.exception('ui run control failed')
+            return _render_ui_error(
+                'Run control not applied',
+                'The run control could not be applied.',
+                400,
+                nonce,
+            )
+        return RedirectResponse(_page_url(run=run_id), status_code=303)
+
+    @app.post('/ui/actions/{action_id}/decide')
+    def ui_decide_action(
+        action_id: str,
+        decision: str = Form(default=''),
+        reviewer: str = Form(default=''),
+        reason: str = Form(default=''),
+        _: None = Depends(require_operator),
+    ) -> Response:
+        nonce = secrets.token_urlsafe(16)
+        reviewer = reviewer.strip()
+        reason = reason.strip()
+        if decision not in ('approve', 'reject'):
+            return _render_ui_error(
+                'Decision not applied',
+                'Choose Approve or Reject.',
+                400,
+                nonce,
+            )
+        if not reviewer:
+            return _render_ui_error(
+                'Decision not applied',
+                'A reviewer name is required.',
+                400,
+                nonce,
+            )
+        if decision == 'reject' and not reason:
+            return _render_ui_error(
+                'Decision not applied',
+                'A rejection needs a reason.',
+                400,
+                nonce,
+            )
+        try:
+            if decision == 'approve':
+                action_record = engine.approve_action(
+                    action_id,
+                    reviewer=reviewer,
+                    reason=reason or 'Approved by human reviewer.',
+                )
+            else:
+                action_record = engine.reject_action(
+                    action_id,
+                    reviewer=reviewer,
+                    reason=reason,
+                )
+        except Exception:  # noqa: BLE001 - internal detail stays hidden
+            logger.exception('ui action decision failed')
+            return _render_ui_error(
+                'Decision not applied',
+                'The decision could not be applied.',
+                400,
+                nonce,
+            )
+        return RedirectResponse(
+            _page_url(run=action_record.run_id),
             status_code=303,
         )
