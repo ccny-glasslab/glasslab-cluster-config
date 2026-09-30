@@ -51,11 +51,14 @@ _LLM_SYSTEM_PROMPT = (
     'You answer strictly from the numbered evidence blocks [E1..En], which '
     'are excerpts from corpus documents. Return STRICT JSON: {"answer": str, '
     '"citations": [{"evidence_id": "E<i>", "excerpt": str}]}. Every excerpt '
-    'MUST be quoted from its evidence block. No prose outside JSON. If the '
-    'blocks do not actually address the question, do not describe, summarize, '
-    'or cite unrelated evidence and never invent citations; return exactly '
+    'MUST be quoted from its evidence block. No prose outside JSON. Cite every '
+    'block you rely on. Incomplete evidence is normal: when the blocks concern '
+    'the question but do not fully answer it, answer with what they DO '
+    'support, note briefly what is missing, and cite the blocks you used. Only '
+    'when the blocks are unrelated to the question, return exactly '
     '{"answer": "I could not find anything in the corpus about that.", '
-    '"citations": []}.'
+    '"citations": []}; never describe or cite unrelated evidence, and never '
+    'invent citations.'
 )
 
 
