@@ -234,6 +234,57 @@ def _scenario_source_filter(store) -> None:
     }
 
 
+def _scenario_relevance_ranking(store) -> None:
+    conjunction_source = _source('repo://docs/relevance-and.md')
+    store.save_knowledge_source(conjunction_source)
+    full = _chunk(conjunction_source.source_id, 0, 'alpha beta gamma evidence')
+    partial = _chunk(conjunction_source.source_id, 1, 'alpha beta notes')
+    store.replace_rag_chunks(conjunction_source.source_id, [full, partial])
+
+    conjunctive = store.search_rag_chunks_fts(
+        'alpha beta gamma', source_ids=[conjunction_source.source_id], limit=10
+    )
+    assert [hit['chunk_id'] for hit in conjunctive] == [full.chunk_id]
+
+    coverage_source = _source('repo://docs/relevance-or.md')
+    store.save_knowledge_source(coverage_source)
+    narrow = _chunk(coverage_source.source_id, 0, 'resampling stability practice')
+    broad = _chunk(
+        coverage_source.source_id, 1, 'stability variance drift diagnostics'
+    )
+    store.replace_rag_chunks(coverage_source.source_id, [narrow, broad])
+
+    ranked = store.search_rag_chunks_fts(
+        'resampling stability variance drift',
+        source_ids=[coverage_source.source_id],
+        limit=10,
+    )
+    assert [hit['chunk_id'] for hit in ranked] == [broad.chunk_id, narrow.chunk_id]
+
+    stopword_source = _source('repo://docs/relevance-stopwords.md')
+    store.save_knowledge_source(stopword_source)
+    noise = _chunk(
+        stopword_source.source_id,
+        0,
+        "I've found it to be extremely helpful in Kaggle competitions.",
+    )
+    real = _chunk(
+        stopword_source.source_id,
+        1,
+        'The corpus sources describe access control policies.',
+    )
+    store.replace_rag_chunks(stopword_source.source_id, [noise, real])
+
+    natural = store.search_rag_chunks_fts(
+        'what sources do you have access to',
+        source_ids=[stopword_source.source_id],
+        limit=10,
+    )
+    ids = [hit['chunk_id'] for hit in natural]
+    assert real.chunk_id in ids
+    assert noise.chunk_id not in ids
+
+
 # --- backend-neutral tests ---------------------------------------------------
 
 
@@ -247,6 +298,10 @@ def test_corpus_membership_and_documents_roundtrip(store) -> None:
 
 def test_search_rag_chunks_fts_respects_source_filter(store) -> None:
     _scenario_source_filter(store)
+
+
+def test_search_rag_chunks_fts_relevance_ranking(store) -> None:
+    _scenario_relevance_ranking(store)
 
 
 def test_list_rag_chunks_filters_by_kind_and_limit(store) -> None:
@@ -318,6 +373,11 @@ def test_pg_corpus_membership_and_documents_roundtrip(pg_store) -> None:
 
 def test_pg_search_rag_chunks_fts_respects_source_filter(pg_store) -> None:
     _scenario_source_filter(pg_store)
+
+
+def test_pg_search_rag_chunks_fts_relevance_ranking(pg_store) -> None:
+    _scenario_relevance_ranking(pg_store)
+
 
 def test_pg_list_rag_chunks_filters_by_kind_and_limit(pg_store) -> None:
     source = _source('repo://docs/kinds.md')

@@ -26,7 +26,7 @@ from .corpus_rag import (
     RagDocumentRecord,
     RagSectionRecord,
 )
-from .knowledge_search import or_query
+from .knowledge_search import or_query, rag_legacy_terms, rag_significant_terms
 from .schemas import (
     ActionRecord,
     AgentName,
@@ -1977,6 +1977,53 @@ class SqliteStore:
                 )
         return len(chunks)
 
+    def _search_rag_fts_rows(
+        self,
+        connection: sqlite3.Connection,
+        match_query: str,
+        coverage_terms: list[str] | None,
+        source_ids: list[str] | None,
+        fetch_limit: int,
+    ) -> list[sqlite3.Row]:
+        # coverage_terms drives an explicit DISTINCT-term count: the WHERE
+        # MATCH already restricts candidates, and the CTE counts how many
+        # significant terms each surviving chunk contains so higher-coverage
+        # chunks sort first. The fallback path (coverage_terms None) keeps the
+        # pre-existing bm25-then-chunk_index ordering.
+        params: list[Any] = []
+        if coverage_terms:
+            values = ', '.join('(?)' for _ in coverage_terms)
+            prefix = f'WITH query_terms(term) AS (VALUES {values})'
+            coverage_expr = (
+                '(SELECT COUNT(*) FROM query_terms qt '
+                'WHERE instr(lower(c.text), lower(qt.term)) > 0)'
+            )
+            order_by = 'coverage DESC, rank, c.chunk_index'
+            params.extend(coverage_terms)
+        else:
+            prefix = ''
+            coverage_expr = '0'
+            order_by = 'rank, c.chunk_index'
+        source_clause = ''
+        if source_ids:
+            placeholders = ', '.join('?' * len(source_ids))
+            source_clause = f' AND c.source_id IN ({placeholders})'
+        params.append(match_query)
+        if source_ids:
+            params.extend(source_ids)
+        params.append(fetch_limit)
+        sql = (
+            f'{prefix}'
+            ' SELECT c.payload, bm25(rag_chunks_fts) AS rank,'
+            f' {coverage_expr} AS coverage'
+            ' FROM rag_chunks c'
+            ' JOIN rag_chunks_fts ON rag_chunks_fts.chunk_id = c.chunk_id'
+            f' WHERE rag_chunks_fts MATCH ?{source_clause}'
+            f' ORDER BY {order_by}'
+            ' LIMIT ?'
+        )
+        return connection.execute(sql, params).fetchall()
+
     def search_rag_chunks_fts(
         self,
         query: str,
@@ -1984,42 +2031,37 @@ class SqliteStore:
         source_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        # Identical term handling to search_knowledge_chunks: every
-        # whitespace-separated term longer than one character competes via
-        # OR, capped at 24 terms.
-        terms = [term for term in query.split() if len(term) > 1][:24]
-        fts_query = ' OR '.join(f'"{term}"' for term in terms) or None
+        # AND-first: require every significant term, then relax to OR only
+        # when the conjunction matches nothing. Chunks sharing more of the
+        # query's distinctive terms outrank chunks sharing fewer.
+        significant = rag_significant_terms(query)
         with self._connect() as connection:
-            if fts_query and source_ids:
-                placeholders = ', '.join('?' * len(source_ids))
-                rows = connection.execute(
-                    f'''
-                    SELECT c.payload, bm25(rag_chunks_fts) AS rank
-                    FROM rag_chunks c
-                    JOIN rag_chunks_fts
-                      ON rag_chunks_fts.chunk_id = c.chunk_id
-                    WHERE rag_chunks_fts MATCH ?
-                      AND c.source_id IN ({placeholders})
-                    ORDER BY rank
-                    LIMIT ?
-                    ''',
-                    (fts_query, *source_ids, limit * 3),
-                ).fetchall()
-            elif fts_query:
-                rows = connection.execute(
-                    '''
-                    SELECT c.payload, bm25(rag_chunks_fts) AS rank
-                    FROM rag_chunks c
-                    JOIN rag_chunks_fts
-                      ON rag_chunks_fts.chunk_id = c.chunk_id
-                    WHERE rag_chunks_fts MATCH ?
-                    ORDER BY rank
-                    LIMIT ?
-                    ''',
-                    (fts_query, limit * 3),
-                ).fetchall()
+            if significant:
+                conjunction = ' AND '.join(
+                    f'"{term}"' for term in significant
+                )
+                rows = self._search_rag_fts_rows(
+                    connection, conjunction, significant, source_ids, limit * 3
+                )
+                if not rows:
+                    disjunction = ' OR '.join(
+                        f'"{term}"' for term in significant
+                    )
+                    rows = self._search_rag_fts_rows(
+                        connection, disjunction, significant, source_ids,
+                        limit * 3,
+                    )
             else:
-                rows = []
+                legacy = rag_legacy_terms(query)
+                if not legacy:
+                    rows = []
+                else:
+                    disjunction = ' OR '.join(
+                        f'"{term}"' for term in legacy
+                    )
+                    rows = self._search_rag_fts_rows(
+                        connection, disjunction, None, source_ids, limit * 3
+                    )
         hits: list[dict[str, Any]] = []
         for row in rows[:limit]:
             hit = json.loads(row['payload'])
