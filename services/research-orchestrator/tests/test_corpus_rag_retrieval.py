@@ -277,8 +277,17 @@ def test_source_diversity_cap_three(tmp_path: Path) -> None:
     chunks_by_source: dict[str, list[RagChunkRecord]] = {}
     for source in (dominant, other_e, other_f):
         store.save_knowledge_source(source)
+    # No chunk holds both query terms, so the conjunction matches nothing and
+    # search falls back to OR: every source stays recallable and the cap, not
+    # term coverage, decides how many dominant chunks survive.
     chunks_by_source[dominant.source_id] = [
-        _chunk(dominant.source_id, i, f'resampling uncertainty estimate variant {i}')
+        _chunk(
+            dominant.source_id,
+            i,
+            f'resampling estimate variant {i}'
+            if i % 2 == 0
+            else f'uncertainty estimate variant {i}',
+        )
         for i in range(6)
     ]
     chunks_by_source[other_e.source_id] = [
@@ -311,8 +320,8 @@ def test_offline_reranker_flips_order(tmp_path: Path) -> None:
     store = SqliteStore(str(tmp_path / 'rerank.db'))
     source = _source('repo://docs/rerank.md')
     store.save_knowledge_source(source)
-    x_chunk = _chunk(source.source_id, 0, 'gradient descent convergence')
-    y_chunk = _chunk(source.source_id, 1, 'gradient descent convergence rates')
+    x_chunk = _chunk(source.source_id, 0, 'gradient descent')
+    y_chunk = _chunk(source.source_id, 1, 'gradient descent convergence')
     z_chunk = _chunk(source.source_id, 2, 'unrelated filler content entirely')
     store.replace_rag_chunks(
         source.source_id, [x_chunk, y_chunk, z_chunk]
@@ -403,7 +412,7 @@ def test_token_budget_drops_whole_entries(tmp_path: Path) -> None:
     source = _source('repo://docs/budget.md')
     store.save_knowledge_source(source)
     ten_words = 'resampling alpha bravo charlie delta echo foxtrot golf hotel india'
-    five_words = 'resampling methods gamma epsilon zeta'
+    five_words = 'methods gamma epsilon zeta'
     two_words = 'resampling theta'
     t1 = _chunk(source.source_id, 0, ten_words)
     t2 = _chunk(source.source_id, 1, five_words)
@@ -522,3 +531,111 @@ def test_lexical_retrieval_hydrates_only_referenced_chunks(
 
     assert result.hits
     assert store.rag_chunk_get_calls, 'targeted chunk hydration was not used'
+
+
+# --- lexical relevance: stopword filtering, coverage, AND-first -------------
+
+
+def _seed_rag_chunks(
+    tmp_path: Path, name: str, texts: list[str]
+) -> tuple[SqliteStore, KnowledgeSource, list[RagChunkRecord]]:
+    store = SqliteStore(str(tmp_path / name))
+    source = _source(f'repo://docs/{name}.md')
+    store.save_knowledge_source(source)
+    chunks = [
+        _chunk(source.source_id, index, text)
+        for index, text in enumerate(texts)
+    ]
+    store.replace_rag_chunks(source.source_id, chunks)
+    return store, source, chunks
+
+
+def test_natural_language_question_excludes_stopword_only_chunk(
+    tmp_path: Path,
+) -> None:
+    """The reported bug: a word-overlap-with-only-stopwords chunk must not win.
+
+    The live failure returned "I've found it to be extremely helpful in Kaggle
+    competitions." for "what sources do you have access to"; after dropping
+    stopwords only 'sources'/'access' remain, so a chunk sharing neither is
+    not a lexical hit at all.
+    """
+    store, source, chunks = _seed_rag_chunks(
+        tmp_path,
+        'nl-question.db',
+        [
+            "I've found it to be extremely helpful in Kaggle competitions.",
+            'The corpus sources describe access control policies.',
+        ],
+    )
+    stopword_only, real = chunks
+
+    hits = store.search_rag_chunks_fts(
+        'what sources do you have access to',
+        source_ids=[source.source_id],
+        limit=10,
+    )
+
+    ids = [hit['chunk_id'] for hit in hits]
+    assert real.chunk_id in ids
+    assert stopword_only.chunk_id not in ids
+
+
+def test_multi_term_query_ranks_highest_coverage_first(tmp_path: Path) -> None:
+    """A chunk holding more distinct query terms must outrank a thinner one."""
+    store, source, chunks = _seed_rag_chunks(
+        tmp_path,
+        'coverage.db',
+        [
+            'resampling stability practice notes',
+            'stability variance drift diagnostics report',
+        ],
+    )
+    narrow, broad = chunks
+
+    hits = store.search_rag_chunks_fts(
+        'resampling stability variance drift',
+        source_ids=[source.source_id],
+        limit=10,
+    )
+
+    assert [hit['chunk_id'] for hit in hits] == [broad.chunk_id, narrow.chunk_id]
+
+
+def test_and_first_requires_all_terms_then_falls_back_to_or(
+    tmp_path: Path,
+) -> None:
+    """Conjunction wins when it matches; OR fires only when it is empty."""
+    store, source, chunks = _seed_rag_chunks(
+        tmp_path,
+        'and-first.db',
+        ['alpha beta gamma evidence', 'alpha beta notes'],
+    )
+    full, partial = chunks
+
+    conjunctive = store.search_rag_chunks_fts(
+        'alpha beta gamma', source_ids=[source.source_id], limit=10
+    )
+    assert [hit['chunk_id'] for hit in conjunctive] == [full.chunk_id]
+
+    store.replace_rag_chunks(source.source_id, [partial])
+    disjunctive = store.search_rag_chunks_fts(
+        'alpha beta gamma', source_ids=[source.source_id], limit=10
+    )
+    assert [hit['chunk_id'] for hit in disjunctive] == [partial.chunk_id]
+
+
+def test_all_stopword_query_never_returns_empty_where_or_would_match(
+    tmp_path: Path,
+) -> None:
+    """A query with no significant terms keeps the pre-filter OR behaviour."""
+    store, source, chunks = _seed_rag_chunks(
+        tmp_path, 'no-signal.db', ['it is what it is about']
+    )
+    (chunk,) = chunks
+
+    hits = store.search_rag_chunks_fts(
+        'what is it', source_ids=[source.source_id], limit=10
+    )
+
+    assert [hit['chunk_id'] for hit in hits] == [chunk.chunk_id]

@@ -48,13 +48,30 @@ STOPWORDS: frozenset[str] = frozenset(
 _ALNUM = re.compile(r'[A-Za-z0-9]')
 
 
-def search_terms(query: str, *, max_terms: int | None = None) -> list[str]:
-    """Split a search query into distinctive, deduplicated terms.
+def _dedupe(tokens: Iterable[str], max_terms: int | None) -> list[str]:
+    """Deduplicate by lowercased form, preserving first-seen order."""
+    terms: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        lowered = token.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        terms.append(token)
+        if max_terms is not None and len(terms) >= max_terms:
+            break
+    return terms
 
-    Drops tokens that are stopwords or that carry no alphanumeric content,
-    then deduplicates while preserving first-seen order. If every token is
-    filtered away the raw whitespace split (length > 1) is returned so the
-    caller still has a query to run.
+
+def filter_search_terms(
+    query: str, *, max_terms: int | None = None
+) -> list[str]:
+    """Distinctive, deduplicated terms only; may be empty.
+
+    Like :func:`search_terms`, but never falls back to the raw token stream.
+    Callers that need to distinguish "the query had signal" from "every token
+    was noise" (corpus-RAG's AND-first lexical search) use this and supply
+    their own behaviour for the empty case.
     """
     tokens = query.split()
     filtered = [
@@ -63,20 +80,51 @@ def search_terms(query: str, *, max_terms: int | None = None) -> list[str]:
         and _ALNUM.search(token)
         and token.lower() not in STOPWORDS
     ]
-    terms: list[str] = []
-    seen: set[str] = set()
-    for token in filtered or [t for t in tokens if len(t) > 1]:
-        lowered = token.lower()
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        terms.append(token)
-    if max_terms is not None:
-        terms = terms[:max_terms]
-    return terms
+    return _dedupe(filtered, max_terms)
+
+
+def search_terms(query: str, *, max_terms: int | None = None) -> list[str]:
+    """Split a search query into distinctive, deduplicated terms.
+
+    Drops tokens that are stopwords or that carry no alphanumeric content,
+    then deduplicates while preserving first-seen order. If every token is
+    filtered away the raw whitespace split (length > 1) is returned so the
+    caller still has a query to run.
+    """
+    terms = filter_search_terms(query, max_terms=max_terms)
+    if terms:
+        return terms
+    return _dedupe(
+        [token for token in query.split() if len(token) > 1], max_terms
+    )
 
 
 def or_query(query: str, *, max_terms: int | None = None) -> str:
     """Build the OR-joined term string shared by both stores."""
     terms = search_terms(query, max_terms=max_terms)
     return ' OR '.join(terms) or query
+
+
+# The corpus-RAG lexical channel (``search_rag_chunks_fts`` on both stores)
+# caps its term list to keep generated tsquery/FTS5 strings bounded. Both
+# stores derive their terms here so their matching and ranking stay aligned.
+RAG_SEARCH_MAX_TERMS = 24
+
+
+def rag_significant_terms(query: str) -> list[str]:
+    """Distinctive corpus-RAG query terms; empty when every token is noise."""
+    return filter_search_terms(query, max_terms=RAG_SEARCH_MAX_TERMS)
+
+
+def rag_legacy_terms(query: str) -> list[str]:
+    """The pre-stopword-filter token stream corpus-RAG falls back to.
+
+    Terms longer than one character, deduplicated and capped, matching the
+    behaviour ``search_rag_chunks_fts`` had before stopword filtering. Used
+    only when the query has no significant terms at all, so a query like
+    "what is it" still searches instead of returning nothing.
+    """
+    return _dedupe(
+        [token for token in query.split() if len(token) > 1],
+        RAG_SEARCH_MAX_TERMS,
+    )

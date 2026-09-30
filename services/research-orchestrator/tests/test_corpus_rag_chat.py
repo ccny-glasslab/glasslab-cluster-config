@@ -25,7 +25,7 @@ from app.ui_chat import ChatCitation
 TITLED_URI = 'repo://docs/resampling.md'
 UNTITLED_URI = 'repo://docs/stability.md'
 TITLED_TEXT = 'Resampling improves stability of small samples.'
-UNTITLED_TEXT = 'Stability diagnostics reveal variance drift across folds.'
+UNTITLED_TEXT = 'Small samples resampling stability diagnostics reveal variance drift.'
 ALPHA_TEXT = 'Alpha beta gamma delta epsilon.'
 
 
