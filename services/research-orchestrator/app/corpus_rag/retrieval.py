@@ -52,6 +52,32 @@ Mode = Literal['lexical', 'dense', 'hybrid', 'hybrid+rerank']
 _RERANK_TOP_N = 24
 _TIMING_STAGES = ('lexical', 'dense', 'fuse', 'rerank', 'expand', 'total')
 
+# Book-index / comma-dense listing detection thresholds. Calibrated read-only
+# against the live store's orchestrator_rag_chunks table (39,144 rows,
+# 2026-09-29): index pages cluster at comma density 0.08-0.14 and digit
+# density 0.29-0.37, while ordinary prose stays below (comma-density p99 =
+# 0.0456). Requiring BOTH densities flags the ~132 index-like rows (the AIMA
+# index plus a few numeric data tables) with no prose false positives; the
+# minimum length keeps short fragments from qualifying on density alone.
+_INDEX_MIN_CHARS = 200
+_INDEX_COMMA_DENSITY = 0.08
+_INDEX_DIGIT_DENSITY = 0.15
+
+
+def _is_index_like(text: str) -> bool:
+    """True when ``text`` reads like a book index or comma-dense listing.
+
+    Pure stdlib. Index pages are long, comma-dense, and digit-dense; the
+    thresholds are calibrated in the module constants above.
+    """
+    length = len(text)
+    if length < _INDEX_MIN_CHARS:
+        return False
+    digits = sum(1 for char in text if char.isdigit())
+    if digits / length < _INDEX_DIGIT_DENSITY:
+        return False
+    return text.count(',') / length >= _INDEX_COMMA_DENSITY
+
 
 def _estimate_tokens(text: str) -> int:
     """Mirror knowledge_manager's word-count floor locally."""
@@ -282,6 +308,8 @@ class HybridRetriever:
                 chunk = RagChunkRecord.model_validate(row)
                 if scope is not None and chunk.source_id not in scope:
                     continue
+                if _is_index_like(chunk.text):
+                    continue
                 table[chunk.chunk_id] = chunk
 
         # (d) FUSE: RRF over the channels the mode selects.
@@ -348,7 +376,10 @@ class HybridRetriever:
                 sibling_id = row['chunk_id']
                 if sibling_id in known:
                     continue
-                table[sibling_id] = RagChunkRecord.model_validate(row)
+                sibling = RagChunkRecord.model_validate(row)
+                if _is_index_like(sibling.text):
+                    continue
+                table[sibling_id] = sibling
                 known.add(sibling_id)
             chosen = set(selected)
             for chunk_id in selected:

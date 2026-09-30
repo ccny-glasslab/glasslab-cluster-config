@@ -31,6 +31,7 @@ from app.corpus_rag.retrieval import (
     OfflineReranker,
     RetrievalOptions,
     Reranker,
+    _is_index_like,
 )
 from app.schemas import KnowledgeSource, SourceType
 from app.storage import SqliteStore
@@ -639,3 +640,100 @@ def test_all_stopword_query_never_returns_empty_where_or_would_match(
     )
 
     assert [hit['chunk_id'] for hit in hits] == [chunk.chunk_id]
+
+
+# --- corpus hygiene: index-like chunks are never retrievable -----------------
+
+
+_INDEX_LIKE_TEXT = (
+    'resampling, 12, 34, 56 stability, 78, 90 estimators, 11, 22 '
+) * 8
+
+
+def test_is_index_like_flags_dense_index_and_ignores_prose() -> None:
+    prose = (
+        'Bootstrap resampling estimates the uncertainty of a statistic by '
+        'repeatedly drawing with replacement from the observed sample, then '
+        'recomputing it to build an empirical distribution used for '
+        'confidence intervals and standard errors in model evaluation.'
+    )
+    assert _is_index_like(_INDEX_LIKE_TEXT) is True
+    assert _is_index_like(prose) is False
+    assert _is_index_like('a, 1, 2, 3, b, 4, 5, 6') is False
+
+
+def test_retrieve_drops_index_like_chunk_from_lexical_channel(
+    tmp_path: Path,
+) -> None:
+    store, source, chunks = _seed_rag_chunks(
+        tmp_path,
+        'index-lexical.db',
+        [
+            _INDEX_LIKE_TEXT,
+            'resampling stability estimates uncertainty when evaluated carefully',
+        ],
+    )
+    index_chunk, prose_chunk = chunks
+
+    result = HybridRetriever(store).retrieve(
+        'resampling stability',
+        options=RetrievalOptions(mode='lexical'),
+    )
+
+    ids = [hit.chunk.chunk_id for hit in result.hits]
+    assert prose_chunk.chunk_id in ids
+    assert index_chunk.chunk_id not in ids
+
+
+def test_retrieve_drops_index_like_chunk_from_dense_channel(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / 'index-dense.db'))
+    source = _source('repo://docs/index-dense.md')
+    store.save_knowledge_source(source)
+    index_chunk = _chunk(source.source_id, 0, _INDEX_LIKE_TEXT)
+    prose_chunk = _chunk(
+        source.source_id, 1, 'clusterability diagnostics reveal bonded structure'
+    )
+    store.replace_rag_chunks(source.source_id, [index_chunk, prose_chunk])
+    _seed_vector(store, index_chunk.chunk_id, _unit(DIMS, 0))
+    _seed_vector(store, prose_chunk.chunk_id, _unit(DIMS, 1))
+
+    retriever = HybridRetriever(
+        store,
+        vector_index=_vector_index(store),
+        embedding_provider=_FixedQueryEmbedding(),
+        model_id=MODEL_ID,
+    )
+    result = retriever.retrieve(
+        'cohesive groups geometry', options=RetrievalOptions(mode='dense')
+    )
+
+    ids = [hit.chunk.chunk_id for hit in result.hits]
+    assert index_chunk.chunk_id not in ids
+    assert prose_chunk.chunk_id in ids
+
+
+def test_expansion_never_appends_index_like_sibling(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / 'index-expand.db'))
+    source = _source('repo://docs/index-expand.md')
+    store.save_knowledge_source(source)
+    before = _chunk(
+        source.source_id, 0, 'first span text alpha', section_path='2.1'
+    )
+    index_sibling = _chunk(
+        source.source_id, 1, _INDEX_LIKE_TEXT, section_path='2.1'
+    )
+    anchor = _chunk(
+        source.source_id, 2, 'second span text beta', section_path='2.1'
+    )
+    store.replace_rag_chunks(source.source_id, [before, index_sibling, anchor])
+
+    result = HybridRetriever(store).retrieve(
+        'beta specifics',
+        options=RetrievalOptions(mode='lexical', k_final=1, expand=True),
+    )
+
+    ids = [hit.chunk.chunk_id for hit in result.hits]
+    assert ids == [anchor.chunk_id, before.chunk_id]
+    assert index_sibling.chunk_id not in ids

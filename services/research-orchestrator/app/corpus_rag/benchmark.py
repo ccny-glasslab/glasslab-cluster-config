@@ -14,7 +14,7 @@ Pure stdlib functions over ranked result lists. Conventions:
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 
 
 def _relevant_ids(relevance: Mapping[str, int], grade_threshold: int) -> set[str]:
@@ -131,3 +131,66 @@ def duplicate_rate_at_k(ranking: Sequence[str], k: int) -> float:
         else:
             seen.add(id_)
     return duplicates / len(prefix)
+
+
+def citation_resolution_rate(
+    citation_ids: Sequence[str], known_ids: Collection[str]
+) -> float:
+    """Fraction of emitted citation ids that resolve to a known chunk id.
+
+    Every emitted row counts, so a repeated id is counted each time. Returns
+    0.0 when no citations were emitted (empty denominator).
+    """
+    if not citation_ids:
+        return 0.0
+    known = set(known_ids)
+    return sum(1 for id_ in citation_ids if id_ in known) / len(citation_ids)
+
+
+def citation_precision(
+    citation_ids: Sequence[str], relevant_ids: Collection[str]
+) -> float:
+    """Fraction of emitted citation ids that point at judged-relevant ids.
+
+    Returns 0.0 when no citations were emitted (empty denominator).
+    """
+    if not citation_ids:
+        return 0.0
+    relevant = set(relevant_ids)
+    return sum(1 for id_ in citation_ids if id_ in relevant) / len(citation_ids)
+
+
+def faithfulness(pairs: Sequence[tuple[str, str]]) -> float:
+    """Fraction of citation ``(excerpt, span_text)`` pairs that verify exactly.
+
+    A pair is faithful only when ``classify_citation`` returns ``'exact'`` (a
+    whitespace-collapsed verbatim match); prefix-only ``'fuzzy'`` and
+    ``'none'`` pairs do not count. Returns 0.0 with no pairs (empty
+    denominator).
+    """
+    if not pairs:
+        return 0.0
+    from app.citation_locator import classify_citation
+
+    exact = sum(
+        1
+        for excerpt, span_text in pairs
+        if classify_citation(excerpt, span_text) == 'exact'
+    )
+    return exact / len(pairs)
+
+
+def abstention_accuracy(
+    expected: Sequence[bool], actual: Sequence[bool]
+) -> float:
+    """Fraction of questions whose abstention decision matches the gold label.
+
+    ``expected`` and ``actual`` are paired positionally and must have equal
+    length. Returns 0.0 for empty inputs (empty denominator).
+    """
+    if len(expected) != len(actual):
+        raise ValueError('expected and actual must have equal length')
+    if not expected:
+        return 0.0
+    matches = sum(1 for want, got in zip(expected, actual) if want is got)
+    return matches / len(expected)
