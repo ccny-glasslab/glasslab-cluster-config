@@ -31,7 +31,12 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from app.corpus_rag.contracts import RetrievedHit
-from app.corpus_rag.retrieval import HybridRetriever, Mode, RetrievalOptions
+from app.corpus_rag.retrieval import (
+    CrossEncoderReranker,
+    HybridRetriever,
+    Mode,
+    RetrievalOptions,
+)
 from app.redaction import redact_free_text
 from app.ui_chat import ChatAnswer, ChatCitation
 
@@ -301,6 +306,18 @@ class CorpusChatService:
         return ''.join(pieces), citations
 
 
+def _effective_retrieval_mode(mode: Mode, rerank_enabled: bool) -> Mode:
+    """Resolve the configured mode plus the rerank flag.
+
+    The flag only acts in a hybrid mode: it upgrades ``hybrid`` to
+    ``hybrid+rerank``, and a configured ``hybrid+rerank`` degrades back to
+    ``hybrid`` when the flag is off. ``lexical``/``dense`` are never upgraded.
+    """
+    if mode in ('hybrid', 'hybrid+rerank'):
+        return 'hybrid+rerank' if rerank_enabled else 'hybrid'
+    return mode
+
+
 def build_corpus_chat_service(
     store: Any,
     settings: Any,
@@ -312,12 +329,20 @@ def build_corpus_chat_service(
 
     ``lexical`` (the default) needs no embedding backend. ``dense``/``hybrid``
     build the provider and vector index; any failure degrades to lexical, so
-    app startup never depends on the dense lane being ready.
+    app startup never depends on the dense lane being ready. The reranker is
+    built only for an effective ``hybrid+rerank`` mode and only after the
+    dense index is ready, so enabling it never adds a startup dependency.
     """
-    mode = getattr(settings, 'ui_chat_retrieval_mode', DEFAULT_RETRIEVAL_MODE)
+    mode: Mode = getattr(
+        settings, 'ui_chat_retrieval_mode', DEFAULT_RETRIEVAL_MODE
+    )
+    effective = _effective_retrieval_mode(
+        mode, bool(getattr(settings, 'ui_chat_rerank_enabled', False))
+    )
     vector_index: VectorIndex | None = None
     embedding_provider: Any = None
-    if mode in _DENSE_MODES:
+    reranker: Any = None
+    if effective in _DENSE_MODES:
         try:
             from app.knowledge_dense import create_embedding_provider
 
@@ -335,14 +360,18 @@ def build_corpus_chat_service(
                     store, provider, pg_dsn=settings.knowledge_dense_pg_dsn
                 )
                 embedding_provider = provider
+                if effective == 'hybrid+rerank':
+                    reranker = CrossEncoderReranker()
         except Exception:  # noqa: BLE001 - dense is additive
             vector_index = None
             embedding_provider = None
+            reranker = None
     return CorpusChatService(
         store,
         top_k=top_k,
         llm=llm,
-        retrieval_mode=mode,
+        retrieval_mode=effective,
         vector_index=vector_index,
         embedding_provider=embedding_provider,
+        reranker=reranker,
     )
