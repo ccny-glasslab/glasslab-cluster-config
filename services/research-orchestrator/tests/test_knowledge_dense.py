@@ -24,6 +24,7 @@ from app.corpus_rag.embeddings import OfflineDeterministicEmbedding
 from app.knowledge_dense import (
     DENSE_INDEX_VERSION,
     NumpyChunkIndex,
+    PgVectorChunkIndex,
     build_dense_index,
 )
 from app.knowledge_manager import KnowledgeManager
@@ -645,3 +646,45 @@ def test_unresolved_lineage_blocks_serving(store) -> None:
     assert readiness.available is False
     assert 'unresolved' in readiness.reason.lower()
     assert index.search(inner.embed_queries(['alpha passage text'])[0], k=3) == []
+
+
+def test_pgvector_readiness_counts_without_loading_blobs() -> None:
+    """``/health`` calls readiness on every probe, so it must stay O(1).
+
+    Loading the vector blobs here starved the sync threadpool and hung the
+    liveness probe in production; the aggregate count is the contract.
+    """
+
+    class _Store:
+        def count_knowledge_chunk_vectors(
+            self, model_id: str, *, dims: int, revision: str | None = None
+        ) -> tuple[int, int]:
+            assert model_id == 'unit-model'
+            assert dims == 768
+            assert revision == 'deadbeef'
+            return 4, 5
+
+        def list_knowledge_chunk_vectors(
+            self, model_id: str | None = None
+        ) -> list[tuple[ChunkVectorMeta, bytes]]:
+            raise AssertionError(
+                'readiness must not materialize vector blobs'
+            )
+
+    class _Provider:
+        model_id = 'unit-model'
+        revision = 'deadbeef'
+        dims = 768
+
+    index = PgVectorChunkIndex.__new__(PgVectorChunkIndex)
+    index._dsn = ''
+    index.model_id = 'unit-model'
+    index._store = _Store()
+    index._provider = _Provider()
+
+    readiness = index.readiness()
+
+    assert readiness.available is True
+    assert readiness.backend == 'pgvector'
+    assert readiness.indexed_count == 4
+    assert '1 row(s) ignored' in readiness.reason
