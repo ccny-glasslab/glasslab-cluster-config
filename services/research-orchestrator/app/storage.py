@@ -48,6 +48,7 @@ ConversationSourceBinding,
     TERMINAL_STATES,
     TurnKind,
     TurnRecord,
+    UiChatConversation,
     utc_now,
 )
 from .state_machine import HUMAN_WAIT_STATES, validate_transition
@@ -277,6 +278,10 @@ class SqliteStore:
                 -- payload row, additive and durable like the other record
                 -- tables.
                 CREATE TABLE IF NOT EXISTS conversation_bindings (
+                    conversation_id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS ui_chat_conversations (
                     conversation_id TEXT PRIMARY KEY,
                     payload TEXT NOT NULL
                 );
@@ -1532,6 +1537,39 @@ class SqliteStore:
             update={'source_ids': remaining, 'updated_at': utc_now()}
         )
         return self.save_conversation_binding(binding)
+
+    def save_ui_chat_conversation(
+        self,
+        record: UiChatConversation,
+    ) -> UiChatConversation:
+        with self.transaction() as connection:
+            connection.execute(
+                '''
+                INSERT INTO ui_chat_conversations (conversation_id, payload)
+                VALUES (?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    payload = excluded.payload
+                ''',
+                (
+                    record.conversation_id,
+                    json.dumps(record.model_dump(mode='json')),
+                ),
+            )
+        return record
+
+    def get_ui_chat_conversation(
+        self,
+        conversation_id: str,
+    ) -> UiChatConversation | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                'SELECT payload FROM ui_chat_conversations'
+                ' WHERE conversation_id = ?',
+                (conversation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return UiChatConversation.model_validate(json.loads(row['payload']))
 
     def save_knowledge_source(self, record: KnowledgeSource) -> KnowledgeSource:
         with self.transaction() as connection:

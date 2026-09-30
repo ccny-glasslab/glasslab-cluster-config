@@ -96,6 +96,7 @@ query parameters, so the URL is the state:
 | `ref` | Selects a linkable artifact for the document preview. |
 | `packet` | Selects a context packet for the evidence inspector. |
 | `excerpt` | Classifies a citation excerpt against the selected packet. |
+| `c` | Selects a multi-turn corpus-chat conversation to replay. |
 
 Example:
 

@@ -670,6 +670,33 @@ class ConversationSourceBinding(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class UiChatTurn(BaseModel):
+    """One persisted, URI-free corpus-chat exchange."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    question: str = Field(min_length=1)
+    answer: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class UiChatConversation(BaseModel):
+    """Durable multi-turn operator ``/ui`` corpus-chat conversation.
+
+    A JSON payload row in both stores, keyed by ``conversation_id`` and
+    surviving restarts, mirroring :class:`ConversationSourceBinding`. ``answer``
+    holds a dumped :class:`app.ui_chat.ChatAnswer`; the mapping keeps this
+    record independent of the UI contract module.
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    conversation_id: str = Field(min_length=1)
+    turns: list[UiChatTurn] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
 class PolicyClassification(StrEnum):
     AUTOMATIC = 'automatic'
     HONEYDEW_APPROVAL = 'honeydew_approval'

@@ -36,6 +36,8 @@ from app.schemas import (
     SourceType,
     TurnKind,
     TurnRecord,
+    UiChatConversation,
+    UiChatTurn,
     CatalogDatasetRecord,
 )
 from app.state_machine import validate_transition
@@ -469,6 +471,43 @@ def test_conversation_source_binding_round_trip_and_reopen(store, tmp_path) -> N
         assert reopened.get_conversation_binding('chat-contract').source_ids == [
             'source-a',
             'source-c',
+        ]
+
+
+def test_ui_chat_conversation_round_trip_and_reopen(store) -> None:
+    conversation = UiChatConversation(
+        conversation_id='ui-chat-contract',
+        turns=[
+            UiChatTurn(
+                question='first',
+                answer={'answer': 'a1', 'citations': []},
+            ),
+            UiChatTurn(
+                question='second',
+                answer={'answer': 'a2', 'citations': []},
+            ),
+        ],
+    )
+    store.save_ui_chat_conversation(conversation)
+    stored = store.get_ui_chat_conversation('ui-chat-contract')
+    assert stored is not None
+    assert [turn.question for turn in stored.turns] == ['first', 'second']
+
+    # The write is an upsert keyed by conversation_id, and an unknown id is
+    # None rather than an error.
+    store.save_ui_chat_conversation(
+        stored.model_copy(update={'turns': stored.turns[:1]})
+    )
+    assert len(store.get_ui_chat_conversation('ui-chat-contract').turns) == 1
+    assert store.get_ui_chat_conversation('missing') is None
+
+    if isinstance(store, SqliteStore):
+        reopened = SqliteStore(store.database_path)
+        reopened_conversation = reopened.get_ui_chat_conversation(
+            'ui-chat-contract'
+        )
+        assert [turn.question for turn in reopened_conversation.turns] == [
+            'first'
         ]
 
 
