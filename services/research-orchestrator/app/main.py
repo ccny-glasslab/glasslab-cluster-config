@@ -47,7 +47,7 @@ from .cluster import FakeClusterExecutor, WorkflowApiClusterExecutor
 from .config import SERVICE_ROOT, Settings, get_settings, read_secret_file
 from .contract_candidates import ContractCandidateManager
 from .contracts import ContractIntegrityError, EvaluationContractResolver
-from .corpus_rag import build_corpus_chat_service
+from .corpus_rag import build_corpus_chat_service, build_rag_llm_provider
 from .corpus_rag.pdf_backend import UnsupportedDocumentError
 from .discord_adapter import (
     DisabledDiscordAdapter,
@@ -1854,7 +1854,11 @@ def create_app(
         settings=settings,
         require_operator=require_operator,
         chat_service=(
-            build_corpus_chat_service(engine.store, settings)
+            build_corpus_chat_service(
+                engine.store,
+                settings,
+                llm=build_rag_llm_provider(settings),
+            )
             if settings.ui_chat_enabled
             else None
         ),

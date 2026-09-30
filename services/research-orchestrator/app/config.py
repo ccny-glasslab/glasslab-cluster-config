@@ -167,10 +167,11 @@ class Settings(BaseSettings):
     # ``ui_chat_enabled`` gates the Ask the corpus pane; ``ui_pdf_enabled``
     # gates the whole /ui/pdf/** route group; ``ui_upload_enabled`` gates the
     # Sources-column PDF upload form and its POST handler. All default on.
-    # ``rag_llm_enabled`` is RESERVED with NO CONSUMER anywhere in the app:
-    # nothing reads it, so flipping it has no effect until the LLM lane lands
-    # and wires it. The no-consumer invariant is pinned by
-    # tests/test_reserved_config.py.
+    # ``rag_llm_enabled`` opts the /ui chat into grounded LLM synthesis using
+    # the hosted OpenCode Go model; when false (the default) the chat answers
+    # extractively and never calls a remote model. The provider is built by
+    # app.corpus_rag.llm_provider.build_rag_llm_provider and falls back to the
+    # extractive answer on any failure, so the page never depends on it.
     ui_chat_enabled: bool = True
     # Retrieval mode for the /ui corpus chat. 'lexical' (the default) needs no
     # embedding backend; 'dense' uses the vector channel only; 'hybrid' fuses
@@ -182,6 +183,13 @@ class Settings(BaseSettings):
     ui_pdf_enabled: bool = True
     ui_upload_enabled: bool = True
     rag_llm_enabled: bool = False
+    # OpenAI-compatible endpoint for /ui chat synthesis. The deployment points
+    # at OpenCode's hosted gateway; the API key is read at call time from
+    # ``opencode_auth_json_path`` (entry 'opencode-go'), never from these
+    # settings, so no secret is stored in config or the ConfigMap.
+    rag_llm_base_url: str = 'https://opencode.ai/zen/go/v1'
+    rag_llm_model: str = 'deepseek-v4.1-flash'
+    rag_llm_timeout_seconds: float = 60.0
     evidence_excerpt_max_bytes: int = 32 * 1024
     # Verbatim tier for evaluator failures/metrics (larger than the general
     # excerpt cap); the whole snapshot is bounded by the snapshot cap.

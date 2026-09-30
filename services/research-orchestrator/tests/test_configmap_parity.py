@@ -152,6 +152,17 @@ OVERRIDES: dict[str, Override] = dict(
             _P + 'OPENCODE_SHARED_CACHE_ROOT',
             '/mnt/artifacts/research-orchestrator/opencode-cache',
         ),
+        # --- live corpus-chat synthesis lane ---
+        (
+            _P + 'RAG_LLM_ENABLED',
+            Override(
+                'eq',
+                'The deployed /ui corpus chat synthesizes grounded answers with '
+                'the hosted OpenCode Go model; the code default stays False so '
+                'local/test never call a remote model.',
+                expected='true',
+            ),
+        ),
         # --- live split-model routing (code default None) ---
         _live_route(_P + 'AGENT_MODEL_NAME', 'deepseek-v4.1-flash'),
         _live_route(
