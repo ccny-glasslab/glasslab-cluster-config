@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
+import pytest
 import yaml
 
 from app.config import Settings
@@ -53,12 +55,30 @@ def test_ui_and_rag_flags_default() -> None:
     settings = Settings()
     assert settings.ui_chat_enabled is True
     assert settings.ui_chat_retrieval_mode == 'lexical'
+    assert settings.ui_chat_rerank_enabled is False
     assert settings.ui_pdf_enabled is True
     assert settings.ui_upload_enabled is True
     assert settings.rag_llm_enabled is False
     assert settings.rag_llm_base_url == 'https://opencode.ai/zen/go/v1'
     assert settings.rag_llm_model == 'deepseek-v4.1-flash'
     assert settings.rag_llm_timeout_seconds == 60.0
+
+
+def test_ui_chat_retrieval_mode_accepts_hybrid_rerank() -> None:
+    """'hybrid+rerank' must parse, not raise a startup ValidationError.
+
+    The deployed retrieval mode may be widened to the rerank variant; before
+    this is accepted the Literal rejects it and the service CrashLoops at
+    import time.
+    """
+    settings = Settings(ui_chat_retrieval_mode='hybrid+rerank')
+    assert settings.ui_chat_retrieval_mode == 'hybrid+rerank'
+
+
+def test_ui_chat_retrieval_mode_rejects_unknown_value() -> None:
+    """The widened Literal still rejects anything outside the enum."""
+    with pytest.raises(ValidationError):
+        Settings(ui_chat_retrieval_mode='bogus')  # type: ignore[arg-type]
 
 
 def test_configmap_sets_corpus_raw_root_container_path() -> None:

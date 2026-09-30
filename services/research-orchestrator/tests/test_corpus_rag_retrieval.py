@@ -374,6 +374,40 @@ def test_offline_reranker_flips_order(tmp_path: Path) -> None:
     assert y_score > x_score
 
 
+class _RaisingReranker:
+    """Reranker whose backend fails; retrieval must fall back to RRF order."""
+
+    def rerank(self, query: str, texts: list[str]) -> list[float]:
+        raise RuntimeError('reranker backend exploded')
+
+
+def test_reranker_failure_falls_back_to_fused_order(mismatch_store) -> None:
+    """A reranker exception must never propagate; keep the fused RRF order."""
+    ns = mismatch_store
+    question = 'cohesive groups unknown geometry'
+    options = RetrievalOptions(mode='hybrid')
+
+    fused = HybridRetriever(
+        ns.store,
+        vector_index=_vector_index(ns.store),
+        embedding_provider=_FixedQueryEmbedding(),
+        model_id=MODEL_ID,
+    ).retrieve(question, options=options)
+    fused_ids = [hit.chunk.chunk_id for hit in fused.hits]
+    assert fused_ids, 'fixture must produce hits'
+
+    broken = HybridRetriever(
+        ns.store,
+        vector_index=_vector_index(ns.store),
+        embedding_provider=_FixedQueryEmbedding(),
+        reranker=_RaisingReranker(),
+        model_id=MODEL_ID,
+    ).retrieve(question, options=RetrievalOptions(mode='hybrid+rerank'))
+
+    assert [hit.chunk.chunk_id for hit in broken.hits] == fused_ids
+    assert all(hit.rerank_score is None for hit in broken.hits)
+
+
 def test_neighbor_expansion_appends_section_sibling(tmp_path: Path) -> None:
     store = SqliteStore(str(tmp_path / 'expand.db'))
     source = _source('repo://docs/expand.md')

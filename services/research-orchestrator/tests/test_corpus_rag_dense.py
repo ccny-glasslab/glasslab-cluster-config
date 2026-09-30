@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 from app.config import Settings
+from app.corpus_rag import chat as chat_module
 from app.corpus_rag.chat import CorpusChatService, build_corpus_chat_service
 from app.corpus_rag.contracts import RAG_INDEX_VERSION, RagChunkRecord
 from app.corpus_rag.dense import (
@@ -259,6 +260,100 @@ def test_factory_dense_active_when_vectors_exist(tmp_path: Path) -> None:
     service = build_corpus_chat_service(store, settings)
 
     assert service.retrieval_mode == 'hybrid'
+
+
+# --- factory reranker selection (flag-gated, model never loaded) ------------
+
+
+class _SentinelReranker:
+    """Fake reranker that never loads a model; used to prove forwarding."""
+
+    def rerank(self, query: str, texts: list[str]) -> list[float]:
+        return [0.0 for _ in texts]
+
+
+def _ready_hybrid_settings(**overrides) -> Settings:
+    return Settings(
+        ui_chat_retrieval_mode='hybrid',
+        knowledge_embedding_model='offline-deterministic',
+        **overrides,
+    )
+
+
+def test_factory_rerank_flag_on_forwarded_with_hybrid_rerank_mode(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store, _ = _seed_store(tmp_path / 'rerank-on.db', ['alpha beta gamma'])
+    provider = OfflineDeterministicEmbedding(dims=768)
+    build_rag_dense_index(store, provider)
+    sentinel = _SentinelReranker()
+    monkeypatch.setattr(
+        chat_module, 'CrossEncoderReranker', lambda: sentinel
+    )
+
+    service = build_corpus_chat_service(
+        store, _ready_hybrid_settings(ui_chat_rerank_enabled=True)
+    )
+
+    assert service.retrieval_mode == 'hybrid+rerank'
+    assert service._retriever._reranker is sentinel
+
+
+def test_factory_rerank_flag_off_is_plain_hybrid_and_builds_no_reranker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store, _ = _seed_store(tmp_path / 'rerank-off.db', ['alpha beta'])
+    provider = OfflineDeterministicEmbedding(dims=768)
+    build_rag_dense_index(store, provider)
+    built: list[object] = []
+    monkeypatch.setattr(
+        chat_module, 'CrossEncoderReranker', lambda: built.append(object())
+    )
+
+    service = build_corpus_chat_service(store, _ready_hybrid_settings())
+
+    assert service.retrieval_mode == 'hybrid'
+    assert service._retriever._reranker is None
+    assert built == [], 'reranker must not be constructed while the flag is off'
+
+
+def test_factory_hybrid_rerank_mode_degrades_to_hybrid_when_flag_off(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store, _ = _seed_store(tmp_path / 'rerank-mode-off.db', ['alpha beta'])
+    provider = OfflineDeterministicEmbedding(dims=768)
+    build_rag_dense_index(store, provider)
+    monkeypatch.setattr(
+        chat_module, 'CrossEncoderReranker', lambda: _SentinelReranker()
+    )
+    settings = Settings(
+        ui_chat_retrieval_mode='hybrid+rerank',
+        ui_chat_rerank_enabled=False,
+        knowledge_embedding_model='offline-deterministic',
+    )
+
+    service = build_corpus_chat_service(store, settings)
+
+    assert service.retrieval_mode == 'hybrid'
+    assert service._retriever._reranker is None
+
+
+def test_factory_rerank_flag_on_degrades_to_lexical_without_vectors(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store, _ = _seed_store(tmp_path / 'rerank-novec.db', ['alpha'])
+    built: list[object] = []
+    monkeypatch.setattr(
+        chat_module, 'CrossEncoderReranker', lambda: built.append(object())
+    )
+
+    service = build_corpus_chat_service(
+        store, _ready_hybrid_settings(ui_chat_rerank_enabled=True)
+    )
+
+    assert service.retrieval_mode == 'lexical'
+    assert service._retriever._reranker is None
+    assert built == [], 'no reranker when the dense index is not ready'
 
 
 if __name__ == '__main__':  # pragma: no cover
