@@ -16,6 +16,7 @@ import pytest
 
 from app.corpus_rag.embeddings import OfflineDeterministicEmbedding
 from app.corpus_rag.pipeline import build_index, ingest_corpus, ingest_document
+from app.corpus_rag.retrieval import _is_index_like
 from app.storage import SqliteStore
 
 
@@ -236,3 +237,92 @@ def test_build_index_skips_ghost_rows_with_warning(
     assert summary['skipped'] == 1
     captured = capsys.readouterr()
     assert 'ghost-chunk-that-vanished' in captured.err
+
+
+# --- corpus hygiene: index/front-matter content never persists ---------------
+
+
+_INDEX_LINES = 'alpha, 12, 34, 56 beta, 78, 90 gamma, 11, 22 delta, 33, 44 '
+_PROSE_BODY = (
+    'bootstrap resampling estimates uncertainty in model evaluation studies '
+    'reliably '
+)
+
+
+def _make_index_section_pdf() -> bytes:
+    doc = pymupdf.open()
+    first = doc.new_page()
+    first.insert_text((72, 72), 'Resampling Hygiene Fixture', fontsize=20)
+    first.insert_text((72, 130), 'Index', fontsize=14)
+    first.insert_text((72, 160), _INDEX_LINES * 6, fontsize=11)
+    second = doc.new_page()
+    second.insert_text((72, 72), '1 Methods', fontsize=14)
+    second.insert_text((72, 102), _PROSE_BODY * 4, fontsize=11)
+    return doc.tobytes()
+
+
+def _make_dense_listing_pdf() -> bytes:
+    doc = pymupdf.open()
+    first = doc.new_page()
+    first.insert_text((72, 72), 'Dense Listing Fixture', fontsize=20)
+    first.insert_text((72, 130), '1 Data listing', fontsize=14)
+    first.insert_text((72, 160), _INDEX_LINES * 6, fontsize=11)
+    second = doc.new_page()
+    second.insert_text((72, 72), '2 Discussion', fontsize=14)
+    second.insert_text((72, 102), _PROSE_BODY * 4, fontsize=11)
+    return doc.tobytes()
+
+
+def _stored_chunks(store: SqliteStore, source_id: str) -> list[dict]:
+    return store.list_rag_chunks(source_ids=[source_id], limit=None)
+
+
+def test_ingest_drops_denylisted_index_section_and_its_chunks(
+    store: SqliteStore,
+) -> None:
+    report = ingest_document(
+        store=store,
+        data=_make_index_section_pdf(),
+        canonical_uri='file://index-fixture.pdf',
+        title='Index hygiene fixture',
+        doc_type='book',
+    )
+    sections = store.list_rag_sections(report.doc_id)
+    titles = {(section.title or '').strip().lower() for section in sections}
+    assert 'index' not in titles
+    section_ids = {section.section_id for section in sections}
+
+    chunks = _stored_chunks(store, report.source_id)
+    assert chunks, 'prose chunks from surviving sections must remain'
+    for chunk in chunks:
+        assert not _is_index_like(chunk['text'])
+        assert chunk['section_id'] in section_ids
+    evidence = [chunk for chunk in chunks if chunk['kind'] == 'evidence_span']
+    assert report.n_evidence_spans == len(evidence)
+
+
+def test_ingest_drops_index_like_chunks_but_keeps_their_section(
+    store: SqliteStore,
+) -> None:
+    report = ingest_document(
+        store=store,
+        data=_make_dense_listing_pdf(),
+        canonical_uri='file://dense-listing.pdf',
+        title='Dense listing fixture',
+        doc_type='book',
+    )
+    sections = store.list_rag_sections(report.doc_id)
+    section_ids = {section.section_id for section in sections}
+    assert any(
+        (section.title or '').strip().lower() == 'data listing'
+        for section in sections
+    ), 'non-denylisted section records are retained'
+
+    chunks = _stored_chunks(store, report.source_id)
+    for chunk in chunks:
+        assert not _is_index_like(chunk['text'])
+        assert chunk['section_id'] in section_ids
+    assert any(chunk['kind'] == 'evidence_span' for chunk in chunks)
+    assert report.n_evidence_spans == len(
+        [chunk for chunk in chunks if chunk['kind'] == 'evidence_span']
+    )

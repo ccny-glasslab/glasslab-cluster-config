@@ -29,6 +29,11 @@ def _questions() -> list[BenchmarkQuestion]:
     return [BenchmarkQuestion.model_validate(json.loads(line)) for line in lines if line.strip()]
 
 
+def _gold() -> list[dict]:
+    lines = (ASSET_DIR / 'gold_qa.jsonl').read_text().splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
 def test_manifest_parses_and_is_complete() -> None:
     entries = _manifest()
     assert len(entries) >= 19
@@ -99,7 +104,41 @@ def test_rubric_documents_scale_and_convention() -> None:
 
 
 @pytest.mark.parametrize(
-    'filename', ['manifest.jsonl', 'questions.jsonl', 'qrels.tsv', 'rubric.md']
+    'filename',
+    ['manifest.jsonl', 'questions.jsonl', 'qrels.tsv', 'rubric.md', 'gold_qa.jsonl'],
 )
 def test_asset_files_exist(filename: str) -> None:
     assert (ASSET_DIR / filename).is_file()
+
+
+def test_gold_qa_parses_with_answerable_and_unanswerable_rows() -> None:
+    entries = _gold()
+    assert len(entries) >= 6
+    qids = [entry['qid'] for entry in entries]
+    assert len(qids) == len(set(qids))
+    assert any(entry['answerable'] for entry in entries)
+    assert any(not entry['answerable'] for entry in entries)
+
+    for entry in entries:
+        assert entry['text'].strip()
+        assert entry['expected_abstention'] is (not entry['answerable'])
+        assert set(entry['expected_citation_ids']) <= set(
+            entry['expected_source_ids']
+        )
+        if entry['answerable']:
+            assert entry['expected_source_ids']
+            assert max(entry['graded_relevance'].values()) == 2
+        else:
+            assert entry['expected_source_ids'] == []
+            assert entry['expected_citation_ids'] == []
+            assert entry['graded_relevance'] == {}
+
+
+def test_gold_qa_references_non_skipped_manifest_ids() -> None:
+    non_skipped = {entry.id for entry in _manifest() if not entry.skip}
+    for entry in _gold():
+        referenced = list(entry['expected_source_ids']) + list(
+            entry['graded_relevance']
+        )
+        for key in referenced:
+            assert key in non_skipped, f"{entry['qid']} references unknown {key}"
