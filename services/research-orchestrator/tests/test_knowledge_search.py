@@ -1,6 +1,11 @@
 """Unit tests for the shared knowledge-search token filter."""
 
-from app.knowledge_search import search_terms, or_query, STOPWORDS
+from app.knowledge_search import (
+    STOPWORDS,
+    or_query,
+    rag_significant_terms,
+    search_terms,
+)
 
 
 def test_search_terms_drops_stopwords_and_boilerplate() -> None:
@@ -43,3 +48,14 @@ def test_or_query_joins_filtered_terms() -> None:
 def test_stopwords_are_lowercase_and_unique() -> None:
     assert all(word == word.lower() for word in STOPWORDS)
     assert len(STOPWORDS) == len(set(STOPWORDS))
+
+
+def test_rag_significant_terms_strips_edge_punctuation() -> None:
+    terms = rag_significant_terms('Can you answer generic questions?')
+    assert terms == ['generic']
+    assert all(term[-1].isalnum() for term in terms)
+
+
+def test_rag_significant_terms_preserves_symbol_terms() -> None:
+    assert rag_significant_terms('SMOTE') == ['SMOTE']
+    assert rag_significant_terms('C++') == ['C++']
