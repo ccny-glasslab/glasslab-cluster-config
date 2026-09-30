@@ -87,9 +87,26 @@ spec:
             # (issue #426).
             - name: REHEARSE_ROOT
               value: /mnt/artifacts/research-orchestrator/rehearsal
+            # Pin torch/OpenMP/MKL to the 2-CPU container limit so a first-use
+            # reranker/embedding model load does not spawn host-core threads
+            # and thrash under the 2-CPU cgroup.
+            - name: OMP_NUM_THREADS
+              value: "2"
+            - name: MKL_NUM_THREADS
+              value: "2"
           ports:
             - containerPort: 8080
               name: http
+          # A slow first start (e.g. a cold dense-index/model load) must never
+          # trip the liveness probe; the startupProbe gates liveness for up to
+          # ~150 s before the pod is considered unhealthy.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /ready

@@ -10,8 +10,12 @@ from __future__ import annotations
 import pytest
 
 from app.corpus_rag.benchmark import (
+    abstention_accuracy,
+    citation_precision,
+    citation_resolution_rate,
     distinct_sources_at_k,
     duplicate_rate_at_k,
+    faithfulness,
     mrr_at_k,
     ndcg_at_k,
     precision_at_k,
@@ -114,3 +118,58 @@ def test_chunk_level_precision_recall() -> None:
     assert precision_at_k(ranking, relevance, 3) == pytest.approx(2 / 3, abs=1e-4)
     # 2 relevant total, 2 found in top 3
     assert recall_at_k(ranking, relevance, 3) == pytest.approx(1.0, abs=1e-4)
+
+
+# ------------------ citation / faithfulness / abstention -------------------- #
+
+
+def test_citation_resolution_rate_golden() -> None:
+    # Two of three emitted citations resolve to a known chunk id.
+    assert citation_resolution_rate(
+        ['a', 'b', 'x'], {'a', 'b'}
+    ) == pytest.approx(2 / 3)
+    # Every emitted row counts, so a repeated resolvable id stays 1.0.
+    assert citation_resolution_rate(['a', 'a'], {'a'}) == 1.0
+    # Empty denominators are defined as 0.0, never a division error.
+    assert citation_resolution_rate([], {'a'}) == 0.0
+    assert citation_resolution_rate(['a'], set()) == 0.0
+
+
+def test_citation_precision_golden() -> None:
+    # Two of three emitted citations point at judged-relevant ids.
+    assert citation_precision(['a', 'b', 'c'], {'a', 'c'}) == pytest.approx(2 / 3)
+    assert citation_precision([], {'a'}) == 0.0
+    assert citation_precision(['a'], set()) == 0.0
+
+
+def test_faithfulness_golden() -> None:
+    block = (
+        'Bootstrap resampling estimates uncertainty by drawing with '
+        'replacement today'
+    )
+    exact_excerpt = (
+        'Bootstrap resampling estimates uncertainty by drawing with replacement'
+    )
+    # Differs only at the tail: prefix locates it, so it classifies fuzzy.
+    fuzzy_excerpt = (
+        'Bootstrap resampling estimates uncertainty by drawing with '
+        'replacement tomorrow'
+    )
+    unrelated = 'completely unrelated claim text that appears nowhere'
+    assert faithfulness([(exact_excerpt, block)]) == 1.0
+    # One exact of two pairs.
+    assert faithfulness(
+        [(exact_excerpt, block), (unrelated, block)]
+    ) == pytest.approx(1 / 2)
+    # A fuzzy (prefix-only) match is not faithful.
+    assert faithfulness([(fuzzy_excerpt, block)]) == 0.0
+    assert faithfulness([]) == 0.0
+
+
+def test_abstention_accuracy_golden() -> None:
+    # One of three abstention decisions matches the gold label.
+    assert abstention_accuracy(
+        [True, False, True], [True, True, False]
+    ) == pytest.approx(1 / 3)
+    assert abstention_accuracy([True], [True]) == 1.0
+    assert abstention_accuracy([], []) == 0.0

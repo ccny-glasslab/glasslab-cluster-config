@@ -129,6 +129,16 @@ def _seed_chat_corpus(
     return source
 
 
+class _ScriptedLlm:
+    """Duck-typed ``complete`` provider returning a fixed JSON string."""
+
+    def __init__(self, response: str) -> None:
+        self._response = response
+
+    def complete(self, *, system: str, user: str) -> str:
+        return self._response
+
+
 def _write_artifact(
     settings,
     run_id: str,
@@ -864,6 +874,59 @@ def test_ui_chat_marker_card_carries_title_badge_and_view_source(
     # No inline style may carry the card geometry: all CSS stays in the
     # nonced stylesheet.
     assert re.search(r'\sstyle="', text) is None
+
+
+def test_ui_chat_llm_answer_renders_inline_citation_markers(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    _seed_chat_corpus(engine)
+    chat_service = CorpusChatService(
+        engine.store,
+        llm=_ScriptedLlm(
+            '{"answer": "Resampling improves stability of small samples [1].",'
+            ' "citations": [{"evidence_id": "E1"}]}'
+        ),
+    )
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        response = client.get(
+            '/ui/',
+            params={'q': _CHAT_QUESTION},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    text = response.text
+    assert re.search(
+        r'<a class="cite" href="[^"]+"><sup>1</sup>', text
+    ) is not None
+    assert 'class="cite-card"' in text
+    assert f'<span class="cite-title">{_CHAT_TITLE}</span>' in text
+    assert 'class="cite-badge badge-exact"' in text
+    assert 'chat-citations' not in text
+    assert '[1]' not in text
+
+
+def test_render_chat_answer_keeps_out_of_range_marker_literal() -> None:
+    answer = ChatAnswer(
+        answer='Only one source [1] but a stray marker [2] stays literal.',
+        citations=[
+            ChatCitation(
+                source_id='src-a',
+                title='Alpha',
+                excerpt='alpha',
+                verdict='exact',
+                page=0,
+            )
+        ],
+    )
+
+    rendered = _render_chat_answer('q', answer)
+
+    assert rendered.count('<a class="cite"') == 1
+    assert '<sup>1</sup>' in rendered
+    assert '[2]' in rendered
 
 
 def test_ui_chat_escapes_malicious_citation_title(orchestrator_bundle) -> None:

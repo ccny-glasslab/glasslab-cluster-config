@@ -175,11 +175,20 @@ class Settings(BaseSettings):
     ui_chat_enabled: bool = True
     # Retrieval mode for the /ui corpus chat. 'lexical' (the default) needs no
     # embedding backend; 'dense' uses the vector channel only; 'hybrid' fuses
-    # lexical and dense with RRF. Non-lexical modes require the dense index to
+    # lexical and dense with RRF; 'hybrid+rerank' additionally reorders the
+    # fused head with a cross-encoder. Only 'hybrid'/'hybrid+rerank' consult
+    # ``ui_chat_rerank_enabled``. Non-lexical modes require the dense index to
     # be built (scripts/corpus_rag/embed_rag_chunks.py) and degrade to lexical
     # when the embedding backend or index is unavailable, so startup never
     # depends on the dense lane being ready.
-    ui_chat_retrieval_mode: Literal['lexical', 'dense', 'hybrid'] = 'lexical'
+    ui_chat_retrieval_mode: Literal[
+        'lexical', 'dense', 'hybrid', 'hybrid+rerank'
+    ] = 'lexical'
+    # Opt the /ui chat into cross-encoder reranking. Only takes effect in a
+    # hybrid mode (it upgrades 'hybrid' to 'hybrid+rerank' and is ignored for
+    # 'lexical'/'dense'). Default off: the reranker model is not currently
+    # cached in-cluster, so enabling it would trigger a first-use download.
+    ui_chat_rerank_enabled: bool = False
     ui_pdf_enabled: bool = True
     ui_upload_enabled: bool = True
     rag_llm_enabled: bool = False
@@ -720,6 +729,17 @@ class Settings(BaseSettings):
             raise ValueError(
                 'link_signing_secret must not reuse operator_api_token'
             )
+        return self
+
+    @model_validator(mode='after')
+    def default_dense_dsn_to_store_dsn(self) -> Settings:
+        # The dense pgvector index lives in the same Postgres database as the
+        # record/event store, so an unset knowledge_dense_pg_dsn falls back to
+        # the store DSN. This keeps the DSN out of the process environment
+        # (issue #597): the deployment projects it as a read-only file and the
+        # store DSN resolution above reads it from there.
+        if not self.knowledge_dense_pg_dsn and self.store_postgres_dsn:
+            self.knowledge_dense_pg_dsn = self.store_postgres_dsn
         return self
 
     @field_validator('knowledge_allowlist_roots', mode='before')

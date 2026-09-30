@@ -163,6 +163,17 @@ OVERRIDES: dict[str, Override] = dict(
                 expected='true',
             ),
         ),
+        (
+            _P + 'UI_CHAT_RETRIEVAL_MODE',
+            Override(
+                'eq',
+                'The deployed /ui corpus chat retrieves through the dense '
+                'pgvector index fused with lexical search; the code default '
+                'stays lexical so local/test need no dense backend. Pinned so '
+                'a silent revert to lexical fails review.',
+                expected='hybrid',
+            ),
+        ),
         # --- live split-model routing (code default None) ---
         _live_route(_P + 'AGENT_MODEL_NAME', 'deepseek-v4.1-flash'),
         _live_route(
