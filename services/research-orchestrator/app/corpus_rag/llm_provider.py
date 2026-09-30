@@ -33,6 +33,12 @@ REQUEST_TIMEOUT_SECONDS = 30
 SUBQUERY_LINE_PREFIX = 'SUBQUERY:'
 OPENCODE_GO_PROVIDER_ID = 'opencode-go'
 
+# The OpenCode Go gateway rejects a request without a routing session header
+# (400 MissingSessionID), so every call identifies the caller and its session.
+_USER_AGENT = 'glasslab-corpus-rag/1.0'
+SESSION_ID_HEADER = 'x-opencode-session'
+DEFAULT_SESSION_ID = 'glasslab-corpus-rag'
+
 
 class ProviderNotConfiguredError(RuntimeError):
     """A required provider environment variable is missing."""
@@ -107,6 +113,7 @@ class OpenAiCompatibleProvider:
         model: str | None = None,
         api_key: str | None = None,
         timeout: float = REQUEST_TIMEOUT_SECONDS,
+        session_id: str = DEFAULT_SESSION_ID,
     ) -> None:
         resolved_base_url = base_url or os.environ.get(BASE_URL_ENV)
         if not resolved_base_url:
@@ -121,9 +128,14 @@ class OpenAiCompatibleProvider:
         )
         self.model = model if model is not None else os.environ.get(MODEL_ENV)
         self.timeout = timeout
+        self.session_id = session_id
 
     def _headers(self) -> dict[str, str]:
-        headers = {'Content-Type': 'application/json'}
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': _USER_AGENT,
+            SESSION_ID_HEADER: self.session_id,
+        }
         if self.api_key:
             # Header material only; never logged.
             headers['Authorization'] = f'Bearer {self.api_key}'
