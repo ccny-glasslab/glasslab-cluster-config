@@ -273,3 +273,18 @@ def test_normalize_chunks_keeps_distinct_texts_and_kinds():
     assert len(out) == 2
     assert {c.kind for c in out} == {'section_unit', 'evidence_span'}
     assert [c.chunk_index for c in out] == [0, 1]
+
+
+def test_sanitize_text_strips_control_characters_postgres_rejects() -> None:
+    """A PDF whose extracted text carries NUL/C0 bytes must still ingest.
+
+    Postgres text columns reject ``0x00``; without this the whole document
+    fails at chunk insert and the source is left with zero chunks.
+    """
+    from app.corpus_rag.chunking import sanitize_text
+
+    assert sanitize_text('a\x00b\x07c\x1fd') == 'abcd'
+    # Tab, newline and carriage return are legitimate text and must survive.
+    assert sanitize_text('keep\ttab\nnewline\rreturn') == (
+        'keep\ttab\nnewline\rreturn'
+    )

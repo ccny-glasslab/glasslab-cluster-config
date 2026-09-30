@@ -34,10 +34,22 @@ provided because ``RagSectionRecord.doc_id`` must be non-empty.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from math import ceil
 from typing import Literal, Protocol
+
+# PostgreSQL text columns reject NUL (0x00) and most C0 control characters.
+# PyMuPDF emits them for some PDFs, which previously made an otherwise-valid
+# document fail to ingest and leave the source with zero chunks. Strip them
+# where text is created so ingest is total for any extractable document.
+_DISALLOWED_CONTROLS = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+
+
+def sanitize_text(text: str) -> str:
+    """Remove characters a Postgres text column cannot store (keeps tab/newline)."""
+    return _DISALLOWED_CONTROLS.sub('', text)
 
 from app.corpus_rag.contracts import (
     RAG_INDEX_VERSION,
@@ -132,7 +144,11 @@ def build_chunks(
                 section_id=section_id,
                 doc_id=resolved_doc_id,
                 path=section.path,
-                title=section.title,
+                title=(
+                    sanitize_text(section.title)
+                    if section.title is not None
+                    else None
+                ),
                 level=section.level,
                 page_start=resolve_page(section.start_char),
                 page_end=resolve_page(max(section.start_char, section.end_char - 1)),
@@ -234,7 +250,7 @@ def _make_chunk(
     section_path: str,
     resolve_page: Callable[[int], int | None],
 ) -> RagChunkRecord:
-    text = document_text[start:end]
+    text = sanitize_text(document_text[start:end])
     return RagChunkRecord(
         chunk_id=_det_id(f'{source_id}|{kind}|{chunk_index}'),
         source_id=source_id,
