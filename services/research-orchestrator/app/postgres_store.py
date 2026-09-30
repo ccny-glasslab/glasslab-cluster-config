@@ -25,7 +25,11 @@ from .corpus_rag import (
     RagDocumentRecord,
     RagSectionRecord,
 )
-from .knowledge_search import or_query
+from .knowledge_search import (
+    or_query,
+    rag_legacy_terms,
+    rag_significant_terms,
+)
 from .schemas import (
     ActionRecord, AgentName, ApprovalStatus, ArtifactRecord, ContextPacket,
     CatalogDatasetRecord, ConversationSourceBinding, EventRecord, IngestedDatasetRecord, JobRecord,
@@ -748,21 +752,76 @@ class PostgresStore:
             for chunk in chunks:
                 conn.execute('INSERT INTO orchestrator_rag_chunks (chunk_id, source_id, kind, chunk_index, text, payload) VALUES (%s,%s,%s,%s,%s,%s)', (chunk.chunk_id, chunk.source_id, chunk.kind, chunk.chunk_index, chunk.text, self._payload(chunk)))
         return len(chunks)
-    def search_rag_chunks_fts(self, query: str, *, source_ids: list[str] | None = None, limit: int = 10) -> list[dict[str, Any]]:
-        # Identical term handling to SqliteStore.search_rag_chunks_fts:
-        # OR-of-quoted-terms, terms longer than one character, capped at 24.
-        # The rank expression and the WHERE predicate each bind the search
-        # query; keep both parameters explicit.
-        terms = [term for term in query.split() if len(term) > 1][:24]
-        or_query = ' OR '.join(f'"{term}"' for term in terms)
-        if not or_query: return []
-        params: list[Any] = [or_query, or_query]
+    def _search_rag_fts_rows(
+        self,
+        conn: Any,
+        match_query: str,
+        coverage_terms: list[str] | None,
+        source_ids: list[str] | None,
+        fetch_limit: int,
+    ) -> list[Any]:
+        # The match query is bound to both the rank expression and the WHERE
+        # predicate. coverage_terms, when present, is an explicit array whose
+        # per-term tsquery match counts how many significant query terms the
+        # chunk's tsvector contains; higher coverage sorts first. The fallback
+        # path (coverage_terms None) keeps the pre-existing rank ordering.
+        params: list[Any] = [match_query]
+        if coverage_terms:
+            coverage_expr = (
+                '(SELECT count(*) FROM unnest(%s::text[]) AS q(term)'
+                " WHERE to_tsvector('simple', text)"
+                " @@ plainto_tsquery('simple', q.term))"
+            )
+            order_by = 'coverage DESC, rank DESC, chunk_index'
+            params.append(coverage_terms)
+        else:
+            coverage_expr = '0'
+            order_by = 'rank DESC, chunk_index'
+        params.append(match_query)
         clause = "to_tsvector('simple', text) @@ websearch_to_tsquery('simple', %s)"
-        if source_ids: clause += ' AND source_id = ANY(%s)'; params.append(source_ids)
-        params.append(limit * 3)
-        sql = ("SELECT payload, ts_rank_cd(to_tsvector('simple', text), websearch_to_tsquery('simple', %s)) AS rank"
-               " FROM orchestrator_rag_chunks WHERE " + clause + " ORDER BY rank DESC, chunk_index LIMIT %s")
-        with self._connect() as conn: rows = conn.execute(sql, params).fetchall()
+        if source_ids:
+            clause += ' AND source_id = ANY(%s)'
+            params.append(source_ids)
+        params.append(fetch_limit)
+        sql = (
+            'SELECT payload,'
+            " ts_rank_cd(to_tsvector('simple', text),"
+            " websearch_to_tsquery('simple', %s)) AS rank,"
+            f' {coverage_expr} AS coverage'
+            ' FROM orchestrator_rag_chunks WHERE ' + clause + f' ORDER BY {order_by} LIMIT %s'
+        )
+        return conn.execute(sql, params).fetchall()
+
+    def search_rag_chunks_fts(self, query: str, *, source_ids: list[str] | None = None, limit: int = 10) -> list[dict[str, Any]]:
+        # AND-first: require every significant term, then relax to OR only
+        # when the conjunction matches nothing. Chunks sharing more of the
+        # query's distinctive terms outrank chunks sharing fewer. The term
+        # handling is shared with SqliteStore.search_rag_chunks_fts.
+        significant = rag_significant_terms(query)
+        with self._connect() as conn:
+            if significant:
+                conjunction = ' '.join(f'"{term}"' for term in significant)
+                rows = self._search_rag_fts_rows(
+                    conn, conjunction, significant, source_ids, limit * 3
+                )
+                if not rows:
+                    disjunction = ' OR '.join(
+                        f'"{term}"' for term in significant
+                    )
+                    rows = self._search_rag_fts_rows(
+                        conn, disjunction, significant, source_ids, limit * 3
+                    )
+            else:
+                legacy = rag_legacy_terms(query)
+                if not legacy:
+                    rows = []
+                else:
+                    disjunction = ' OR '.join(
+                        f'"{term}"' for term in legacy
+                    )
+                    rows = self._search_rag_fts_rows(
+                        conn, disjunction, None, source_ids, limit * 3
+                    )
         hits = []
         for row in rows[:limit]:
             hit = dict(RagChunkRecord.model_validate(row['payload']).model_dump(mode='json'))

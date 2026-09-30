@@ -11,13 +11,22 @@ citation contract is deliberately URI-free (the ``/ui`` page forbids emitting
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
+import httpx
 import pytest
 
+from app.config import Settings
 from app.corpus_rag.chat import CorpusChatService
 from app.corpus_rag.contracts import RagChunkRecord
-from app.corpus_rag.llm_provider import get_llm
+from app.corpus_rag.llm_provider import (
+    LlmRequestError,
+    LlmResponseError,
+    OpenAiCompatibleProvider,
+    build_rag_llm_provider,
+    get_llm,
+)
 from app.schemas import KnowledgeSource, SourceType
 from app.storage import SqliteStore
 from app.ui_chat import ChatCitation
@@ -25,7 +34,7 @@ from app.ui_chat import ChatCitation
 TITLED_URI = 'repo://docs/resampling.md'
 UNTITLED_URI = 'repo://docs/stability.md'
 TITLED_TEXT = 'Resampling improves stability of small samples.'
-UNTITLED_TEXT = 'Stability diagnostics reveal variance drift across folds.'
+UNTITLED_TEXT = 'Small samples resampling stability diagnostics reveal variance drift.'
 ALPHA_TEXT = 'Alpha beta gamma delta epsilon.'
 
 
@@ -255,6 +264,185 @@ def test_answer_redacts_secret_question_and_caps_length(tmp_path: Path) -> None:
     assert any('redacted' in query for query in store.fts_queries)
     assert all(len(query) <= 50 for query in store.fts_queries)
     assert 'x' * 100 not in joined
+
+
+# --- behavior 6: OpenAiCompatibleProvider.complete over a faked transport ----
+
+_FAKE_KEY = 'sk-fake-opencode-go-key'
+
+
+def _mock_httpx(monkeypatch: pytest.MonkeyPatch, handler) -> None:
+    """Route every ``httpx.Client`` the provider builds through a MockTransport."""
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.Client
+
+    def factory(*args, **kwargs) -> httpx.Client:
+        kwargs['transport'] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, 'Client', factory)
+
+
+def _provider() -> OpenAiCompatibleProvider:
+    return OpenAiCompatibleProvider(
+        base_url='https://opencode.test/zen/go/v1',
+        model='deepseek-v4.1-flash',
+        api_key=_FAKE_KEY,
+        timeout=5.0,
+    )
+
+
+def _content_response(content: str) -> httpx.Response:
+    return httpx.Response(
+        200, json={'choices': [{'message': {'content': content}}]}
+    )
+
+
+def test_complete_returns_message_content_and_sends_key_in_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen['url'] = str(request.url)
+        seen['auth'] = request.headers.get('authorization', '')
+        seen['model'] = json.loads(request.content)['model']
+        return _content_response('Grounded provider answer.')
+
+    _mock_httpx(monkeypatch, handler)
+
+    result = _provider().complete(system='be concise', user='what is X?')
+
+    assert result == 'Grounded provider answer.'
+    assert seen['url'] == 'https://opencode.test/zen/go/v1/chat/completions'
+    assert seen['auth'] == f'Bearer {_FAKE_KEY}'
+    assert seen['model'] == 'deepseek-v4.1-flash'
+    # The key travels only in the Authorization header, never in the URL.
+    assert _FAKE_KEY not in seen['url']
+
+
+def test_complete_raises_typed_error_on_non_2xx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_httpx(monkeypatch, lambda request: httpx.Response(502, text='bad'))
+
+    with pytest.raises(LlmRequestError):
+        _provider().complete(system='s', user='u')
+
+
+def test_complete_raises_typed_error_on_malformed_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_httpx(
+        monkeypatch,
+        lambda request: httpx.Response(200, json={'choices': []}),
+    )
+
+    with pytest.raises(LlmResponseError):
+        _provider().complete(system='s', user='u')
+
+
+# --- behavior 7: chat uses the provider, with extractive fallback ----------
+
+
+def _provider_json(payload: dict) -> str:
+    return json.dumps(payload)
+
+
+def test_answer_uses_provider_answer_when_citations_resolve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store = _seed_store(tmp_path / 'provider.db', include_untitled=False)
+    titled = store.list_knowledge_sources()[0]
+    payload = _provider_json(
+        {
+            'answer': 'Provider synthesis.',
+            'citations': [
+                {
+                    'evidence_id': 'E1',
+                    'excerpt': 'Resampling improves stability of small samples.',
+                }
+            ],
+        }
+    )
+    _mock_httpx(monkeypatch, lambda request: _content_response(payload))
+
+    result = CorpusChatService(store, llm=_provider()).answer(
+        'resampling stability'
+    )
+
+    assert result.answer == 'Provider synthesis.'
+    assert [c.source_id for c in result.citations] == [titled.source_id]
+    assert result.insufficient is False
+
+
+def test_answer_falls_back_when_provider_http_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store = _seed_store(tmp_path / 'provider-fail.db', include_untitled=False)
+    _mock_httpx(monkeypatch, lambda request: httpx.Response(500, text='boom'))
+
+    result = CorpusChatService(store, llm=_provider()).answer(
+        'resampling stability'
+    )
+
+    assert 'Resampling improves stability' in result.answer
+    assert result.insufficient is False
+
+
+def test_answer_falls_back_when_citations_do_not_resolve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store = _seed_store(tmp_path / 'provider-bad.db', include_untitled=False)
+    payload = _provider_json(
+        {'answer': 'Fabricated.', 'citations': [{'evidence_id': 'E99', 'excerpt': 'x'}]}
+    )
+    _mock_httpx(monkeypatch, lambda request: _content_response(payload))
+
+    result = CorpusChatService(store, llm=_provider()).answer(
+        'resampling stability'
+    )
+
+    assert result.answer != 'Fabricated.'
+    assert 'Resampling improves stability' in result.answer
+
+
+# --- behavior 8: build_rag_llm_provider gating ------------------------------
+
+
+def test_build_rag_llm_provider_disabled_returns_none() -> None:
+    assert build_rag_llm_provider(Settings()) is None
+
+
+def test_build_rag_llm_provider_missing_auth_file_returns_none(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        rag_llm_enabled=True,
+        opencode_auth_json_path=str(tmp_path / 'missing-auth.json'),
+    )
+
+    assert build_rag_llm_provider(settings) is None
+
+
+def test_build_rag_llm_provider_enabled_reads_opencode_go_key(
+    tmp_path: Path,
+) -> None:
+    auth = tmp_path / 'auth.json'
+    auth.write_text(
+        json.dumps({'opencode-go': {'type': 'api', 'key': _FAKE_KEY}}),
+        encoding='utf-8',
+    )
+    settings = Settings(
+        rag_llm_enabled=True, opencode_auth_json_path=str(auth)
+    )
+
+    provider = build_rag_llm_provider(settings)
+
+    assert isinstance(provider, OpenAiCompatibleProvider)
+    assert provider.base_url == 'https://opencode.ai/zen/go/v1'
+    assert provider.model == 'deepseek-v4.1-flash'
+    assert provider.api_key == _FAKE_KEY
 
 
 if __name__ == '__main__':  # pragma: no cover
