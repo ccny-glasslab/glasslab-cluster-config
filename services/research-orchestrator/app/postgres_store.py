@@ -903,6 +903,22 @@ class PostgresStore:
                 except Exception:
                     pass
 
+    def count_knowledge_chunk_vectors(self, model_id: str, *, dims: int, revision: str | None = None) -> tuple[int, int]:
+        # A readiness probe must not materialize vector blobs; count the usable
+        # and total rows for the lineage in one aggregate instead.
+        revision = revision or ''
+        query = (
+            'SELECT count(*) AS total,'
+            " count(*) FILTER (WHERE dims = %s AND (%s = '' OR revision = %s))"
+            ' AS usable'
+            ' FROM orchestrator_knowledge_chunk_vectors WHERE model_id=%s'
+        )
+        with self._connect() as conn:
+            row = conn.execute(
+                query, (dims, revision, revision, model_id)
+            ).fetchone()
+        return int(row['usable'] or 0), int(row['total'] or 0)
+
     def list_knowledge_chunk_vectors(self, model_id: str | None = None) -> list[tuple[ChunkVectorMeta, bytes]]:
         query = ('SELECT chunk_id, vec, model_id, revision, dims, index_version'
                  ' FROM orchestrator_knowledge_chunk_vectors')

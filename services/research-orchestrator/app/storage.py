@@ -2188,6 +2188,22 @@ class SqliteStore:
                 ),
             )
 
+    def count_knowledge_chunk_vectors(
+        self, model_id: str, *, dims: int, revision: str | None = None
+    ) -> tuple[int, int]:
+        revision = revision or ''
+        query = (
+            'SELECT count(*) AS total,'
+            ' sum(CASE WHEN dims = ? AND (? = ? OR revision = ?)'
+            ' THEN 1 ELSE 0 END) AS usable'
+            ' FROM knowledge_chunk_vectors WHERE model_id = ?'
+        )
+        with self._connect() as connection:
+            row = connection.execute(
+                query, (dims, revision, '', revision, model_id)
+            ).fetchone()
+        return int(row['usable'] or 0), int(row['total'] or 0)
+
     def list_knowledge_chunk_vectors(
         self, model_id: str | None = None
     ) -> list[tuple[ChunkVectorMeta, bytes]]:
