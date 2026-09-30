@@ -19,7 +19,7 @@ import pytest
 
 from app.config import Settings
 from app.corpus_rag.chat import CorpusChatService
-from app.corpus_rag.contracts import RagChunkRecord
+from app.corpus_rag.contracts import RagChunkRecord, RetrievedHit
 from app.corpus_rag.llm_provider import (
     LlmRequestError,
     LlmResponseError,
@@ -64,6 +64,11 @@ def _chunk(
         token_count=max(1, len(text.split())),
         page_start=page_start,
     )
+
+
+def _hit(source_id: str, index: int, text: str) -> RetrievedHit:
+    """A hand-built retrieval hit, for direct ``_llm_answer`` marker tests."""
+    return RetrievedHit(chunk=_chunk(source_id, index, text), score=1.0)
 
 
 def _seed_store(
@@ -198,16 +203,20 @@ def test_answer_llm_citations_validated_then_silent_extractive_fallback(
     titled = store.list_knowledge_sources()[0]
 
     validated_llm = _ScriptedLlm(
-        '{"answer": "LLM synthesis.", "citations": ['
-        '{"evidence_id": "E1", "excerpt": "Resampling improves stability of small samples."},'
-        '{"evidence_id": "E99", "excerpt": "fabricated"}]}'
+        '{"answer": "Resampling improves stability [1] and ghost [2].",'
+        ' "citations": [{"evidence_id": "E1"}, {"evidence_id": "E99"}]}'
     )
     validated = CorpusChatService(store, llm=validated_llm)
     result = validated.answer('resampling stability')
 
-    assert result.answer == 'LLM synthesis.'
+    # Only marker-referenced, resolvable evidence survives: the array's
+    # unresolved ``E99`` is never marked and is dropped, and the [2] marker
+    # itself is stripped. The excerpt and verdict are server-owned: the cited
+    # chunk's first sentence and the claim sentence's classification.
+    assert result.answer == 'Resampling improves stability [1] and ghost .'
     assert [c.source_id for c in result.citations] == [titled.source_id]
-    assert all(c.verdict == 'exact' for c in result.citations)
+    assert result.citations[0].excerpt == TITLED_TEXT
+    assert result.citations[0].verdict == 'exact'
 
     # Any provider failure silently falls back to the extractive answer.
     falling_back = CorpusChatService(store, llm=_RaisingLlm())
@@ -227,24 +236,143 @@ def test_answer_llm_citations_validated_then_silent_extractive_fallback(
 
 
 def test_answer_verdict_exact_fuzzy_none(tmp_path: Path) -> None:
-    store = _seed_store(
-        tmp_path / 'verdict.db',
-        titled_text=ALPHA_TEXT,
-        titled_page=None,
-        include_untitled=False,
-    )
+    # The verdict is classified from the claim sentence that carries each
+    # marker, never from the model-supplied excerpt (which the server ignores).
+    store = SqliteStore(str(tmp_path / 'verdict.db'))
     llm = _ScriptedLlm(
-        '{"answer": "Grounded.", "citations": ['
-        '{"evidence_id": "E1", "excerpt": "Alpha beta gamma delta epsilon."},'
-        '{"evidence_id": "E1", "excerpt": "Alpha, beta gamma delta epsilon."},'
-        '{"evidence_id": "E1", "excerpt": "Totally unrelated statement."}]}'
+        '{"answer": "Alpha beta gamma delta epsilon [1]. '
+        'Bravo, charlie delta echo foxtrot [2]. '
+        'Totally unrelated statement about nothing [3].", '
+        '"citations": [{"evidence_id": "E1", "excerpt": "ignored"}, '
+        '{"evidence_id": "E2", "excerpt": "ignored"}, '
+        '{"evidence_id": "E3", "excerpt": "ignored"}]}'
+    )
+    service = CorpusChatService(store, llm=llm)
+    hits = [
+        _hit('src-a', 0, ALPHA_TEXT),
+        _hit('src-b', 1, 'Bravo charlie delta echo foxtrot.'),
+        _hit('src-c', 2, 'Charlie delta echo foxtrot golf.'),
+    ]
+
+    result = service._llm_answer('alpha beta gamma delta epsilon', hits)
+
+    assert result is not None
+    assert [c.verdict for c in result.citations] == ['exact', 'fuzzy', 'none']
+    assert [c.excerpt for c in result.citations] == [
+        ALPHA_TEXT,
+        'Bravo charlie delta echo foxtrot.',
+        'Charlie delta echo foxtrot golf.',
+    ]
+
+
+# --- behavior 4b: markers are the citation source of truth ------------------
+
+
+def test_llm_answer_renumbers_markers_to_sorted_evidence_order(
+    tmp_path: Path,
+) -> None:
+    # The model's citations array is not E-ordered: marker [1] points at E2,
+    # [2] at E1, [3] at E3. Sorting the cited evidence ascending and
+    # renumbering the markers must keep each marker attached to its evidence.
+    store = SqliteStore(str(tmp_path / 'renumber.db'))
+    llm = _ScriptedLlm(
+        '{"answer": "Alpha fact [1] then beta fact [2] and gamma [3].", '
+        '"citations": [{"evidence_id": "E2"}, {"evidence_id": "E1"}, '
+        '{"evidence_id": "E3"}]}'
+    )
+    service = CorpusChatService(store, llm=llm)
+    hits = [
+        _hit('src-a', 0, 'Alpha fact is supported.'),
+        _hit('src-b', 1, 'Beta fact is supported.'),
+        _hit('src-c', 2, 'Gamma fact is supported.'),
+    ]
+
+    result = service._llm_answer('q', hits)
+
+    assert result is not None
+    assert [c.source_id for c in result.citations] == [
+        'src-a',
+        'src-b',
+        'src-c',
+    ]
+    assert result.answer == 'Alpha fact [2] then beta fact [1] and gamma [3].'
+
+
+def test_llm_answer_uses_chunk_first_sentence_not_model_excerpt(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / 'excerpt.db'))
+    llm = _ScriptedLlm(
+        '{"answer": "Resampling improves stability [1].", '
+        '"citations": [{"evidence_id": "E1", "excerpt": "MODEL FABRICATED"}]}'
+    )
+    service = CorpusChatService(store, llm=llm)
+    hits = [
+        _hit(
+            'src-a',
+            0,
+            'Resampling improves stability. A later sentence is irrelevant.',
+        )
+    ]
+
+    result = service._llm_answer('q', hits)
+
+    assert result is not None
+    assert result.citations[0].excerpt == 'Resampling improves stability.'
+
+
+def test_llm_answer_duplicate_evidence_refs_collapse_to_one_citation(
+    tmp_path: Path,
+) -> None:
+    store = SqliteStore(str(tmp_path / 'dupe.db'))
+    llm = _ScriptedLlm(
+        '{"answer": "One fact [1] and the same fact again [2].", '
+        '"citations": [{"evidence_id": "E1"}, {"evidence_id": "E1"}]}'
+    )
+    service = CorpusChatService(store, llm=llm)
+    hits = [_hit('src-a', 0, 'The fact is true.')]
+
+    result = service._llm_answer('q', hits)
+
+    assert result is not None
+    assert len(result.citations) == 1
+    assert result.answer == 'One fact [1] and the same fact again [1].'
+
+
+def test_llm_answer_strips_invalid_and_unknown_markers(tmp_path: Path) -> None:
+    store = SqliteStore(str(tmp_path / 'strip.db'))
+    llm = _ScriptedLlm(
+        '{"answer": "Real fact [1], unknown [2], out of range [9], zero [0].", '
+        '"citations": [{"evidence_id": "E1"}, {"evidence_id": "E99"}]}'
+    )
+    service = CorpusChatService(store, llm=llm)
+    hits = [_hit('src-a', 0, 'Real fact is true.')]
+
+    result = service._llm_answer('q', hits)
+
+    assert result is not None
+    assert '[1]' in result.answer
+    for stripped in ('[2]', '[9]', '[0]'):
+        assert stripped not in result.answer
+    assert len(result.citations) == 1
+
+
+def test_answer_falls_back_when_llm_answer_has_no_markers(
+    tmp_path: Path,
+) -> None:
+    store = _seed_store(tmp_path / 'no-marker.db', include_untitled=False)
+    llm = _ScriptedLlm(
+        '{"answer": "A confident but uncited synthesis.", '
+        '"citations": [{"evidence_id": "E1"}]}'
     )
     service = CorpusChatService(store, llm=llm)
 
-    result = service.answer('alpha beta gamma delta epsilon')
+    result = service.answer('resampling stability')
 
-    assert [c.verdict for c in result.citations] == ['exact', 'fuzzy', 'none']
-    assert [c.page for c in result.citations] == [None, None, None]
+    # A substantive answer that cites nothing must never be shown uncited:
+    # the service falls back to the deterministic extractive answer.
+    assert 'Resampling improves stability' in result.answer
+    assert result.insufficient is False
 
 
 # --- behavior 5: question is redacted and length-capped ---------------------
@@ -362,13 +490,8 @@ def test_answer_uses_provider_answer_when_citations_resolve(
     titled = store.list_knowledge_sources()[0]
     payload = _provider_json(
         {
-            'answer': 'Provider synthesis.',
-            'citations': [
-                {
-                    'evidence_id': 'E1',
-                    'excerpt': 'Resampling improves stability of small samples.',
-                }
-            ],
+            'answer': 'Provider synthesis [1].',
+            'citations': [{'evidence_id': 'E1'}],
         }
     )
     _mock_httpx(monkeypatch, lambda request: _content_response(payload))
@@ -377,8 +500,9 @@ def test_answer_uses_provider_answer_when_citations_resolve(
         'resampling stability'
     )
 
-    assert result.answer == 'Provider synthesis.'
+    assert result.answer == 'Provider synthesis [1].'
     assert [c.source_id for c in result.citations] == [titled.source_id]
+    assert result.citations[0].excerpt == TITLED_TEXT
     assert result.insufficient is False
 
 
@@ -401,7 +525,7 @@ def test_answer_falls_back_when_citations_do_not_resolve(
 ) -> None:
     store = _seed_store(tmp_path / 'provider-bad.db', include_untitled=False)
     payload = _provider_json(
-        {'answer': 'Fabricated.', 'citations': [{'evidence_id': 'E99', 'excerpt': 'x'}]}
+        {'answer': 'Fabricated [1].', 'citations': [{'evidence_id': 'E99'}]}
     )
     _mock_httpx(monkeypatch, lambda request: _content_response(payload))
 
@@ -409,7 +533,7 @@ def test_answer_falls_back_when_citations_do_not_resolve(
         'resampling stability'
     )
 
-    assert result.answer != 'Fabricated.'
+    assert result.answer != 'Fabricated [1].'
     assert 'Resampling improves stability' in result.answer
 
 
