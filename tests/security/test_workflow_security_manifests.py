@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -504,6 +505,38 @@ class ServiceImagePinSentinelTests(unittest.TestCase):
                 )
             )
         self.assertEqual(marker_services, set(BOUNDED_SERVICE_DEPLOYMENTS))
+
+
+class ParameterizedFromBaseTests(unittest.TestCase):
+    """The GPU orchestrator image inherits a CI-pinned base by build-arg."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "validate_configs", REPOSITORY_ROOT / "scripts" / "validate-configs.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        cls.validate_configs = module
+
+    def test_allowlisted_build_arg_from_passes(self):
+        dockerfile = (
+            REPOSITORY_ROOT / "services" / "research-orchestrator" / "Dockerfile.gpu"
+        )
+        self.assertEqual(self.validate_configs.check_dockerfile(dockerfile), [])
+
+    def test_unlisted_unpinned_literal_from_still_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dockerfile = Path(tmp) / "Dockerfile"
+            dockerfile.write_text("FROM ghcr.io/ccny-glasslab/glasslab-x:latest\n")
+            self.assertTrue(self.validate_configs.check_dockerfile(dockerfile))
+
+    def test_build_arg_from_in_another_dockerfile_still_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dockerfile = Path(tmp) / "Dockerfile"
+            dockerfile.write_text("ARG CPU_IMAGE=x\nFROM ${CPU_IMAGE}\n")
+            self.assertTrue(self.validate_configs.check_dockerfile(dockerfile))
 
 
 if __name__ == "__main__":
