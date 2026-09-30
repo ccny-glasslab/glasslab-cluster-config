@@ -254,7 +254,8 @@ def _make_index_section_pdf() -> bytes:
     first = doc.new_page()
     first.insert_text((72, 72), 'Resampling Hygiene Fixture', fontsize=20)
     first.insert_text((72, 130), 'Index', fontsize=14)
-    first.insert_text((72, 160), _INDEX_LINES * 6, fontsize=11)
+    for line in range(6):
+        first.insert_text((72, 158 + line * 15), _INDEX_LINES, fontsize=11)
     second = doc.new_page()
     second.insert_text((72, 72), '1 Methods', fontsize=14)
     second.insert_text((72, 102), _PROSE_BODY * 4, fontsize=11)
@@ -266,7 +267,8 @@ def _make_dense_listing_pdf() -> bytes:
     first = doc.new_page()
     first.insert_text((72, 72), 'Dense Listing Fixture', fontsize=20)
     first.insert_text((72, 130), '1 Data listing', fontsize=14)
-    first.insert_text((72, 160), _INDEX_LINES * 6, fontsize=11)
+    for line in range(6):
+        first.insert_text((72, 158 + line * 15), _INDEX_LINES, fontsize=11)
     second = doc.new_page()
     second.insert_text((72, 72), '2 Discussion', fontsize=14)
     second.insert_text((72, 102), _PROSE_BODY * 4, fontsize=11)

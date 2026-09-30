@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from app.corpus_rag import CorpusManifestEntry, RAG_INDEX_VERSION, ChunkVectorMeta
+from app.corpus_rag.retrieval import _is_index_like
 from app.storage import SqliteStore
 
 _MANIFEST_PATH = (
@@ -29,6 +30,12 @@ _MANIFEST_PATH = (
 )
 _BOOK_IDS = frozenset({'islr2', 'esl'})
 _EMBED_BATCH = 32
+
+# Detected heading titles whose body is a listing rather than prose; matched
+# case-insensitively against SectionNode.title and dropped at ingest.
+_NON_PROSE_SECTION_TITLES = frozenset(
+    {'index', 'contents', 'table of contents', 'bibliography', 'references'}
+)
 
 
 def _sha256_of(path: Path) -> str:
@@ -102,6 +109,30 @@ def _page_resolver(document: Any):
     return page_for_char
 
 
+def _drop_non_prose(
+    sections: list[Any], chunks: list[Any]
+) -> tuple[list[Any], list[Any]]:
+    """Drop index-like chunks plus index/front-matter sections at ingest.
+
+    A denylisted heading title removes its section and every chunk referencing
+    it; other index-like chunks are dropped too. Retained chunks never point
+    at a removed section.
+    """
+    kept_sections = [
+        section
+        for section in sections
+        if (section.title or '').strip().lower() not in _NON_PROSE_SECTION_TITLES
+    ]
+    kept_ids = {section.section_id for section in kept_sections}
+    kept_chunks = [
+        chunk
+        for chunk in chunks
+        if (chunk.section_id is None or chunk.section_id in kept_ids)
+        and not _is_index_like(chunk.text)
+    ]
+    return kept_sections, kept_chunks
+
+
 def ingest_document(
     *,
     store: Any,
@@ -156,6 +187,7 @@ def ingest_document(
         page_for_char=_page_resolver(document),
     )
     chunks = normalize_chunks(chunks)
+    sections, chunks = _drop_non_prose(sections, chunks)
     store.replace_rag_sections(record.doc_id, sections)
     store.replace_rag_chunks(source.source_id, chunks)
     return IngestReport(
