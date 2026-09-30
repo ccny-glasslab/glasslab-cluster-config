@@ -259,18 +259,14 @@ class PgVectorChunkIndex:
                 dims=self._provider_dims(),
                 indexed_count=0,
             )
-        rows = self._store.list_knowledge_chunk_vectors(self.model_id)
         expected = self._provider_dims()
         declared_revision = _provider_revision(self._provider)
-        usable = [
-            (meta, blob) for meta, blob in rows
-            if meta.dims == expected
-            and decode_vector(blob).shape[0] == expected
-            and (not declared_revision or meta.revision == declared_revision)
-        ]
-        mismatched = len(rows) - len(usable)
+        usable, total = self._store.count_knowledge_chunk_vectors(
+            self.model_id, dims=expected, revision=declared_revision
+        )
+        mismatched = total - usable
         reason = ''
-        available = bool(usable)
+        available = usable > 0
         if not available:
             reason = f'no usable pgvector rows for model {self.model_id!r}'
         elif mismatched:
@@ -282,9 +278,9 @@ class PgVectorChunkIndex:
             reason=reason,
             backend='pgvector',
             model_id=self.model_id,
-            revision=_provider_revision(self._provider),
+            revision=declared_revision,
             dims=expected,
-            indexed_count=len(usable),
+            indexed_count=usable,
         )
 
     def search(
