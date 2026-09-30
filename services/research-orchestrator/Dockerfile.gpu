@@ -1,0 +1,11 @@
+# GPU variant of the research-orchestrator image: identical application code,
+# CUDA-enabled torch for the on-GPU embedding/reranking jobs. Built FROM the
+# CPU image for the same commit (see .github/workflows/service-images.yml).
+ARG CPU_IMAGE=ghcr.io/ccny-glasslab/glasslab-research-orchestrator:latest
+FROM ${CPU_IMAGE}
+# torch 2.6.0+cu124 is the newest CUDA wheel that runs on this cluster's
+# driver (535 / CUDA 12.4) and GPU (Quadro P4000, sm_61); the CPU pin 2.13.0
+# has no x86_64 CUDA wheel. sentence-transformers 6.0.0 works with it
+# (verified in-cluster: model device cuda:0, encoded (2, 768)).
+RUN pip install --no-cache-dir --force-reinstall \
+      torch==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124

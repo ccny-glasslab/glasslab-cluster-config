@@ -80,6 +80,30 @@ PENDING_BUILD_IMAGES = {
     'ghcr.io/ccny-glasslab/glasslab-schedule-worker',
 }
 
+# Dockerfiles whose ``FROM`` base is intentionally selected at build time from
+# a declared build-arg rather than written as a literal. The CI build supplies a
+# pinned value (service-images.yml passes CPU_IMAGE as the per-commit CPU image
+# tag) while the Dockerfile default stays a local fallback, so the literal
+# ``${VAR}`` token cannot itself carry a digest. The exception is keyed by exact
+# (path suffix, base token): a stray unpinned literal FROM in the same file, or
+# the same token in any other Dockerfile, still fails.
+PARAMETERIZED_FROM_ALLOWLIST = {
+    'services/research-orchestrator/Dockerfile.gpu': {'${CPU_IMAGE}'},
+}
+
+
+def is_allowed_parameterized_from(path: Path, base: str) -> bool:
+    """True when ``base`` is an allowlisted build-arg FROM for this Dockerfile.
+
+    Matches on a path suffix so the rule holds whether the walk yields a
+    repository-relative path (as ``main`` does) or an absolute one (tests).
+    """
+    as_posix = path.as_posix()
+    return any(
+        as_posix.endswith(rel) and base in bases
+        for rel, bases in PARAMETERIZED_FROM_ALLOWLIST.items()
+    )
+
 
 def should_skip(path: Path) -> bool:
     # VCS internals, caches, and vendored dependency trees are never valid
@@ -207,7 +231,9 @@ def check_dockerfile(path: Path) -> list[str]:
 
     The base must carry a well-formed ``@sha256:<64 hex>`` digest; a bare
     tag, a short digest, or a non-hex digest all fail. ``scratch`` and
-    ``--platform=`` options are handled.
+    ``--platform=`` options are handled. The one exception is an exact
+    parameterized base listed in PARAMETERIZED_FROM_ALLOWLIST, whose value CI
+    pins at build time.
     """
     errors: list[str] = []
     for line in path.read_text().splitlines():
@@ -217,6 +243,8 @@ def check_dockerfile(path: Path) -> list[str]:
         parts = stripped.split()
         base = next((p for p in parts[1:] if not p.startswith('--')), None)
         if base is None or base == 'scratch':
+            continue
+        if is_allowed_parameterized_from(path, base):
             continue
         digest = base.split('@', 1)[1] if '@' in base else ''
         if not DIGEST_RE.match(digest):
