@@ -334,21 +334,30 @@ class HybridRetriever:
         timings['fuse'] = _elapsed_ms(stage)
 
         # (e) RERANK: reorder the head by reranker score; fall back to the
-        # RRF order untouched when no reranker is configured.
+        # RRF order untouched when no reranker is configured or the reranker
+        # fails (a model load or predict error must never 500 a chat answer).
         rerank_scores: dict[str, float] = {}
         if options.rerank and self._reranker is not None and ranked:
             stage = time.perf_counter()
             head = ranked[:_RERANK_TOP_N]
             tail = ranked[_RERANK_TOP_N:]
-            scores = self._reranker.rerank(
-                question, [table[cid].text for cid in head]
-            )
-            order = sorted(
-                range(len(head)), key=lambda i: (-float(scores[i]), head[i])
-            )
-            ranked = [head[i] for i in order] + tail
-            for position, chunk_id in enumerate(head):
-                rerank_scores[chunk_id] = float(scores[position])
+            try:
+                scores = self._reranker.rerank(
+                    question, [table[cid].text for cid in head]
+                )
+                if len(scores) != len(head):
+                    raise ValueError('reranker returned misaligned scores')
+                order = sorted(
+                    range(len(head)),
+                    key=lambda i: (-float(scores[i]), head[i]),
+                )
+                reranked = [head[i] for i in order] + tail
+            except Exception:  # noqa: BLE001 - rerank is a non-fatal enhancement
+                pass
+            else:
+                ranked = reranked
+                for position, chunk_id in enumerate(head):
+                    rerank_scores[chunk_id] = float(scores[position])
             timings['rerank'] = _elapsed_ms(stage)
 
         # (f) DIVERSIFY: cap chunks per source while filling k_final.

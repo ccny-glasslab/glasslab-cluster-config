@@ -499,6 +499,36 @@ def test_postgres_dsn_file_satisfies_postgres_backend(tmp_path: Path) -> None:
     assert settings.store_postgres_dsn == 'postgresql://file/db'
 
 
+def test_dense_pg_dsn_defaults_to_store_dsn(tmp_path: Path) -> None:
+    """The dense index lives in the store's Postgres DB.
+
+    An unset dense DSN therefore falls back to the store DSN resolved from
+    the read-only secret file, so the deployment never has to project the DSN
+    into the process environment to get the pgvector backend.
+    """
+    assert Settings().knowledge_dense_pg_dsn == ''
+
+    secrets_dir = tmp_path / 'secrets'
+    secrets_dir.mkdir()
+    _write_secret(secrets_dir, 'store_postgres_dsn', 'postgresql://file/db')
+    settings = Settings(secrets_dir=str(secrets_dir), store_backend='postgres')
+
+    assert settings.knowledge_dense_pg_dsn == 'postgresql://file/db'
+
+
+def test_explicit_dense_pg_dsn_is_not_overwritten(tmp_path: Path) -> None:
+    secrets_dir = tmp_path / 'secrets'
+    secrets_dir.mkdir()
+    _write_secret(secrets_dir, 'store_postgres_dsn', 'postgresql://file/db')
+    settings = Settings(
+        secrets_dir=str(secrets_dir),
+        store_backend='postgres',
+        knowledge_dense_pg_dsn='postgresql://dense/db',
+    )
+
+    assert settings.knowledge_dense_pg_dsn == 'postgresql://dense/db'
+
+
 def test_read_secret_file_returns_none_without_directory(tmp_path: Path) -> None:
     assert read_secret_file(None, 'operator_api_token') is None
     assert read_secret_file(str(tmp_path), 'operator_api_token') is None
