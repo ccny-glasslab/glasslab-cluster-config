@@ -47,6 +47,27 @@ STOPWORDS: frozenset[str] = frozenset(
 
 _ALNUM = re.compile(r'[A-Za-z0-9]')
 
+# Edge punctuation a whitespace-split token picks up from prose: the ``?`` in
+# "questions?", the quotes around "term", the comma after "word,". Only the
+# boundaries are trimmed, so the hyphen in "state-of-the-art" survives; ``+``
+# is kept because it is part of real terms such as "C++".
+_EDGE_PUNCTUATION = re.compile(r'^[^A-Za-z0-9+]+|[^A-Za-z0-9+]+$')
+
+
+def _normalize_token(token: str) -> str:
+    """Strip leading/trailing punctuation, preserving internal symbols."""
+    return _EDGE_PUNCTUATION.sub('', token)
+
+
+def _normalized_tokens(query: str) -> list[str]:
+    """Whitespace-split tokens with edge punctuation stripped.
+
+    Empty results (tokens that were pure punctuation) are dropped so the
+    length and stopword checks below see the same normalized form the store
+    later quotes into its MATCH query.
+    """
+    return [token for token in map(_normalize_token, query.split()) if token]
+
 
 def _dedupe(tokens: Iterable[str], max_terms: int | None) -> list[str]:
     """Deduplicate by lowercased form, preserving first-seen order."""
@@ -73,7 +94,7 @@ def filter_search_terms(
     was noise" (corpus-RAG's AND-first lexical search) use this and supply
     their own behaviour for the empty case.
     """
-    tokens = query.split()
+    tokens = _normalized_tokens(query)
     filtered = [
         token for token in tokens
         if len(token) > 2
@@ -95,7 +116,8 @@ def search_terms(query: str, *, max_terms: int | None = None) -> list[str]:
     if terms:
         return terms
     return _dedupe(
-        [token for token in query.split() if len(token) > 1], max_terms
+        [token for token in _normalized_tokens(query) if len(token) > 1],
+        max_terms,
     )
 
 
@@ -125,6 +147,6 @@ def rag_legacy_terms(query: str) -> list[str]:
     "what is it" still searches instead of returning nothing.
     """
     return _dedupe(
-        [token for token in query.split() if len(token) > 1],
+        [token for token in _normalized_tokens(query) if len(token) > 1],
         RAG_SEARCH_MAX_TERMS,
     )

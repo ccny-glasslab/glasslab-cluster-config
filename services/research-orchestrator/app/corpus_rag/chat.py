@@ -6,9 +6,10 @@ lexical hybrid retrieval (the dense channel is never engaged here) followed
 by extractive synthesis that quotes grounded sentences from the top hits. An
 optional duck-typed LLM provider may replace synthesis, but every citation it
 returns must resolve to a retrieved hit; any failure -- the shipped providers
-expose ``complete_json`` but no ``complete``, malformed JSON, unresolvable
-evidence ids, or an empty result -- silently falls back to the extractive
-answer.
+expose ``complete_json`` but no ``complete``, malformed JSON, or unresolvable
+evidence ids -- silently falls back to the extractive answer. A well-formed
+payload that names no citations is treated as the model's own refusal and is
+returned as-is rather than replaced by extractive quoting.
 
 The emitted :class:`~app.ui_chat.ChatCitation` contract has no URI or path
 field: the operator page forbids emitting ``knowledge://`` URIs or filesystem
@@ -47,10 +48,14 @@ _INSUFFICIENT_ANSWER = (
 )
 _SENTENCE_END_RE = re.compile(r'[.!?](?:\s|$)')
 _LLM_SYSTEM_PROMPT = (
-    'You answer strictly from the numbered evidence blocks [E1..En]. Return '
-    'STRICT JSON: {"answer": str, "citations": [{"evidence_id": "E<i>", '
-    '"excerpt": str}]}. Every excerpt MUST be quoted from its evidence block. '
-    'No prose outside JSON.'
+    'You answer strictly from the numbered evidence blocks [E1..En], which '
+    'are excerpts from corpus documents. Return STRICT JSON: {"answer": str, '
+    '"citations": [{"evidence_id": "E<i>", "excerpt": str}]}. Every excerpt '
+    'MUST be quoted from its evidence block. No prose outside JSON. If the '
+    'blocks do not actually address the question, do not describe, summarize, '
+    'or cite unrelated evidence and never invent citations; return exactly '
+    '{"answer": "I could not find anything in the corpus about that.", '
+    '"citations": []}.'
 )
 
 
@@ -191,8 +196,9 @@ class CorpusChatService:
             answer = str(payload.get('answer') or '').strip()
             if not answer:
                 return None
+            refs = payload.get('citations', [])
             citations: list[ChatCitation] = []
-            for ref in payload.get('citations', []):
+            for ref in refs:
                 if not isinstance(ref, dict):
                     continue
                 hit = by_evidence.get(str(ref.get('evidence_id')))
@@ -203,7 +209,13 @@ class CorpusChatService:
                     self._citation(hit, excerpt, len(citations) + 1)
                 )
             if not citations:
-                return None
+                # No declared citations is a deliberate refusal; ids that
+                # failed to resolve are an unusable payload, so fall back.
+                if refs:
+                    return None
+                return ChatAnswer(
+                    answer=answer, citations=[], insufficient=True
+                )
             return ChatAnswer(
                 answer=answer, citations=citations, insufficient=False
             )

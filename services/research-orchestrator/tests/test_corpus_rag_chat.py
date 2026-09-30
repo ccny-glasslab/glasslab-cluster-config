@@ -413,6 +413,23 @@ def test_answer_falls_back_when_citations_do_not_resolve(
     assert 'Resampling improves stability' in result.answer
 
 
+def test_answer_accepts_empty_citations_refusal(tmp_path: Path) -> None:
+    store = _seed_store(tmp_path / 'provider-refuse.db', include_untitled=False)
+    llm = _ScriptedLlm(
+        '{"answer": "I could not find anything in the corpus about that.",'
+        ' "citations": []}'
+    )
+    service = CorpusChatService(store, llm=llm)
+
+    result = service.answer('resampling stability')
+
+    assert result.answer == 'I could not find anything in the corpus about that.'
+    assert result.citations == []
+    assert result.insufficient is True
+    # Extractive synthesis would have quoted the seeded sentence; it must not.
+    assert 'Resampling improves stability' not in result.answer
+
+
 # --- behavior 8: build_rag_llm_provider gating ------------------------------
 
 
