@@ -211,6 +211,8 @@ Embeddings are produced in-process by the Snowflake arctic-embed provider
 resolved HuggingFace revision (`GLASSLAB_ORCHESTRATOR_KNOWLEDGE_EMBEDDING_REVISION`)
 so stored vectors match what the orchestrator queries. The orchestrator image
 ships the CPU torch runtime, so the embed Job runs on CPU and requests no GPU.
+A GPU variant of the same Job is available for full-corpus batches (see
+[GPU embed Job](#gpu-embed-job) below).
 
 Run the embed step as a Job:
 
@@ -232,6 +234,26 @@ Then flip the chat mode by setting
 defaults to `lexical`, so leaving the key unset preserves today's behavior. A
 deployment that selects `dense`/`hybrid` before the vectors exist degrades to
 lexical rather than returning no evidence.
+
+### GPU embed Job
+
+At full corpus scale the CPU embed Job takes hours. `corpus-rag-embed-gpu.yaml`
+is the same `embed_rag_chunks.py --apply --embedding settings --vector-backend
+auto` run on the GPU image (`glasslab-research-orchestrator-gpu`): the
+orchestrator code with a CUDA-enabled torch. It requests one `nvidia.com/gpu`,
+uses `runtimeClassName: nvidia`, and keeps the CPU Job's Postgres label and
+store/lineage env, so it writes the identical vectors.
+
+```bash
+kubectl apply -f kubeadm/glasslab-v2/jobs/corpus-rag-embed-gpu.yaml
+kubectl -n glasslab-v2 logs job/corpus-rag-embed-gpu -f
+```
+
+Pin the image to a commit whose GPU image CI has published: the workflow builds
+`glasslab-research-orchestrator-gpu:<commit-sha>` alongside the CPU image, so
+the tag moves with each merge. Like the CPU Job the embed step is idempotent —
+it embeds only chunks missing a vector for the active lineage, so a re-run adds
+nothing and computes only the missing vectors.
 
 ## Exact-span highlighting
 
