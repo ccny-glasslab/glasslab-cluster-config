@@ -56,6 +56,9 @@ def test_ui_and_rag_flags_default() -> None:
     assert settings.ui_pdf_enabled is True
     assert settings.ui_upload_enabled is True
     assert settings.rag_llm_enabled is False
+    assert settings.rag_llm_base_url == 'https://opencode.ai/zen/go/v1'
+    assert settings.rag_llm_model == 'deepseek-v4.1-flash'
+    assert settings.rag_llm_timeout_seconds == 60.0
 
 
 def test_configmap_sets_corpus_raw_root_container_path() -> None:

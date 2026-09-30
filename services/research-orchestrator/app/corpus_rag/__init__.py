@@ -30,6 +30,7 @@ from .contracts import (
     RagSectionRecord,
     RetrievedHit,
 )
+from .llm_provider import build_rag_llm_provider
 
 __all__ = [
     'ADVISORY_TOKEN_BUDGET',
@@ -57,4 +58,5 @@ __all__ = [
     'RagSectionRecord',
     'RetrievedHit',
     'build_corpus_chat_service',
+    'build_rag_llm_provider',
 ]

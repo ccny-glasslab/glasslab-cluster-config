@@ -163,17 +163,39 @@ an opaque `404`, so the response never reveals whether a path exists.
 The chat pane answers a question from indexed corpus chunks. Retrieval is
 configurable: `lexical` (the default) needs no embedding backend, `dense` uses
 the vector channel only, and `hybrid` fuses lexical and dense with RRF.
-Synthesis is extractive: the answer quotes the top retrieved passages and
-renders each one as a citation. Dense and hybrid additionally require the dense
-index to be built first (see [Dense and hybrid retrieval](#dense-and-hybrid-retrieval)
-below), and both degrade to lexical when the embedding backend or the index is
-unavailable. Selecting a citation opens the PDF viewer at the cited source and
-drives the exact-span highlight.
+Synthesis is extractive by default: the answer quotes the top retrieved
+passages and renders each one as a citation. Dense and hybrid additionally
+require the dense index to be built first (see
+[Dense and hybrid retrieval](#dense-and-hybrid-retrieval) below), and both
+degrade to lexical when the embedding backend or the index is unavailable.
+Selecting a citation opens the PDF viewer at the cited source and drives the
+exact-span highlight.
 
-The only remaining reserved flag is `GLASSLAB_ORCHESTRATOR_RAG_LLM_ENABLED`
-for a future remote synthesis lane. The shipped `/ui/` wiring does not read it,
-and the chat service is built without a synthesis provider, so the current chat
-always answers extractively regardless of its value.
+## Grounded LLM answers
+
+With `GLASSLAB_ORCHESTRATOR_RAG_LLM_ENABLED=true` the chat asks the hosted
+OpenCode Go gateway to synthesize a grounded answer instead of quoting raw
+passages. The deployment sets this on, so the operator `/ui` chat generates
+answers from the retrieved evidence.
+
+- **Endpoint and model.** OpenAI-compatible
+  `POST https://opencode.ai/zen/go/v1/chat/completions` with model
+  `deepseek-v4.1-flash`. Override the endpoint with
+  `GLASSLAB_ORCHESTRATOR_RAG_LLM_BASE_URL` and the model with
+  `GLASSLAB_ORCHESTRATOR_RAG_LLM_MODEL`.
+- **Key.** Read at call time from the OpenCode auth file at
+  `GLASSLAB_ORCHESTRATOR_OPENCODE_AUTH_JSON_PATH`
+  (default `/etc/opencode-auth/auth.json`), entry `opencode-go` -> `key`. The
+  key stays in the mounted secret; it never appears in the ConfigMap, config,
+  logs, or the request URL. The same secret already authenticates the agent
+  runtime.
+- **Fallback.** Every failure — the file or key is missing, the model is down,
+  a non-2xx response, a malformed body, or citations that do not resolve to a
+  retrieved hit — silently falls back to the extractive answer, so the page
+  never fails on a model error.
+- **Disable.** Set `GLASSLAB_ORCHESTRATOR_RAG_LLM_ENABLED=false` and roll the
+  deployment to return to purely extractive answers. Startup never depends on
+  the provider: with the flag off the chat is built without one.
 
 ## Dense and hybrid retrieval
 
@@ -255,7 +277,10 @@ All orchestrator settings use the `GLASSLAB_ORCHESTRATOR_` prefix unless noted.
 | `GLASSLAB_ORCHESTRATOR_UI_CHAT_ENABLED` | `true` | Gates the chat pane. When `false`, `/ui/` still renders but carries no Ask the corpus section. |
 | `GLASSLAB_ORCHESTRATOR_UI_CHAT_RETRIEVAL_MODE` | `lexical` | Chat retrieval mode: `lexical`, `dense`, or `hybrid`. Non-lexical modes require the dense index to be built (`scripts/corpus_rag/embed_rag_chunks.py`) and degrade to lexical when the backend or index is unavailable. |
 | `GLASSLAB_ORCHESTRATOR_UI_PDF_ENABLED` | `true` | Gates the viewer routes. When `false`, no `/ui/pdf/**` route is registered, so every such path returns `404`. |
-| `GLASSLAB_ORCHESTRATOR_RAG_LLM_ENABLED` | `false` | Reserved, deliberately unwired: no code reads it, so it has no effect. It pairs with the `GLASSLAB_RAG_LLM_BASE_URL`, `GLASSLAB_RAG_LLM_MODEL`, and `GLASSLAB_RAG_LLM_API_KEY` endpoint family. The shipped `/ui/` chat builds no provider, so it always answers extractively. |
+| `GLASSLAB_ORCHESTRATOR_RAG_LLM_ENABLED` | `false` | Opts the `/ui` chat into grounded LLM synthesis through the hosted OpenCode Go gateway. The deployment sets it to `true`; the key is read from the OpenCode auth file, not config. Every failure falls back to the extractive answer, so the page never depends on the model. |
+| `GLASSLAB_ORCHESTRATOR_RAG_LLM_BASE_URL` | `https://opencode.ai/zen/go/v1` | OpenAI-compatible base URL for chat synthesis; the deployment leaves it at the default. |
+| `GLASSLAB_ORCHESTRATOR_RAG_LLM_MODEL` | `deepseek-v4.1-flash` | Model name sent to the synthesis endpoint. |
+| `GLASSLAB_ORCHESTRATOR_RAG_LLM_TIMEOUT_SECONDS` | `60.0` | Per-request timeout for chat synthesis; a timeout falls back to the extractive answer. |
 
 None of these carry secret values in the manifest. The LLM API key belongs in
 the deployment Secret, not in the ConfigMap or a tracked file.
@@ -315,7 +340,8 @@ operator-gated and that the proxy is the intended path.
 This feature does not loosen the read-only boundary. Specifically:
 
 - The chat is a read path: it retrieves corpus chunks and renders text. It
-  does not mutate run state, and the shipped chat calls no remote model.
+  does not mutate run state, and the grounded-answer call is a stateless
+  synthesis request that falls back to the extractive answer on any failure.
 - No run control. Reading or chatting does not pause, resume, cancel, or retry
   any run.
 - No approves, rejections, contract promotion, or dataset or corpus changes.
