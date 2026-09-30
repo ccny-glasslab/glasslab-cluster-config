@@ -1,10 +1,12 @@
-# Orchestrator Corpus UI (Read-Only)
+# Orchestrator Corpus UI
 
-This runbook covers the read-only corpus and reports page served by the
-research orchestrator at `GET /ui/`, and the loopback proxy that makes it
-usable from a browser without handing the operator token to the page. The page
-is server-rendered with no JavaScript, no CDN, and a strict Content-Security
-Policy, so it renders with scripting disabled.
+This runbook covers the corpus and reports page served by the research
+orchestrator at `GET /ui/`, and the loopback proxy that makes it usable from a
+browser without handing the operator token to the page. The page is
+server-rendered with no JavaScript, no CDN, and a strict Content-Security
+Policy, so it renders with scripting disabled. The base page is read-only; an
+opt-in control surface (launch a run, pause/resume/cancel, approve or reject a
+gate) is covered under [Operator controls](#operator-controls).
 
 Canonical feature PR: #592.
 
@@ -53,7 +55,7 @@ header name to stderr. The token value is never printed.
 | `--upstream` | `http://127.0.0.1:18080` | Loopback orchestrator origin. Must be a bare origin with no path, query, or fragment. |
 | `--token-env` | `GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN` | Name of the environment variable that holds the operator token. |
 | `--header` | `X-Glasslab-Operator-Token` | Header injected on every upstream request. |
-| `--allow-methods` | `GET,HEAD` | Comma-separated HTTP methods to forward. |
+| `--allow-methods` | `GET,HEAD` | Comma-separated HTTP methods to forward. Add `POST` to enable the [Operator controls](#operator-controls). |
 
 The proxy is deliberately constrained:
 
@@ -67,6 +69,11 @@ The proxy is deliberately constrained:
 - **Read-only by default.** Only the allowlisted methods are forwarded.
   Anything else gets `405 Method Not Allowed` with an `Allow` header and never
   reaches the orchestrator.
+- **Origin-guarded writes.** When `POST` is allowlisted, every state-changing
+  request must carry an `Origin` (or `Referer`) that names a loopback host for
+  the listen port; anything else gets `403 Forbidden` before the operator
+  token is injected. This closes the cross-site form-post hole that widening
+  the method allowlist would otherwise open.
 - **Host-validated.** A request whose `Host` header doesn't name the loopback
   listener is rejected with `421 Misdirected Request`. This closes DNS
   rebinding, where an attacker name resolves to `127.0.0.1` but the browser
@@ -127,24 +134,43 @@ and is never an independent verification.
 The inspector labels the located block by its 1-based ordinal and shows the
 source id, digest, and score, then the matched block text.
 
+## Operator controls
+
+The base page is read-only, but the same page carries an opt-in control
+surface when the proxy forwards `POST`. It is gated by the same operator token
+and uses ordinary same-origin forms (no script, no inline style):
+
+| Form | Action | Route |
+| --- | --- | --- |
+| Start a research run | Starts a run from an objective (optional contract id/version) | `POST /ui/runs` |
+| Pause / Resume / Cancel | Pause, resume, or cancel the selected run | `POST /ui/runs/{run_id}/control` |
+| Approve / Reject | Decide a pending human gate on the selected run | `POST /ui/actions/{action_id}/decide` |
+
+Run the proxy with `--allow-methods GET,HEAD,POST` to enable them; with the
+default `GET,HEAD` the forms are still rendered but their submission is
+answered `405`. Each controller calls the same engine methods as the JSON API
+(`POST /runs`, `POST /runs/{run_id}/{pause,resume,cancel}`,
+`POST /actions/{action_id}/{approve,reject}`), and a validation failure
+renders an escaped error page rather than a JSON body. A gate that still needs
+Honeydew's sign-off renders as "awaiting Honeydew" with no decision form.
+
 ## Read-only scope
 
-The page and its proxy never mutate state. In particular:
+Everything else on the page never mutates state:
 
-- No agent turn control. Reading a run does not pause, resume, cancel, or
-  retry it. The corpus chat pane is a read-only question-and-answer path, not a
-  control surface; see
+- No agent-turn control beyond pause/resume/cancel. Reading a run does not
+  retry it, and the corpus chat pane remains a read-only question-and-answer
+  path, not a control surface; see
   [Corpus Chat And In-Browser PDF Viewer](orchestrator-corpus-ui-chat.md).
-- No approves, rejections, contract promotion, or dataset or corpus changes.
+- No contract promotion, and no dataset or corpus changes from the page.
 - No in-page PDF rendering on this base view. A PDF that is a linkable
   artifact is previewed only as its extracted text here. The in-browser PDF
   viewer and exact-span highlighting are covered by
   [Corpus Chat And In-Browser PDF Viewer](orchestrator-corpus-ui-chat.md).
-- No write methods. The proxy forwards `GET` and `HEAD` only by default.
 
-The page reads only durable orchestrator records (runs, corpus sources,
-context packets, artifact records) plus digest-verified artifact text. The
-database and append-only event log remain authoritative.
+The page reads only durable orchestrator records (runs, actions, corpus
+sources, context packets, artifact records) plus digest-verified artifact
+text. The database and append-only event log remain authoritative.
 
 ## Troubleshooting
 
@@ -152,7 +178,8 @@ database and append-only event log remain authoritative.
 | --- | --- |
 | `401 Unauthorized` | The operator token is missing or wrong. Confirm `GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN` is exported in the shell that started the proxy, then restart it. The token is read once at startup. |
 | `421 Misdirected Request` | The request `Host` didn't name the loopback listener. Open `http://127.0.0.1:19090/ui/`, not a hostname, and don't change `--listen` without matching the URL. |
-| `405 Method Not Allowed` | The proxy is read-only. It forwards `GET` and `HEAD` only unless you widen `--allow-methods` deliberately. |
+| `405 Method Not Allowed` | The proxy isn't forwarding the method. Run it with `--allow-methods GET,HEAD,POST` to enable the operator controls; the base page is read-only by default. |
+| `403 Forbidden` on a control submit | A state-changing request didn't carry a loopback `Origin`/`Referer` for the listen port. Open the page at `http://127.0.0.1:19090/ui/` and submit from there; a cross-site form or a tool that omits `Origin` is refused. |
 | `502 Bad Gateway` | The proxy reached its listen port but couldn't reach the upstream. The SSH port-forward or the orchestrator service is down. |
 | Blank page or connection refused | The proxy process or the SSH session (with its `LocalForward`) isn't running. Start both, then reload. |
 | `Document unavailable` | The ref is invalid, outside the linkable directories, has no artifact record, failed digest verification, or exceeds the 2 MiB preview cap. |

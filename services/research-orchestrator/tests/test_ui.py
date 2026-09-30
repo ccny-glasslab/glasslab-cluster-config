@@ -42,12 +42,16 @@ from app.corpus_rag.chat import CorpusChatService
 from app.corpus_rag.contracts import RagChunkRecord
 from app.knowledge_manager import KnowledgeError
 from app.schemas import (
+    ActionRecord,
     AgentName,
+    ApprovalStatus,
     ArtifactRecord,
     ContextPacket,
     KnowledgeSource,
+    PolicyClassification,
     RunCreateRequest,
     RunRecord,
+    RunState,
     SourceType,
     TurnKind,
 )
@@ -1645,3 +1649,201 @@ def test_ui_upload_disabled_shows_note_and_refuses_post(
     assert 'Source upload is not enabled on this deployment.' in page.text
     assert 'action="/ui/sources/upload"' not in page.text
     assert post.status_code == 404
+
+
+def _seed_pending_action(
+    engine,
+    run_id: str,
+    *,
+    policy: PolicyClassification = PolicyClassification.HUMAN_APPROVAL,
+    honeydew_approved: bool = True,
+) -> ActionRecord:
+    """A pending human gate whose type matches no engine resume branch, so
+    approving or rejecting it is a state-gated no-op past the status update."""
+    action = ActionRecord(
+        run_id=run_id,
+        proposed_by=AgentName.BEAKER,
+        type='test_gate',
+        policy_classification=policy,
+        approval_status=ApprovalStatus.PENDING,
+        honeydew_approved=honeydew_approved,
+        reason='run the bounded matrix',
+        idempotency_key=f'test-gate-{run_id}',
+    )
+    return engine.store.save_action(action)
+
+
+def test_ui_renders_launch_and_gate_controls(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='inspect launch controls'))
+    _seed_pending_action(engine, run.run_id)
+
+    with _client(settings, engine) as client:
+        page = client.get('/ui/', params={'run': run.run_id}, headers=AUTH_HEADERS)
+
+    assert page.status_code == 200
+    assert '<form method="post" action="/ui/runs"' in page.text
+    assert 'name="objective"' in page.text
+    assert f'/ui/runs/{run.run_id}/control' in page.text
+    assert '/ui/actions/' in page.text and '/decide' in page.text
+    assert '<script' not in page.text
+    assert re.search(r'\sstyle="', page.text) is None
+
+
+def test_ui_gate_defers_until_honeydew_approves(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='defer the double gate'))
+    _seed_pending_action(
+        engine,
+        run.run_id,
+        policy=PolicyClassification.HONEYDEW_AND_HUMAN_APPROVAL,
+        honeydew_approved=False,
+    )
+
+    with _client(settings, engine) as client:
+        page = client.get('/ui/', params={'run': run.run_id}, headers=AUTH_HEADERS)
+
+    assert page.status_code == 200
+    gates = re.findall(
+        r'<article class="gate">.*?</article>', page.text, re.DOTALL
+    )
+    deferred = [gate for gate in gates if 'awaiting Honeydew' in gate]
+    assert len(deferred) == 1
+    assert 'run the bounded matrix' in deferred[0]
+    assert '<form' not in deferred[0]
+
+
+def test_ui_launch_starts_a_run(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    before = len(engine.store.list_runs())
+
+    with _client(settings, engine) as client:
+        response = client.post(
+            '/ui/runs',
+            data={'objective': 'launch from the zero-JS form'},
+            headers=AUTH_HEADERS,
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    assert response.headers['location'].startswith('/ui/?run=')
+    assert len(engine.store.list_runs()) == before + 1
+
+
+def test_ui_launch_rejects_short_objective(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    before = len(engine.store.list_runs())
+
+    with _client(settings, engine) as client:
+        response = client.post(
+            '/ui/runs',
+            data={'objective': 'tiny'},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 400
+    assert 'Could not start the run' in response.text
+    assert len(engine.store.list_runs()) == before
+
+
+def test_ui_launch_rejects_orphan_contract_id(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.post(
+            '/ui/runs',
+            data={
+                'objective': 'objective with an orphan contract',
+                'contract_id': 'c1',
+            },
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 400
+    assert 'Could not start the run' in response.text
+
+
+def test_ui_launch_requires_operator(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.post('/ui/runs', data={'objective': 'unauthorized'})
+
+    assert response.status_code == 401
+
+
+def test_ui_run_control_applies_and_rejects_unknown(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='control the run'))
+
+    with _client(settings, engine) as client:
+        paused = client.post(
+            f'/ui/runs/{run.run_id}/control',
+            data={'action': 'pause'},
+            headers=AUTH_HEADERS,
+            follow_redirects=False,
+        )
+        unknown = client.post(
+            f'/ui/runs/{run.run_id}/control',
+            data={'action': 'explode'},
+            headers=AUTH_HEADERS,
+        )
+
+    assert paused.status_code == 303
+    assert paused.headers['location'] == f'/ui/?run={run.run_id}'
+    assert engine.store.get_run(run.run_id).state == RunState.PAUSED
+    assert unknown.status_code == 400
+
+
+def test_ui_decide_gate_approves_pending_action(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='approve the gate'))
+    action = _seed_pending_action(engine, run.run_id)
+
+    with _client(settings, engine) as client:
+        response = client.post(
+            f'/ui/actions/{action.action_id}/decide',
+            data={
+                'decision': 'approve',
+                'reviewer': 'operator',
+                'reason': 'looks good',
+            },
+            headers=AUTH_HEADERS,
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    assert response.headers['location'] == f'/ui/?run={run.run_id}'
+    stored = engine.store.get_action(action.action_id)
+    assert stored.approval_status == ApprovalStatus.APPROVED
+    assert stored.reviewer == 'operator'
+
+
+def test_ui_decide_gate_validates_before_acting(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='validate the gate'))
+    action = _seed_pending_action(engine, run.run_id)
+    decide = f'/ui/actions/{action.action_id}/decide'
+
+    with _client(settings, engine) as client:
+        no_reviewer = client.post(
+            decide,
+            data={'decision': 'approve', 'reviewer': '', 'reason': 'x'},
+            headers=AUTH_HEADERS,
+        )
+        bad_decision = client.post(
+            decide,
+            data={'decision': 'maybe', 'reviewer': 'op', 'reason': 'x'},
+            headers=AUTH_HEADERS,
+        )
+        reject_without_reason = client.post(
+            decide,
+            data={'decision': 'reject', 'reviewer': 'op', 'reason': ''},
+            headers=AUTH_HEADERS,
+        )
+
+    assert no_reviewer.status_code == 400
+    assert bad_decision.status_code == 400
+    assert reject_without_reason.status_code == 400
+    stored = engine.store.get_action(action.action_id)
+    assert stored.approval_status == ApprovalStatus.PENDING

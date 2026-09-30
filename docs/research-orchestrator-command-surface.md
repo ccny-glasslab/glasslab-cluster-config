@@ -274,13 +274,15 @@ POST /actions/{action_id}/approve
 POST /actions/{action_id}/reject
 ```
 
-`GET /ui/` is a server-rendered, read-only HTML page over the same durable
-state (three panes: sources, document, evidence inspector). It is gated by the
-same operator header, and a browser can't attach that header to a top-level
-navigation, so open it through the loopback proxy instead: run
+`GET /ui/` is a server-rendered HTML page over the same durable state (three
+panes: sources, corpus chat, viewer). It is gated by the same operator header,
+and a browser can't attach that header to a top-level navigation, so open it
+through the loopback proxy instead: run
 `python3 scripts/glasslab-orchestrator-ui-proxy.py` on the workstation (it
 injects the operator token from the environment), then browse
-`http://127.0.0.1:19090/ui/`. See
+`http://127.0.0.1:19090/ui/`. With `--allow-methods GET,HEAD,POST` the page
+also carries opt-in operator controls (launch a run, pause/resume/cancel,
+approve or reject a gate). See
 [Orchestrator Corpus UI](glasslab-v2/runbooks/orchestrator-corpus-ui.md) for
 the proxy flags, pane layout, and citation badges.
 
