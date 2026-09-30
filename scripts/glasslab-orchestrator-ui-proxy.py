@@ -35,11 +35,15 @@ Security properties
   so a long-lived SSE stream does not block concurrent XHR requests.  Upstream
   response bodies are relayed unbuffered (chunked when the upstream sets no
   ``Content-Length``) so events arrive incrementally.
-* **Read-only + anti-CSRF.**  Only the allowlisted HTTP methods (default
-  ``GET,HEAD``) are forwarded, and the request ``Host`` must name a loopback
-  host for the configured listen port.  A page the operator visits therefore
-  cannot reach the token-injecting path through a cross-origin "simple"
-  request or a DNS-rebinding name.
+* **Read-only by default + anti-CSRF.**  Only the allowlisted HTTP methods
+  (default ``GET,HEAD``) are forwarded.  The write surface is opt-in: run with
+  ``--allow-methods GET,HEAD,POST`` to let the browser submit the ``/ui``
+  launch and gate forms.  Two guards protect the token-injecting path either
+  way: the request ``Host`` must name a loopback host for the configured
+  listen port (defeats a DNS-rebinding name), and every state-changing method
+  must carry an ``Origin`` (or ``Referer``) that is also a loopback origin for
+  that port (defeats a cross-site form the operator's browser is induced into
+  submitting), so no page the operator visits can reach the token path.
 
 Only the Python standard library is used.
 """
@@ -65,6 +69,13 @@ DEFAULT_ALLOW_METHODS = 'GET,HEAD'
 
 STREAM_BLOCK = 65536
 MAX_REQUEST_BODY = 64 * 1024 * 1024
+
+# Methods that can change upstream state.  For these the request must prove it
+# came from this loopback listener (Origin, falling back to Referer), so a
+# cross-site form the operator's browser is induced into submitting cannot ride
+# the token-injecting path.  GET/HEAD are excluded: browsers attach no Origin
+# to a simple navigation and they change nothing upstream.
+STATE_CHANGING_METHODS = frozenset({'POST', 'PUT', 'PATCH', 'DELETE'})
 
 # RFC 7230 hop-by-hop headers, dropped in both directions.
 HOP_BY_HOP = frozenset(
@@ -256,6 +267,42 @@ def host_header_allowed(
     if host is None or port != effective_port:
         return False
     normalized = host.lower()
+    return (
+        normalized in _LOOPBACK_HOST_NAMES
+        or normalized == config.listen_host.lower()
+    )
+
+
+def origin_header_allowed(
+    origin: str | None,
+    referer: str | None,
+    config: ProxyConfig,
+    *,
+    listen_port: int | None = None,
+) -> bool:
+    """Accept a state-changing request only from this loopback listener.
+
+    CSRF guard: the operator's browser can be induced by a page it visits to
+    submit a form to the loopback proxy, whose ``Host`` still names the
+    loopback listener and so passes :func:`host_header_allowed` while the proxy
+    injects the operator token.  Browsers send ``Origin`` on every
+    non-GET/HEAD request, so require it (falling back to ``Referer``) to name a
+    loopback host on the bound listen port; a cross-site submission carries the
+    attacker's origin and is refused.
+    """
+    raw = (origin or referer or '').strip()
+    if not raw:
+        return False
+    parsed = urllib.parse.urlsplit(raw.split()[0])
+    if parsed.scheme not in ('http', 'https') or parsed.hostname is None:
+        return False
+    port = parsed.port
+    if port is None:
+        port = 80 if parsed.scheme == 'http' else 443
+    effective_port = config.listen_port if listen_port is None else listen_port
+    if port != effective_port:
+        return False
+    normalized = parsed.hostname.lower()
     return (
         normalized in _LOOPBACK_HOST_NAMES
         or normalized == config.listen_host.lower()
@@ -462,6 +509,14 @@ class ProxyRequestHandler(http.server.BaseHTTPRequestHandler):
             listen_port=self.server.server_address[1],  # type: ignore[attr-defined]
         ):
             self._reject(421, 'invalid Host header')
+            return
+        if method in STATE_CHANGING_METHODS and not origin_header_allowed(
+            self.headers.get('Origin'),
+            self.headers.get('Referer'),
+            config,
+            listen_port=self.server.server_address[1],  # type: ignore[attr-defined]
+        ):
+            self._reject(403, 'cross-origin state-changing request rejected')
             return
 
         try:

@@ -359,16 +359,20 @@ operator-gated and that the proxy is the intended path.
 
 ## Read-only scope (updated)
 
-This feature does not loosen the read-only boundary. Specifically:
+The chat feature itself does not loosen the read-only boundary. Specifically:
 
 - The chat is a read path: it retrieves corpus chunks and renders text. It
   does not mutate run state, and the grounded-answer call is a stateless
   synthesis request that falls back to the extractive answer on any failure.
-- No run control. Reading or chatting does not pause, resume, cancel, or retry
-  any run.
-- No approves, rejections, contract promotion, or dataset or corpus changes.
-- No write methods. The proxy still forwards `GET` and `HEAD` only. The chat
-  form is `GET`, so it writes nothing.
+- No run control from the chat. Reading or chatting does not pause, resume,
+  cancel, or retry any run.
+- The chat form is `GET`, so it writes nothing.
+
+The page also carries a separate, opt-in operator control surface (launch a
+run, pause/resume/cancel, approve or reject a gate). The proxy forwards it
+only when run with `--allow-methods GET,HEAD,POST`, and it guards every
+state-changing request with a loopback `Origin`; see
+[Operator controls](orchestrator-corpus-ui.md#operator-controls).
 
 The page reads durable orchestrator records and the corpus-RAG store, plus
 digest-verified artifact text and the staged raw PDFs. The database and
