@@ -47,15 +47,19 @@ _INSUFFICIENT_ANSWER = (
     'No corpus evidence is available to answer that question.'
 )
 _SENTENCE_END_RE = re.compile(r'[.!?](?:\s|$)')
+_CITATION_MARKER_RE = re.compile(r'\[(\d{1,3})\]')
+_VERDICT_RANK = {'exact': 2, 'fuzzy': 1, 'none': 0}
 _LLM_SYSTEM_PROMPT = (
     'You answer strictly from the numbered evidence blocks [E1..En], which '
     'are excerpts from corpus documents. Return STRICT JSON: {"answer": str, '
-    '"citations": [{"evidence_id": "E<i>", "excerpt": str}]}. Every excerpt '
-    'MUST be quoted from its evidence block. No prose outside JSON. Cite every '
-    'block you rely on. Incomplete evidence is normal: when the blocks concern '
-    'the question but do not fully answer it, answer with what they DO '
-    'support, note briefly what is missing, and cite the blocks you used. Only '
-    'when the blocks are unrelated to the question, return exactly '
+    '"citations": [{"evidence_id": "E<i>"}]}. Place an inline [n] marker in '
+    'the answer immediately after every claim the evidence supports, where n '
+    'is the 1-based position of that evidence in your citations array; cite '
+    'every block you rely on. No prose outside JSON. Incomplete evidence is '
+    'normal: when the blocks concern the question but do not fully answer it, '
+    'answer with what they DO support, note briefly what is missing, and cite '
+    'the blocks you used. Only when the blocks are unrelated to the question, '
+    'return exactly '
     '{"answer": "I could not find anything in the corpus about that.", '
     '"citations": []}; never describe or cite unrelated evidence, and never '
     'invent citations.'
@@ -68,6 +72,15 @@ def _first_sentence(text: str) -> str:
     match = _SENTENCE_END_RE.search(collapsed)
     sentence = collapsed[: match.end()].strip() if match else collapsed
     return sentence[:_EXCERPT_CHARS]
+
+
+def _claim_sentence(text: str, marker_start: int) -> str:
+    """The text from the previous sentence boundary up to the marker."""
+    prefix = text[:marker_start]
+    boundary = 0
+    for match in _SENTENCE_END_RE.finditer(prefix):
+        boundary = match.end()
+    return prefix[boundary:].strip()
 
 
 class CorpusChatService:
@@ -200,30 +213,92 @@ class CorpusChatService:
             if not answer:
                 return None
             refs = payload.get('citations', [])
-            citations: list[ChatCitation] = []
-            for ref in refs:
-                if not isinstance(ref, dict):
-                    continue
-                hit = by_evidence.get(str(ref.get('evidence_id')))
-                if hit is None:
-                    continue
-                excerpt = str(ref.get('excerpt') or '')[:_EXCERPT_CHARS]
-                citations.append(
-                    self._citation(hit, excerpt, len(citations) + 1)
-                )
-            if not citations:
-                # No declared citations is a deliberate refusal; ids that
-                # failed to resolve are an unusable payload, so fall back.
-                if refs:
-                    return None
+            if not refs:
+                # No declared citations is the model's deliberate refusal.
                 return ChatAnswer(
                     answer=answer, citations=[], insufficient=True
                 )
+            resolved = self._resolve_citations(answer, refs, by_evidence)
+            if resolved is None:
+                # A substantive answer with no marker that resolves to a
+                # retrieved hit must never be shown uncited: fall back.
+                return None
+            answer, citations = resolved
             return ChatAnswer(
                 answer=answer, citations=citations, insufficient=False
             )
         except Exception:  # noqa: BLE001 - any provider failure must fall back
             return None
+
+    def _resolve_citations(
+        self,
+        answer: str,
+        refs: Any,
+        by_evidence: dict[str, RetrievedHit],
+    ) -> tuple[str, list[ChatCitation]] | None:
+        """Derive citations and renumber markers from the answer's markers.
+
+        The model's ``citations`` array is only an ordinal address book: a
+        marker ``[n]`` selects ``refs[n-1]``, whose ``evidence_id`` resolves to
+        a retrieved hit. Evidence never referenced by a marker is dropped; the
+        cited evidence is sorted ascending and the markers are rewritten to
+        those ordinals. The excerpt and verdict are server-owned. Returns
+        ``None`` when no marker resolves.
+        """
+        from app.citation_locator import classify_citation
+
+        occurrences: list[tuple[int, int, int | None]] = []
+        for match in _CITATION_MARKER_RE.finditer(answer):
+            position = int(match.group(1))
+            index: int | None = None
+            if 1 <= position <= len(refs) and isinstance(
+                refs[position - 1], dict
+            ):
+                evidence_id = str(refs[position - 1].get('evidence_id') or '')
+                if evidence_id in by_evidence:
+                    index = int(evidence_id[1:])
+            occurrences.append((match.start(), match.end(), index))
+
+        cited_indices = sorted({
+            index for _, _, index in occurrences if index is not None
+        })
+        if not cited_indices:
+            return None
+        ordinals = {
+            index: ordinal
+            for ordinal, index in enumerate(cited_indices, start=1)
+        }
+
+        verdicts = {index: 'none' for index in cited_indices}
+        for start, _, index in occurrences:
+            if index is None:
+                continue
+            hit = by_evidence[f'E{index}']
+            claim = _claim_sentence(answer, start) or _first_sentence(
+                hit.chunk.text
+            )
+            verdict = classify_citation(claim, hit.chunk.text)
+            if _VERDICT_RANK[verdict] > _VERDICT_RANK[verdicts[index]]:
+                verdicts[index] = verdict
+
+        citations = [
+            self._citation(
+                by_evidence[f'E{index}'],
+                _first_sentence(by_evidence[f'E{index}'].chunk.text),
+                ordinals[index],
+            ).model_copy(update={'verdict': verdicts[index]})
+            for index in cited_indices
+        ]
+
+        pieces: list[str] = []
+        cursor = 0
+        for start, end, index in occurrences:
+            pieces.append(answer[cursor:start])
+            if index is not None:
+                pieces.append(f'[{ordinals[index]}]')
+            cursor = end
+        pieces.append(answer[cursor:])
+        return ''.join(pieces), citations
 
 
 def build_corpus_chat_service(
