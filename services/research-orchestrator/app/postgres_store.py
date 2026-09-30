@@ -34,7 +34,8 @@ from .schemas import (
     ActionRecord, AgentName, ApprovalStatus, ArtifactRecord, ContextPacket,
     CatalogDatasetRecord, ConversationSourceBinding, EventRecord, IngestedDatasetRecord, JobRecord,
     JobStatus, KnowledgeChunk, KnowledgeSource, RunRecord, RunState,
-    SourceType, STORED_PAYLOAD_CONTEXT, TERMINAL_STATES, TurnKind, TurnRecord, utc_now,
+    SourceType, STORED_PAYLOAD_CONTEXT, TERMINAL_STATES, TurnKind, TurnRecord,
+    UiChatConversation, utc_now,
 )
 from .state_machine import HUMAN_WAIT_STATES, validate_transition
 from .storage import ConcurrencyConflict, RecordNotFound
@@ -146,6 +147,11 @@ class PostgresStore:
           payload JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL);
         CREATE INDEX IF NOT EXISTS orchestrator_conversation_bindings_updated_idx
           ON orchestrator_conversation_bindings(updated_at);
+        CREATE TABLE IF NOT EXISTS orchestrator_ui_chat_conversations (
+          conversation_id TEXT PRIMARY KEY, payload JSONB NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL);
+        CREATE INDEX IF NOT EXISTS orchestrator_ui_chat_conversations_updated_idx
+          ON orchestrator_ui_chat_conversations(updated_at);
         CREATE INDEX IF NOT EXISTS orchestrator_knowledge_chunks_fts_idx ON orchestrator_knowledge_chunks USING GIN (to_tsvector('simple', text));
         CREATE TABLE IF NOT EXISTS orchestrator_context_packets (
           packet_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES orchestrator_runs(run_id),
@@ -583,6 +589,38 @@ class PostgresStore:
             if binding.discord_thread_id == thread_id:
                 return binding
         return None
+
+    def save_ui_chat_conversation(
+        self,
+        record: UiChatConversation,
+    ) -> UiChatConversation:
+        with self.transaction() as conn:
+            conn.execute(
+                'INSERT INTO orchestrator_ui_chat_conversations'
+                ' (conversation_id, payload, updated_at) VALUES (%s,%s,%s)'
+                ' ON CONFLICT (conversation_id) DO UPDATE SET'
+                ' payload=EXCLUDED.payload, updated_at=EXCLUDED.updated_at',
+                (
+                    record.conversation_id,
+                    json.dumps(record.model_dump(mode='json')),
+                    record.updated_at,
+                ),
+            )
+        return record
+
+    def get_ui_chat_conversation(
+        self,
+        conversation_id: str,
+    ) -> UiChatConversation | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                'SELECT payload FROM orchestrator_ui_chat_conversations'
+                ' WHERE conversation_id=%s',
+                (conversation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return UiChatConversation.model_validate(row['payload'])
 
     def bind_conversation_thread(
         self,

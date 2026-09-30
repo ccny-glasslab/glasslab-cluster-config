@@ -65,7 +65,8 @@ proxy the token is injected for you; a direct request without the token gets
 
 | Method and path | Purpose |
 | --- | --- |
-| `GET /ui/` | The whole page. With `?q=<question>` the corpus chat answers and renders the answer into the same response. Selection parameters: `run`, `ref`, `packet`, `excerpt`, `source`, `page`. |
+| `GET /ui/` | The whole page. With `?c=<conversation-id>` the multi-turn corpus chat replays that conversation. Selection parameters: `run`, `ref`, `packet`, `excerpt`, `c`, `source`, `page`. |
+| `POST /ui/chat` | Appends a chat turn: `q` (the question) and optional `c` (conversation id). Persists the turn and 303-redirects to `GET /ui/?c=<id>#latest`. |
 | `GET /ui/pdf/document.pdf?source=<source-id>` | The raw corpus PDF as a Starlette `FileResponse`. Honors HTTP Range requests and advertises `Accept-Ranges: bytes`. |
 | `GET /ui/pdf/boxes?source=<source-id>&page=<n>&excerpt=<text>` | JSON highlight rectangles for `excerpt` on the 1-based `page`. `excerpt` is optional and capped at 400 characters. |
 | `GET /ui/pdf/assets/{path}` | Vendored pdf.js assets under `static/pdfjs`, served with an explicit MIME map. |
@@ -74,24 +75,22 @@ proxy the token is injected for you; a direct request without the token gets
 The page itself still emits no script. The only JavaScript that runs is inside
 the same-origin viewer iframe.
 
-## Why the chat is GET
+## Why the chat is POST
 
-The chat form is a `GET` to `/ui/`, not a `POST`. That is a deliberate
-consequence of the proxy, not a shortcut:
+Each turn is a `POST /ui/chat` that persists the turn and 303-redirects to
+`GET /ui/?c=<conversation-id>#latest`, which replays the conversation. The
+earlier single-turn `GET /ui/?q=` form is gone.
 
-- The loopback UI proxy is **`GET`/`HEAD`-only** and injects the operator token
-  on every upstream request. A browser form `POST` through the proxy is
-  answered with `405 Method Not Allowed` and never reaches the orchestrator.
-  The page cannot hold or attach the token itself, so it cannot bypass the
-  proxy either.
-- Rather than widen the proxy to accept `POST` (which would reopen the write
-  surface the proxy was built to close), the chat keeps the page's existing
-  URL-is-state model. The question and the current selection travel as query
-  parameters, and the server renders the answer into the same page.
-
-The practical consequence is that the question text ends up in the URL, in
-browser history, and in the proxy's request log. Do not type secrets, tokens,
-or private data into the chat box.
+- A `GET` that mutates (persisting a turn and calling the synthesis model) would
+  re-fire on refresh, history navigation, and prefetch, duplicating turns;
+  `POST` makes the append explicit per submission.
+- The loopback UI proxy must forward `POST` for the chat, launch, and gate
+  forms: run it with `--allow-methods GET,HEAD,POST`. Every state-changing
+  request it forwards must carry a loopback `Origin`; see
+  [Orchestrator Corpus UI](orchestrator-corpus-ui.md).
+- The question travels in the request body rather than the URL, but a proxied
+  session can log request bodies: do not paste secrets, tokens, or private
+  data into the chat box.
 
 ## CSP deltas
 
@@ -100,7 +99,7 @@ directives change for this feature:
 
 | Directive | Base page | With chat and viewer | Why |
 | --- | --- | --- | --- |
-| `form-action` | `'none'` | `'self'` | The chat submits a same-origin `GET` form. `'none'` blocks all form submission. |
+| `form-action` | `'none'` | `'self'` | The chat, run-launch, and gate forms submit same-origin. `'none'` blocks all form submission. |
 | `frame-src` | absent | `'self'` | The PDF viewer is embedded in a same-origin iframe. With `default-src 'none'`, an unlisted frame source is blocked. |
 
 Every other directive is unchanged: the page still has no CDN, no remote
@@ -116,7 +115,7 @@ The page CSP is signed off with exactly two deliberate deltas from
 
 | Directive | Value | Why `'none'` breaks it |
 | --- | --- | --- |
-| `form-action` | `'self'` | `'none'` blocks the zero-JS `GET` chat form, so the Ask the corpus form can never submit and the chat is dead. |
+| `form-action` | `'self'` | `'none'` blocks the zero-JS chat, launch, and gate forms, so none can ever submit. |
 | `frame-src` | `'self'` | `'none'` (or an unlisted source under `default-src 'none'`) blocks the same-origin cited-source PDF iframe, so selecting a citation shows a blank pane. |
 
 Everything else stays default-deny. There is deliberately no `script-src`:
@@ -160,7 +159,11 @@ an opaque `404`, so the response never reveals whether a path exists.
 
 ## The chat pane
 
-The chat pane answers a question from indexed corpus chunks. Retrieval is
+The chat pane is a persistent, multi-turn conversation over indexed corpus
+chunks: each `POST /ui/chat` appends a turn, and the prior turns feed the
+synthesis prompt (the last few exchanges, under a token budget) so follow-up
+questions keep their context. A conversation is keyed by `conversation_id` and
+stored durably, so `GET /ui/?c=<id>` replays it. Retrieval is
 configurable: `lexical` (the default) needs no embedding backend, `dense` uses
 the vector channel only, and `hybrid` fuses lexical and dense with RRF.
 Synthesis is extractive by default: the answer quotes the top retrieved
@@ -315,9 +318,10 @@ With the proxy running and the operator token exported:
 # Page renders (200) and carries the chat form.
 curl -s -o /dev/null -w '%{http_code}\n' 'http://127.0.0.1:19090/ui/'
 
-# Chat is GET-driven: the answer renders from ?q= alone, no POST.
-curl -s -o /dev/null -w '%{http_code}\n' \
-  'http://127.0.0.1:19090/ui/?q=resampling+stability'
+# Chat turn: POST persists it and 303-redirects to ?c=…#latest (expect 303).
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  --data-urlencode 'q=resampling stability' \
+  'http://127.0.0.1:19090/ui/chat'
 
 # Full document fetch (no Range): expect 200.
 curl -s -o /dev/null -w '%{http_code}\n' \
@@ -347,7 +351,7 @@ operator-gated and that the proxy is the intended path.
 | --- | --- |
 | Chat reports no corpus evidence | The store holds no ingested corpus, or the raw PDFs are not staged. Complete the infra prerequisite, then reload. |
 | Chat cites a source but the PDF pane is empty | The source is an operator `upload://` row: uploads discard the raw bytes, so the viewer can never serve a PDF for them. Only `file://` PDFs (staged under the raw root) render. See [Feed The Knowledge Corpus](knowledge-corpus.md#making-operator-uploaded-sources-citable-in-ui-backfill). |
-| `405 Method Not Allowed` on submit | The chat was submitted as `POST`. It must be a `GET`; the proxy is `GET`/`HEAD`-only. |
+| `405 Method Not Allowed` on submit | The proxy isn't forwarding `POST`. Run it with `--allow-methods GET,HEAD,POST`. |
 | Blank PDF pane | The viewer assets are missing from the image, or `.mjs` is served with the wrong MIME type and the module worker is rejected. Check the browser console and the asset route's `Content-Type`. |
 | Viewer loads the first page but will not seek | The PDF route is compressed or not returning ranges. Confirm no compression middleware wraps the PDF routes and that a `Range` request returns `206`. |
 | Page renders but no highlight | The excerpt did not match on that page, or it spans pages. Confirm the raw PDF is staged at the configured raw root and that the page number is right. |
@@ -355,7 +359,7 @@ operator-gated and that the proxy is the intended path.
 | `404` from `/ui/pdf/document.pdf` | The source is unknown, or its URI is not a `file:` PDF, is a symlink, is missing, or resolves outside the raw root. All of these collapse to one opaque `404`. |
 | `401 Unauthorized` | The proxy is not injecting a valid operator token. Confirm the token variable is set in the proxy's shell and restart the proxy. |
 | `502 Bad Gateway` | The SSH port-forward or the orchestrator service is down. Restore both, then reload. |
-| Long question fails | A `GET` question travels in the URL. Keep the question short; very long prompts exceed URL length limits. |
+| Long question fails | The question is capped at 2000 characters before synthesis. Shorten it. |
 
 ## Read-only scope (updated)
 

@@ -9,16 +9,17 @@ never being emitted, and the evidence badge coming from the deterministic
 citation locator rather than the stored (tautological)
 ``ranked_sources[].verified`` flag.
 
-The corpus chat is a same-origin ``GET`` form (the loopback UI proxy forwards
-only ``GET``/``HEAD`` and injects the operator token), so ``?q=…`` renders the
-answer into the same page. The answer's valid ``[n]`` ordinals become inline
-superscript citation markers (there is no end-of-answer reference list), each
-with a CSS-only hover/focus preview card that carries the source title, the
-verdict badge, and a "View source" affordance. The marker's link preserves the
-question and selects the cited source in the side panel, which embeds the
-same-origin PDF viewer iframe. The CSP tests pin the two deliberate deltas:
-``form-action 'self'`` and ``frame-src 'self'``; everything else still denies
-by default, and the document still carries no script and no external origin.
+The corpus chat is a persistent multi-turn conversation: the composer posts a
+turn to ``/ui/chat``, which persists it and 303-redirects to
+``/ui/?c=<id>#latest``; ``GET /ui/?c=`` replays it. The answer's valid ``[n]``
+ordinals become inline superscript citation markers (there is no end-of-answer
+reference list), each with a CSS-only hover/focus preview card that carries the
+source title, the verdict badge, and a "View source" affordance. The marker's
+link preserves the conversation and selects the cited source in the side panel,
+which embeds the same-origin PDF viewer iframe. The CSP tests pin the two
+deliberate deltas: ``form-action 'self'`` and ``frame-src 'self'``; everything
+else still denies by default, and the document still carries no script and no
+external origin.
 
 The tests use the repository's ``orchestrator_bundle`` fixture: a real
 SqliteStore engine with a fake runtime, no live cluster, and no network.
@@ -97,6 +98,24 @@ def _ui_app(settings, engine, **route_options) -> FastAPI:
 
 def _client(settings, engine, **route_options) -> TestClient:
     return TestClient(_ui_app(settings, engine, **route_options))
+
+
+def _ask(
+    client: TestClient,
+    question: str,
+    *,
+    conversation_id: str = '',
+):
+    """Post one chat turn and follow the 303 to the rendered conversation."""
+    response = client.post(
+        '/ui/chat',
+        data={'q': question, 'c': conversation_id},
+        headers=AUTH_HEADERS,
+        follow_redirects=False,
+    )
+    if response.status_code != 303:
+        return response
+    return client.get(response.headers['location'], headers=AUTH_HEADERS)
 
 
 def _seed_chat_corpus(
@@ -472,7 +491,7 @@ def test_ui_page_has_no_script_and_no_inline_style(
     with _client(settings, engine) as client:
         response = client.get(
             '/ui/',
-            params={'run': run.run_id, 'ref': REPORT_REF, 'q': _CHAT_QUESTION},
+            params={'run': run.run_id, 'ref': REPORT_REF},
             headers=AUTH_HEADERS,
         )
 
@@ -775,29 +794,26 @@ def test_ui_csp_sign_off_directives(orchestrator_bundle) -> None:
     assert 'script-src' not in csp
 
 
-def test_ui_ask_form_is_get_and_get_driven(orchestrator_bundle) -> None:
+def test_ui_chat_form_posts_and_persists_turns(orchestrator_bundle) -> None:
     settings, _, _, _, engine = orchestrator_bundle
     _seed_chat_corpus(engine)
     chat_service = CorpusChatService(engine.store)
 
     with _client(settings, engine, chat_service=chat_service) as client:
         page = client.get('/ui/', headers=AUTH_HEADERS)
-        answered = client.get(
-            '/ui/',
-            params={'q': _CHAT_QUESTION},
-            headers=AUTH_HEADERS,
-        )
+        answered = _ask(client, _CHAT_QUESTION)
 
     assert page.status_code == 200
     assert '<section class="pane" id="ask">' in page.text
     assert '<h2>Ask the corpus</h2>' in page.text
-    assert '<form method="get" action="/ui/"' in page.text
+    assert '<form method="post" action="/ui/chat"' in page.text
     assert 'name="q"' in page.text
-    # GET-driven: the answer is rendered into the same page from ?q=… alone;
-    # the question never needs a POST, which the loopback proxy would reject.
-    assert answered.status_code == 200
+    # A fresh page shows no turn; a posted question persists a turn and the
+    # 303 replays it from the stored conversation.
     assert _CHAT_CHUNK_TEXT not in page.text
+    assert answered.status_code == 200
     assert _CHAT_CHUNK_TEXT in answered.text
+    assert 'id="latest"' in answered.text
 
 
 def test_ui_chat_renders_source_title_excerpt_and_badge(
@@ -808,11 +824,7 @@ def test_ui_chat_renders_source_title_excerpt_and_badge(
     chat_service = CorpusChatService(engine.store)
 
     with _client(settings, engine, chat_service=chat_service) as client:
-        response = client.get(
-            '/ui/',
-            params={'q': _CHAT_QUESTION},
-            headers=AUTH_HEADERS,
-        )
+        response = _ask(client, _CHAT_QUESTION)
 
     assert response.status_code == 200
     # The marker's preview card links the store-resolved title, carries the
@@ -833,11 +845,7 @@ def test_ui_chat_inline_markers_replace_the_footnote_list(
     chat_service = CorpusChatService(engine.store)
 
     with _client(settings, engine, chat_service=chat_service) as client:
-        response = client.get(
-            '/ui/',
-            params={'q': _CHAT_QUESTION},
-            headers=AUTH_HEADERS,
-        )
+        response = _ask(client, _CHAT_QUESTION)
 
     assert response.status_code == 200
     text = response.text
@@ -864,11 +872,7 @@ def test_ui_chat_marker_card_carries_title_badge_and_view_source(
     chat_service = CorpusChatService(engine.store)
 
     with _client(settings, engine, chat_service=chat_service) as client:
-        response = client.get(
-            '/ui/',
-            params={'q': _CHAT_QUESTION},
-            headers=AUTH_HEADERS,
-        )
+        response = _ask(client, _CHAT_QUESTION)
 
     text = response.text
     assert 'class="cite-card"' in text
@@ -894,11 +898,7 @@ def test_ui_chat_llm_answer_renders_inline_citation_markers(
     )
 
     with _client(settings, engine, chat_service=chat_service) as client:
-        response = client.get(
-            '/ui/',
-            params={'q': _CHAT_QUESTION},
-            headers=AUTH_HEADERS,
-        )
+        response = _ask(client, _CHAT_QUESTION)
 
     assert response.status_code == 200
     text = response.text
@@ -939,11 +939,7 @@ def test_ui_chat_escapes_malicious_citation_title(orchestrator_bundle) -> None:
     chat_service = CorpusChatService(engine.store)
 
     with _client(settings, engine, chat_service=chat_service) as client:
-        response = client.get(
-            '/ui/',
-            params={'q': _CHAT_QUESTION},
-            headers=AUTH_HEADERS,
-        )
+        response = _ask(client, _CHAT_QUESTION)
 
     assert response.status_code == 200
     assert '<img' not in response.text
@@ -1036,11 +1032,7 @@ def test_ui_chat_empty_corpus_shows_no_evidence(orchestrator_bundle) -> None:
     chat_service = CorpusChatService(engine.store)
 
     with _client(settings, engine, chat_service=chat_service) as client:
-        response = client.get(
-            '/ui/',
-            params={'q': _CHAT_QUESTION},
-            headers=AUTH_HEADERS,
-        )
+        response = _ask(client, _CHAT_QUESTION)
 
     assert response.status_code == 200
     assert (
@@ -1066,11 +1058,7 @@ def test_ui_chat_escapes_and_redacts_question_and_answer(
     question = f'{payload} resampling stability with {secret}'
 
     with _client(settings, engine, chat_service=chat_service) as client:
-        response = client.get(
-            '/ui/',
-            params={'q': question},
-            headers=AUTH_HEADERS,
-        )
+        response = _ask(client, question)
 
     assert response.status_code == 200
     assert '<script' not in response.text
@@ -1082,7 +1070,7 @@ def test_ui_chat_escapes_and_redacts_question_and_answer(
     assert 'improves stability of' in response.text
 
 
-def test_ui_citation_link_preserves_q_and_targets_source_panel(
+def test_ui_citation_link_preserves_conversation_and_targets_source_panel(
     orchestrator_bundle,
     tmp_path,
 ) -> None:
@@ -1098,21 +1086,17 @@ def test_ui_citation_link_preserves_q_and_targets_source_panel(
     chat_service = CorpusChatService(engine.store)
 
     with _client(settings, engine, chat_service=chat_service) as client:
-        page = client.get(
-            '/ui/',
-            params={'q': _CHAT_QUESTION},
-            headers=AUTH_HEADERS,
-        )
-        # The chat citation is the source link that also carries the question;
-        # the corpus index links a source without q.
-        match = re.search(r'href="(/ui/\?[^"]*q=[^"]*source=[^"]*)"', page.text)
+        page = _ask(client, _CHAT_QUESTION)
+        # The chat citation is the source link that also carries the
+        # conversation; the corpus index links a source without c.
+        match = re.search(r'href="(/ui/\?[^"]*c=[^"]*source=[^"]*)"', page.text)
         assert match is not None
         citation_href = html.unescape(match.group(1))
         followed = client.get(citation_href, headers=AUTH_HEADERS)
 
     assert page.status_code == 200
     citation_query = parse_qs(urlsplit(citation_href).query)
-    assert citation_query['q'] == [_CHAT_QUESTION]
+    assert citation_query['c'] and citation_query['c'][0]
     assert citation_query['source'] == [source.source_id]
     # The chunk is 0-based (page_start=3); the emitted HTTP page is the
     # 1-based human page number the viewer and boxes route agree on.
@@ -1429,14 +1413,10 @@ def test_ui_citation_omits_page_when_chunk_has_no_page(
     chat_service = CorpusChatService(engine.store)
 
     with _client(settings, engine, chat_service=chat_service) as client:
-        page = client.get(
-            '/ui/',
-            params={'q': _CHAT_QUESTION},
-            headers=AUTH_HEADERS,
-        )
+        page = _ask(client, _CHAT_QUESTION)
 
     assert page.status_code == 200
-    match = re.search(r'href="(/ui/\?[^"]*q=[^"]*source=[^"]*)"', page.text)
+    match = re.search(r'href="(/ui/\?[^"]*c=[^"]*source=[^"]*)"', page.text)
     assert match is not None
     citation_query = parse_qs(urlsplit(html.unescape(match.group(1))).query)
     assert 'page' not in citation_query
@@ -1847,3 +1827,95 @@ def test_ui_decide_gate_validates_before_acting(orchestrator_bundle) -> None:
     assert reject_without_reason.status_code == 400
     stored = engine.store.get_action(action.action_id)
     assert stored.approval_status == ApprovalStatus.PENDING
+
+
+class _RecordingLlm:
+    """Duck-typed provider that records each synthesis prompt."""
+
+    def __init__(self, response: str) -> None:
+        self._response = response
+        self.calls: list[str] = []
+
+    def complete(self, *, system: str, user: str) -> str:
+        self.calls.append(user)
+        return self._response
+
+
+def _conversation_id(page_text: str) -> str:
+    match = re.search(r'name="c" value="([0-9a-f]+)"', page_text)
+    assert match is not None
+    return match.group(1)
+
+
+def test_ui_chat_multi_turn_persists_and_replays(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    _seed_chat_corpus(engine)
+    chat_service = CorpusChatService(engine.store)
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        first = _ask(client, 'first question about resampling')
+        conversation_id = _conversation_id(first.text)
+        second = _ask(
+            client,
+            'second question',
+            conversation_id=conversation_id,
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    # Both turns replay, oldest first, with the newest anchored for scroll.
+    assert (
+        second.text.index('first question about resampling')
+        < second.text.index('second question')
+    )
+    assert 'id="latest"' in second.text
+    stored = engine.store.get_ui_chat_conversation(conversation_id)
+    assert stored is not None
+    assert [turn.question for turn in stored.turns] == [
+        'first question about resampling',
+        'second question',
+    ]
+    # A fresh request without c starts an independent conversation.
+    third = _ask(client, 'unrelated question')
+    assert _conversation_id(third.text) != conversation_id
+
+
+def test_ui_chat_feeds_prior_turns_to_synthesis(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    _seed_chat_corpus(engine)
+    llm = _RecordingLlm(
+        '{"answer": "Resampling improves stability [1].",'
+        ' "citations": [{"evidence_id": "E1"}]}'
+    )
+    chat_service = CorpusChatService(engine.store, llm=llm)
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        first = _ask(client, 'what is resampling')
+        conversation_id = _conversation_id(first.text)
+        _ask(
+            client,
+            'does resampling improve stability',
+            conversation_id=conversation_id,
+        )
+
+    assert len(llm.calls) == 2
+    assert 'Earlier in this conversation' not in llm.calls[0]
+    assert 'Earlier in this conversation' in llm.calls[1]
+    assert 'what is resampling' in llm.calls[1]
+    assert 'Resampling improves stability' in llm.calls[1]
+
+
+def test_ui_chat_requires_a_question(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    _seed_chat_corpus(engine)
+    chat_service = CorpusChatService(engine.store)
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        response = client.post(
+            '/ui/chat',
+            data={'q': '   '},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 400
+    assert 'Nothing to ask' in response.text

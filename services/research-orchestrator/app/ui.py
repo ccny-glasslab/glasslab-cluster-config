@@ -31,14 +31,16 @@ scrolls internally, so the document body never grows tall with content. Below
 1100px the grid stacks into one column (chat first) and every section stays
 usable.
 
-When a corpus-chat service is injected, the center column answers ``?q=…``
-from a same-origin ``GET`` form (the loopback UI proxy forwards only
-``GET``/``HEAD``); every valid ``[n]`` ordinal in the answer becomes an inline
-``<sup>`` citation marker whose anchor links back with
-``?q=&source=&page=&excerpt=``, and selecting one embeds the same-origin PDF
-viewer iframe for the cited source. Hovering or keyboard-focusing a marker
-reveals its preview card (title, verdict badge, "View source") through CSS
-only. The page itself still emits no script and no external resource.
+When a corpus-chat service is injected, the center column is a persistent
+multi-turn conversation. The composer posts a question to ``/ui/chat``, which
+persists the turn and 303-redirects to ``/ui/?c=<conversation-id>#latest``;
+``GET /ui/?c=`` replays the whole conversation. Every valid ``[n]`` ordinal in
+an answer becomes an inline ``<sup>`` citation marker whose anchor links back
+with ``?c=&source=&page=&excerpt=`` (keeping the thread on screen while it
+opens the source), and selecting one embeds the same-origin PDF viewer iframe
+for the cited source. Hovering or keyboard-focusing a marker reveals its
+preview card (title, verdict badge, "View source") through CSS only. The page
+itself still emits no script and no external resource.
 
 The page is escape-first: every interpolated value passes through
 :func:`html.escape`, the document body is shown as escaped text inside
@@ -72,6 +74,7 @@ import re
 import secrets
 from typing import TYPE_CHECKING, Any, BinaryIO
 from urllib.parse import urlencode
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -98,8 +101,12 @@ from .schemas import (
     RunCreateRequest,
     RunState,
     TERMINAL_STATES,
+    UiChatConversation,
+    UiChatTurn,
+    utc_now,
 )
 from .storage import RecordNotFound
+from .ui_chat import ChatAnswer
 from .ui_pdf import document_is_resolvable
 
 if TYPE_CHECKING:
@@ -107,7 +114,7 @@ if TYPE_CHECKING:
     from .corpus_rag.chat import CorpusChatService
     from .engine import ResearchOrchestrator
     from .schemas import ActionRecord, ArtifactRecord, ContextPacket
-    from .ui_chat import ChatAnswer, ChatCitation
+    from .ui_chat import ChatCitation
 
 logger = logging.getLogger(__name__)
 
@@ -364,6 +371,10 @@ border:1px solid var(--line-faint);border-radius:var(--radius-sm)}
 .gate-meta{margin:0 0 .45rem;font-size:.75rem}
 .chat-turn{margin:1rem 0 0;padding:.9rem 1.05rem;background:var(--well);
 border:1px solid var(--line-faint);border-radius:var(--radius-sm)}
+/* The chat composer is pinned below the scrolling conversation so it never
+   scrolls away; a 303 redirect to ``#latest`` scrolls the newest turn into
+   view within the column body, with no script and no inline style. */
+.chat-compose{flex:none;margin:.7rem 0 0}
 /* Inline citations: a superscript ordinal marker whose preview card is a
    CSS-only hover/focus popover (no script, no inline style). The card opens
    downward, inside the chat column's scroll area, so it is not clipped by
@@ -449,18 +460,19 @@ h1{font-size:1.2rem}.pane{padding:.95rem .95rem 1.05rem}}
 class UiRequest:
     """One ``GET /ui/`` request: the optional selection plus its CSP nonce.
 
-    ``question`` drives the chat answer; ``source_id``/``page`` select the
-    cited source shown in the PDF viewer, with ``excerpt`` supplying the
-    exact-span highlight text. ``run_id``/``ref`` select the run whose file
-    tree is shown and the file previewed in the viewer; ``packet_id``
-    selects the packet inspected in the Sources column.
+    ``conversation_id`` selects the multi-turn corpus-chat conversation to
+    render. ``source_id``/``page`` select the cited source shown in the PDF
+    viewer, with ``excerpt`` supplying the exact-span highlight text.
+    ``run_id``/``ref`` select the run whose file tree is shown and the file
+    previewed in the viewer; ``packet_id`` selects the packet inspected in the
+    Sources column.
     """
 
     run_id: str | None = None
     ref: str | None = None
     packet_id: str | None = None
     excerpt: str | None = None
-    question: str | None = None
+    conversation_id: str | None = None
     source_id: str | None = None
     page: int | None = None
     nonce: str = ''
@@ -1218,11 +1230,14 @@ def _render_citation_marker(
     question: str,
     ordinal: int,
     citation: ChatCitation,
+    *,
+    conversation_id: str | None = None,
 ) -> str:
     """One inline superscript marker and its CSS-only hover preview card."""
     excerpt = redact_free_text(citation.excerpt)
+    selector = {'c': conversation_id} if conversation_id else {'q': question}
     href = _page_url(
-        q=question,
+        **selector,
         source=citation.source_id,
         # citation.page is the 0-based chunk page_start; the viewer URL and
         # the boxes route both use the 1-based human page number.
@@ -1242,13 +1257,20 @@ def _render_citation_marker(
     )
 
 
-def _render_chat_answer(question: str, answer: ChatAnswer) -> str:
+def _render_chat_answer(
+    question: str,
+    answer: ChatAnswer,
+    *,
+    conversation_id: str | None = None,
+) -> str:
     """Render the answer with inline superscript citation markers.
 
     Escape-first: every literal segment is escaped and only a valid ``[n]``
     ordinal (``1 <= n <= len(answer.citations)``) becomes the controlled marker
     element. There is no end-of-answer reference block; the quoted excerpts
-    are already inline in the answer text.
+    are already inline in the answer text. When ``conversation_id`` is set the
+    marker links back to the conversation, so selecting a citation keeps the
+    thread on screen while it opens the cited source in the viewer.
     """
     text = redact_free_text(answer.answer)
     citations = answer.citations
@@ -1260,7 +1282,12 @@ def _render_chat_answer(question: str, answer: ChatAnswer) -> str:
             continue
         rendered.append(_escape(text[cursor : match.start()]))
         rendered.append(
-            _render_citation_marker(question, ordinal, citations[ordinal - 1])
+            _render_citation_marker(
+                question,
+                ordinal,
+                citations[ordinal - 1],
+                conversation_id=conversation_id,
+            )
         )
         cursor = match.end()
     rendered.append(_escape(text[cursor:]))
@@ -1270,38 +1297,53 @@ def _render_chat_answer(question: str, answer: ChatAnswer) -> str:
 def _render_chat_panel(
     chat_service: CorpusChatService | None,
     selection: UiRequest,
+    engine: ResearchOrchestrator,
 ) -> str:
     if chat_service is None:
         body = (
             '<p class="muted">Corpus chat is not enabled on this '
             'deployment.</p>'
         )
+        compose = ''
     else:
-        question = selection.question or ''
-        display_question = redact_free_text(question)
-        body = (
-            '<form method="get" action="/ui/" class="ask-form">'
+        conversation_id = selection.conversation_id or ''
+        conversation = (
+            engine.store.get_ui_chat_conversation(conversation_id)
+            if conversation_id
+            else None
+        )
+        turns = conversation.turns if conversation is not None else []
+        turns_html: list[str] = []
+        for index, turn in enumerate(turns):
+            anchor = ' id="latest"' if index == len(turns) - 1 else ''
+            answer = ChatAnswer.model_validate(turn.answer)
+            turns_html.append(
+                f'<div class="chat-turn"{anchor}>'
+                '<p><strong>Question:</strong> '
+                f'{_escape(redact_free_text(turn.question))}</p>'
+                '<p><strong>Answer:</strong> '
+                f'{_render_chat_answer(turn.question, answer, conversation_id=conversation_id)}'
+                '</p>'
+                '</div>'
+            )
+        body = ''.join(turns_html) or (
+            '<p class="muted">Ask a question to start a conversation.</p>'
+        )
+        compose = (
+            '<form method="post" action="/ui/chat" '
+            'class="ask-form chat-compose">'
+            f'<input type="hidden" name="c" value="{_escape(conversation_id)}">'
             '<label for="ask-question">Question</label>'
-            f'<input id="ask-question" type="text" name="q" '
-            f'value="{_escape(display_question)}" '
-            'placeholder="Ask about the corpus" autocomplete="off">'
+            '<input id="ask-question" type="text" name="q" '
+            'placeholder="Ask about the corpus" autocomplete="off" required>'
             '<button type="submit">Ask</button>'
             '</form>'
         )
-        if question.strip():
-            answer = chat_service.answer(question)
-            body += (
-                '<div class="chat-turn">'
-                f'<p><strong>Question:</strong> '
-                f'{_escape(display_question)}</p>'
-                f'<p><strong>Answer:</strong> '
-                f'{_render_chat_answer(display_question, answer)}</p>'
-                '</div>'
-            )
     return (
         '<section class="pane" id="ask">'
         '<div class="column-head"><h2>Ask the corpus</h2></div>'
         f'<div class="column-body">{body}</div>'
+        f'{compose}'
         '</section>'
     )
 
@@ -1325,7 +1367,7 @@ def render_ui_page(
         '</header>'
         '<main class="notebook">'
         f'{_render_sources_panel(engine, settings, request)}'
-        f'{_render_chat_panel(chat_service, request)}'
+        f'{_render_chat_panel(chat_service, request, engine)}'
         f'{_render_viewer_panel(engine, settings, request)}'
         '</main>'
         '</body></html>'
@@ -1378,7 +1420,7 @@ def register_ui_routes(
         ref: str | None = Query(default=None),
         packet: str | None = Query(default=None),
         excerpt: str | None = Query(default=None),
-        q: str | None = Query(default=None),
+        c: str | None = Query(default=None),
         source: str | None = Query(default=None),
         page: int | None = Query(default=None),
         _: None = Depends(require_operator),
@@ -1388,7 +1430,7 @@ def register_ui_routes(
             ref=ref,
             packet_id=packet,
             excerpt=excerpt,
-            question=q,
+            conversation_id=c,
             source_id=source,
             page=page,
             nonce=secrets.token_urlsafe(16),
@@ -1396,6 +1438,51 @@ def register_ui_routes(
         return HTMLResponse(
             content=render_ui_page(engine, settings, request, chat_service),
             headers=_ui_headers(request.nonce),
+        )
+
+    @app.post('/ui/chat')
+    def ui_chat_ask(
+        question: str = Form(default='', alias='q'),
+        conversation_id: str = Form(default='', alias='c'),
+        _: None = Depends(require_operator),
+    ) -> Response:
+        nonce = secrets.token_urlsafe(16)
+        if chat_service is None:
+            return _render_ui_error(
+                'Chat unavailable',
+                'Corpus chat is not enabled on this deployment.',
+                404,
+                nonce,
+            )
+        asked = question.strip()
+        if not asked:
+            return _render_ui_error(
+                'Nothing to ask',
+                'Enter a question first.',
+                400,
+                nonce,
+            )
+        conversation_id = conversation_id.strip() or uuid4().hex
+        conversation = engine.store.get_ui_chat_conversation(conversation_id)
+        prior = conversation.turns if conversation is not None else []
+        history = [
+            (turn.question, ChatAnswer.model_validate(turn.answer).answer)
+            for turn in prior
+        ]
+        answer = chat_service.answer(asked, history=history)
+        turn = UiChatTurn(question=asked, answer=answer.model_dump(mode='json'))
+        turns = [*prior, turn]
+        updated = (
+            conversation.model_copy(
+                update={'turns': turns, 'updated_at': utc_now()}
+            )
+            if conversation is not None
+            else UiChatConversation(conversation_id=conversation_id, turns=turns)
+        )
+        engine.store.save_ui_chat_conversation(updated)
+        return RedirectResponse(
+            _page_url(c=conversation_id) + '#latest',
+            status_code=303,
         )
 
     @app.post('/ui/sources/upload')

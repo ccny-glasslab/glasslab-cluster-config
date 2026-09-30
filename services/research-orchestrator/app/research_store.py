@@ -29,6 +29,7 @@ from .schemas import (
     RunState,
     SourceType,
     TurnRecord,
+    UiChatConversation,
 )
 
 
@@ -113,6 +114,12 @@ class ResearchStore(Protocol):
     def unbind_conversation_source(
         self, conversation_id: str, source_id: str,
     ) -> ConversationSourceBinding | None: ...
+    def save_ui_chat_conversation(
+        self, record: UiChatConversation
+    ) -> UiChatConversation: ...
+    def get_ui_chat_conversation(
+        self, conversation_id: str
+    ) -> UiChatConversation | None: ...
     def replace_knowledge_chunks(self, source_id: str,
                                  chunks: list[KnowledgeChunk]) -> list[KnowledgeChunk]: ...
     def list_knowledge_chunks(self, source_id: str) -> list[KnowledgeChunk]: ...

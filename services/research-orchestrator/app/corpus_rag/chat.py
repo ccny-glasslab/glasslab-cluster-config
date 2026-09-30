@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from app.corpus_rag.contracts import RetrievedHit
@@ -54,6 +55,8 @@ _INSUFFICIENT_ANSWER = (
 _SENTENCE_END_RE = re.compile(r'[.!?](?:\s|$)')
 _CITATION_MARKER_RE = re.compile(r'\[(\d{1,3})\]')
 _VERDICT_RANK = {'exact': 2, 'fuzzy': 1, 'none': 0}
+_MAX_HISTORY_TURNS = 5
+_MAX_HISTORY_ANSWER_CHARS = 600
 _LLM_SYSTEM_PROMPT = (
     'You answer strictly from the numbered evidence blocks [E1..En], which '
     'are excerpts from corpus documents. Return STRICT JSON: {"answer": str, '
@@ -133,7 +136,12 @@ class CorpusChatService:
         """The effective mode after the dense-availability fallback."""
         return self._retrieval_mode
 
-    def answer(self, question: str) -> ChatAnswer:
+    def answer(
+        self,
+        question: str,
+        *,
+        history: Sequence[tuple[str, str]] = (),
+    ) -> ChatAnswer:
         prepared = self._prepare_question(question)
         if not prepared.strip():
             return ChatAnswer(answer=_INSUFFICIENT_ANSWER, insufficient=True)
@@ -147,10 +155,21 @@ class CorpusChatService:
         if not hits:
             return ChatAnswer(answer=_INSUFFICIENT_ANSWER, insufficient=True)
         if self._llm is not None:
-            llm_answer = self._llm_answer(prepared, hits)
+            llm_answer = self._llm_answer(prepared, hits, history)
             if llm_answer is not None:
                 return llm_answer
         return self._extractive(hits)
+
+    def _history_block(self, history: Sequence[tuple[str, str]]) -> str:
+        """Prior (question, answer) pairs for the synthesis prompt, bounded."""
+        recent = list(history)[-_MAX_HISTORY_TURNS:]
+        if not recent:
+            return ''
+        lines = ['Earlier in this conversation:']
+        for prior_question, prior_answer in recent:
+            lines.append(f'Q: {prior_question}')
+            lines.append(f'A: {prior_answer[:_MAX_HISTORY_ANSWER_CHARS]}')
+        return '\n'.join(lines) + '\n\n'
 
     def _prepare_question(self, question: str) -> str:
         # Redact concrete credential formats BEFORE capping so a token split by
@@ -194,7 +213,10 @@ class CorpusChatService:
         return ChatAnswer(answer=answer, citations=citations, insufficient=False)
 
     def _llm_answer(
-        self, question: str, hits: list[RetrievedHit]
+        self,
+        question: str,
+        hits: list[RetrievedHit],
+        history: Sequence[tuple[str, str]] = (),
     ) -> ChatAnswer | None:
         try:
             by_evidence = {
@@ -207,7 +229,10 @@ class CorpusChatService:
             )
             raw = self._llm.complete(
                 system=_LLM_SYSTEM_PROMPT,
-                user=f'Question: {question}\n\nEvidence blocks:\n{blocks}',
+                user=(
+                    f'{self._history_block(history)}'
+                    f'Question: {question}\n\nEvidence blocks:\n{blocks}'
+                ),
             )
             payload = json.loads(
                 str(raw).strip().removeprefix('```json').removesuffix('```').strip()

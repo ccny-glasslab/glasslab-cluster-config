@@ -361,14 +361,17 @@ def test_rendered_citation_page_and_boxes_page_agree(
     chat_service = CorpusChatService(engine.store)
 
     with _ui_and_pdf_client(settings, engine, chat_service) as client:
-        page = client.get(
-            '/ui/',
-            params={'q': 'resampling stability small samples'},
+        posted = client.post(
+            '/ui/chat',
+            data={'q': 'resampling stability small samples'},
             headers=AUTH_HEADERS,
+            follow_redirects=False,
         )
-        # The chat citation is the source link that also carries the question;
-        # the corpus index links a bare source without q or page.
-        href = re.search(r'href="(/ui/\?[^"]*q=[^"]*source=[^"]*)"', page.text)
+        assert posted.status_code == 303
+        page = client.get(posted.headers['location'], headers=AUTH_HEADERS)
+        # The chat citation is the source link that also carries the
+        # conversation; the corpus index links a bare source without c or page.
+        href = re.search(r'href="(/ui/\?[^"]*c=[^"]*source=[^"]*)"', page.text)
         assert href is not None
         followed = client.get(
             html.unescape(href.group(1)),
