@@ -67,6 +67,13 @@ spec:
             # never re-downloads the weights.
             - name: HF_HOME
               value: /mnt/artifacts/research-orchestrator/hf-cache
+            # Pin native-library threads to the container's CPU quota. Torch and
+            # OpenMP default to the host core count, which over-subscribes the
+            # cgroup and throttled this job to a ~15x slowdown.
+            - name: OMP_NUM_THREADS
+              value: "8"
+            - name: MKL_NUM_THREADS
+              value: "8"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -78,10 +85,10 @@ spec:
           resources:
             limits:
               memory: 8Gi
-              cpu: "4"
+              cpu: "8"
             requests:
               memory: 4Gi
-              cpu: "2"
+              cpu: "4"
           volumeMounts:
             - name: artifacts
               mountPath: /mnt/artifacts
