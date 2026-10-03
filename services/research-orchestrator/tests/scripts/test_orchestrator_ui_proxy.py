@@ -14,8 +14,9 @@ Covered contracts:
 5. startup is refused when the token environment variable is unset or empty;
 6. only allowlisted HTTP methods reach the upstream (default GET,HEAD);
 7. a rebinding ``Host`` for another name is refused before the upstream.
-8. a state-changing method (``POST``) is refused unless ``Origin``/``Referer``
-   names a loopback origin for the listen port.
+8. a state-changing method (``POST``) is refused unless Fetch Metadata
+   ``Sec-Fetch-Site`` is same-origin/user-initiated, or (when absent)
+   ``Origin``/``Referer`` names a loopback origin for the listen port.
 """
 
 from __future__ import annotations
@@ -311,6 +312,40 @@ class ProxyIntegrationTests(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertEqual([('GET', '/echo')], _FakeUpstreamHandler.requests)
 
+    def test_same_origin_fetch_metadata_is_accepted_with_null_origin(self) -> None:
+        server, port = _start_proxy(self.upstream_port, ('--allow-methods', 'GET,HEAD,POST'))
+        try:
+            status, _, _ = self._request(
+                'POST',
+                '/echo',
+                port=port,
+                headers={'Origin': 'null', 'Sec-Fetch-Site': 'same-origin'},
+            )
+            self.assertEqual(200, status)
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual([('POST', '/echo')], _FakeUpstreamHandler.requests)
+
+    def test_cross_site_fetch_metadata_is_rejected(self) -> None:
+        server, port = _start_proxy(self.upstream_port, ('--allow-methods', 'GET,HEAD,POST'))
+        try:
+            for site in ('cross-site', 'same-site'):
+                status, _, _ = self._request(
+                    'POST',
+                    '/echo',
+                    port=port,
+                    headers={
+                        'Origin': f'http://127.0.0.1:{port}',
+                        'Sec-Fetch-Site': site,
+                    },
+                )
+                self.assertEqual(403, status, site)
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual([], _FakeUpstreamHandler.requests)
+
     def test_rebinding_host_is_rejected_without_calling_upstream(self) -> None:
         status, _, _ = self._request(
             'GET',
@@ -387,6 +422,34 @@ class ProxyConfigTests(unittest.TestCase):
         self.assertFalse(PROXY.origin_header_allowed('http://127.0.0.1:19091', None, config))
         self.assertFalse(PROXY.origin_header_allowed('null', None, config))
         self.assertFalse(PROXY.origin_header_allowed(None, None, config))
+
+    def test_fetch_metadata_takes_precedence_over_origin(self) -> None:
+        config = self._config(['--listen', '127.0.0.1:19090'])
+        # Referrer-Policy: no-referrer nulls Origin on a same-origin form POST,
+        # but Sec-Fetch-Site still proves the request is same-origin.
+        self.assertTrue(
+            PROXY.origin_header_allowed(
+                'null', None, config, sec_fetch_site='same-origin'
+            )
+        )
+        self.assertTrue(
+            PROXY.origin_header_allowed(
+                None, None, config, sec_fetch_site='none'
+            )
+        )
+        self.assertFalse(
+            PROXY.origin_header_allowed(
+                'http://127.0.0.1:19090',
+                None,
+                config,
+                sec_fetch_site='cross-site',
+            )
+        )
+        self.assertFalse(
+            PROXY.origin_header_allowed(
+                None, None, config, sec_fetch_site='same-site'
+            )
+        )
 
     def test_non_loopback_listen_is_refused(self) -> None:
         with self.assertRaises(PROXY.ProxyConfigError):

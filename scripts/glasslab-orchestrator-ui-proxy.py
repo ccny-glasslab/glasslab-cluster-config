@@ -41,9 +41,9 @@ Security properties
   launch and gate forms.  Two guards protect the token-injecting path either
   way: the request ``Host`` must name a loopback host for the configured
   listen port (defeats a DNS-rebinding name), and every state-changing method
-  must carry an ``Origin`` (or ``Referer``) that is also a loopback origin for
-  that port (defeats a cross-site form the operator's browser is induced into
-  submitting), so no page the operator visits can reach the token path.
+  must be same-origin per Fetch Metadata ``Sec-Fetch-Site`` (falling back to a
+  loopback ``Origin``/``Referer``), so a cross-site form the operator's browser
+  is induced into submitting is refused before the token is injected.
 
 Only the Python standard library is used.
 """
@@ -279,17 +279,25 @@ def origin_header_allowed(
     config: ProxyConfig,
     *,
     listen_port: int | None = None,
+    sec_fetch_site: str | None = None,
 ) -> bool:
-    """Accept a state-changing request only from this loopback listener.
+    """Accept a state-changing request only if it is same-origin.
 
     CSRF guard: the operator's browser can be induced by a page it visits to
     submit a form to the loopback proxy, whose ``Host`` still names the
     loopback listener and so passes :func:`host_header_allowed` while the proxy
-    injects the operator token.  Browsers send ``Origin`` on every
-    non-GET/HEAD request, so require it (falling back to ``Referer``) to name a
-    loopback host on the bound listen port; a cross-site submission carries the
-    attacker's origin and is refused.
+    injects the operator token.  Fetch Metadata ``Sec-Fetch-Site`` is the
+    primary signal: the browser sets it on every request, page script cannot
+    forge it, and -- unlike ``Origin`` -- it is not reduced to the opaque
+    ``null`` by the page's ``Referrer-Policy: no-referrer`` (which the
+    orchestrator sends, and which nulls a legitimate same-origin form POST's
+    ``Origin``).  Only ``same-origin`` (and user-initiated ``none``) pass.
+    When the header is absent (older browsers, direct clients) fall back to
+    ``Origin``/``Referer`` naming a loopback host on the bound listen port.
     """
+    site = (sec_fetch_site or '').strip().lower()
+    if site:
+        return site in ('same-origin', 'none')
     raw = (origin or referer or '').strip()
     if not raw:
         return False
@@ -515,6 +523,7 @@ class ProxyRequestHandler(http.server.BaseHTTPRequestHandler):
             self.headers.get('Referer'),
             config,
             listen_port=self.server.server_address[1],  # type: ignore[attr-defined]
+            sec_fetch_site=self.headers.get('Sec-Fetch-Site'),
         ):
             self._reject(403, 'cross-origin state-changing request rejected')
             return

@@ -70,10 +70,14 @@ The proxy is deliberately constrained:
   Anything else gets `405 Method Not Allowed` with an `Allow` header and never
   reaches the orchestrator.
 - **Origin-guarded writes.** When `POST` is allowlisted, every state-changing
-  request must carry an `Origin` (or `Referer`) that names a loopback host for
-  the listen port; anything else gets `403 Forbidden` before the operator
-  token is injected. This closes the cross-site form-post hole that widening
-  the method allowlist would otherwise open.
+  request must be same-origin per Fetch Metadata `Sec-Fetch-Site`
+  (`same-origin` or user-initiated `none`); when that header is absent, a
+  loopback `Origin`/`Referer` for the listen port is required instead.
+  Anything else gets `403 Forbidden` before the operator token is injected.
+  This closes the cross-site form-post hole that widening the method allowlist
+  would otherwise open. (Fetch Metadata is the primary signal because the
+  page's `Referrer-Policy: no-referrer` reduces a same-origin form POST's
+  `Origin` to the opaque `null`.)
 - **Host-validated.** A request whose `Host` header doesn't name the loopback
   listener is rejected with `421 Misdirected Request`. This closes DNS
   rebinding, where an attacker name resolves to `127.0.0.1` but the browser
