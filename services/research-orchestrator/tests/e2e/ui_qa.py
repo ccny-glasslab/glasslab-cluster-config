@@ -290,6 +290,10 @@ def ui_qa() -> UiQaEnvironment:
             app_origin,
             '--token-env',
             TOKEN_ENV,
+            # The chat turn, run launch, and gate forms are POST; the proxy
+            # guards every state-changing request with Fetch Metadata.
+            '--allow-methods',
+            'GET,HEAD,POST',
         ],
         env={TOKEN_ENV: OPERATOR_TOKEN},
     )
