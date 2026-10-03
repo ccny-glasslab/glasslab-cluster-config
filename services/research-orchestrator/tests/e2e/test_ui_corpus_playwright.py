@@ -10,7 +10,7 @@ PDF bytes, and the live highlight boxes.
 
 Assertions (issues #618/#619):
 
-1. the ask form renders and a GET ``?q=`` submission renders an answer whose
+1. the ask form renders and a POST ``/ui/chat`` turn renders an answer whose
    citation is an inline superscript marker with a CSS-only hover preview
    card (source title, verdict badge, "View source") and no footnote list;
 2. clicking the citation opens the cited-source iframe at the exact
@@ -162,8 +162,8 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
         expect(ask).to_be_visible()
         expect(ask.locator('h2')).to_have_text('Ask the corpus')
         form = ask.locator('form.ask-form')
-        assert form.get_attribute('method').lower() == 'get'
-        assert form.get_attribute('action') == '/ui/'
+        assert form.get_attribute('method').lower() == 'post'
+        assert form.get_attribute('action') == '/ui/chat'
         question_input = ask.locator('input[name="q"]')
         expect(question_input).to_be_visible()
         expect(ask.locator('button[type="submit"]')).to_have_text('Ask')
@@ -177,13 +177,13 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
             screenshot='01-ask-form.png',
         )
 
-        # --- 2. GET ?q= renders the answer and its inline citation --------
+        # --- 2. the posted turn renders the answer and its inline citation --
         question_input.fill(manifest['question'])
         with page.expect_navigation(wait_until='domcontentloaded'):
             ask.locator('button[type="submit"]').click()
-        assert 'q=' in page.url, f'question missing from URL: {page.url}'
         turn = page.locator('.chat-turn')
         expect(turn).to_be_visible()
+        assert 'c=' in page.url, f'conversation missing from URL: {page.url}'
         expect(turn).to_contain_text('Question:')
         expect(turn).to_contain_text(manifest['question'])
         expect(turn).to_contain_text('Answer:')
