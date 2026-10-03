@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import html
 import re
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, Header, HTTPException
@@ -45,6 +47,7 @@ from app.knowledge_manager import KnowledgeError
 from app.schemas import (
     ActionRecord,
     AgentName,
+    AgentTurnResult,
     ApprovalStatus,
     ArtifactRecord,
     ContextPacket,
@@ -55,6 +58,7 @@ from app.schemas import (
     RunState,
     SourceType,
     TurnKind,
+    TurnRecord,
 )
 from app.ui import _render_chat_answer, register_ui_routes
 from app.ui_chat import ChatAnswer, ChatCitation
@@ -220,6 +224,33 @@ def _save_packet(
     return packet
 
 
+def _seed_turn(
+    engine,
+    run_id: str,
+    *,
+    agent: AgentName = AgentName.HONEYDEW,
+    status: Literal['running', 'completed', 'failed', 'aborted'] = 'completed',
+    kind: TurnKind = TurnKind.PROTOCOL_DRAFT,
+    summary: str = 'drafted the protocol',
+    error: str | None = None,
+    created_at: datetime | None = None,
+) -> TurnRecord:
+    """Persist one agent turn through the real store, as the engine does."""
+    started = created_at or datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    turn = TurnRecord(
+        run_id=run_id,
+        agent=agent,
+        input_event={'event': 'agent_turn'},
+        structured_output=AgentTurnResult(kind=kind, summary=summary),
+        status=status,
+        error=error,
+        created_at=started,
+        updated_at=started + timedelta(minutes=5),
+    )
+    engine.store.save_turn(turn)
+    return turn
+
+
 def test_ui_requires_operator_token_and_renders_three_columns(
     orchestrator_bundle,
 ) -> None:
@@ -332,6 +363,249 @@ def test_ui_narrow_layout_bounds_the_corpus_and_text_panels(
         '.column-body.is-fill{display:block;overflow:visible}' in response.text
     )
     assert '.column-body,.tab-panels{overflow:visible}' not in response.text
+    # The Viewer keeps its tab panels in document flow when stacked, and the
+    # fill panel drops its fixed height so the 70vh PDF iframe is not clipped.
+    assert '#viewer .tab-panels{max-block-size:none;overflow:visible}' in (
+        response.text
+    )
+    assert (
+        '#rtab-viewer:checked ~ .tab-panels > #rpanel-viewer.is-fill'
+        '{display:block;' in response.text
+    )
+
+
+def test_ui_right_pane_renders_turns_and_viewer_tabs(
+    orchestrator_bundle,
+) -> None:
+    """The Viewer column is a second zero-JS tab strip: Turns | Viewer."""
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.get('/ui/', headers=AUTH_HEADERS)
+
+    assert response.status_code == 200
+    text = response.text
+    assert 'name="right-tab"' in text
+    for tab_id, label, panel_id in (
+        ('rtab-turns', 'Turns', 'rpanel-turns'),
+        ('rtab-viewer', 'Viewer', 'rpanel-viewer'),
+    ):
+        assert f'<label class="tab" for="{tab_id}">{label}</label>' in text
+        assert f'id="{panel_id}"' in text
+    # The swap is the same :checked sibling mechanism as the Sources strip.
+    assert (
+        '#rtab-turns:checked ~ .tab-panels > #rpanel-turns,' in text
+    )
+    assert (
+        '#rtab-viewer:checked ~ .tab-panels > #rpanel-viewer{display:block}'
+        in text
+    )
+    # The cited-source PDF fill survives the tab wrapper: the checked panel is
+    # a full-height flex column for the .is-fill body.
+    assert (
+        '#rtab-viewer:checked ~ .tab-panels > #rpanel-viewer.is-fill'
+        '{display:flex;' in text
+    )
+    assert 'flex-direction:column;block-size:100%;overflow:hidden}' in text
+    assert 'Select a run to list its agent turns.' in text
+    assert '<script' not in text
+    assert re.search(r'\sstyle="', text) is None
+
+
+@pytest.mark.parametrize(
+    ('params', 'checked'),
+    [
+        ({}, 'rtab-viewer'),
+        ({'run': 'run-placeholder'}, 'rtab-turns'),
+        ({'run': 'run-placeholder', 'ref': REPORT_REF}, 'rtab-viewer'),
+        ({'ref': REPORT_REF}, 'rtab-viewer'),
+        ({'source': 'source-placeholder'}, 'rtab-viewer'),
+    ],
+)
+def test_ui_server_selects_the_initial_right_tab(
+    orchestrator_bundle,
+    params: dict[str, str],
+    checked: str,
+) -> None:
+    """A run selection opens Turns; a source or file selection opens Viewer."""
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.get('/ui/', params=params, headers=AUTH_HEADERS)
+
+    assert response.status_code == 200
+    for tab_id in ('rtab-turns', 'rtab-viewer'):
+        marker = (
+            f'id="{tab_id}" checked>'
+            if tab_id == checked
+            else f'id="{tab_id}">'
+        )
+        assert marker in response.text
+
+
+def test_ui_run_selection_lists_agent_turns(
+    orchestrator_bundle,
+) -> None:
+    """A selected run lists its redacted TurnSummaries in storage order."""
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='list the turns'))
+    first = _seed_turn(
+        engine,
+        run.run_id,
+        agent=AgentName.HONEYDEW,
+        status='completed',
+        kind=TurnKind.PROTOCOL_DRAFT,
+        summary='drafted the protocol for review',
+        created_at=datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    _seed_turn(
+        engine,
+        run.run_id,
+        agent=AgentName.BEAKER,
+        status='failed',
+        kind=TurnKind.IMPLEMENTATION_PLAN,
+        summary='planned the implementation matrix',
+        error='RuntimeError: model endpoint unavailable',
+        created_at=datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc),
+    )
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'run': run.run_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    text = response.text
+    assert 'id="rtab-turns" checked>' in text
+    assert 'id="rtab-viewer">' in text
+    turns_panel = text[
+        text.index('id="rpanel-turns"') : text.index('id="rpanel-viewer"')
+    ]
+    assert '<strong>Honeydew</strong>' in turns_panel
+    assert '<strong>Beaker</strong>' in turns_panel
+    assert '<code>protocol_draft</code>' in turns_panel
+    assert '<code>implementation_plan</code>' in turns_panel
+    assert '<code>completed</code>' in turns_panel
+    assert '<code>failed</code>' in turns_panel
+    assert 'drafted the protocol for review' in turns_panel
+    assert 'planned the implementation matrix' in turns_panel
+    assert 'RuntimeError: model endpoint unavailable' in turns_panel
+    assert first.created_at.isoformat() in turns_panel
+    assert first.updated_at.isoformat() in turns_panel
+    assert turns_panel.index('drafted the protocol') < turns_panel.index(
+        'planned the implementation'
+    )
+    # Only summarize_turns output is rendered; the raw input_event stays out.
+    assert 'agent_turn' not in turns_panel
+    assert re.search(r'\sstyle="', text) is None
+
+
+def test_ui_turns_panel_empty_states(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        no_selection = client.get('/ui/', headers=AUTH_HEADERS)
+        empty_run = client.get(
+            '/ui/',
+            params={'run': 'run-with-no-turns'},
+            headers=AUTH_HEADERS,
+        )
+
+    assert 'Select a run to list its agent turns.' in no_selection.text
+    assert 'id="rtab-viewer" checked>' in no_selection.text
+    assert 'no agent turns recorded for this run.' in empty_run.text
+    assert 'id="rtab-turns" checked>' in empty_run.text
+
+
+def test_ui_turns_panel_escapes_agent_output(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='escape the turns'))
+    payload = '<script>alert(1)</script>'
+    _seed_turn(
+        engine,
+        run.run_id,
+        kind=TurnKind.EXPERIMENT_ANALYSIS,
+        summary=f'analysis {payload}',
+        error=f'failure {payload}',
+    )
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'run': run.run_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    text = response.text
+    assert '<script' not in text
+    assert '&lt;script&gt;alert(1)&lt;/script&gt;' in text
+    assert re.search(r'\sstyle="', text) is None
+    csp = response.headers['content-security-policy']
+    assert "default-src 'none'" in csp
+    assert 'script-src' not in csp
+
+
+def test_ui_pdf_source_keeps_the_viewer_panel_fill(
+    orchestrator_bundle,
+    tmp_path,
+) -> None:
+    """The cited-source body lives in the .is-fill tab panel, unchanged."""
+    settings, _, _, _, engine = orchestrator_bundle
+    raw_root = tmp_path / 'rag-raw'
+    settings = settings.model_copy(
+        update={'corpus_rag_raw_root': str(raw_root)}
+    )
+    pdf_path = raw_root / 'handbook.pdf'
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf_path.write_bytes(b'%PDF-1.4\n%%EOF\n')
+    source = _seed_chat_corpus(engine, canonical_uri=pdf_path.as_uri())
+    text_source = _seed_chat_corpus(
+        engine,
+        title='Extracted Only',
+        text='stored extracted text only',
+        canonical_uri='doc://extracted-only',
+    )
+    run = engine.create_run(RunCreateRequest(objective='run without a pdf'))
+
+    with _client(settings, engine) as client:
+        pdf_page = client.get(
+            '/ui/',
+            params={'source': source.source_id},
+            headers=AUTH_HEADERS,
+        )
+        text_page = client.get(
+            '/ui/',
+            params={'source': text_source.source_id},
+            headers=AUTH_HEADERS,
+        )
+        run_page = client.get(
+            '/ui/',
+            params={'run': run.run_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert pdf_page.status_code == 200
+    assert 'id="rtab-viewer" checked>' in pdf_page.text
+    assert (
+        '<section class="tab-panel is-fill" id="rpanel-viewer">'
+        in pdf_page.text
+    )
+    assert '<div class="column-body is-fill">' in pdf_page.text
+    assert '<div class="pdf-viewer">' in pdf_page.text
+    # The extracted-text fallback uses the same fill panel so .source-text
+    # keeps scrolling internally instead of collapsing.
+    assert (
+        '<section class="tab-panel is-fill" id="rpanel-viewer">'
+        in text_page.text
+    )
+    assert '<div class="source-text">' in text_page.text
+    # A run selection is not the fill case: its tree scrolls in .tab-panels.
+    assert (
+        '<section class="tab-panel" id="rpanel-viewer">' in run_page.text
+    )
 
 
 def test_ui_run_selection_renders_file_tree_and_verified_preview(

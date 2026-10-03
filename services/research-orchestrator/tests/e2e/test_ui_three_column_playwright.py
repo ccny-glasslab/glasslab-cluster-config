@@ -181,6 +181,11 @@ def test_ui_three_column_notebook_and_viewer(ui_qa) -> None:
         assert page.locator('[style]').count() == 0
         expect(page.locator('#panel-runs')).to_be_visible()
         expect(page.locator('#panel-corpus')).to_be_hidden()
+        assert page.locator('#rtab-viewer').is_checked(), (
+            'the default right pane opens the Viewer tab'
+        )
+        expect(page.locator('#rpanel-viewer')).to_be_visible()
+        expect(page.locator('#rpanel-turns')).to_be_hidden()
         _shot(page, env, 'ui-3col-default.png')
         _log(
             env,
@@ -196,6 +201,15 @@ def test_ui_three_column_notebook_and_viewer(ui_qa) -> None:
         # --- 2. the run selection renders the artifact tree in the viewer -
         with page.expect_navigation(wait_until='domcontentloaded'):
             page.locator(f'#panel-runs a[href*="{run_id}"]').first.click()
+        # A run selection server-selects the Turns tab; the Viewer tab keeps
+        # the unchanged artifact tree.
+        assert page.locator('#rtab-turns').is_checked(), (
+            'selecting a run must land on the Turns tab'
+        )
+        expect(page.locator('#rpanel-turns')).to_be_visible()
+        assert page.locator('#rpanel-viewer').is_hidden()
+        page.locator('label[for="rtab-viewer"]').click()
+        assert page.locator('#rtab-viewer').is_checked()
         viewer = page.locator('#viewer')
         expect(viewer.locator('details.tree-folder').first).to_be_visible()
         viewer_text = viewer.inner_text()
@@ -239,6 +253,9 @@ def test_ui_three_column_notebook_and_viewer(ui_qa) -> None:
         expect(iframe).to_be_visible()
         assert page.locator('#tab-corpus').is_checked(), (
             'selecting a source must land on the Corpus sources tab'
+        )
+        assert page.locator('#rtab-viewer').is_checked(), (
+            'selecting a source must land on the Viewer tab'
         )
         expect(page.locator('#panel-corpus')).to_be_visible()
         iframe_box = iframe.bounding_box()
