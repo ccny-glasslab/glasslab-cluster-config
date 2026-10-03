@@ -65,7 +65,7 @@ proxy the token is injected for you; a direct request without the token gets
 
 | Method and path | Purpose |
 | --- | --- |
-| `GET /ui/` | The whole page. With `?c=<conversation-id>` the multi-turn corpus chat replays that conversation. Selection parameters: `run`, `ref`, `packet`, `excerpt`, `c`, `source`, `page`. |
+| `GET /ui/` | The whole page. With `?c=<conversation-id>` the multi-turn corpus chat replays that conversation. Selection parameters: `run`, `ref`, `packet`, `excerpt`, `c`, `source`, `page`. A `run` selection opens the right pane's Turns tab; a `source` or `ref` selection opens its Viewer tab. |
 | `POST /ui/chat` | Appends a chat turn: `q` (the question) and optional `c` (conversation id). Persists the turn and 303-redirects to `GET /ui/?c=<id>#latest`. |
 | `GET /ui/pdf/document.pdf?source=<source-id>` | The raw corpus PDF as a Starlette `FileResponse`. Honors HTTP Range requests and advertises `Accept-Ranges: bytes`. |
 | `GET /ui/pdf/boxes?source=<source-id>&page=<n>&excerpt=<text>` | JSON highlight rectangles for `excerpt` on the 1-based `page`. `excerpt` is optional and capped at 400 characters. |
@@ -126,6 +126,12 @@ future edit that loosens the base policy (or strips `form-action`/`frame-src`)
 fails review.
 
 ## The PDF viewer
+
+The viewer lives in the right pane's **Viewer** tab, alongside the **Turns**
+tab that lists the selected run's redacted agent-turn summaries. Selecting a
+source or a citation opens Viewer; selecting a run opens Turns. Both tabs are
+the same CSS-only `:checked` radio group as the Sources strip, so the page
+itself stays zero-JS.
 
 - **Vendored pdf.js 6.3.289**, served same-origin from `/ui/pdf/assets/**`. The
   assets ship with the service image; there is no CDN and no external fetch.

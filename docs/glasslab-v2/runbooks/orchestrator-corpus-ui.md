@@ -92,11 +92,12 @@ query parameters, so the URL is the state:
 
 | Parameter | Used by |
 | --- | --- |
-| `run` | Selects a run; drives the sources packet list and the document artifact list. |
-| `ref` | Selects a linkable artifact for the document preview. |
+| `run` | Selects a run; drives the sources packet list, the Viewer column's Turns tab, and the viewer artifact tree. |
+| `ref` | Selects a linkable artifact for the viewer preview (opens the Viewer tab). |
 | `packet` | Selects a context packet for the evidence inspector. |
 | `excerpt` | Classifies a citation excerpt against the selected packet. |
 | `c` | Selects a multi-turn corpus-chat conversation to replay. |
+| `source` / `page` | Selects the cited corpus source (and 1-based page) for the PDF viewer (opens the Viewer tab). |
 
 Example:
 
@@ -109,15 +110,21 @@ http://127.0.0.1:19090/ui/?run=<run-id>&packet=<packet-id>&excerpt=<quoted-text>
    (title, type, scope, truncated digest), and, once a run is selected, its
    context packets (packet id, agent, turn number and kind, query). Selecting a
    packet opens it in the evidence inspector.
-2. **Document.** The selected run's linkable artifacts, and a digest-verified
-   text preview of the chosen one. Only run-relative refs under `reports/`,
-   `plots/`, `tables/`, and `shared-artifacts/` are previewable. The body is
-   shown as escaped text inside a `<pre>` block, never as rendered markdown or
-   HTML. Preview is capped at 2 MiB. Ranked-source URIs and filesystem paths
-   are never emitted.
-3. **Evidence inspector.** The selected context packet: its ranked sources
-   (rank, source id, truncated digest, score) and the citation classification
-   for the supplied excerpt.
+2. **Ask the corpus.** The persistent, multi-turn conversation over indexed
+   corpus chunks: the composer posts a turn to `/ui/chat`, and the replayed
+   conversation renders each answer with inline citation markers. See
+   [Corpus Chat And In-Browser PDF Viewer](orchestrator-corpus-ui-chat.md).
+3. **Viewer.** A two-tab surface over the selection. **Turns** lists the
+   selected run's redacted agent-turn summaries (agent, status, the
+   structured-output kind and summary, start/end timestamps, and the error
+   when set) in storage order, oldest first; it renders read-only
+   `TurnSummary` fields only, never raw tool-call transcripts. **Viewer** holds
+   the existing viewer body: the cited source's same-origin PDF viewer iframe,
+   or its stored extracted text when no PDF is servable, or the selected run's
+   artifact tree with the digest-verified text preview of the chosen file.
+   Selecting a run opens Turns; selecting a source or a file opens Viewer.
+   The strip is the same pure-CSS `:checked` radio group as the Sources tabs,
+   so the page stays zero-JS.
 
 ## Citation badges
 
@@ -160,7 +167,8 @@ Honeydew's sign-off renders as "awaiting Honeydew" with no decision form.
 Everything else on the page never mutates state:
 
 - No agent-turn control beyond pause/resume/cancel. Reading a run does not
-  retry it, and the corpus chat pane remains a read-only question-and-answer
+  retry it, the Viewer column's Turns tab renders only redacted turn
+  summaries, and the corpus chat pane remains a read-only question-and-answer
   path, not a control surface; see
   [Corpus Chat And In-Browser PDF Viewer](orchestrator-corpus-ui-chat.md).
 - No contract promotion, and no dataset or corpus changes from the page.

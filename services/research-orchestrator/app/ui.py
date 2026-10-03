@@ -19,10 +19,13 @@ loopback UI proxy forwards ``POST``):
   the answer, whose ``[n]`` citation positions render as inline superscript
   markers with a CSS-only hover/focus preview card (no end-of-answer
   reference list, no script);
-* the **Viewer** column shows the selected content: the cited source's
-  same-origin PDF viewer iframe, or -- when no PDF is servable -- the
-  source's stored extracted text with the cited excerpt marked, or the
-  selected run's artifact tree (folders are native
+* the **Viewer** column is a second CSS-only tab strip (**Turns** |
+  **Viewer**): Turns lists the selected run's redacted agent-turn summaries
+  (agent, status, structured-output kind and summary, timestamps, and error
+  when set) in storage order, and Viewer holds the selected content -- the
+  cited source's same-origin PDF viewer iframe, or -- when no PDF is
+  servable -- the source's stored extracted text with the cited excerpt
+  marked, or the selected run's artifact tree (folders are native
   ``<details>``/``<summary>``) with the digest-verified text preview of the
   selected file.
 
@@ -106,6 +109,7 @@ from .schemas import (
     utc_now,
 )
 from .storage import RecordNotFound
+from .turn_inspection import DEFAULT_TURN_LIMIT, summarize_turns
 from .ui_chat import ChatAnswer
 from .ui_pdf import document_is_resolvable
 
@@ -113,7 +117,12 @@ if TYPE_CHECKING:
     from .config import Settings
     from .corpus_rag.chat import CorpusChatService
     from .engine import ResearchOrchestrator
-    from .schemas import ActionRecord, ArtifactRecord, ContextPacket
+    from .schemas import (
+        ActionRecord,
+        ArtifactRecord,
+        ContextPacket,
+        TurnSummary,
+    )
     from .ui_chat import ChatCitation
 
 logger = logging.getLogger(__name__)
@@ -156,6 +165,15 @@ _SOURCES_TABS = (
     ('tab-runs', 'Runs', 'panel-runs'),
     ('tab-corpus', 'Corpus sources', 'panel-corpus'),
     ('tab-packets', 'Context packets', 'panel-packets'),
+)
+
+# The Viewer column's tab strip: (radio id, label text, panel id), mirroring
+# ``_SOURCES_TABS``. The group name (``right-tab``) is separate, so the two
+# tab strips switch independently through the same :checked sibling
+# mechanism, with no script and no inline style.
+_RIGHT_TABS = (
+    ('rtab-turns', 'Turns', 'rpanel-turns'),
+    ('rtab-viewer', 'Viewer', 'rpanel-viewer'),
 )
 
 _PAGE_STYLES = """
@@ -296,6 +314,21 @@ border-bottom-color:transparent}
 #tab-runs:focus-visible ~ .tab-strip > label[for="tab-runs"],
 #tab-corpus:focus-visible ~ .tab-strip > label[for="tab-corpus"],
 #tab-packets:focus-visible ~ .tab-strip > label[for="tab-packets"]{outline:2px solid var(--accent);outline-offset:2px}
+#rtab-turns:checked ~ .tab-panels > #rpanel-turns,
+#rtab-viewer:checked ~ .tab-panels > #rpanel-viewer{display:block}
+#rtab-turns:checked ~ .tab-strip > label[for="rtab-turns"],
+#rtab-viewer:checked ~ .tab-strip > label[for="rtab-viewer"]{color:var(--text);
+background:var(--raised);border-color:var(--line);
+border-bottom-color:transparent}
+#rtab-turns:focus-visible ~ .tab-strip > label[for="rtab-turns"],
+#rtab-viewer:focus-visible ~ .tab-strip > label[for="rtab-viewer"]{outline:2px solid var(--accent);outline-offset:2px}
+/* The cited-source PDF (or its extracted-text fallback) must keep filling the
+   pane inside the tab: when the Viewer tab holds the fill body, the checked
+   panel becomes a full-height flex column so .column-body.is-fill, .pdf-viewer
+   and the iframe still resolve their flex:1 chain and scroll internally --
+   no intrinsic-height collapse and no dead scrollbar. */
+#rtab-viewer:checked ~ .tab-panels > #rpanel-viewer.is-fill{display:flex;
+flex-direction:column;block-size:100%;overflow:hidden}
 li.is-current,tr.is-current td{background:rgba(139,147,255,.09)}
 a[aria-current="page"]{color:var(--text);text-decoration-color:currentColor}
 /* Recursive artifact tree: folders are native <details> disclosures and
@@ -371,6 +404,13 @@ border:1px solid var(--line-faint);border-radius:var(--radius-sm)}
 .gate-meta{margin:0 0 .45rem;font-size:.75rem}
 .chat-turn{margin:1rem 0 0;padding:.9rem 1.05rem;background:var(--well);
 border:1px solid var(--line-faint);border-radius:var(--radius-sm)}
+.turn{margin:.75rem 0 0;padding:.75rem .9rem;background:var(--well);
+border:1px solid var(--line-faint);border-radius:var(--radius-sm)}
+.turn-head{margin:0;font-size:.8125rem}
+.turn-summary{margin:.45rem 0 0;font-size:.8125rem;line-height:1.62;
+white-space:pre-wrap;overflow-wrap:anywhere}
+.turn-error{margin:.45rem 0 0;font-size:.8125rem;line-height:1.62;
+color:var(--bad-fg);white-space:pre-wrap;overflow-wrap:anywhere}
 /* The chat composer is pinned below the scrolling conversation so it never
    scrolls away; a 303 redirect to ``#latest`` scrolls the newest turn into
    view within the column body, with no script and no inline style. */
@@ -449,6 +489,12 @@ main{display:flex;flex-direction:column}
 .source-text{max-block-size:65vh}
 .column-body.is-fill{display:block;overflow:visible}
 .pdf-viewer iframe{block-size:70vh;flex:none}
+/* The Viewer's tab panels return to document flow like the rest of the
+   stacked notebook, and the fill panel stops being a fixed-height flex
+   column so the 70vh PDF iframe is never clipped. */
+#viewer .tab-panels{max-block-size:none;overflow:visible}
+#rtab-viewer:checked ~ .tab-panels > #rpanel-viewer.is-fill{display:block;
+block-size:auto;overflow:visible}
 }
 @media (max-width:640px){body{padding:1.2rem .8rem 2.2rem}
 h1{font-size:1.2rem}.pane{padding:.95rem .95rem 1.05rem}}
@@ -537,6 +583,32 @@ def _render_tab_inputs(selection: UiRequest) -> str:
         checked = ' checked' if tab_id == active else ''
         inputs.append(
             '<input class="tab-input" type="radio" name="sources-tab" '
+            f'id="{tab_id}"{checked}>'
+        )
+    return '\n'.join(inputs)
+
+
+def _active_right_tab(selection: UiRequest) -> str:
+    """Return the right-pane radio id the server marks checked on this render.
+
+    A cited source or a previewed file needs the Viewer tab; a selected run
+    lands on its Turns tab; the default (nothing selected) opens Viewer so
+    the pane keeps its "select a source or run" prompt visible.
+    """
+    if selection.source_id or selection.ref:
+        return 'rtab-viewer'
+    if selection.run_id:
+        return 'rtab-turns'
+    return 'rtab-viewer'
+
+
+def _render_right_tab_inputs(selection: UiRequest) -> str:
+    active = _active_right_tab(selection)
+    inputs = []
+    for tab_id, _, _ in _RIGHT_TABS:
+        checked = ' checked' if tab_id == active else ''
+        inputs.append(
+            '<input class="tab-input" type="radio" name="right-tab" '
             f'id="{tab_id}"{checked}>'
         )
     return '\n'.join(inputs)
@@ -1162,6 +1234,63 @@ def _render_run_view(
     )
 
 
+def _render_turn_summary(summary: TurnSummary) -> str:
+    """One redacted TurnSummary as an escaped, zero-JS turn card.
+
+    Only the fields :func:`app.turn_inspection.summarize_turns` returns are
+    rendered: the agent/status head, the structured-output kind and summary
+    when present, the start/end window, and the redacted error when set. The
+    summary keeps its line breaks, and every interpolated value is escaped.
+    """
+    output = summary.output if isinstance(summary.output, dict) else {}
+    kind = output.get('kind')
+    text = output.get('summary')
+    head = [
+        f'<strong>{_escape(summary.agent.value.title())}</strong>',
+        f'<code>{_escape(summary.status)}</code>',
+    ]
+    if kind:
+        head.append(f'<code>{_escape(kind)}</code>')
+    window = _escape(summary.started_at.isoformat())
+    if summary.ended_at is not None:
+        window += f' → {_escape(summary.ended_at.isoformat())}'
+    head.append(f'<span class="muted nowrap">{window}</span>')
+    rendered = [
+        '<article class="turn">',
+        f'<p class="turn-head">{" · ".join(head)}</p>',
+    ]
+    if text:
+        rendered.append(f'<p class="turn-summary">{_escape(text)}</p>')
+    if summary.error:
+        rendered.append(
+            f'<p class="turn-error"><strong>Error:</strong> '
+            f'{_escape(summary.error)}</p>'
+        )
+    rendered.append('</article>')
+    return ''.join(rendered)
+
+
+def _render_turns_panel(
+    engine: ResearchOrchestrator,
+    selection: UiRequest,
+) -> str:
+    """The right pane's Turns panel: a run's redacted agent-turn summaries."""
+    if not selection.run_id:
+        body = '<p class="muted">Select a run to list its agent turns.</p>'
+    else:
+        turns = summarize_turns(
+            engine.store.list_turns(selection.run_id),
+            limit=DEFAULT_TURN_LIMIT,
+        )
+        if turns:
+            body = ''.join(_render_turn_summary(turn) for turn in turns)
+        else:
+            body = (
+                '<p class="muted">no agent turns recorded for this run.</p>'
+            )
+    return f'<section class="tab-panel" id="rpanel-turns">{body}</section>'
+
+
 def _render_viewer_panel(
     engine: ResearchOrchestrator,
     settings: Settings,
@@ -1169,17 +1298,35 @@ def _render_viewer_panel(
 ) -> str:
     if selection.source_id:
         body_class = 'column-body is-fill'
+        # The fill class moves to the checked panel so the PDF/extracted-text
+        # flex chain keeps filling the tab (see the #rtab-viewer rule).
+        panel_class = 'tab-panel is-fill'
         body = _render_cited_source(engine, settings, selection)
     elif selection.run_id:
         body_class = 'column-body'
+        panel_class = 'tab-panel'
         body = _render_run_view(engine, settings, selection)
     else:
         body_class = 'column-body'
+        panel_class = 'tab-panel'
         body = '<p class="muted">Select a source or run.</p>'
+    tab_strip = '\n'.join(
+        f'<label class="tab" for="{tab_id}">{_escape(label)}</label>'
+        for tab_id, label, _ in _RIGHT_TABS
+    )
     return (
         '<section class="pane" id="viewer">'
         '<div class="column-head"><h2>Viewer</h2></div>'
+        '<div class="tabs">'
+        f'{_render_right_tab_inputs(selection)}'
+        f'<div class="tab-strip">{tab_strip}</div>'
+        '<div class="tab-panels">'
+        f'{_render_turns_panel(engine, selection)}'
+        f'<section class="{panel_class}" id="rpanel-viewer">'
         f'<div class="{body_class}">{body}</div>'
+        '</section>'
+        '</div>'
+        '</div>'
         '</section>'
     )
 
