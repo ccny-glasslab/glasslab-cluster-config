@@ -27,7 +27,7 @@ spec:
         - name: rag-backfill
           # Orchestrator image: app/ and scripts/ ship in-image. Pin this to a
           # release that contains scripts/corpus_rag/backfill_rag_from_knowledge.py.
-          image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:e6000d38538c9cf625aa5c6cf1f13ace547b0e58
+          image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:ffbbbf38b61c72d4623415eab45da8a168fb3b05
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command:
