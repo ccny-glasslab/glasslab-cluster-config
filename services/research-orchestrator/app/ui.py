@@ -71,6 +71,7 @@ import contextlib
 from dataclasses import dataclass, field
 import hashlib
 import html
+import json
 import logging
 from pathlib import Path, PurePosixPath
 import re
@@ -1027,6 +1028,102 @@ def _render_artifact_tree(
     return f'<ul class="tree">{_render_tree_children(root, refs, selection)}</ul>'
 
 
+def _notebook_text(value: object) -> str:
+    """A notebook ``source``/``text`` field as plain text.
+
+    Notebook JSON stores multi-line fields as a list of lines; a bare string
+    is also valid in older notebooks, so both shapes are accepted.
+    """
+    if isinstance(value, list):
+        return ''.join(str(line) for line in value)
+    return '' if value is None else str(value)
+
+
+def _render_notebook_output(output: object) -> str:
+    """One code-cell output as plain text, or ``''`` when it has no text form.
+
+    Only ``text/plain`` is rendered. An output that carries binary payloads
+    (an image, most often) is replaced by a short note instead of an
+    ``<img>``/``data:`` URI: the page has no ``img-src`` and never inlines
+    embedded bytes.
+    """
+    if not isinstance(output, dict):
+        return ''
+    output_type = output.get('output_type')
+    if output_type == 'stream':
+        return _notebook_text(output.get('text'))
+    if output_type in ('execute_result', 'display_data'):
+        data = output.get('data')
+        if not isinstance(data, dict):
+            return ''
+        text = data.get('text/plain')
+        if text is not None:
+            return _notebook_text(text)
+        return '[non-text output omitted]' if data else ''
+    if output_type == 'error':
+        traceback = output.get('traceback')
+        if isinstance(traceback, list):
+            return '\n'.join(str(line) for line in traceback)
+        ename = output.get('ename') or 'error'
+        evalue = output.get('evalue') or ''
+        return f'{ename}: {evalue}'
+    return ''
+
+
+def _render_notebook_body(text: str) -> str:
+    """Render a stored ``.ipynb`` as escaped, zero-JS notebook cells.
+
+    Parsing uses the standard library only (no ``nbformat`` dependency). Every
+    cell kind, source line, and output is escaped, so a notebook is rendered
+    as inert text like any other document -- never as raw markdown, HTML, or
+    an embedded image.
+    """
+    try:
+        notebook = json.loads(text)
+    except json.JSONDecodeError:
+        return (
+            '<p class="muted">Notebook unavailable: the file is not valid '
+            'JSON.</p>'
+        )
+    cells = notebook.get('cells') if isinstance(notebook, dict) else None
+    if not isinstance(cells, list):
+        return (
+            '<p class="muted">Notebook unavailable: the file has no cell '
+            'list.</p>'
+        )
+    rendered = ['<div class="notebook">']
+    for index, cell in enumerate(cells, start=1):
+        if not isinstance(cell, dict):
+            continue
+        cell_type = cell.get('cell_type')
+        if isinstance(cell_type, str) and cell_type:
+            kind = cell_type
+        else:
+            kind = 'unknown'
+        rendered.append('<article class="notebook-cell">')
+        rendered.append(
+            f'<p class="notebook-kind muted">Cell {index} · '
+            f'{_escape(kind)}</p>'
+        )
+        rendered.append(
+            '<pre class="notebook-source">'
+            f'{_escape(_notebook_text(cell.get("source")))}</pre>'
+        )
+        if kind == 'code':
+            outputs = cell.get('outputs')
+            if isinstance(outputs, list):
+                for output in outputs:
+                    output_text = _render_notebook_output(output)
+                    if output_text:
+                        rendered.append(
+                            '<pre class="notebook-output">'
+                            f'{_escape(output_text)}</pre>'
+                        )
+        rendered.append('</article>')
+    rendered.append('</div>')
+    return ''.join(rendered)
+
+
 def _render_document_body(
     settings: Settings,
     selection: UiRequest,
@@ -1058,12 +1155,14 @@ def _render_document_body(
             'failed or the file exceeds the preview limit.</p>'
         )
     text = content.decode('utf-8', errors='replace')
-    return (
+    header = (
         f'<p><strong>Ref:</strong> <code>{_escape(ref)}</code> · '
         f'<strong>SHA-256:</strong> '
         f'<code>{_escape(_digest_prefix(artifact.sha256))}</code></p>'
-        f'<pre>{_escape(text)}</pre>'
     )
+    if ref.endswith('.ipynb'):
+        return header + _render_notebook_body(text)
+    return header + f'<pre>{_escape(text)}</pre>'
 
 
 def _pdf_viewer_url(

@@ -28,6 +28,7 @@ SqliteStore engine with a fake runtime, no live cluster, and no network.
 from __future__ import annotations
 
 import html
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -2193,3 +2194,107 @@ def test_ui_chat_requires_a_question(orchestrator_bundle) -> None:
 
     assert response.status_code == 400
     assert 'Nothing to ask' in response.text
+
+
+def _notebook_bytes(cells: list[dict]) -> bytes:
+    return json.dumps(
+        {
+            'nbformat': 4,
+            'nbformat_minor': 5,
+            'metadata': {},
+            'cells': cells,
+        }
+    ).encode()
+
+
+def test_ui_notebook_preview_renders_cells_and_escapes(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='render a notebook'))
+    notebook = _notebook_bytes(
+        [
+            {
+                'cell_type': 'markdown',
+                'metadata': {},
+                'source': ['# Analysis\n', '<script>alert(1)</script>\n'],
+            },
+            {
+                'cell_type': 'code',
+                'execution_count': 1,
+                'metadata': {},
+                'outputs': [
+                    {
+                        'output_type': 'stream',
+                        'name': 'stdout',
+                        'text': 'result <script>alert(2)</script>\n',
+                    }
+                ],
+                'source': 'print(1)\n',
+            },
+        ]
+    )
+    engine.store.save_artifact(
+        _write_artifact(
+            settings,
+            run.run_id,
+            'reports/analysis.ipynb',
+            notebook,
+            artifact_type='analysis-notebook',
+        )
+    )
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'run': run.run_id, 'ref': 'reports/analysis.ipynb'},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    # Cells render as escaped text, not as one dumped JSON envelope.
+    assert 'class="notebook-cell"' in response.text
+    assert 'nbformat' not in response.text
+    assert '&lt;script&gt;alert(1)&lt;/script&gt;' in response.text
+    assert '&lt;script&gt;alert(2)&lt;/script&gt;' in response.text
+    assert '<script' not in response.text
+    assert '<img' not in response.text
+    assert 'data:image' not in response.text
+
+
+def test_ui_notebook_preview_malformed_json_is_graceful(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='break a notebook'))
+    engine.store.save_artifact(
+        _write_artifact(
+            settings,
+            run.run_id,
+            'reports/broken.ipynb',
+            b'{not valid json',
+            artifact_type='analysis-notebook',
+        )
+    )
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'run': run.run_id, 'ref': 'reports/broken.ipynb'},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert 'Notebook unavailable' in response.text
+    assert '{not valid json' not in response.text
+
+
+def test_ui_csp_has_no_img_src(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.get('/ui/', headers=AUTH_HEADERS)
+
+    assert response.status_code == 200
+    csp = response.headers['content-security-policy']
+    assert 'img-src' not in csp
