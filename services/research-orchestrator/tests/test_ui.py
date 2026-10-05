@@ -2445,6 +2445,73 @@ def test_ui_notebook_preview_deeply_nested_json_is_graceful(
     assert 'Traceback' not in response.text
 
 
+def test_ui_notebook_preview_huge_integer_is_graceful(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='parse a huge integer'))
+    # Valid JSON, but the metadata seed exceeds CPython's int-string digit
+    # limit, so ``json.loads`` raises a plain ValueError rather than the
+    # JSONDecodeError the renderer used to catch.
+    engine.store.save_artifact(
+        _write_artifact(
+            settings,
+            run.run_id,
+            'reports/hugeint.ipynb',
+            ('{"cells": [], "metadata": {"seed": ' + '9' * 6000 + '}}').encode(),
+            artifact_type='analysis-notebook',
+        )
+    )
+    # ``raise_server_exceptions=False`` observes the 500 as a status code
+    # instead of letting the uncaught ValueError fail the test outright.
+    client = TestClient(_ui_app(settings, engine), raise_server_exceptions=False)
+
+    with client:
+        response = client.get(
+            '/ui/',
+            params={'run': run.run_id, 'ref': 'reports/hugeint.ipynb'},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert 'Notebook unavailable' in response.text
+    assert 'Traceback' not in response.text
+
+
+def test_ui_notebook_preview_lone_surrogate_is_graceful(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='decode a surrogate'))
+    # The JSON escape ``\ud800`` parses cleanly into a lone surrogate, which
+    # then cannot be UTF-8 encoded into the response. ``errors='replace'`` on
+    # the initial file decode cannot help: the surrogate only appears after
+    # JSON unescaping.
+    surrogate_escape = b'{"cells":[{"cell_type":"code","source":["\\ud800"]}]}'
+    engine.store.save_artifact(
+        _write_artifact(
+            settings,
+            run.run_id,
+            'reports/surrogate.ipynb',
+            surrogate_escape,
+            artifact_type='analysis-notebook',
+        )
+    )
+    client = TestClient(_ui_app(settings, engine), raise_server_exceptions=False)
+
+    with client:
+        response = client.get(
+            '/ui/',
+            params={'run': run.run_id, 'ref': 'reports/surrogate.ipynb'},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    body = response.content.decode('utf-8')
+    assert 'Traceback' not in body
+    assert 'UnicodeEncodeError' not in body
+
+
 def test_ui_artifacts_zip_rejects_unsafe_run_id(orchestrator_bundle) -> None:
     settings, _, _, _, engine = orchestrator_bundle
     run = engine.create_run(RunCreateRequest(objective='guard the filename'))
