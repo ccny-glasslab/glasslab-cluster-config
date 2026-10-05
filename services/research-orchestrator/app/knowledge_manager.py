@@ -37,7 +37,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from collections.abc import Sequence
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from .schemas import (
     AgentName,
@@ -195,7 +195,7 @@ class KnowledgeManager:
         source_version: str | None = None,
         metadata: dict[str, Any] | None = None,
         run_scope: str | None = None,
-        access_policy: str = 'run-approved',
+        access_policy: Literal['run-private', 'run-approved'] = 'run-approved',
         index_version: str = INDEX_VERSION,
         emit_event_for_run: str | None = None,
     ) -> KnowledgeSource:
@@ -231,7 +231,7 @@ class KnowledgeManager:
         source_version: str | None = None,
         metadata: dict[str, Any] | None = None,
         run_scope: str | None = None,
-        access_policy: str = 'run-private',
+        access_policy: Literal['run-private', 'run-approved'] = 'run-private',
         index_version: str = INDEX_VERSION,
         emit_event_for_run: str | None = None,
     ) -> KnowledgeSource:
@@ -265,7 +265,7 @@ class KnowledgeManager:
         title: str | None = None,
         source_version: str | None = None,
         metadata: dict[str, Any] | None = None,
-        access_policy: str = 'run-approved',
+        access_policy: Literal['run-private', 'run-approved'] = 'run-approved',
         emit_event_for_run: str | None = None,
         forbidden_values: Sequence[str] = (),
     ) -> KnowledgeSource:
@@ -968,16 +968,19 @@ class KnowledgeManager:
         source_by_id: dict[str, KnowledgeSource],
     ) -> list[dict[str, Any]]:
         """Cosine-ranked chunk entries from the wired dense index."""
-        readiness = self.dense_index.readiness()
+        dense_index = self.dense_index
+        if dense_index is None:
+            raise RuntimeError('dense index is not available')
+        readiness = dense_index.readiness()
         if not readiness.available:
             raise RuntimeError(readiness.reason or 'dense index unavailable')
 
-        query_vec = self.dense_index.embed_query(query)
+        query_vec = dense_index.embed_query(query)
         collected: dict[str, float] = {}
         k = max(limit, 8)
         for _attempt in range(3):
-            raw = self.dense_index.search(query_vec, source_ids=source_ids, k=k)
-            rows = self.dense_index.hydrate([cid for cid, _ in raw])
+            raw = dense_index.search(query_vec, source_ids=source_ids, k=k)
+            rows = dense_index.hydrate([cid for cid, _ in raw])
             row_by_id = {row['chunk_id']: row for row in rows}
             allowed_sources = set(source_ids)
             for cid, score in raw:
@@ -990,7 +993,7 @@ class KnowledgeManager:
             k *= 4
 
         top = sorted(collected.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
-        rows = self.dense_index.hydrate([cid for cid, _ in top])
+        rows = dense_index.hydrate([cid for cid, _ in top])
         row_by_id = {row['chunk_id']: row for row in rows}
 
         entries: list[dict[str, Any]] = []
