@@ -37,6 +37,7 @@ from app.schemas import (
     SourceType,
 )
 from app.storage import SqliteStore
+from app.text_tokens import estimate_tokens
 
 PG_DSN = os.environ.get('CORPUS_RAG_PG_DSN')
 MODEL_ID = 'dense-test-model'
@@ -552,7 +553,7 @@ def test_km_token_budget_applies_in_dense_mode(tmp_path) -> None:
     long_chunk = KnowledgeChunk(
         source_id=extra.source_id, chunk_index=0, text=long_text,
         digest=hashlib.sha256(long_text.encode()).hexdigest(),
-        token_count=len(long_text.split()),
+        token_count=estimate_tokens(long_text),
     )
     store.replace_knowledge_chunks(extra.source_id, [long_chunk])
 

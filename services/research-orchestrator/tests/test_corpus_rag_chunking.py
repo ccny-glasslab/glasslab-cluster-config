@@ -1,8 +1,8 @@
 """Two-tier structure-aware chunking tests.
 
-Pins the public surface of ``app/corpus_rag/chunking.py``: token estimation
-semantics mirrored from ``knowledge_manager.estimate_tokens``, tier budgets,
-the character-slice invariant (``document_text[char_start:char_end] ==
+Pins the public surface of ``app/corpus_rag/chunking.py``: the content-aware
+``estimate_tokens`` re-exported from ``app.text_tokens``, tier budgets, the
+character-slice invariant (``document_text[char_start:char_end] ==
 chunk.text``), parent/child containment between section_units and
 evidence_spans, and deterministic record ids across rebuilds.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from math import ceil
 
 from app.corpus_rag.chunking import (
     MAX_CHUNK_TOKENS,
@@ -60,10 +61,12 @@ def _build_doc(bodies: list[tuple[str, str | None, int, str]]):
     return text, sections
 
 
-def test_estimate_tokens_matches_knowledge_manager_semantics():
+def test_estimate_tokens_is_shared_and_content_aware():
     assert estimate_tokens('') == 1
     assert estimate_tokens('   \n\t ') == 1
-    assert estimate_tokens('one two three') == 3
+    # Three whitespace words but 13 characters: the content-aware estimator
+    # takes ceil(chars / 3) instead of the word count.
+    assert estimate_tokens('one two three') == -(-13 // 3) == 5
 
 
 def test_two_tier_bounds_parents_and_offsets():
@@ -117,12 +120,16 @@ def test_two_tier_bounds_parents_and_offsets():
         assert sec_out.page_start == page_for_char(sec_in.start_char)
         assert sec_out.page_end == page_for_char(sec_in.end_char - 1)
 
-    # Tier structure: short sections -> one unit; long -> ceil(1440/1200) = 2.
+    # Tier structure: short sections -> one unit; the long body yields
+    # ceil(estimate_tokens(body) / UNIT_TARGET_TOKENS) units.
+    expected_long_units = ceil(
+        estimate_tokens(long_body) / ChunkPlan.UNIT_TARGET_TOKENS
+    )
     units_by_path: dict[str, list] = {}
     for unit in units:
         units_by_path.setdefault(unit.section_path, []).append(unit)
     assert len(units_by_path['1']) == 1
-    assert len(units_by_path['2']) == 2
+    assert len(units_by_path['2']) == expected_long_units
     assert len(units_by_path['3']) == 1
     for unit in units:
         assert unit.token_count <= ChunkPlan.UNIT_MAX

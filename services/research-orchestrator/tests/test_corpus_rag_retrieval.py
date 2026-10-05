@@ -32,6 +32,7 @@ from app.corpus_rag.retrieval import (
     RetrievalOptions,
     Reranker,
     _is_index_like,
+    estimate_tokens,
 )
 from app.schemas import KnowledgeSource, SourceType
 from app.storage import SqliteStore
@@ -456,18 +457,21 @@ def test_token_budget_drops_whole_entries(tmp_path: Path) -> None:
 
     scripted = _ScriptedReranker({ten_words: 30.0, five_words: 20.0, two_words: 10.0})
     retriever = HybridRetriever(store, reranker=scripted, model_id=MODEL_ID)
+    # The shared estimator prices each whole entry. A budget of the first plus
+    # last entry admits those two and drops the middle one whole.
+    budget = estimate_tokens(ten_words) + estimate_tokens(two_words)
     result = retriever.retrieve(
         'resampling methods',
         source_ids=[source.source_id],
-        options=RetrievalOptions(mode='hybrid+rerank', token_budget=12),
+        options=RetrievalOptions(mode='hybrid+rerank', token_budget=budget),
     )
 
     assert len(result.hits) == 2
     emitted = {h.chunk.text for h in result.hits}
     assert emitted == {ten_words, two_words}, 'middle entry dropped whole'
     assert five_words not in emitted
-    total_words = sum(len(h.chunk.text.split()) for h in result.hits)
-    assert total_words <= 12
+    total_tokens = sum(estimate_tokens(h.chunk.text) for h in result.hits)
+    assert total_tokens <= budget
     for hit in result.hits:
         assert hit.chunk.text in (ten_words, two_words)  # intact, never truncated
 
