@@ -1,10 +1,14 @@
 """Live-server fixtures for the ``/ui`` corpus chat + PDF viewer browser QA.
 
 Starts a real ``uvicorn app.main:app`` against a throwaway SQLite corpus
-(seeded by ``scripts/qa/seed_ui_corpus.py``) and the loopback
-operator-token-injecting UI proxy
-(``scripts/glasslab-orchestrator-ui-proxy.py``), then tears both down and
-writes a teardown receipt.
+(seeded by ``scripts/qa/seed_ui_corpus.py``) and TWO loopback
+operator-token-injecting UI proxies
+(``scripts/glasslab-orchestrator-ui-proxy.py``): the page listener, which
+forwards every path, and the #620 viewer listener, which is scoped to
+``/ui/pdf/``. Both share the same upstream and token; the app is configured
+with ``GLASSLAB_ORCHESTRATOR_UI_ORIGIN``/``GLASSLAB_ORCHESTRATOR_UI_PDF_VIEWER_ORIGIN``
+so the page frames the viewer from the second origin. Everything is torn
+down and a teardown receipt is written.
 
 The browser test runs under the Playwright venv; the app server runs under an
 interpreter that can import the service dependencies. ``GLASSLAB_QA_APP_PYTHON``
@@ -69,6 +73,7 @@ class UiQaEnvironment:
 
     app_origin: str
     proxy_origin: str
+    viewer_origin: str
     token: str
     manifest: dict
     artifacts_dir: Path
@@ -78,8 +83,11 @@ class UiQaEnvironment:
     app_process: subprocess.Popen
     proxy_server: object
     proxy_thread: threading.Thread
+    viewer_proxy_server: object
+    viewer_proxy_thread: threading.Thread
     app_port: int
     proxy_port: int
+    viewer_proxy_port: int
 
 
 def _app_python() -> str:
@@ -148,8 +156,20 @@ def _load_proxy_module():
     return module
 
 
-def _server_env(scratch: Path, db_path: Path, raw_root: Path) -> dict[str, str]:
-    """The app environment: sqlite store, seeded DB, auth on, scratch roots."""
+def _server_env(
+    scratch: Path,
+    db_path: Path,
+    raw_root: Path,
+    *,
+    ui_origin: str,
+    viewer_origin: str,
+) -> dict[str, str]:
+    """The app environment: sqlite store, seeded DB, auth on, scratch roots.
+
+    ``ui_origin``/``viewer_origin`` are the two loopback proxy origins. The
+    app emits an absolute viewer iframe URL on the second origin and admits
+    the first in the viewer's ``frame-ancestors`` (#620).
+    """
     return {
         **os.environ,
         'PYTHONPATH': str(SERVICE_ROOT),
@@ -157,6 +177,8 @@ def _server_env(scratch: Path, db_path: Path, raw_root: Path) -> dict[str, str]:
         'GLASSLAB_ORCHESTRATOR_DATABASE_PATH': str(db_path),
         'GLASSLAB_ORCHESTRATOR_REQUIRE_OPERATOR_AUTH': 'true',
         'GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN': OPERATOR_TOKEN,
+        'GLASSLAB_ORCHESTRATOR_UI_ORIGIN': ui_origin,
+        'GLASSLAB_ORCHESTRATOR_UI_PDF_VIEWER_ORIGIN': viewer_origin,
         'GLASSLAB_ORCHESTRATOR_CORPUS_RAG_RAW_ROOT': str(raw_root),
         'GLASSLAB_ORCHESTRATOR_CLUSTER_EXECUTION_MODE': 'fake',
         'GLASSLAB_ORCHESTRATOR_UI_CHAT_ENABLED': 'true',
@@ -188,9 +210,20 @@ def _server_env(scratch: Path, db_path: Path, raw_root: Path) -> dict[str, str]:
     }
 
 
+_ACTIVE_ENVIRONMENT: UiQaEnvironment | None = None
+
+
 @pytest.fixture(scope='session')
 def ui_qa() -> UiQaEnvironment:
-    """Seed the corpus, start the app + proxy, and tear both down."""
+    """Seed the corpus, start the app + both proxies, and tear them down."""
+    global _ACTIVE_ENVIRONMENT
+    if _ACTIVE_ENVIRONMENT is not None:
+        # A fixture imported into a test module registers once per importing
+        # module, so pytest builds one session instance per test module. A
+        # second instance would wipe the first module's action log and start
+        # a duplicate stack; reuse the live one instead.
+        yield _ACTIVE_ENVIRONMENT
+        return
     artifacts_dir = ARTIFACTS_DIR
     scratch = SCRATCH_ROOT
     if scratch.exists():
@@ -236,7 +269,60 @@ def ui_qa() -> UiQaEnvironment:
 
     app_port = _free_port()
     app_origin = f'http://127.0.0.1:{app_port}'
-    env = _server_env(scratch, db_path, raw_root)
+
+    # Both proxies are bound (but not yet serving) before the app starts, so
+    # their origins can be handed to the app through the environment: the
+    # page is framed from ``ui_origin`` and the #620 viewer iframe from the
+    # path-scoped ``ui_pdf_viewer_origin``.
+    proxy_module = _load_proxy_module()
+    proxy_config = proxy_module.parse_config(
+        [
+            '--listen',
+            '127.0.0.1:0',
+            '--upstream',
+            app_origin,
+            '--token-env',
+            TOKEN_ENV,
+            # The chat turn, run launch, and gate forms are POST; the proxy
+            # guards every state-changing request with Fetch Metadata.
+            '--allow-methods',
+            'GET,HEAD,POST',
+        ],
+        env={TOKEN_ENV: OPERATOR_TOKEN},
+    )
+    proxy_server = proxy_module.build_server(proxy_config)
+    proxy_port = int(proxy_server.server_address[1])
+    proxy_origin = f'http://127.0.0.1:{proxy_port}'
+
+    # The viewer listener shares the upstream + token but forwards only the
+    # viewer paths, so a script running on the viewer origin cannot reach the
+    # operator read API (#620).
+    viewer_proxy_config = proxy_module.parse_config(
+        [
+            '--listen',
+            '127.0.0.1:0',
+            '--upstream',
+            app_origin,
+            '--token-env',
+            TOKEN_ENV,
+            '--allow-methods',
+            'GET,HEAD',
+            '--allow-paths',
+            '/ui/pdf/',
+        ],
+        env={TOKEN_ENV: OPERATOR_TOKEN},
+    )
+    viewer_proxy_server = proxy_module.build_server(viewer_proxy_config)
+    viewer_proxy_port = int(viewer_proxy_server.server_address[1])
+    viewer_origin = f'http://127.0.0.1:{viewer_proxy_port}'
+
+    env = _server_env(
+        scratch,
+        db_path,
+        raw_root,
+        ui_origin=proxy_origin,
+        viewer_origin=viewer_origin,
+    )
     (artifacts_dir / 'server-env.json').write_text(
         json.dumps(
             {
@@ -277,37 +363,25 @@ def ui_qa() -> UiQaEnvironment:
         except subprocess.TimeoutExpired:
             app_process.kill()
         log_file.close()
+        proxy_server.server_close()
+        viewer_proxy_server.server_close()
         raise RuntimeError(
             f'app server failed to start; log:\n{log_path.read_text()}'
         )
 
-    proxy_module = _load_proxy_module()
-    proxy_config = proxy_module.parse_config(
-        [
-            '--listen',
-            '127.0.0.1:0',
-            '--upstream',
-            app_origin,
-            '--token-env',
-            TOKEN_ENV,
-            # The chat turn, run launch, and gate forms are POST; the proxy
-            # guards every state-changing request with Fetch Metadata.
-            '--allow-methods',
-            'GET,HEAD,POST',
-        ],
-        env={TOKEN_ENV: OPERATOR_TOKEN},
-    )
-    proxy_server = proxy_module.build_server(proxy_config)
-    proxy_port = int(proxy_server.server_address[1])
     proxy_thread = threading.Thread(
         target=proxy_server.serve_forever, daemon=True
     )
     proxy_thread.start()
-    proxy_origin = f'http://127.0.0.1:{proxy_port}'
+    viewer_proxy_thread = threading.Thread(
+        target=viewer_proxy_server.serve_forever, daemon=True
+    )
+    viewer_proxy_thread.start()
 
     environment = UiQaEnvironment(
         app_origin=app_origin,
         proxy_origin=proxy_origin,
+        viewer_origin=viewer_origin,
         token=OPERATOR_TOKEN,
         manifest=manifest,
         artifacts_dir=artifacts_dir,
@@ -317,15 +391,23 @@ def ui_qa() -> UiQaEnvironment:
         app_process=app_process,
         proxy_server=proxy_server,
         proxy_thread=proxy_thread,
+        viewer_proxy_server=viewer_proxy_server,
+        viewer_proxy_thread=viewer_proxy_thread,
         app_port=app_port,
         proxy_port=proxy_port,
+        viewer_proxy_port=viewer_proxy_port,
     )
+    _ACTIVE_ENVIRONMENT = environment
     try:
         yield environment
     finally:
+        _ACTIVE_ENVIRONMENT = None
         proxy_server.shutdown()
         proxy_server.server_close()
         proxy_thread.join(timeout=5)
+        viewer_proxy_server.shutdown()
+        viewer_proxy_server.server_close()
+        viewer_proxy_thread.join(timeout=5)
         app_process.terminate()
         try:
             app_process.wait(timeout=15)
@@ -339,8 +421,11 @@ def ui_qa() -> UiQaEnvironment:
             f'app_exit={app_process.poll()}',
             f'proxy_port={proxy_port} '
             f'proxy_thread_alive={proxy_thread.is_alive()}',
+            f'viewer_proxy_port={viewer_proxy_port} '
+            f'viewer_proxy_thread_alive={viewer_proxy_thread.is_alive()}',
             f'app_port_closed={_port_closed(app_port)}',
             f'proxy_port_closed={_port_closed(proxy_port)}',
+            f'viewer_proxy_port_closed={_port_closed(viewer_proxy_port)}',
             f'uvicorn_log={log_path}',
         ]
         (artifacts_dir / 'teardown.txt').write_text('\n'.join(receipt) + '\n')

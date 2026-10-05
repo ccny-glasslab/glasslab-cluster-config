@@ -1,11 +1,12 @@
 """Real-browser layout QA for the three-column ``/ui`` notebook.
 
 Drives headless Chromium through the loopback operator-token-injecting UI
-proxy (``scripts/glasslab-orchestrator-ui-proxy.py``) against a live uvicorn
+proxies (``scripts/glasslab-orchestrator-ui-proxy.py``) against a live uvicorn
 ``app.main:app`` seeded with a synthetic corpus and a completed run
 (``scripts/qa/seed_ui_corpus.py``). Nothing here is mocked: the browser talks
-HTTP to the proxy, the proxy injects the operator header, and the app serves
-the notebook, the artifact tree, the cited-source iframe, and the PDF bytes.
+HTTP to the page proxy and the #620 viewer proxy (scoped to ``/ui/pdf/``),
+each injects the operator header, and the app serves the notebook, the
+artifact tree, the cited-source iframe, and the PDF bytes.
 
 Assertions:
 
@@ -266,7 +267,7 @@ def test_ui_three_column_notebook_and_viewer(ui_qa) -> None:
             iframe_box,
             viewer_box,
         )
-        frame = _wait_for_frame(page, env.proxy_origin + HIGHLIGHT_PATH)
+        frame = _wait_for_frame(page, env.viewer_origin + HIGHLIGHT_PATH)
         canvas = frame.locator('#page canvas')
         canvas.wait_for(state='visible', timeout=30_000)
         status = frame.locator('#status')
