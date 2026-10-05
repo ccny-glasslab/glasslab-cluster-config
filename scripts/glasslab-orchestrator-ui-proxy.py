@@ -44,6 +44,13 @@ Security properties
   must be same-origin per Fetch Metadata ``Sec-Fetch-Site`` (falling back to a
   loopback ``Origin``/``Referer``), so a cross-site form the operator's browser
   is induced into submitting is refused before the token is injected.
+* **Path-scoped origins (issue #620).**  ``--allow-paths`` restricts the
+  forwarded request paths to a comma-separated prefix allowlist (for example
+  ``/ui/pdf/``).  The empty default forwards every path, preserving the
+  original single-listener behavior.  The intended deployment runs a second
+  listener scoped to the viewer paths, so a script running on the viewer
+  origin cannot reach ``/runs`` on the operator API; a request outside the
+  allowlist is refused with ``403`` before the token is injected.
 
 Only the Python standard library is used.
 """
@@ -66,6 +73,7 @@ DEFAULT_UPSTREAM = 'http://127.0.0.1:18080'
 DEFAULT_TOKEN_ENV = 'GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN'
 DEFAULT_HEADER = 'X-Glasslab-Operator-Token'
 DEFAULT_ALLOW_METHODS = 'GET,HEAD'
+DEFAULT_ALLOW_PATHS = ''
 
 STREAM_BLOCK = 65536
 MAX_REQUEST_BODY = 64 * 1024 * 1024
@@ -115,6 +123,7 @@ class ProxyConfig:
     upstream_port: int
     header_name: str
     allow_methods: frozenset[str]
+    allow_paths: frozenset[str]
     token: str = field(repr=False)
 
 
@@ -205,6 +214,51 @@ def parse_allow_methods(value: str) -> frozenset[str]:
     if not methods:
         raise ProxyConfigError('allow-methods must list at least one method')
     return frozenset(methods)
+
+
+def parse_allow_paths(value: str) -> frozenset[str]:
+    """Parse a comma-separated request-path prefix allowlist.
+
+    The empty default returns an empty set, which forwards every path.  Each
+    non-empty entry must be an absolute path prefix (starts with ``/``) with
+    no ``..`` traversal segment and no control character, so a malformed
+    prefix can never widen or confuse the allowlist.
+    """
+    if not value.strip():
+        return frozenset()
+    paths: set[str] = set()
+    for raw in value.split(','):
+        prefix = raw.strip()
+        if not prefix:
+            raise ProxyConfigError('allow-paths contains an empty entry')
+        if not prefix.startswith('/'):
+            raise ProxyConfigError(f'allow-path must start with /: {raw!r}')
+        if '..' in prefix:
+            raise ProxyConfigError(
+                f'allow-path must not contain ..: {raw!r}'
+            )
+        if any(
+            ord(character) < 0x20 or ord(character) == 0x7F
+            for character in prefix
+        ):
+            raise ProxyConfigError(
+                f'allow-path contains a control character: {raw!r}'
+            )
+        paths.add(prefix)
+    return frozenset(paths)
+
+
+def path_allowlisted(request_target: str, allow_paths: frozenset[str]) -> bool:
+    """Whether a request target's path starts with an allowed prefix.
+
+    An empty allowlist means no path restriction.  Only the path portion of
+    the target is matched (the query string is ignored); a target outside
+    every prefix is refused before the operator token is injected.
+    """
+    if not allow_paths:
+        return True
+    path = urllib.parse.urlsplit(request_target).path
+    return any(path.startswith(prefix) for prefix in allow_paths)
 
 
 def _parse_port(text: str) -> int | None:
@@ -346,6 +400,7 @@ def parse_config(
     scheme, upstream_host, upstream_port = parse_upstream(args.upstream)
     validate_header_name(args.header)
     allow_methods = parse_allow_methods(args.allow_methods)
+    allow_paths = parse_allow_paths(args.allow_paths)
     token = resolve_token(args.token_env, env)
     return ProxyConfig(
         listen_host=listen_host,
@@ -355,6 +410,7 @@ def parse_config(
         upstream_port=upstream_port,
         header_name=args.header,
         allow_methods=allow_methods,
+        allow_paths=allow_paths,
         token=token,
     )
 
@@ -385,6 +441,15 @@ def _build_parser() -> argparse.ArgumentParser:
         '--allow-methods',
         default=DEFAULT_ALLOW_METHODS,
         help='comma-separated HTTP methods to forward (read-only v1 defaults to GET,HEAD)',
+    )
+    parser.add_argument(
+        '--allow-paths',
+        default=DEFAULT_ALLOW_PATHS,
+        help=(
+            'comma-separated request-path prefixes to forward; empty (the '
+            'default) forwards every path, /ui/pdf/ scopes a viewer-origin '
+            'listener to the PDF viewer routes'
+        ),
     )
     return parser
 
@@ -526,6 +591,9 @@ class ProxyRequestHandler(http.server.BaseHTTPRequestHandler):
             sec_fetch_site=self.headers.get('Sec-Fetch-Site'),
         ):
             self._reject(403, 'cross-origin state-changing request rejected')
+            return
+        if not path_allowlisted(self.path, config.allow_paths):
+            self._reject(403, 'request path is not in the allowlist')
             return
 
         try:

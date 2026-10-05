@@ -17,6 +17,9 @@ Covered contracts:
 8. a state-changing method (``POST``) is refused unless Fetch Metadata
    ``Sec-Fetch-Site`` is same-origin/user-initiated, or (when absent)
    ``Origin``/``Referer`` names a loopback origin for the listen port.
+9. with ``--allow-paths``, only request paths under an allowed prefix reach
+   the upstream; everything else is a ``403`` and never appears on the
+   upstream side.  The default (no flag) forwards every path unchanged.
 """
 
 from __future__ import annotations
@@ -94,6 +97,13 @@ class _FakeUpstreamHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._record()
         self._dispatch()
+
+    def do_HEAD(self) -> None:
+        self._record()
+        self.send_response_only(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
 
     def _record(self) -> None:
         _FakeUpstreamHandler.requests.append((self.command, self.path))
@@ -312,6 +322,56 @@ class ProxyIntegrationTests(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertEqual([('GET', '/echo')], _FakeUpstreamHandler.requests)
 
+    def test_default_allow_paths_forwards_every_path(self) -> None:
+        # No --allow-paths flag: behavior is exactly the pre-#620 proxy, where
+        # every path the method allowlist admits reaches the upstream.
+        status, _ = self._get('/runs')
+        self.assertEqual(200, status)
+        self.assertEqual([('GET', '/runs')], _FakeUpstreamHandler.requests)
+
+    def test_allow_paths_scopes_the_proxy_to_allowed_prefixes(self) -> None:
+        server, port = _start_proxy(
+            self.upstream_port, ('--allow-paths', '/ui/pdf/')
+        )
+        try:
+            _FakeUpstreamHandler.reset_requests()
+            status, _ = self._get('/ui/pdf/document.pdf?source=x', port=port)
+            self.assertEqual(200, status)
+            self.assertEqual(
+                [('GET', '/ui/pdf/document.pdf?source=x')],
+                _FakeUpstreamHandler.requests,
+            )
+            for path in ('/runs', '/ui/', '/health'):
+                _FakeUpstreamHandler.reset_requests()
+                status, _ = self._get(path, port=port)
+                self.assertEqual(403, status, path)
+                self.assertEqual([], _FakeUpstreamHandler.requests, path)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_allow_paths_applies_to_head_requests(self) -> None:
+        server, port = _start_proxy(
+            self.upstream_port, ('--allow-paths', '/ui/pdf/')
+        )
+        try:
+            _FakeUpstreamHandler.reset_requests()
+            status, _, _ = self._request(
+                'HEAD', '/ui/pdf/document.pdf', port=port
+            )
+            self.assertEqual(200, status)
+            self.assertEqual(
+                [('HEAD', '/ui/pdf/document.pdf')],
+                _FakeUpstreamHandler.requests,
+            )
+            _FakeUpstreamHandler.reset_requests()
+            status, _, _ = self._request('HEAD', '/runs', port=port)
+            self.assertEqual(403, status)
+            self.assertEqual([], _FakeUpstreamHandler.requests)
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_same_origin_fetch_metadata_is_accepted_with_null_origin(self) -> None:
         server, port = _start_proxy(self.upstream_port, ('--allow-methods', 'GET,HEAD,POST'))
         try:
@@ -391,6 +451,21 @@ class ProxyConfigTests(unittest.TestCase):
     def test_allow_methods_option_is_parsed_and_normalized(self) -> None:
         config = self._config(['--allow-methods', 'get, Head ,POST'])
         self.assertEqual(frozenset({'GET', 'HEAD', 'POST'}), config.allow_methods)
+
+    def test_allow_paths_defaults_to_no_restriction(self) -> None:
+        config = self._config([])
+        self.assertEqual(frozenset(), config.allow_paths)
+
+    def test_allow_paths_option_is_parsed_and_normalized(self) -> None:
+        config = self._config(['--allow-paths', ' /ui/pdf/ , /ui/other/ '])
+        self.assertEqual(
+            frozenset({'/ui/pdf/', '/ui/other/'}), config.allow_paths
+        )
+
+    def test_invalid_allow_path_is_refused(self) -> None:
+        for value in ('ui/pdf/', '/ui/../pdf/', '/ui/pdf/\x01', '/ui/pdf/,'):
+            with self.assertRaises(PROXY.ProxyConfigError, msg=value):
+                self._config(['--allow-paths', value])
 
     def test_invalid_method_name_is_refused(self) -> None:
         with self.assertRaises(PROXY.ProxyConfigError):
