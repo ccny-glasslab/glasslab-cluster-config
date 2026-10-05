@@ -25,7 +25,8 @@ loopback UI proxy forwards ``POST``):
   **Viewer**): Turns lists the selected run's redacted agent-turn summaries
   (agent, status, structured-output kind and summary, timestamps, and error
   when set) in storage order, and Viewer holds the selected content -- the
-  cited source's same-origin PDF viewer iframe, or -- when no PDF is
+  cited source's PDF viewer iframe (same-origin by default, or the configured
+  viewer origin when origin isolation is enabled), or -- when no PDF is
   servable -- the source's stored extracted text with the cited excerpt
   marked, or the selected run's artifact tree (folders are native
   ``<details>``/``<summary>``) with the digest-verified text preview of the
@@ -42,8 +43,8 @@ persists the turn and 303-redirects to ``/ui/?c=<conversation-id>#latest``;
 ``GET /ui/?c=`` replays the whole conversation. Every valid ``[n]`` ordinal in
 an answer becomes an inline ``<sup>`` citation marker whose anchor links back
 with ``?c=&source=&page=&excerpt=`` (keeping the thread on screen while it
-opens the source), and selecting one embeds the same-origin PDF viewer iframe
-for the cited source. Hovering or keyboard-focusing a marker reveals its
+opens the source), and selecting one embeds the PDF viewer iframe for the
+cited source. Hovering or keyboard-focusing a marker reveals its
 preview card (title, verdict badge, "View source") through CSS only. The page
 itself still emits no script and no external resource.
 
@@ -54,10 +55,11 @@ filesystem paths are never emitted. Links are root-relative so the page works
 unchanged through the loopback UI proxy. The Content-Security-Policy keeps
 ``default-src 'none'`` and a per-response style nonce, and widens only
 ``form-action`` to ``'self'`` (the chat and upload forms) and adds
-``frame-src 'self'``
-(the viewer iframe); no remote origin can load. There is deliberately no
-``script-src`` at all, so the tabs, the file tree, and the citation hover
-cards are pure HTML and CSS.
+``frame-src 'self'`` (the viewer iframe); when viewer-origin isolation is
+configured the one configured viewer origin is appended to ``frame-src`` so
+that iframe can load from the second loopback origin. No remote origin can
+load. There is deliberately no ``script-src`` at all, so the tabs, the file
+tree, and the citation hover cards are pure HTML and CSS.
 """
 
 from __future__ import annotations
@@ -679,6 +681,7 @@ def _upload_title(filename: str | None) -> str | None:
 
 
 def _render_ui_error(
+    settings: Settings,
     title: str,
     message: str,
     status_code: int,
@@ -694,18 +697,21 @@ def _render_ui_error(
             '</body></html>'
         ),
         status_code=status_code,
-        headers=_ui_headers(nonce),
+        headers=_ui_headers(nonce, settings),
     )
 
 
 def _render_upload_error(
+    settings: Settings,
     message: str,
     status_code: int,
     nonce: str,
 ) -> HTMLResponse:
     # A short, escaped, script-free page: the POST failed, so the client gets
     # a message and a way back without any internal detail.
-    return _render_ui_error('Source upload failed', message, status_code, nonce)
+    return _render_ui_error(
+        settings, 'Source upload failed', message, status_code, nonce
+    )
 
 
 def _render_launch_form() -> str:
@@ -1189,13 +1195,18 @@ def _pdf_viewer_url(
     source_id: str,
     page: int | None,
     excerpt: str | None,
+    *,
+    viewer_origin: str | None = None,
 ) -> str:
     parameters = {'source': source_id}
     if page is not None:
         parameters['page'] = str(page)
     if excerpt:
         parameters['excerpt'] = excerpt
-    return '/ui/pdf/assets/web/highlight.html?' + urlencode(parameters)
+    path = '/ui/pdf/assets/web/highlight.html?' + urlencode(parameters)
+    if viewer_origin:
+        return f'{viewer_origin.rstrip("/")}{path}'
+    return path
 
 
 def _highlight_escaped(text: str, needle: str | None) -> str:
@@ -1320,7 +1331,12 @@ def _render_cited_source(
     excerpt = (
         redact_free_text(selection.excerpt) if selection.excerpt else None
     )
-    url = _pdf_viewer_url(selection.source_id, selection.page, excerpt)
+    url = _pdf_viewer_url(
+        selection.source_id,
+        selection.page,
+        excerpt,
+        viewer_origin=settings.ui_pdf_viewer_origin,
+    )
     return (
         '<h3>Cited source</h3>'
         '<div class="pdf-viewer">'
@@ -1646,17 +1662,23 @@ def render_ui_page(
     )
 
 
-def _ui_headers(nonce: str) -> dict[str, str]:
-    # CSP sign-off (#618): default-src 'none' plus a per-response style nonce,
-    # and exactly two deliberate deltas. form-action 'self' is required for the
-    # zero-JS GET chat form ('none' blocks the submission, so the chat cannot
-    # work), and frame-src 'self' is required for the same-origin cited-source
-    # PDF iframe. Everything else stays default-deny, including script: there
-    # is no script-src at all, so a corpus-authored string can never execute.
+def _ui_headers(nonce: str, settings: Settings) -> dict[str, str]:
+    # CSP sign-off (#618, #620): default-src 'none' plus a per-response style
+    # nonce, and exactly two deliberate deltas. form-action 'self' is required
+    # for the zero-JS GET chat form ('none' blocks the submission, so the chat
+    # cannot work), and frame-src 'self' is required for the cited-source PDF
+    # iframe; when viewer-origin isolation is configured the viewer origin is
+    # appended to frame-src so the iframe may be served from the second
+    # loopback origin. Everything else stays default-deny, including script:
+    # there is no script-src at all, so a corpus-authored string can never
+    # execute.
+    viewer_origin = (settings.ui_pdf_viewer_origin or '').rstrip('/')
+    frame_src = "'self'" if not viewer_origin else f"'self' {viewer_origin}"
     return {
         'Content-Security-Policy': (
             "default-src 'none'; style-src 'nonce-" + nonce + "'; "
-            "base-uri 'none'; form-action 'self'; frame-src 'self'; "
+            "base-uri 'none'; form-action 'self'; "
+            f"frame-src {frame_src}; "
             "frame-ancestors 'none'"
         ),
         'X-Content-Type-Options': 'nosniff',
@@ -1711,7 +1733,7 @@ def register_ui_routes(
         )
         return HTMLResponse(
             content=render_ui_page(engine, settings, request, chat_service),
-            headers=_ui_headers(request.nonce),
+            headers=_ui_headers(request.nonce, settings),
         )
 
     @app.get('/ui/artifacts.zip')
@@ -1728,7 +1750,7 @@ def register_ui_routes(
         nonce = secrets.token_urlsafe(16)
         if _RUN_ID_PATTERN.fullmatch(run) is None:
             return _render_ui_error(
-                'Artifact bundle unavailable',
+                settings, 'Artifact bundle unavailable',
                 'No run exists with that id.',
                 404,
                 nonce,
@@ -1737,7 +1759,7 @@ def register_ui_routes(
             engine.store.get_run(run)
         except RecordNotFound:
             return _render_ui_error(
-                'Artifact bundle unavailable',
+                settings, 'Artifact bundle unavailable',
                 'No run exists with that id.',
                 404,
                 nonce,
@@ -1757,7 +1779,7 @@ def register_ui_routes(
             # URIs or store paths, so the page reports only that nothing
             # verified is currently available.
             return _render_ui_error(
-                'Artifact bundle unavailable',
+                settings, 'Artifact bundle unavailable',
                 'No digest-verified artifacts are currently available for '
                 'this run.',
                 409,
@@ -1785,7 +1807,7 @@ def register_ui_routes(
         nonce = secrets.token_urlsafe(16)
         if chat_service is None:
             return _render_ui_error(
-                'Chat unavailable',
+                settings, 'Chat unavailable',
                 'Corpus chat is not enabled on this deployment.',
                 404,
                 nonce,
@@ -1793,7 +1815,7 @@ def register_ui_routes(
         asked = question.strip()
         if not asked:
             return _render_ui_error(
-                'Nothing to ask',
+                settings, 'Nothing to ask',
                 'Enter a question first.',
                 400,
                 nonce,
@@ -1833,20 +1855,20 @@ def register_ui_routes(
         nonce = secrets.token_urlsafe(16)
         if not settings.ui_upload_enabled:
             return _render_upload_error(
-                'Source upload is not enabled on this deployment.',
+                settings, 'Source upload is not enabled on this deployment.',
                 404,
                 nonce,
             )
         data = _read_upload_bounded(file.file, MAXIMUM_UI_UPLOAD_BYTES)
         if data is None:
             return _render_upload_error(
-                'The file exceeds the upload size limit.',
+                settings, 'The file exceeds the upload size limit.',
                 413,
                 nonce,
             )
         if not data.startswith(b'%PDF'):
             return _render_upload_error(
-                'Only PDF files can be uploaded.',
+                settings, 'Only PDF files can be uploaded.',
                 415,
                 nonce,
             )
@@ -1860,7 +1882,7 @@ def register_ui_routes(
         except Exception:  # noqa: BLE001 - a store/path detail stays internal
             logger.exception('ui source upload staging failed')
             return _render_upload_error(
-                'The upload could not be stored.',
+                settings, 'The upload could not be stored.',
                 500,
                 nonce,
             )
@@ -1879,7 +1901,7 @@ def register_ui_routes(
             with contextlib.suppress(OSError):
                 staged.unlink()
             return _render_upload_error(
-                'The document could not be ingested.',
+                settings, 'The document could not be ingested.',
                 400,
                 nonce,
             )
@@ -1907,7 +1929,7 @@ def register_ui_routes(
             )
         except ValidationError:
             return _render_ui_error(
-                'Could not start the run',
+                settings, 'Could not start the run',
                 'The objective is required (at least 10 characters), and a '
                 'contract id and version must be supplied together.',
                 400,
@@ -1918,7 +1940,7 @@ def register_ui_routes(
         except Exception:  # noqa: BLE001 - internal detail stays hidden
             logger.exception('ui run launch failed')
             return _render_ui_error(
-                'Could not start the run',
+                settings, 'Could not start the run',
                 'The run could not be started.',
                 400,
                 nonce,
@@ -1940,7 +1962,7 @@ def register_ui_routes(
         control = controls.get(action)
         if control is None:
             return _render_ui_error(
-                'Run control not applied',
+                settings, 'Run control not applied',
                 'Unknown run control.',
                 400,
                 nonce,
@@ -1950,7 +1972,7 @@ def register_ui_routes(
         except Exception:  # noqa: BLE001 - internal detail stays hidden
             logger.exception('ui run control failed')
             return _render_ui_error(
-                'Run control not applied',
+                settings, 'Run control not applied',
                 'The run control could not be applied.',
                 400,
                 nonce,
@@ -1970,21 +1992,21 @@ def register_ui_routes(
         reason = reason.strip()
         if decision not in ('approve', 'reject'):
             return _render_ui_error(
-                'Decision not applied',
+                settings, 'Decision not applied',
                 'Choose Approve or Reject.',
                 400,
                 nonce,
             )
         if not reviewer:
             return _render_ui_error(
-                'Decision not applied',
+                settings, 'Decision not applied',
                 'A reviewer name is required.',
                 400,
                 nonce,
             )
         if decision == 'reject' and not reason:
             return _render_ui_error(
-                'Decision not applied',
+                settings, 'Decision not applied',
                 'A rejection needs a reason.',
                 400,
                 nonce,
@@ -2005,7 +2027,7 @@ def register_ui_routes(
         except Exception:  # noqa: BLE001 - internal detail stays hidden
             logger.exception('ui action decision failed')
             return _render_ui_error(
-                'Decision not applied',
+                settings, 'Decision not applied',
                 'The decision could not be applied.',
                 400,
                 nonce,
