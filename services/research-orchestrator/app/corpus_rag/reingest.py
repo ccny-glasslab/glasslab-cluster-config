@@ -6,6 +6,12 @@ GitHub issue #622: dozens of ``orchestrator_knowledge_*`` sources have zero
 chunk-less one is never retried. This healer re-ingests the local PDF, or
 re-downloads and re-stages the exact versioned arXiv PDF, or reports
 ``unrecoverable`` -- never fabricating bytes or chunks. It is dry by default.
+
+A document that extracts successfully but still yields zero chunks (a
+degenerate or non-prose PDF) is reported as ``empty`` -- never as ``healed`` --
+so an operator is not misled and a second applied run is a no-op. Old-style
+arXiv sources whose staged filename dropped the archive prefix (``hep-th``)
+recover their full id from the stored ``metadata`` rather than the filename.
 """
 
 from __future__ import annotations
@@ -33,6 +39,8 @@ PdfDownloader = Callable[[str], bytes]
 # Old-style: archive_NNNNNNN, where the underscore is the path separator.
 _MODERN_ARXIV_ID = re.compile(r'^\d{4}\.\d{4,5}(?:v\d+)?$')
 _OLD_ARXIV_ID = re.compile(r'^([A-Za-z][A-Za-z.\-]*)_(\d{7})(v\d+)?$')
+# Full old-style id as preserved in source metadata: archive/YYMMNNN(vN).
+_OLD_STYLE_FULL_ARXIV_ID = re.compile(r'^[A-Za-z][A-Za-z.\-]*/\d{7}(?:v\d+)?$')
 
 _EPOCH = date(1970, 1, 1)
 
@@ -42,6 +50,7 @@ STATUS_WOULD_LOCAL = 'would-heal-local'
 STATUS_WOULD_FETCH = 'would-heal-fetch'
 STATUS_SKIPPED = 'skipped-has-chunks'
 STATUS_UNRECOVERABLE = 'unrecoverable'
+STATUS_EMPTY = 'empty'
 STATUS_ERROR = 'error'
 
 FAILURE_SECRET = 'secret-rejected'
@@ -68,6 +77,7 @@ class ReingestReport:
     network_fetches: int = 0
     skipped_has_chunks: int = 0
     unrecoverable: int = 0
+    empty: int = 0
     errors: int = 0
     secret_rejected: int = 0
     sources: list[ReingestSourceReport] = field(default_factory=list)
@@ -104,6 +114,23 @@ def parse_arxiv_id(name: str) -> str | None:
         return None
     version = match.group(3) or ''
     return f'{match.group(1)}/{match.group(2)}{version}'
+
+
+def _arxiv_id_from_metadata(source: KnowledgeSource) -> str | None:
+    metadata = source.metadata or {}
+    for key in ('arxiv_id', 'source_url'):
+        value = metadata.get(key)
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        for marker in ('/abs/', '/pdf/'):
+            if marker in text:
+                text = text.split(marker, 1)[1]
+                break
+        text = _strip_pdf_suffix(text.rstrip('/'))
+        if _MODERN_ARXIV_ID.match(text) or _OLD_STYLE_FULL_ARXIV_ID.match(text):
+            return text
+    return None
 
 
 def arxiv_pdf_url(arxiv_id: str) -> str:
@@ -155,9 +182,9 @@ def _classify(source: KnowledgeSource, root: Path) -> tuple[Any, ...]:
         return ('unrecoverable', 'path is outside the raw root')
     if path.is_file():
         return ('local', path)
-    arxiv_id = parse_arxiv_id(path.name)
+    arxiv_id = parse_arxiv_id(path.name) or _arxiv_id_from_metadata(source)
     if arxiv_id is None:
-        return ('unrecoverable', 'file missing and filename is not an arXiv id')
+        return ('unrecoverable', 'file missing and no recoverable arXiv id')
     return ('fetch', _strip_pdf_suffix(path.name), arxiv_id, arxiv_pdf_url(arxiv_id))
 
 
@@ -221,6 +248,8 @@ def _heal_source(
             canonical_uri=source.canonical_uri,
             metadata=None,
         )
+        if chunks == 0:
+            return STATUS_EMPTY, 0
         return STATUS_HEALED_LOCAL, chunks
 
     _kind, name, arxiv_id, url = decision
@@ -241,6 +270,10 @@ def _heal_source(
         # source's canonical URI still resolves to.
         staged.unlink(missing_ok=True)
         raise
+    if chunks == 0:
+        # Keep the staged bytes so the next run re-ingests locally (no network)
+        # and reports empty again: a zero-chunk source is never "added".
+        return STATUS_EMPTY, 0
     return STATUS_HEALED_FETCH, chunks
 
 
@@ -316,6 +349,8 @@ def reingest_missing_chunks(
         if status in (STATUS_HEALED_LOCAL, STATUS_HEALED_FETCH):
             report.added += 1
             report.added_chunks += chunks
+        elif status == STATUS_EMPTY:
+            report.empty += 1
         _add(report, source, status, added_chunks=chunks)
 
     report.network_fetches = context.fetches

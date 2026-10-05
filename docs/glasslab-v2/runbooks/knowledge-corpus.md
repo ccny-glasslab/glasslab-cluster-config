@@ -221,17 +221,25 @@ kubectl -n glasslab-v2 logs job/corpus-rag-reingest -f
 ```
 
 Per source the run reports `healed-local`, `healed-fetch`, `would-heal-*`
-(dry run), `skipped-has-chunks`, `unrecoverable`, or `error`. A source whose
-raw PDF is still on the PVC is re-ingested from local bytes with no network; a
-missing arXiv PDF is re-downloaded from `https://arxiv.org/pdf/<id>` and
-re-staged before ingest. Sources it cannot recover (`upload://` URIs, paths
+(dry run), `skipped-has-chunks`, `empty`, `unrecoverable`, or `error`. A source
+whose raw PDF is still on the PVC is re-ingested from local bytes with no
+network; a missing arXiv PDF is re-downloaded from `https://arxiv.org/pdf/<id>`
+and re-staged before ingest. Sources it cannot recover (`upload://` URIs, paths
 outside the raw root, or a missing non-arXiv filename) are reported
-`unrecoverable` and never fabricated. `--diagnose` classifies each failure
+`unrecoverable` and never fabricated. A document that extracts but still yields
+zero chunks is reported `empty` -- never `healed` -- so it is not counted as an
+add and a second run is a no-op. `--diagnose` classifies each failure
 (`secret-rejected` vs `other`) and prints the traceback; `--source-id`
 (repeatable) and `--limit` narrow a staged rollout. A second `--apply` adds
 nothing and makes no network calls. A re-download whose digest differs from the
 originally registered source still updates that same `source_id` in place
 (digest aligned before re-ingest) so no duplicate source is created.
+
+Old-style arXiv ids (e.g. `hep-th/9901001`) are staged by the sidecar under
+their bare tail (`9901001.pdf`), which is not itself a fetchable id (bare
+`arxiv.org/pdf/9901001` 404s). The healer recovers the full id from the stored
+`metadata` (`arxiv_id` / `source_url`); if neither is present it reports the
+source `unrecoverable` rather than guessing.
 
 > The `corpus-rag-reingest` Job pins `ffbbbf38...`, a release that predates
 > `reingest_missing_chunks.py`. Re-pin the Job to the merge SHA once the image

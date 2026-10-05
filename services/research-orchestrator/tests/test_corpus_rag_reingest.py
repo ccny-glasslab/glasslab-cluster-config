@@ -5,7 +5,9 @@ regular arXiv sidecar skips existing sources, so it can never heal them. This
 module re-ingests the chunk-less sources from local raw bytes when the staged
 PDF still exists, and re-fetches it from arXiv when the staged ``file://`` path
 is missing. It must never fabricate chunks for a source it cannot recover, and
-a second applied run must add nothing and touch the network not at all.
+a second applied run must add nothing and touch the network not at all. A
+document that extracts but still yields zero chunks is reported ``empty``, not
+``healed``, so an operator is never misled and the run stays idempotent.
 """
 
 from __future__ import annotations
@@ -31,6 +33,13 @@ from app.storage import SqliteStore
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _make_tiny_pdf() -> bytes:
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), 'Hi', fontsize=20)
+    return doc.tobytes()
 
 
 def _make_pdf(marker: str = 'Resampling Methods for Evaluation') -> bytes:
@@ -291,6 +300,10 @@ def test_parse_arxiv_id_modern_and_old() -> None:
     assert parse_arxiv_id('math.GT_0309136v1') == 'math.GT/0309136v1'
     assert parse_arxiv_id('mystery') is None
     assert parse_arxiv_id('notes.pdf') is None
+    # The arXiv sidecar stages old-style ids by their bare tail (no archive
+    # prefix), which is NOT itself a fetchable id -- recovery needs metadata.
+    assert parse_arxiv_id('9901001') is None
+    assert parse_arxiv_id('0309136v1') is None
 
 
 def test_arxiv_pdf_url() -> None:
@@ -456,4 +469,125 @@ def test_other_failures_are_classified_as_other(
     assert report.errors == 1
     assert report.secret_rejected == 0
     assert report.sources[0].failure_class == 'other'
+
+
+def test_zero_chunk_local_source_is_empty_not_healed(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    raw_root = tmp_path / 'raw'
+    raw_root.mkdir()
+    tiny = _make_tiny_pdf()
+    staged = raw_root / '2401.00021v1.pdf'
+    staged.write_bytes(tiny)
+    _add_source(store, source_id='a', uri=_file_uri(staged), digest=_sha(tiny))
+
+    def downloader(url: str) -> bytes:
+        raise AssertionError('a present local file must not be fetched')
+
+    first = reingest_missing_chunks(
+        store, raw_root=raw_root, apply=True, downloader=downloader
+    )
+    assert first.sources[0].status == 'empty'
+    assert first.empty == 1
+    assert first.added == 0
+    assert first.added_chunks == 0
+    assert first.network_fetches == 0
+    assert store.list_rag_chunks(source_ids=['a']) == []
+
+    second = reingest_missing_chunks(
+        store, raw_root=raw_root, apply=True, downloader=downloader
+    )
+    assert second.sources[0].status == 'empty'
+    assert second.added == 0
+    assert second.network_fetches == 0
+
+
+def test_zero_chunk_fetch_keeps_staged_file_and_never_refetches(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    raw_root = tmp_path / 'raw'
+    tiny = _make_tiny_pdf()
+    _add_source(
+        store,
+        source_id='a',
+        uri=_file_uri(raw_root / '2401.00022v1.pdf'),
+        digest=_sha(tiny),
+    )
+    urls: list[str] = []
+
+    def downloader(url: str) -> bytes:
+        urls.append(url)
+        return tiny
+
+    first = reingest_missing_chunks(
+        store, raw_root=raw_root, apply=True, downloader=downloader
+    )
+    assert first.sources[0].status == 'empty'
+    assert first.added == 0
+    assert first.network_fetches == 1
+    assert (raw_root / '2401.00022v1.pdf').read_bytes() == tiny
+
+    second = reingest_missing_chunks(
+        store, raw_root=raw_root, apply=True, downloader=downloader
+    )
+    assert second.sources[0].status == 'empty'
+    assert second.network_fetches == 0
+    assert urls == ['https://arxiv.org/pdf/2401.00022v1']
+
+
+def test_missing_old_style_file_recovers_id_from_metadata(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    raw_root = tmp_path / 'raw'
+    pdf = _make_pdf()
+    store.save_knowledge_source(
+        KnowledgeSource(
+            source_id='a',
+            source_type=SourceType.PAPER,
+            canonical_uri=_file_uri(raw_root / '9901001.pdf'),
+            digest=_sha(pdf),
+            title='Old-style paper',
+            metadata={
+                'arxiv_id': 'http://arxiv.org/abs/hep-th/9901001',
+                'source_url': 'https://arxiv.org/pdf/hep-th/9901001',
+            },
+        )
+    )
+    urls: list[str] = []
+
+    def downloader(url: str) -> bytes:
+        urls.append(url)
+        return pdf
+
+    report = reingest_missing_chunks(
+        store, raw_root=raw_root, apply=True, downloader=downloader
+    )
+
+    assert report.sources[0].status == 'healed-fetch'
+    assert urls == ['https://arxiv.org/pdf/hep-th/9901001']
+    assert (raw_root / '9901001.pdf').read_bytes() == pdf
+    assert store.list_rag_chunks(source_ids=['a'])
+
+
+def test_missing_old_style_file_without_metadata_is_unrecoverable(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    raw_root = tmp_path / 'raw'
+    _add_source(
+        store,
+        source_id='a',
+        uri=_file_uri(raw_root / '9901001.pdf'),
+        digest=_sha(b'z'),
+    )
+
+    def downloader(url: str) -> bytes:
+        raise AssertionError('no recoverable id means no fetch')
+
+    report = reingest_missing_chunks(
+        store, raw_root=raw_root, apply=True, downloader=downloader
+    )
+
+    assert report.unrecoverable == 1
+    assert report.added == 0
+    assert report.sources[0].status == 'unrecoverable'
 
