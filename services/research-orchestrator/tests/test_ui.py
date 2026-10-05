@@ -2415,6 +2415,109 @@ def test_ui_notebook_preview_malformed_json_is_graceful(
     assert '{not valid json' not in response.text
 
 
+def test_ui_notebook_preview_deeply_nested_json_is_graceful(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='nest a notebook'))
+    # Valid JSON, but nested past the interpreter's recursion limit, so
+    # ``json.loads`` raises RecursionError rather than JSONDecodeError.
+    deeply_nested = ('{"x":' * 20000 + '1' + '}' * 20000).encode()
+    engine.store.save_artifact(
+        _write_artifact(
+            settings,
+            run.run_id,
+            'reports/deep.ipynb',
+            deeply_nested,
+            artifact_type='analysis-notebook',
+        )
+    )
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'run': run.run_id, 'ref': 'reports/deep.ipynb'},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert 'Notebook unavailable' in response.text
+    assert 'Traceback' not in response.text
+
+
+def test_ui_artifacts_zip_rejects_unsafe_run_id(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='guard the filename'))
+    engine.store.save_artifact(
+        _write_report(settings, run.run_id, b'# Findings\n')
+    )
+    # A run whose id carries a Content-Disposition injection must be refused,
+    # not merely absent from the store; seed one so the header path is reached.
+    unsafe_run_id = 'abc"; x="'
+    engine.store.create_run(
+        run.model_copy(update={'run_id': unsafe_run_id}),
+        one_active_run=False,
+    )
+    engine.store.save_artifact(
+        _write_artifact(settings, unsafe_run_id, REPORT_REF, b'# Findings\n')
+    )
+
+    with _client(settings, engine) as client:
+        unsafe = client.get(
+            '/ui/artifacts.zip',
+            params={'run': unsafe_run_id},
+            headers=AUTH_HEADERS,
+        )
+        valid = client.get(
+            '/ui/artifacts.zip',
+            params={'run': run.run_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert 400 <= unsafe.status_code < 500
+    assert 'Artifact bundle unavailable' in unsafe.text
+    assert 'Traceback' not in unsafe.text
+    assert '<script' not in unsafe.text
+    assert 'x="' not in unsafe.text
+    assert 'x=' not in unsafe.headers.get('content-disposition', '')
+    assert 'filename="abc' not in unsafe.text
+
+    assert valid.status_code == 200
+    assert valid.headers['content-type'].startswith('application/zip')
+    assert valid.headers['content-disposition'] == (
+        f'attachment; filename="glasslab-{run.run_id[:12]}-artifacts.zip"'
+    )
+
+
+def test_ui_artifacts_zip_unreadable_artifact_is_not_500(
+    orchestrator_bundle,
+    monkeypatch,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='unreadable artifact'))
+
+    def _raise_permission_error(**_kwargs):
+        raise PermissionError('shared-mount path leaked /var/lib/glasslab')
+
+    monkeypatch.setattr(
+        'app.ui.build_run_artifact_bundle',
+        _raise_permission_error,
+    )
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/artifacts.zip',
+            params={'run': run.run_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 409
+    assert 'Artifact bundle unavailable' in response.text
+    assert 'Traceback' not in response.text
+    assert '<script' not in response.text
+    assert '/var/lib/glasslab' not in response.text
+
+
 def test_ui_csp_has_no_img_src(orchestrator_bundle) -> None:
     settings, _, _, _, engine = orchestrator_bundle
 

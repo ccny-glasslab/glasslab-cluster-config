@@ -166,6 +166,11 @@ _CITATION_BADGES: dict[CitationClass, str] = {
 # or out-of-range ``[n]`` stays escaped literal text.
 _CITATION_ORDINAL_RE = re.compile(r'\[(\d{1,3})\]')
 
+# A run id arrives as a raw query parameter and is interpolated into the
+# artifact-zip download filename, so only this strict form is accepted; a
+# filename built from it can never break the quoted Content-Disposition value.
+_RUN_ID_PATTERN = re.compile(r'[A-Za-z0-9._-]{1,128}')
+
 # The Sources tab strip: (radio id, label text, panel id). The panel id is
 # derived from the radio id suffix so the CSS sibling selectors, the labels,
 # and the tests all agree on one naming scheme.
@@ -1087,7 +1092,7 @@ def _render_notebook_body(text: str) -> str:
     """
     try:
         notebook = json.loads(text)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         return (
             '<p class="muted">Notebook unavailable: the file is not valid '
             'JSON.</p>'
@@ -1713,6 +1718,13 @@ def register_ui_routes(
         # verification, same cap, same source-archive toggle); only the
         # response shape differs.
         nonce = secrets.token_urlsafe(16)
+        if _RUN_ID_PATTERN.fullmatch(run) is None:
+            return _render_ui_error(
+                'Artifact bundle unavailable',
+                'No run exists with that id.',
+                404,
+                nonce,
+            )
         try:
             engine.store.get_run(run)
         except RecordNotFound:
@@ -1731,9 +1743,11 @@ def register_ui_routes(
                 maximum_bytes=settings.maximum_discord_artifact_bundle_bytes,
                 include_source=include_source,
             )
-        except ArtifactDeliveryError:
-            # The exception can name artifact URIs, so the page reports only
-            # that nothing verified is currently available.
+        except (ArtifactDeliveryError, OSError):
+            # A broken bundle or an unreadable artifact file on the shared
+            # mount is reported the same way; the exception can name artifact
+            # URIs or store paths, so the page reports only that nothing
+            # verified is currently available.
             return _render_ui_error(
                 'Artifact bundle unavailable',
                 'No digest-verified artifacts are currently available for '
@@ -1741,12 +1755,13 @@ def register_ui_routes(
                 409,
                 nonce,
             )
+        download_name = f'glasslab-{run[:12]}-artifacts.zip'
         return Response(
             content=bundle.content,
             media_type='application/zip',
             headers={
                 'Content-Disposition': (
-                    f'attachment; filename="{bundle.filename}"'
+                    f'attachment; filename="{download_name}"'
                 ),
                 'X-Content-Type-Options': 'nosniff',
                 'Referrer-Policy': 'no-referrer',
