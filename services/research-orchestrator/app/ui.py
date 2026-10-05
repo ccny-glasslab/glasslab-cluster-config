@@ -1,7 +1,9 @@
 """Server-rendered corpus and reports notebook for the operator UI.
 
 Operator-gated routes: ``GET /ui/`` renders a no-JavaScript, three-column
-notebook over durable orchestrator state; ``POST /ui/sources/upload`` ingests
+notebook over durable orchestrator state; ``GET /ui/artifacts.zip`` exports
+the selected run's digest-verified artifact bundle as a zip attachment;
+``POST /ui/sources/upload`` ingests
 one operator-supplied PDF from the Sources column into the corpus; and the
 zero-JS operator control forms ``POST /ui/runs``, ``POST
 /ui/runs/{run_id}/control``, and ``POST /ui/actions/{action_id}/decide``
@@ -84,7 +86,12 @@ from fastapi import Depends, FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
-from .artifact_delivery import ArtifactDeliveryError, VerifiedArtifactReader
+from .artifact_delivery import (
+    ArtifactBundle,
+    ArtifactDeliveryError,
+    VerifiedArtifactReader,
+    build_run_artifact_bundle,
+)
 from .corpus_rag.pipeline import ingest_document, stage_raw_pdf
 from .citation_locator import (
     CitationClass,
@@ -1329,6 +1336,12 @@ def _render_run_view(
     return (
         preview
         + '<h3>Run files</h3>'
+        + '<p><a href="'
+        + _escape(
+            '/ui/artifacts.zip?' + urlencode({'run': selection.run_id or ''})
+        )
+        + '">Download bundle</a> '
+        + '<span class="muted">(digest-verified zip)</span></p>'
         + _render_artifact_tree(refs, selection)
     )
 
@@ -1653,7 +1666,9 @@ def register_ui_routes(
     rather than imported; the UI module never reads the operator token.
     ``chat_service`` is likewise injected by the host -- a
     :class:`~app.corpus_rag.chat.CorpusChatService`, or ``None`` when the chat
-    is disabled -- and this module only calls its ``answer`` method.
+    is disabled -- and this module only calls its ``answer`` method. The
+    ``GET /ui/artifacts.zip`` export lives here too so it inherits the same
+    injected ``require_operator`` gate.
     """
 
     @app.api_route(
@@ -1684,6 +1699,58 @@ def register_ui_routes(
         return HTMLResponse(
             content=render_ui_page(engine, settings, request, chat_service),
             headers=_ui_headers(request.nonce),
+        )
+
+    @app.get('/ui/artifacts.zip')
+    def export_run_artifacts_zip(
+        run: str = Query(default=''),
+        include_source: bool = Query(default=False),
+        _: None = Depends(require_operator),
+    ) -> Response:
+        # A sync handler: FastAPI runs it in the threadpool, so hashing and
+        # zipping a run's artifacts never blocks the event loop. The bundle is
+        # built exactly as Discord's export builds it (same digest
+        # verification, same cap, same source-archive toggle); only the
+        # response shape differs.
+        nonce = secrets.token_urlsafe(16)
+        try:
+            engine.store.get_run(run)
+        except RecordNotFound:
+            return _render_ui_error(
+                'Artifact bundle unavailable',
+                'No run exists with that id.',
+                404,
+                nonce,
+            )
+        try:
+            bundle: ArtifactBundle = build_run_artifact_bundle(
+                run_id=run,
+                artifacts=engine.store.list_artifacts(run),
+                jobs=engine.store.list_jobs(run),
+                shared_mount_root=engine.settings.shared_mount_root,
+                maximum_bytes=settings.maximum_discord_artifact_bundle_bytes,
+                include_source=include_source,
+            )
+        except ArtifactDeliveryError:
+            # The exception can name artifact URIs, so the page reports only
+            # that nothing verified is currently available.
+            return _render_ui_error(
+                'Artifact bundle unavailable',
+                'No digest-verified artifacts are currently available for '
+                'this run.',
+                409,
+                nonce,
+            )
+        return Response(
+            content=bundle.content,
+            media_type='application/zip',
+            headers={
+                'Content-Disposition': (
+                    f'attachment; filename="{bundle.filename}"'
+                ),
+                'X-Content-Type-Options': 'nosniff',
+                'Referrer-Policy': 'no-referrer',
+            },
         )
 
     @app.post('/ui/chat')
