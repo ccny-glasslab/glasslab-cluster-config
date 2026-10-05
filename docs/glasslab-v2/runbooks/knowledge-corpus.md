@@ -226,13 +226,27 @@ raw PDF is still on the PVC is re-ingested from local bytes with no network; a
 missing arXiv PDF is re-downloaded from `https://arxiv.org/pdf/<id>` and
 re-staged before ingest. Sources it cannot recover (`upload://` URIs, paths
 outside the raw root, or a missing non-arXiv filename) are reported
-`unrecoverable` and never fabricated. `--diagnose` prints the traceback for
-each `error`; `--source-id` (repeatable) and `--limit` narrow a staged rollout.
-A second `--apply` adds nothing and makes no network calls.
+`unrecoverable` and never fabricated. `--diagnose` classifies each failure
+(`secret-rejected` vs `other`) and prints the traceback; `--source-id`
+(repeatable) and `--limit` narrow a staged rollout. A second `--apply` adds
+nothing and makes no network calls. A re-download whose digest differs from the
+originally registered source still updates that same `source_id` in place
+(digest aligned before re-ingest) so no duplicate source is created.
 
 > The `corpus-rag-reingest` Job pins `ffbbbf38...`, a release that predates
 > `reingest_missing_chunks.py`. Re-pin the Job to the merge SHA once the image
 > containing the script is published; until then the Job is not runnable.
+
+### Known residual class: `secret-rejected`
+
+The fail-closed content scanner in `app/knowledge_manager.py` rejects extracted
+text matching `re.compile(r'token["\']?\s*[:=]\s*\S+', re.IGNORECASE)`. That
+pattern false-positives on legitimate ML prose such as `token = [MASK]` or
+`token: the`, so some arXiv sources stay chunk-less even after a correct
+re-ingest. The healer reports these separately (`failure_class:
+"secret-rejected"`, counted as `secret_rejected`). Do **not** weaken the
+scanner to force them through; open a separate security-reviewed issue to narrow
+the pattern if the false-positive rate justifies it.
 
 ## Scanned books (OCR)
 
