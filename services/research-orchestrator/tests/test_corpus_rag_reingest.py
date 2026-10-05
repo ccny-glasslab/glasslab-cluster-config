@@ -24,6 +24,7 @@ from app.corpus_rag.reingest import (
     reingest_missing_chunks,
     scan_missing_chunk_sources,
 )
+from app.knowledge_manager import KnowledgeError
 from app.schemas import KnowledgeSource, SourceType
 from app.storage import SqliteStore
 
@@ -332,3 +333,127 @@ def test_sleep_is_invoked_between_network_fetches(
 
     assert report.added == 2
     assert sleeps == [3.0]
+
+
+def test_staged_pdf_is_not_double_suffixed(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    raw_root = tmp_path / 'raw'
+    pdf = _make_pdf()
+    _add_source(
+        store,
+        source_id='a',
+        uri=_file_uri(raw_root / '2401.00016v1.pdf'),
+        digest=_sha(pdf),
+    )
+
+    reingest_missing_chunks(
+        store, raw_root=raw_root, apply=True, downloader=lambda url: pdf
+    )
+
+    assert (raw_root / '2401.00016v1.pdf').is_file()
+    assert not (raw_root / '2401.00016v1.pdf.pdf').exists()
+
+
+def test_digest_change_reuses_the_existing_source_id(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    raw_root = tmp_path / 'raw'
+    name = '2401.00017v1'
+    pdf = _make_pdf()
+    _add_source(
+        store,
+        source_id='a',
+        uri=_file_uri(raw_root / f'{name}.pdf'),
+        digest=_sha(b'original bytes that are now gone'),
+    )
+
+    report = reingest_missing_chunks(
+        store, raw_root=raw_root, apply=True, downloader=lambda url: pdf
+    )
+
+    assert report.sources[0].status == 'healed-fetch'
+    sources = store.list_knowledge_sources()
+    assert len(sources) == 1
+    assert sources[0].source_id == 'a'
+    assert sources[0].digest == _sha(pdf)
+    assert store.list_rag_chunks(source_ids=['a'])
+
+
+def test_reingest_replaces_existing_sections_without_pkey_collision(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    raw_root = tmp_path / 'raw'
+    raw_root.mkdir()
+    pdf = _make_pdf()
+    staged = raw_root / '2401.00018v1.pdf'
+    staged.write_bytes(pdf)
+    _add_source(store, source_id='a', uri=_file_uri(staged), digest=_sha(pdf))
+
+    reingest_missing_chunks(store, raw_root=raw_root, apply=True)
+    doc_id = store.get_rag_document('a').doc_id
+    sections_before = store.list_rag_sections(doc_id)
+    assert sections_before
+
+    # Simulate a partial ingest: sections survive while chunks vanish, putting
+    # the source back into the chunk-less scan with its section rows still there.
+    store.replace_rag_chunks('a', [])
+    assert store.list_rag_chunks(source_ids=['a']) == []
+
+    report = reingest_missing_chunks(store, raw_root=raw_root, apply=True)
+
+    assert report.added == 1
+    assert store.list_rag_chunks(source_ids=['a'])
+    assert len(store.list_rag_sections(doc_id)) == len(sections_before)
+
+
+def test_secret_rejection_is_classified(
+    store: SqliteStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    raw_root = tmp_path / 'raw'
+    raw_root.mkdir()
+    pdf = _make_pdf()
+    staged = raw_root / '2401.00019v1.pdf'
+    staged.write_bytes(pdf)
+    _add_source(store, source_id='a', uri=_file_uri(staged), digest=_sha(pdf))
+
+    def reject(**kwargs: object) -> None:
+        raise KnowledgeError("document matches secret pattern 'token[..]'")
+
+    monkeypatch.setattr(reingest, 'ingest_document', reject)
+
+    report = reingest_missing_chunks(
+        store, raw_root=raw_root, apply=True, diagnose=True
+    )
+
+    assert report.errors == 1
+    assert report.secret_rejected == 1
+    assert report.sources[0].failure_class == 'secret-rejected'
+    assert 'secret-rejected' in capsys.readouterr().err
+
+
+def test_other_failures_are_classified_as_other(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    raw_root = tmp_path / 'raw'
+    _add_source(
+        store,
+        source_id='a',
+        uri=_file_uri(raw_root / '2401.00020v1.pdf'),
+        digest=_sha(b'z'),
+    )
+
+    def downloader(url: str) -> bytes:
+        raise RuntimeError('boom')
+
+    report = reingest_missing_chunks(
+        store, raw_root=raw_root, apply=True, downloader=downloader
+    )
+
+    assert report.errors == 1
+    assert report.secret_rejected == 0
+    assert report.sources[0].failure_class == 'other'
+
