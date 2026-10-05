@@ -191,6 +191,16 @@ class Settings(BaseSettings):
     ui_chat_rerank_enabled: bool = False
     ui_pdf_enabled: bool = True
     ui_upload_enabled: bool = True
+    # Viewer-origin isolation (#620). The page and the cited-source PDF iframe
+    # used to share one origin, and the single loopback proxy injects the
+    # operator token on every path, so a viewer-side script could fetch
+    # ``/runs``. The deployment serves the page on ``ui_origin`` (19090) and
+    # the viewer on a second loopback listener ``ui_pdf_viewer_origin``
+    # (19091) whose proxy forwards only ``/ui/pdf/``. Both are absolute
+    # origins when set; unset keeps the pre-#620 single-origin rendering
+    # (relative iframe, ``'self'``-only CSP).
+    ui_origin: str | None = None
+    ui_pdf_viewer_origin: str | None = None
     rag_llm_enabled: bool = False
     # OpenAI-compatible endpoint for /ui chat synthesis. The deployment points
     # at OpenCode's hosted gateway; the API key is read at call time from
