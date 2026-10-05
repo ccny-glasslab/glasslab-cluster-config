@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: rag-backfill
+  name: corpus-rag-reingest
   namespace: glasslab-v2
 spec:
   backoffLimit: 1
@@ -11,7 +11,7 @@ spec:
       labels:
         # Admitted by the glasslab-postgres-ingress allow-list; without this
         # label the Job cannot reach Postgres on 5432.
-        app.kubernetes.io/name: rag-backfill
+        app.kubernetes.io/name: corpus-rag-reingest
     spec:
       serviceAccountName: glasslab-gpu-runner
       automountServiceAccountToken: false
@@ -24,9 +24,12 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: rag-backfill
-          # Orchestrator image: app/ and scripts/ ship in-image. Pin this to a
-          # release that contains scripts/corpus_rag/backfill_rag_from_knowledge.py.
+        - name: corpus-rag-reingest
+          # CHICKEN/EGG: this Job runs scripts/corpus_rag/reingest_missing_chunks.py,
+          # which exists only in an image built AFTER the PR that adds the script.
+          # ffbbbf38 is the current published release and does NOT yet contain it,
+          # so this Job is intentionally NOT runnable until this pin is moved to
+          # the merge SHA once that image is published. Do not run it before then.
           image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:ffbbbf38b61c72d4623415eab45da8a168fb3b05
           imagePullPolicy: IfNotPresent
           workingDir: /app
@@ -34,9 +37,9 @@ spec:
             - /bin/sh
             - -c
             - >
-              python /app/scripts/corpus_rag/backfill_rag_from_knowledge.py
+              python /app/scripts/corpus_rag/reingest_missing_chunks.py
               --apply
-              --corpus live-knowledge
+              --raw-root /mnt/artifacts/research-orchestrator/rag/raw
           env:
             - name: GLASSLAB_ORCHESTRATOR_STORE_BACKEND
               value: postgres
@@ -61,8 +64,13 @@ spec:
               memory: 512Mi
               cpu: "250m"
           volumeMounts:
+            - name: artifacts
+              mountPath: /mnt/artifacts
             - name: temporary
               mountPath: /tmp
       volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: glasslab-shared-artifacts
         - name: temporary
           emptyDir: {}

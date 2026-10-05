@@ -32,6 +32,7 @@ ARXIV_SYNC_PATH = JOBS_DIR / 'corpus-arxiv-sync.yaml'
 RAG_BACKFILL_PATH = JOBS_DIR / 'rag-backfill.yaml'
 RAG_EMBED_PATH = JOBS_DIR / 'corpus-rag-embed.yaml'
 GPU_EMBED_PATH = JOBS_DIR / 'corpus-gpu-embed.yaml'
+REINGEST_PATH = JOBS_DIR / 'corpus-rag-reingest.yaml'
 POSTGRES_POLICY_PATH = (
     REPO_ROOT / 'kubeadm' / 'glasslab-v2' / 'postgres' / '50-network-policy.yaml'
 )
@@ -45,6 +46,10 @@ EMBED_SCRIPT_PATH = (
 )
 
 _PINNED_IMAGE_RE = re.compile(r'(@sha256:[0-9a-f]{64}|:[0-9a-f]{40})$')
+
+# Published release shipping backfill.py; the re-ingest script needs a newer
+# image, so its Job must be re-pinned to the merge SHA before it is runnable.
+BACKFILL_RELEASE_SHA = 'ffbbbf38b61c72d4623415eab45da8a168fb3b05'
 
 
 def _load(path: Path) -> list[dict[str, Any]]:
@@ -215,6 +220,42 @@ def test_rag_backfill_job_uses_postgres_and_pins_the_release_image() -> None:
     assert _PINNED_IMAGE_RE.search(container['image']), container['image']
 
 
+def test_corpus_rag_reingest_job_heals_missing_chunks_from_the_pvc() -> None:
+    docs = _load(REINGEST_PATH)
+    job = next(doc for doc in docs if doc.get('kind') == 'Job')
+    container = _container(job)
+    command = _command_text(container)
+    env = _env(container)
+
+    assert 'reingest_missing_chunks.py' in command
+    assert '--apply' in command
+    assert '--raw-root' in command
+    assert RAW_ROOT in command
+    assert '--store' not in command
+
+    assert _env_value(env, 'GLASSLAB_ORCHESTRATOR_STORE_BACKEND') == 'postgres'
+    assert _env_value(
+        env, 'GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN'
+    ) == {'secretKeyRef': {'name': DSN_SECRET, 'key': DSN_KEY}}
+
+    pod_spec = _pod_spec(job)
+    assert pod_spec.get('automountServiceAccountToken') is False
+    assert pod_spec.get('serviceAccountName')
+    assert pod_spec['securityContext']['fsGroup'] == 10001
+    assert container['securityContext']['runAsUser'] == 10001
+    assert container['securityContext']['runAsGroup'] == 10001
+
+    mount_paths = {mount['mountPath'] for mount in container['volumeMounts']}
+    assert any(RAW_ROOT.startswith(path) for path in mount_paths)
+    claims = {
+        volume.get('persistentVolumeClaim', {}).get('claimName')
+        for volume in pod_spec['volumes']
+    }
+    assert PVC_NAME in claims
+
+    assert f':{BACKFILL_RELEASE_SHA}' in container['image'], container['image']
+
+
 def test_corpus_job_pods_are_admitted_by_the_postgres_ingress_policy() -> None:
     allowed = _postgres_ingress_allowed_names()
     for path in (
@@ -223,6 +264,7 @@ def test_corpus_job_pods_are_admitted_by_the_postgres_ingress_policy() -> None:
         RAG_BACKFILL_PATH,
         RAG_EMBED_PATH,
         GPU_EMBED_PATH,
+        REINGEST_PATH,
     ):
         doc = _load(path)[0]
         name = _pod_template_labels(doc).get('app.kubernetes.io/name')
