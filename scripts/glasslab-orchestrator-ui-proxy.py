@@ -51,6 +51,11 @@ Security properties
   listener scoped to the viewer paths, so a script running on the viewer
   origin cannot reach ``/runs`` on the operator API; a request outside the
   allowlist is refused with ``403`` before the token is injected.
+* **Configurable upstream timeout.**  ``--upstream-timeout`` (default 120
+  seconds) bounds one upstream socket operation.  The default comfortably
+  covers a synchronous ``POST /ui/chat`` whose grounded synthesis alone may
+  take up to 60 seconds; a shorter hardcoded timeout surfaced as a spurious
+  ``502`` while the orchestrator went on to complete the request.
 
 Only the Python standard library is used.
 """
@@ -61,6 +66,7 @@ import argparse
 import http.client
 import http.server
 import ipaddress
+import math
 import os
 import re
 import socket
@@ -74,6 +80,7 @@ DEFAULT_TOKEN_ENV = 'GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN'
 DEFAULT_HEADER = 'X-Glasslab-Operator-Token'
 DEFAULT_ALLOW_METHODS = 'GET,HEAD'
 DEFAULT_ALLOW_PATHS = ''
+DEFAULT_UPSTREAM_TIMEOUT = 120.0
 
 STREAM_BLOCK = 65536
 MAX_REQUEST_BODY = 64 * 1024 * 1024
@@ -124,6 +131,7 @@ class ProxyConfig:
     header_name: str
     allow_methods: frozenset[str]
     allow_paths: frozenset[str]
+    upstream_timeout: float
     token: str = field(repr=False)
 
 
@@ -246,6 +254,21 @@ def parse_allow_paths(value: str) -> frozenset[str]:
             )
         paths.add(prefix)
     return frozenset(paths)
+
+
+def parse_upstream_timeout(value: str | float) -> float:
+    """Parse a positive, finite upstream socket timeout in seconds."""
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ProxyConfigError(
+            f'upstream-timeout must be a number: {value!r}'
+        ) from exc
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ProxyConfigError(
+            f'upstream-timeout must be a positive number of seconds: {value!r}'
+        )
+    return timeout
 
 
 def path_allowlisted(request_target: str, allow_paths: frozenset[str]) -> bool:
@@ -401,6 +424,7 @@ def parse_config(
     validate_header_name(args.header)
     allow_methods = parse_allow_methods(args.allow_methods)
     allow_paths = parse_allow_paths(args.allow_paths)
+    upstream_timeout = parse_upstream_timeout(args.upstream_timeout)
     token = resolve_token(args.token_env, env)
     return ProxyConfig(
         listen_host=listen_host,
@@ -411,6 +435,7 @@ def parse_config(
         header_name=args.header,
         allow_methods=allow_methods,
         allow_paths=allow_paths,
+        upstream_timeout=upstream_timeout,
         token=token,
     )
 
@@ -449,6 +474,14 @@ def _build_parser() -> argparse.ArgumentParser:
             'comma-separated request-path prefixes to forward; empty (the '
             'default) forwards every path, /ui/pdf/ scopes a viewer-origin '
             'listener to the PDF viewer routes'
+        ),
+    )
+    parser.add_argument(
+        '--upstream-timeout',
+        default=DEFAULT_UPSTREAM_TIMEOUT,
+        help=(
+            'upstream socket timeout in seconds (default '
+            f'{DEFAULT_UPSTREAM_TIMEOUT:g}; must be > 0)'
         ),
     )
     return parser
@@ -624,10 +657,14 @@ class ProxyRequestHandler(http.server.BaseHTTPRequestHandler):
     def _open_upstream(self, config: ProxyConfig) -> http.client.HTTPConnection:
         if config.upstream_scheme == 'https':
             return http.client.HTTPSConnection(
-                config.upstream_host, config.upstream_port, timeout=30
+                config.upstream_host,
+                config.upstream_port,
+                timeout=config.upstream_timeout,
             )
         return http.client.HTTPConnection(
-            config.upstream_host, config.upstream_port, timeout=30
+            config.upstream_host,
+            config.upstream_port,
+            timeout=config.upstream_timeout,
         )
 
     def _read_request_body(self) -> bytes | None:

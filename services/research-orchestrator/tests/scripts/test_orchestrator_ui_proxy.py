@@ -20,6 +20,9 @@ Covered contracts:
 9. with ``--allow-paths``, only request paths under an allowed prefix reach
    the upstream; everything else is a ``403`` and never appears on the
    upstream side.  The default (no flag) forwards every path unchanged.
+10. ``--upstream-timeout`` sets the upstream socket timeout (default 120
+    seconds, so the 60-second ``/ui/chat`` synthesis is not cut off) and
+    refuses non-positive or non-numeric values at parse time.
 """
 
 from __future__ import annotations
@@ -466,6 +469,19 @@ class ProxyConfigTests(unittest.TestCase):
         for value in ('ui/pdf/', '/ui/../pdf/', '/ui/pdf/\x01', '/ui/pdf/,'):
             with self.assertRaises(PROXY.ProxyConfigError, msg=value):
                 self._config(['--allow-paths', value])
+
+    def test_default_upstream_timeout_is_120_seconds(self) -> None:
+        config = self._config([])
+        self.assertEqual(120.0, config.upstream_timeout)
+
+    def test_upstream_timeout_option_is_parsed(self) -> None:
+        config = self._config(['--upstream-timeout', '5'])
+        self.assertEqual(5.0, config.upstream_timeout)
+
+    def test_invalid_upstream_timeout_is_refused(self) -> None:
+        for value in ('0', '-1', 'abc', 'nan', 'inf'):
+            with self.assertRaises(PROXY.ProxyConfigError, msg=value):
+                self._config(['--upstream-timeout', value])
 
     def test_invalid_method_name_is_refused(self) -> None:
         with self.assertRaises(PROXY.ProxyConfigError):
