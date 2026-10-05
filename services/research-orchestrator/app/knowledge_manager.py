@@ -51,6 +51,7 @@ from .schemas import (
     utc_now,
 )
 from .research_store import ResearchStore
+from .text_tokens import estimate_tokens
 
 
 def verify_excerpt(excerpt: str, chunk_text: str) -> bool:
@@ -135,12 +136,6 @@ def digest_bytes(content: bytes) -> str:
 
 def digest_text(text: str) -> str:
     return sha256(text.encode('utf-8')).hexdigest()
-
-
-def estimate_tokens(text: str) -> int:
-    # The floor of 1 keeps empty or whitespace-only text from counting as
-    # zero-cost in the token budget; a free chunk would never be trimmed.
-    return max(1, len(text.split()))
 
 
 class KnowledgeManager:

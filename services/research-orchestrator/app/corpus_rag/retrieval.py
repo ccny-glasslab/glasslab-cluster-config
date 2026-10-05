@@ -35,6 +35,7 @@ from app.corpus_rag.contracts import (
     RetrievedHit,
 )
 from app.corpus_rag.planner import build_query_plan
+from app.text_tokens import estimate_tokens
 
 if TYPE_CHECKING:
     from app.corpus_rag.vector_index import VectorIndex
@@ -77,11 +78,6 @@ def _is_index_like(text: str) -> bool:
     if digits / length < _INDEX_DIGIT_DENSITY:
         return False
     return text.count(',') / length >= _INDEX_COMMA_DENSITY
-
-
-def _estimate_tokens(text: str) -> int:
-    """Mirror knowledge_manager's word-count floor locally."""
-    return max(1, len(text.split()))
 
 
 def _elapsed_ms(start: float) -> float:
@@ -423,7 +419,7 @@ class HybridRetriever:
         cumulative = 0
         for chunk_id in [*selected, *(record.chunk_id for record in extras)]:
             record = table[chunk_id]
-            cost = _estimate_tokens(record.text)
+            cost = estimate_tokens(record.text)
             if cumulative + cost > options.token_budget:
                 continue
             cumulative += cost
