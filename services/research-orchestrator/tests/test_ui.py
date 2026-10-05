@@ -1072,6 +1072,83 @@ def test_ui_csp_sign_off_directives(orchestrator_bundle) -> None:
     assert 'script-src' not in csp
 
 
+def test_ui_cited_source_iframe_uses_the_viewer_origin(
+    orchestrator_bundle,
+    tmp_path,
+) -> None:
+    """#620: the viewer iframe moves to the path-scoped second loopback origin.
+
+    The page stays on the operator origin; only the PDF viewer is served from
+    the viewer origin, whose proxy listener forwards nothing but ``/ui/pdf/``,
+    so a viewer-side script cannot reach the operator API.
+    """
+    settings, _, _, _, engine = orchestrator_bundle
+    raw_root = tmp_path / 'rag-raw'
+    settings = settings.model_copy(
+        update={
+            'corpus_rag_raw_root': str(raw_root),
+            'ui_origin': 'http://127.0.0.1:19090',
+            'ui_pdf_viewer_origin': 'http://127.0.0.1:19091',
+        }
+    )
+    pdf_path = raw_root / 'resampling.pdf'
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf_path.write_bytes(b'%PDF-1.4\n%%EOF\n')
+    source = _seed_chat_corpus(engine, canonical_uri=pdf_path.as_uri())
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'source': source.source_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    frame = re.search(r'<iframe[^>]*\bsrc="([^"]+)"[^>]*>', response.text)
+    assert frame is not None
+    frame_src = html.unescape(frame.group(1))
+    assert frame_src.startswith(
+        'http://127.0.0.1:19091/ui/pdf/assets/web/highlight.html?'
+    )
+    csp = response.headers['content-security-policy']
+    assert "frame-src 'self' http://127.0.0.1:19091;" in csp
+    assert "default-src 'none'" in csp
+    assert 'script-src' not in csp
+
+
+def test_ui_cited_source_iframe_stays_relative_without_a_viewer_origin(
+    orchestrator_bundle,
+    tmp_path,
+) -> None:
+    """Unconfigured deployments keep the pre-#620 relative iframe and CSP."""
+    settings, _, _, _, engine = orchestrator_bundle
+    raw_root = tmp_path / 'rag-raw'
+    settings = settings.model_copy(
+        update={'corpus_rag_raw_root': str(raw_root)}
+    )
+    pdf_path = raw_root / 'resampling.pdf'
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf_path.write_bytes(b'%PDF-1.4\n%%EOF\n')
+    source = _seed_chat_corpus(engine, canonical_uri=pdf_path.as_uri())
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'source': source.source_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    frame = re.search(r'<iframe[^>]*\bsrc="([^"]+)"[^>]*>', response.text)
+    assert frame is not None
+    assert html.unescape(frame.group(1)).startswith(
+        '/ui/pdf/assets/web/highlight.html?'
+    )
+    csp = response.headers['content-security-policy']
+    assert "frame-src 'self';" in csp
+    assert 'http://127.0.0.1:19091' not in csp
+
+
 def test_ui_chat_form_posts_and_persists_turns(orchestrator_bundle) -> None:
     settings, _, _, _, engine = orchestrator_bundle
     _seed_chat_corpus(engine)

@@ -6,7 +6,8 @@ the research orchestrator's read-only `/ui/` page. It supersedes the
 [Orchestrator Corpus UI (Read-Only)](orchestrator-corpus-ui.md); that runbook
 stays authoritative for the proxy, the three panes, and the citation badges.
 
-Canonical issues: #618 (corpus chat) and #619 (in-browser PDF viewer).
+Canonical issues: #618 (corpus chat), #619 (in-browser PDF viewer), and #620
+(viewer-origin isolation).
 
 ## Infra prerequisite (read this first)
 
@@ -52,6 +53,11 @@ corpus is an expected state, not a failure.
   `127.0.0.1:19090`, and `GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN` is exported
   in the shell that started it. The proxy injects the operator token, so
   browser and `curl` traffic through it does not carry the header itself.
+- The viewer-origin proxy from
+  [Viewer origin](orchestrator-corpus-ui.md#viewer-origin) is running on
+  `127.0.0.1:19091` with `--allow-paths /ui/pdf/`. The deployment pins
+  `GLASSLAB_ORCHESTRATOR_UI_PDF_VIEWER_ORIGIN` to that listener, so without it
+  the cited-source iframe has nothing to load.
 - The orchestrator port-forward from the same runbook is up. The proxy returns
   `502` when the upstream or the SSH forward is down.
 - The deployed image includes the #618 and #619 changes. An image without them
@@ -100,13 +106,14 @@ directives change for this feature:
 | Directive | Base page | With chat and viewer | Why |
 | --- | --- | --- | --- |
 | `form-action` | `'none'` | `'self'` | The chat, run-launch, and gate forms submit same-origin. `'none'` blocks all form submission. |
-| `frame-src` | absent | `'self'` | The PDF viewer is embedded in a same-origin iframe. With `default-src 'none'`, an unlisted frame source is blocked. |
+| `frame-src` | absent | `'self'` plus the configured viewer origin (`http://127.0.0.1:19091` in the deployment) | The PDF viewer iframe is served from the second loopback origin, so `'self'` alone would block it. With `default-src 'none'`, any unlisted frame source is blocked. |
 
 Every other directive is unchanged: the page still has no CDN, no remote
 script, and the per-response nonce is still the only way inline style is
 allowed. The PDF routes carry their own tighter policies: the raw document is
 served under `default-src 'none'; frame-ancestors 'self'`, and the viewer shell
-may load only same-origin scripts, workers, styles, and fonts.
+may load only same-origin scripts, workers, styles, and fonts while admitting
+the configured UI origin in its `frame-ancestors` (#620).
 
 ### CSP sign-off
 
@@ -116,14 +123,16 @@ The page CSP is signed off with exactly two deliberate deltas from
 | Directive | Value | Why `'none'` breaks it |
 | --- | --- | --- |
 | `form-action` | `'self'` | `'none'` blocks the zero-JS chat, launch, and gate forms, so none can ever submit. |
-| `frame-src` | `'self'` | `'none'` (or an unlisted source under `default-src 'none'`) blocks the same-origin cited-source PDF iframe, so selecting a citation shows a blank pane. |
+| `frame-src` | `'self'`, plus the configured viewer origin when viewer-origin isolation is set | `'none'` (or an unlisted source under `default-src 'none'`) blocks the cited-source PDF iframe, so selecting a citation shows a blank pane. |
 
 Everything else stays default-deny. There is deliberately no `script-src`:
 the page itself runs no JavaScript, and the only script that runs is inside
-the first-party same-origin viewer iframe, which carries its own policy. The
-guard test `test_ui_csp_sign_off_directives` pins these four facts, so a
-future edit that loosens the base policy (or strips `form-action`/`frame-src`)
-fails review.
+the first-party viewer iframe, which carries its own policy (its
+`frame-ancestors` names the configured UI origin). The guard tests
+`test_ui_csp_sign_off_directives`,
+`test_ui_cited_source_iframe_uses_the_viewer_origin`, and the viewer-CSP tests
+in `test_ui_pdf_assets.py` pin these facts, so a future edit that loosens the
+base policy (or strips `form-action`/`frame-src`) fails review.
 
 ## The PDF viewer
 
@@ -152,11 +161,17 @@ itself stays zero-JS.
   Compression strips `Content-Length` and re-chunks the body, which makes byte
   ranges unreliable; seeking and page rendering then break. The PDF route
   returns uncompressed bytes.
-- **The iframe is intentionally not sandboxed.** The viewer needs same-origin
-  module workers, blob URLs, and same-origin fetches, and a `sandbox` attribute
-  breaks all three. The content is first-party, same-origin, already constrained
-  by the page CSP, and reachable only through the loopback token-injecting
-  proxy.
+- **The iframe is intentionally not sandboxed; the viewer origin is
+  path-scoped instead.** The viewer needs same-origin module workers, blob
+  URLs, and same-origin fetches, and a `sandbox` attribute breaks all three.
+  The isolation comes from the origin, not the sandbox: the viewer is served
+  from a second loopback origin (19091) whose proxy injects the operator token
+  but forwards only `/ui/pdf/`, so a viewer-side script cannot reach `/runs`.
+  The page CSP admits exactly that origin in `frame-src`, and the viewer CSP
+  names the page origin (`http://127.0.0.1:19090`) in `frame-ancestors` in
+  return; see [Viewer origin](orchestrator-corpus-ui.md#viewer-origin). With
+  both origin settings unset the viewer stays same-origin and both CSPs stay
+  `'self'`-only.
 
 The document route confines reads to the configured raw root: a source must
 resolve to a `file:` URI with a `.pdf` suffix, must not be a symlink, and must
@@ -308,6 +323,8 @@ All orchestrator settings use the `GLASSLAB_ORCHESTRATOR_` prefix unless noted.
 | `GLASSLAB_ORCHESTRATOR_UI_CHAT_ENABLED` | `true` | Gates the chat pane. When `false`, `/ui/` still renders but carries no Ask the corpus section. |
 | `GLASSLAB_ORCHESTRATOR_UI_CHAT_RETRIEVAL_MODE` | `lexical` | Chat retrieval mode: `lexical`, `dense`, or `hybrid`. Non-lexical modes require the dense index to be built (`scripts/corpus_rag/embed_rag_chunks.py`) and degrade to lexical when the backend or index is unavailable. |
 | `GLASSLAB_ORCHESTRATOR_UI_PDF_ENABLED` | `true` | Gates the viewer routes. When `false`, no `/ui/pdf/**` route is registered, so every such path returns `404`. |
+| `GLASSLAB_ORCHESTRATOR_UI_ORIGIN` | unset (code); `http://127.0.0.1:19090` in the deployment | Origin of the operator page. When set, the viewer CSP `frame-ancestors` admits it so the page can frame the viewer on the second origin. |
+| `GLASSLAB_ORCHESTRATOR_UI_PDF_VIEWER_ORIGIN` | unset (code); `http://127.0.0.1:19091` in the deployment | Origin the cited-source viewer iframe is served from. When set, the iframe `src` is absolute and the page CSP `frame-src` admits it; unset keeps the relative single-origin iframe. |
 | `GLASSLAB_ORCHESTRATOR_RAG_LLM_ENABLED` | `false` | Opts the `/ui` chat into grounded LLM synthesis through the hosted OpenCode Go gateway. The deployment sets it to `true`; the key is read from the OpenCode auth file, not config. Every failure falls back to the extractive answer, so the page never depends on the model. |
 | `GLASSLAB_ORCHESTRATOR_RAG_LLM_BASE_URL` | `https://opencode.ai/zen/go/v1` | OpenAI-compatible base URL for chat synthesis; the deployment leaves it at the default. |
 | `GLASSLAB_ORCHESTRATOR_RAG_LLM_MODEL` | `deepseek-v4.1-flash` | Model name sent to the synthesis endpoint. |
@@ -318,7 +335,8 @@ the deployment Secret, not in the ConfigMap or a tracked file.
 
 ## Verification
 
-With the proxy running and the operator token exported:
+With both proxies running (page on 19090, viewer on 19091) and the operator
+token exported:
 
 ```bash
 # Page renders (200) and carries the chat form.
@@ -329,18 +347,22 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST \
   --data-urlencode 'q=resampling stability' \
   'http://127.0.0.1:19090/ui/chat'
 
+# Viewer-origin listener: the document and boxes routes are reachable there.
 # Full document fetch (no Range): expect 200.
 curl -s -o /dev/null -w '%{http_code}\n' \
-  'http://127.0.0.1:19090/ui/pdf/document.pdf?source=<source-id>'
+  'http://127.0.0.1:19091/ui/pdf/document.pdf?source=<source-id>'
 
 # Range fetch: expect 206 and a Content-Range header.
 curl -s -D - -o /dev/null -H 'Range: bytes=0-1023' \
-  'http://127.0.0.1:19090/ui/pdf/document.pdf?source=<source-id>'
+  'http://127.0.0.1:19091/ui/pdf/document.pdf?source=<source-id>'
 
 # Exact-span boxes: expect a JSON object; boxes is empty when nothing matches.
 curl -s \
-  'http://127.0.0.1:19090/ui/pdf/boxes?source=<source-id>&page=12&excerpt=<quoted-text>' \
+  'http://127.0.0.1:19091/ui/pdf/boxes?source=<source-id>&page=12&excerpt=<quoted-text>' \
   | jq
+
+# The viewer listener refuses anything outside /ui/pdf/: expect 403.
+curl -s -o /dev/null -w '%{http_code}\n' 'http://127.0.0.1:19091/runs'
 ```
 
 Open the viewer at `http://127.0.0.1:19090/ui/`, select a corpus source, and
@@ -359,6 +381,7 @@ operator-gated and that the proxy is the intended path.
 | Chat cites a source but the PDF pane is empty | The source is an operator `upload://` row: uploads discard the raw bytes, so the viewer can never serve a PDF for them. Only `file://` PDFs (staged under the raw root) render. See [Feed The Knowledge Corpus](knowledge-corpus.md#making-operator-uploaded-sources-citable-in-ui-backfill). |
 | `405 Method Not Allowed` on submit | The proxy isn't forwarding `POST`. Run it with `--allow-methods GET,HEAD,POST`. |
 | Blank PDF pane | The viewer assets are missing from the image, or `.mjs` is served with the wrong MIME type and the module worker is rejected. Check the browser console and the asset route's `Content-Type`. |
+| Blank PDF pane with a refused viewer request | The 19091 viewer-origin proxy isn't running, or its `--allow-paths` doesn't cover `/ui/pdf/`. Start it with `--allow-paths /ui/pdf/`; see [Viewer origin](orchestrator-corpus-ui.md#viewer-origin). |
 | Viewer loads the first page but will not seek | The PDF route is compressed or not returning ranges. Confirm no compression middleware wraps the PDF routes and that a `Range` request returns `206`. |
 | Page renders but no highlight | The excerpt did not match on that page, or it spans pages. Confirm the raw PDF is staged at the configured raw root and that the page number is right. |
 | `400` from `/ui/pdf/boxes` | `page` is below `1` or past the page count, or `excerpt` is longer than 400 characters. Shorten the excerpt or use a valid 1-based page. |

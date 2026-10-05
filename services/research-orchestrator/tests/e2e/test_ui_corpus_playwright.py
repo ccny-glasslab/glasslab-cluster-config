@@ -1,14 +1,15 @@
 """Real-browser end-to-end QA for the ``/ui`` corpus chat and PDF viewer.
 
 Drives headless Chromium through the loopback operator-token-injecting UI
-proxy (``scripts/glasslab-orchestrator-ui-proxy.py``) against a live uvicorn
+proxies (``scripts/glasslab-orchestrator-ui-proxy.py``) against a live uvicorn
 ``app.main:app`` seeded with a synthetic corpus
 (``scripts/qa/seed_ui_corpus.py``). Nothing here is mocked: the browser talks
-HTTP to the proxy, the proxy injects the operator header, and the app serves
-the chat page, the cited-source iframe, the vendored pdf.js assets, the raw
-PDF bytes, and the live highlight boxes.
+HTTP to the proxies, each proxy injects the operator header, and the app
+serves the chat page, the cited-source iframe, the vendored pdf.js assets,
+the raw PDF bytes, and the live highlight boxes. Two listeners are live: the
+page proxy (every path) and the #620 viewer proxy, scoped to ``/ui/pdf/``.
 
-Assertions (issues #618/#619):
+Assertions (issues #618/#619/#620):
 
 1. the ask form renders and a POST ``/ui/chat`` turn renders an answer whose
    citation is an inline superscript marker with a CSS-only hover preview
@@ -22,7 +23,12 @@ Assertions (issues #618/#619):
    page);
 4. zero CSP-violation console errors across the whole flow;
 5. direct (unauthenticated) requests to the app are 401 for ``/ui/`` and
-   ``/ui/pdf/document.pdf``.
+   ``/ui/pdf/document.pdf``;
+6. the iframe ``src`` is the second viewer origin, a different port than the
+   page origin, and a direct ``/runs`` request there is refused with 403 by
+   the path-scoped proxy while the page proxy still reaches it;
+7. a ``fetch`` from inside the viewer frame to ``<viewer-origin>/runs``
+   returns the scoped proxy's 403 refusal and no operator run data.
 
 Every step captures a screenshot and appends to the action log under
 ``<tempdir>/glasslab-ui-qa/artifacts/`` (see ``ui_qa.ARTIFACTS_DIR``).
@@ -229,6 +235,7 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
         src = iframe.get_attribute('src')
         assert src is not None, 'iframe has no src'
         parsed = urlsplit(src)
+        assert parsed.netloc, f'iframe src must be absolute, got {src!r}'
         assert parsed.path == HIGHLIGHT_PATH, f'iframe path {parsed.path!r}'
         params = parse_qs(parsed.query)
         assert params == {
@@ -236,9 +243,24 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
             'page': [expected_page],
             'excerpt': [manifest['excerpt']],
         }, f'unexpected iframe query: {params}'
+        iframe_origin = f'{parsed.scheme}://{parsed.netloc}'
+        assert iframe_origin == env.viewer_origin, (
+            f'iframe src origin {iframe_origin!r} is not the viewer origin '
+            f'{env.viewer_origin!r}'
+        )
+        page_port = urlsplit(env.proxy_origin).port
+        viewer_port = urlsplit(env.viewer_origin).port
+        assert viewer_port != page_port, (
+            f'viewer origin {env.viewer_origin!r} must not share the page '
+            f'origin port {page_port}'
+        )
         iframe.scroll_into_view_if_needed()
-        frame = _wait_for_frame(page, env.proxy_origin + HIGHLIGHT_PATH)
+        frame = _wait_for_frame(page, env.viewer_origin + HIGHLIGHT_PATH)
         frame_parsed = urlsplit(frame.url)
+        assert (
+            f'{frame_parsed.scheme}://{frame_parsed.netloc}'
+            == env.viewer_origin
+        ), frame.url
         assert frame_parsed.path == HIGHLIGHT_PATH, frame.url
         assert parse_qs(frame_parsed.query) == params, frame.url
         _shot(page, env, '03-cited-source-iframe.png')
@@ -248,6 +270,9 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
             'opened-iframe',
             url=page.url,
             iframe_src=src,
+            iframe_origin=iframe_origin,
+            viewer_origin=env.viewer_origin,
+            page_origin=env.proxy_origin,
             sandboxed=False,
             screenshot='03-cited-source-iframe.png',
         )
@@ -352,7 +377,7 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
         # Record the raw boxes payload the wrapper consumed: the coordinates
         # are the evidence for the highlight geometry (see the QA report).
         boxes_response = context.request.get(
-            env.proxy_origin + '/ui/pdf/boxes',
+            env.viewer_origin + '/ui/pdf/boxes',
             params={
                 'source': manifest['source_id'],
                 'page': expected_page,
@@ -385,6 +410,40 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
             text_box=text_box,
             boxes=boxes_payload['boxes'],
             screenshot='04-iframe-highlight.png',
+        )
+
+        # --- 4b. the viewer origin cannot reach the operator read API ------
+        runs_url = env.viewer_origin + '/runs'
+        viewer_runs = frame.evaluate(
+            """async (url) => {
+                try {
+                    const response = await fetch(url, {
+                        headers: {'Accept': 'application/json'},
+                    });
+                    return {
+                        status: response.status,
+                        ok: response.ok,
+                        body: (await response.text()).slice(0, 400),
+                    };
+                } catch (error) {
+                    return {status: null, ok: false, body: String(error)};
+                }
+            }""",
+            runs_url,
+        )
+        run_id = manifest['run']['run_id']
+        assert viewer_runs['status'] == 403, viewer_runs
+        assert not viewer_runs['ok'], viewer_runs
+        assert run_id not in viewer_runs['body'], viewer_runs
+        _log(
+            env,
+            'viewer-origin',
+            'runs-fetch-refused-in-frame',
+            url=runs_url,
+            status=viewer_runs['status'],
+            body=viewer_runs['body'],
+            operator_run_id=run_id,
+            operator_data_absent=run_id not in viewer_runs['body'],
         )
 
         # --- 5. zero CSP-violation console errors --------------------------
@@ -439,6 +498,51 @@ def test_ui_requires_operator_token_direct(ui_qa) -> None:
                 direct_pdf=document.status,
                 direct_pdf_body=document.text()[:200],
                 proxied_ui=proxied.status,
+            )
+        finally:
+            request.dispose()
+
+
+@PLAYWRIGHT_SKIP
+def test_viewer_origin_is_scoped_to_pdf_paths(ui_qa) -> None:
+    """The #620 viewer listener refuses operator API paths before upstream.
+
+    A script that lands on the viewer origin must not be able to read
+    ``/runs``: the path-scoped proxy returns 403 before injecting the operator
+    token. The contrast through the unscoped page proxy proves the refusal is
+    the path scope, not a missing route or an auth failure; the viewer asset
+    request proves the same listener does forward the viewer paths.
+    """
+    from playwright.sync_api import sync_playwright
+
+    env = ui_qa
+    with sync_playwright() as playwright:
+        request = playwright.request.new_context()
+        try:
+            refused = request.get(env.viewer_origin + '/runs')
+            assert refused.status == 403, (
+                f'viewer-origin /runs status {refused.status}'
+            )
+            refused_body = refused.text()
+            assert 'allowlist' in refused_body, refused_body
+            page_runs = request.get(env.proxy_origin + '/runs')
+            assert page_runs.status == 200, (
+                f'page-proxy /runs status {page_runs.status}'
+            )
+            viewer_asset = request.get(
+                env.viewer_origin + '/ui/pdf/assets/web/highlight.html'
+            )
+            assert viewer_asset.status == 200, (
+                f'viewer-origin viewer asset status {viewer_asset.status}'
+            )
+            _log(
+                env,
+                'viewer-origin',
+                'scope-checked',
+                viewer_runs=refused.status,
+                viewer_runs_body=refused_body[:200],
+                page_proxy_runs=page_runs.status,
+                viewer_pdf_asset=viewer_asset.status,
             )
         finally:
             request.dispose()

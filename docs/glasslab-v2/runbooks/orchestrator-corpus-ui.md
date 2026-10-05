@@ -56,6 +56,7 @@ header name to stderr. The token value is never printed.
 | `--token-env` | `GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN` | Name of the environment variable that holds the operator token. |
 | `--header` | `X-Glasslab-Operator-Token` | Header injected on every upstream request. |
 | `--allow-methods` | `GET,HEAD` | Comma-separated HTTP methods to forward. Add `POST` to enable the [Operator controls](#operator-controls). |
+| `--allow-paths` | *empty* | Comma-separated request-path prefixes to forward. Empty forwards every path (the base page listener). Use `--allow-paths /ui/pdf/` for the viewer-origin listener; any other path gets `403` before the operator token is injected. See [Viewer origin](#viewer-origin). |
 
 The proxy is deliberately constrained:
 
@@ -85,9 +86,43 @@ The proxy is deliberately constrained:
 - **Header hygiene.** Hop-by-hop headers are dropped in both directions, and
   any client-supplied copy of the injected header is replaced with the trusted
   token, so the client can't smuggle its own value.
+- **Path-scoped (optional).** `--allow-paths` restricts the listener to a
+  comma-separated prefix allowlist; every other request path is rejected with
+  `403` before the operator token is injected. The base page listener keeps
+  the empty default (all paths); the viewer listener on the second origin is
+  scoped to `/ui/pdf/`, so a viewer-side script cannot reach `/runs`; see
+  [Viewer origin](#viewer-origin).
 - **Streaming.** Upstream responses are relayed unbuffered, so
   `GET /runs/{run_id}/events/stream` (Server-Sent Events) arrives incrementally
   even while other requests are in flight.
+
+## Viewer origin
+
+The cited-source PDF viewer is served from a second loopback origin so a
+script running inside the viewer cannot reach the operator read API: the
+single listener injects the operator token on every path, so an unsandboxed
+viewer sharing that origin could `fetch('/runs')`. Both listeners point at the
+same upstream; only the request-path allowlist differs.
+
+```bash
+# Terminal 1: the operator page on 19090 (every path).
+python3 scripts/glasslab-orchestrator-ui-proxy.py
+
+# Terminal 2: the viewer origin on 19091, /ui/pdf/ only.
+python3 scripts/glasslab-orchestrator-ui-proxy.py \
+  --listen 127.0.0.1:19091 --allow-paths /ui/pdf/
+```
+
+Open `http://127.0.0.1:19090/ui/`. The deployment ConfigMap pins
+`GLASSLAB_ORCHESTRATOR_UI_ORIGIN=http://127.0.0.1:19090` and
+`GLASSLAB_ORCHESTRATOR_UI_PDF_VIEWER_ORIGIN=http://127.0.0.1:19091`, so the
+page emits an absolute viewer iframe, the page CSP admits that origin in
+`frame-src`, and the viewer CSP admits the page origin in `frame-ancestors`.
+
+A request to the viewer listener outside `/ui/pdf/` (for example `/runs`) is
+answered `403` and never reaches the orchestrator, which is what contains a
+viewer-side script. With both settings unset the page falls back to the
+pre-#620 relative single-origin iframe and an empty path allowlist.
 
 ## The three panes
 
@@ -123,9 +158,11 @@ http://127.0.0.1:19090/ui/?run=<run-id>&packet=<packet-id>&excerpt=<quoted-text>
    structured-output kind and summary, start/end timestamps, and the error
    when set) in storage order, oldest first; it renders read-only
    `TurnSummary` fields only, never raw tool-call transcripts. **Viewer** holds
-   the existing viewer body: the cited source's same-origin PDF viewer iframe,
-   or its stored extracted text when no PDF is servable, or the selected run's
-   artifact tree with the digest-verified text preview of the chosen file.
+   the existing viewer body: the cited source's PDF viewer iframe (same-origin,
+   or the configured viewer origin when origin isolation is enabled; see
+   [Viewer origin](#viewer-origin)), or its stored extracted text when no PDF
+   is servable, or the selected run's artifact tree with the digest-verified
+   text preview of the chosen file.
    Selecting a run opens Turns; selecting a source or a file opens Viewer.
    The strip is the same pure-CSS `:checked` radio group as the Sources tabs,
    so the page stays zero-JS.
@@ -191,6 +228,7 @@ text. The database and append-only event log remain authoritative.
 | --- | --- |
 | `401 Unauthorized` | The operator token is missing or wrong. Confirm `GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN` is exported in the shell that started the proxy, then restart it. The token is read once at startup. |
 | `421 Misdirected Request` | The request `Host` didn't name the loopback listener. Open `http://127.0.0.1:19090/ui/`, not a hostname, and don't change `--listen` without matching the URL. |
+| `403 Forbidden` from the viewer origin | The 19091 listener was started with an `--allow-paths` value that doesn't cover the requested path. Run it with `--allow-paths /ui/pdf/`; see [Viewer origin](#viewer-origin). |
 | `405 Method Not Allowed` | The proxy isn't forwarding the method. Run it with `--allow-methods GET,HEAD,POST` to enable the operator controls; the base page is read-only by default. |
 | `403 Forbidden` on a control submit | A state-changing request didn't carry a loopback `Origin`/`Referer` for the listen port. Open the page at `http://127.0.0.1:19090/ui/` and submit from there; a cross-site form or a tool that omits `Origin` is refused. |
 | `502 Bad Gateway` | The proxy reached its listen port but couldn't reach the upstream. The SSH port-forward or the orchestrator service is down. |

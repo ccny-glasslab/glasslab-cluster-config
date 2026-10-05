@@ -8,7 +8,10 @@ tests pin the three properties that make that promise true:
   standard fonts, wasm, iccs) exist in ``static/pdfjs``;
 * ``static/pdfjs/VENDOR.json`` records a sha256 for every vendored byte and
   its values still match the tree;
-* ``web/viewer.html`` loads no subresource from an external origin.
+* ``web/viewer.html`` loads no subresource from an external origin;
+* the served viewer-shell CSP names the configured UI origin in
+  ``frame-ancestors`` so a viewer served from a second loopback origin can
+  still be framed by the operator page (#620).
 """
 
 from __future__ import annotations
@@ -18,8 +21,16 @@ import json
 from html.parser import HTMLParser
 from pathlib import Path
 
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.testclient import TestClient
+
+from app.ui_pdf import register_ui_pdf_routes
+
 PDFJS_ROOT = Path(__file__).resolve().parents[1] / "static" / "pdfjs"
 VENDOR_MANIFEST_PATH = PDFJS_ROOT / "VENDOR.json"
+
+OPERATOR_TOKEN = "test-operator-token"
+AUTH_HEADERS = {"X-Glasslab-Operator-Token": OPERATOR_TOKEN}
 
 PDFJS_VERSION = "6.3.289"
 PDFJS_SOURCE_URL = (
@@ -184,3 +195,58 @@ def test_no_external_origin_in_viewer_html() -> None:
         "viewer.html loads resources from an external origin: "
         f"{parser.external_urls}"
     )
+
+
+def _require_operator_token(
+    supplied: str | None = Header(
+        default=None,
+        alias="X-Glasslab-Operator-Token",
+    ),
+) -> None:
+    if supplied is None or supplied != OPERATOR_TOKEN:
+        raise HTTPException(status_code=401, detail="valid operator token required")
+
+
+def _viewer_client(settings, engine) -> TestClient:
+    app = FastAPI()
+    register_ui_pdf_routes(
+        app,
+        engine=engine,
+        settings=settings,
+        require_operator=_require_operator_token,
+    )
+    return TestClient(app)
+
+
+def test_viewer_csp_frame_ancestors_names_the_ui_origin(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    configured = settings.model_copy(
+        update={"ui_origin": "http://127.0.0.1:19090"}
+    )
+
+    with _viewer_client(configured, engine) as client:
+        response = client.get(
+            "/ui/pdf/assets/web/highlight.html", headers=AUTH_HEADERS
+        )
+
+    assert response.status_code == 200
+    csp = response.headers["content-security-policy"]
+    assert "frame-ancestors 'self' http://127.0.0.1:19090" in csp
+
+
+def test_viewer_csp_stays_self_only_without_a_ui_origin(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _viewer_client(settings, engine) as client:
+        response = client.get(
+            "/ui/pdf/assets/web/highlight.html", headers=AUTH_HEADERS
+        )
+
+    assert response.status_code == 200
+    csp = response.headers["content-security-policy"]
+    assert "frame-ancestors 'self'" in csp
+    assert "http://" not in csp

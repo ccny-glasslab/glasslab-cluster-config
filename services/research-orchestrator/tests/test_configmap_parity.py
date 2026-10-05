@@ -352,6 +352,30 @@ OVERRIDES: dict[str, Override] = dict(
                 expected='http://127.0.0.1:18080',
             ),
         ),
+        # --- /ui viewer-origin isolation (issue #620) ---
+        (
+            _P + 'UI_ORIGIN',
+            Override(
+                'eq',
+                'Viewer-origin isolation: the code default is None so '
+                'local/test render the pre-#620 single relative origin; the '
+                'deployment serves the page from the first loopback proxy '
+                'listener. Pinned so a misdirected page origin fails review.',
+                expected='http://127.0.0.1:19090',
+            ),
+        ),
+        (
+            _P + 'UI_PDF_VIEWER_ORIGIN',
+            Override(
+                'eq',
+                'Viewer-origin isolation: the code default is None so '
+                'local/test keep the relative viewer iframe; the deployment '
+                'serves the cited-source viewer from a second loopback proxy '
+                'listener scoped to /ui/pdf/. Pinned so the viewer cannot '
+                'silently revert onto the token-injecting operator origin.',
+                expected='http://127.0.0.1:19091',
+            ),
+        ),
     ]
 )
 

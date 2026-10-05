@@ -49,15 +49,25 @@ if TYPE_CHECKING:
 # directory the asset route may read from.
 _PDFJS_ROOT = SERVICE_ROOT / 'static' / 'pdfjs'
 
+
 # The viewer needs same-origin module workers, blob URLs, and same-origin
 # fetches; the policy below is the minimum that permits them and nothing else.
-_VIEWER_CSP = (
-    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; "
-    "worker-src 'self' blob:; style-src 'self'; "
-    "img-src 'self' blob: data:; media-src blob:; "
-    "font-src 'self' data:; connect-src 'self' blob: data:; "
-    "base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
-)
+# With viewer-origin isolation (#620) the viewer is served from the second
+# loopback origin while the operator page that frames it stays on the first,
+# so the configured UI origin is appended to frame-ancestors; unset keeps the
+# pre-#620 same-origin-only policy.
+def _viewer_csp(ui_origin: str | None) -> str:
+    ancestors = "'self'" if not ui_origin else f"'self' {ui_origin.rstrip('/')}"
+    return (
+        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; "
+        "worker-src 'self' blob:; style-src 'self'; "
+        "img-src 'self' blob: data:; media-src blob:; "
+        "font-src 'self' data:; connect-src 'self' blob: data:; "
+        "base-uri 'none'; form-action 'none'; "
+        f"frame-ancestors {ancestors}"
+    )
+
+
 # The raw PDF is a passive document: no script, no subresource, and it may
 # only be framed by this same origin.
 _DOCUMENT_CSP = "default-src 'none'; frame-ancestors 'self'"
@@ -320,5 +330,5 @@ def register_ui_pdf_routes(
         )
         headers = {'X-Content-Type-Options': 'nosniff'}
         if media_type == 'text/html':
-            headers['Content-Security-Policy'] = _VIEWER_CSP
+            headers['Content-Security-Policy'] = _viewer_csp(settings.ui_origin)
         return FileResponse(asset, media_type=media_type, headers=headers)
