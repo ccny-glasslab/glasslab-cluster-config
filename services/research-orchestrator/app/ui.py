@@ -1092,7 +1092,7 @@ def _render_notebook_body(text: str) -> str:
     """
     try:
         notebook = json.loads(text)
-    except (json.JSONDecodeError, RecursionError):
+    except (ValueError, RecursionError):
         return (
             '<p class="muted">Notebook unavailable: the file is not valid '
             'JSON.</p>'
@@ -1173,7 +1173,15 @@ def _render_document_body(
         f'<code>{_escape(_digest_prefix(artifact.sha256))}</code></p>'
     )
     if ref.endswith('.ipynb'):
-        return header + _render_notebook_body(text)
+        # A JSON ``\uXXXX`` escape decodes to a lone surrogate that survives
+        # ``html.escape`` and then fails UTF-8 encoding in the response. The
+        # bytes are pure ASCII, so the surrogate only exists after parsing and
+        # ``errors='replace'`` on the file decode cannot help; the rendered
+        # notebook body is sanitized instead. The generic ``<pre>`` path never
+        # unescapes, so it keeps its own handling.
+        return header + _render_notebook_body(text).encode(
+            'utf-8', 'replace'
+        ).decode('utf-8')
     return header + f'<pre>{_escape(text)}</pre>'
 
 
