@@ -57,11 +57,11 @@ from app.corpus_rag.contracts import (
     RagSectionRecord,
 )
 from app.corpus_rag.spans import (
-    estimate_tokens,
     group_atoms,
     sentence_atoms,
     split_oversized,
 )
+from app.text_tokens import estimate_tokens
 
 __all__ = [
     'ChunkPlan',

@@ -12,13 +12,10 @@ from __future__ import annotations
 import re
 from math import ceil
 
+from app.text_tokens import estimate_tokens
+
 _SENTENCE_SPLIT = re.compile(r'(?<=[.!?])\s+')
 _WORD = re.compile(r'\S+')
-
-
-def estimate_tokens(text: str) -> int:
-    """Whitespace-split token count with floor 1 (mirrors knowledge_manager)."""
-    return max(1, len(text.split()))
 
 
 def sentence_atoms(body: str, base: int) -> list[tuple[int, int]]:
@@ -35,19 +32,22 @@ def sentence_atoms(body: str, base: int) -> list[tuple[int, int]]:
 def split_oversized(
     text: str, start: int, end: int, max_tokens: int
 ) -> list[tuple[int, int]]:
-    """Word-boundary split of one atom so every piece has <= max_tokens."""
+    """Word-boundary split of one atom so every piece fits ``max_tokens``.
+
+    Piece boundaries advance on whitespace, but the budget is measured with the
+    shared estimator over the candidate slice, so every emitted piece satisfies
+    ``estimate_tokens(...) <= max_tokens`` -- except a lone word that is itself
+    already over budget, which cannot be broken further and is emitted alone.
+    """
     pieces: list[tuple[int, int]] = []
     piece_start: int | None = None
-    piece_words = 0
     piece_end = start
     for match in _WORD.finditer(text, start, end):
-        if piece_start is not None and piece_words + 1 > max_tokens:
-            pieces.append((piece_start, piece_end))
-            piece_start = None
-            piece_words = 0
         if piece_start is None:
             piece_start = match.start()
-        piece_words += 1
+        elif estimate_tokens(text[piece_start:match.end()]) > max_tokens:
+            pieces.append((piece_start, piece_end))
+            piece_start = match.start()
         piece_end = match.end()
     if piece_start is not None:
         pieces.append((piece_start, piece_end))

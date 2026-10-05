@@ -16,11 +16,11 @@ from collections.abc import Sequence
 from app.corpus_rag.chunking import MAX_CHUNK_TOKENS
 from app.corpus_rag.contracts import RagChunkRecord
 from app.corpus_rag.spans import (
-    estimate_tokens,
     group_atoms,
     sentence_atoms,
     split_oversized,
 )
+from app.text_tokens import estimate_tokens
 
 __all__ = ['normalize_chunks']
 

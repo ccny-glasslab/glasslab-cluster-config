@@ -16,6 +16,7 @@ import pytest
 from app.knowledge_manager import (
     KnowledgeError,
     KnowledgeManager,
+    estimate_tokens,
     verify_excerpt,
 )
 from app.schemas import EventRecord, RunRecord, RunState, SourceType, TurnKind
@@ -557,7 +558,8 @@ def test_deterministic_token_budget_never_exceeds_limit(tmp_path: Path) -> None:
         )
     packet = _retrieve(manager, run_id=run_id, query='content')
     text = packet.exact_text_supplied or ''
-    assert len(text.split()) <= 4000
+    # The shared content-aware estimator is the budget's unit of account.
+    assert estimate_tokens(text) <= 4000
     assert packet.token_budget == 4000
 
 

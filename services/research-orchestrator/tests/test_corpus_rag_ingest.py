@@ -330,9 +330,12 @@ def test_ingest_deduplicates_identical_chunks(store):
     units = [c for c in chunks if c['kind'] == 'section_unit']
     evidence = [c for c in chunks if c['kind'] == 'evidence_span']
 
-    assert len(units) == 1
+    body = ' '.join(_sent(i) for i in range(60))
+    # Each of the two identical sections chunks into the same set of units, so
+    # dedup keeps one copy of each unit rather than one copy per section.
+    assert len(units) == len({u['text'] for u in units}) == 2
     assert len(evidence) == len({e['text'] for e in evidence})
-    assert units[0]['text'] == 'Intro\n\n' + ' '.join(_sent(i) for i in range(60))
+    assert units[0]['text'] + ' ' + units[1]['text'] == 'Intro\n\n' + body
 
 
 def test_ingest_store_reports_no_duplicate_chunks(store, tmp_path):
@@ -346,7 +349,7 @@ def test_ingest_store_reports_no_duplicate_chunks(store, tmp_path):
     finally:
         connection.close()
     assert dupes == []
-    assert report.n_section_units == 1
+    assert report.n_section_units == 2
 
 
 def test_ingest_chunks_respect_max_size(store):
