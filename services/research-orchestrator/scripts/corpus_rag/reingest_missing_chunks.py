@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         '--diagnose',
         action='store_true',
-        help='print the traceback for every source that fails',
+        help='classify each failure (secret-rejected vs other) and print tracebacks',
     )
     args = parser.parse_args(argv)
 

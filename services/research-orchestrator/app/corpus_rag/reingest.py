@@ -10,7 +10,9 @@ re-downloads and re-stages the exact versioned arXiv PDF, or reports
 
 from __future__ import annotations
 
+import hashlib
 import re
+import sys
 import time
 import traceback
 import urllib.parse
@@ -22,6 +24,7 @@ from typing import Any, Callable
 
 from app.corpus_rag.arxiv import ArxivEntry, download_pdf
 from app.corpus_rag.pipeline import ingest_document, stage_raw_pdf
+from app.knowledge_manager import KnowledgeError
 from app.schemas import KnowledgeSource, SourceType
 
 PdfDownloader = Callable[[str], bytes]
@@ -41,6 +44,9 @@ STATUS_SKIPPED = 'skipped-has-chunks'
 STATUS_UNRECOVERABLE = 'unrecoverable'
 STATUS_ERROR = 'error'
 
+FAILURE_SECRET = 'secret-rejected'
+FAILURE_OTHER = 'other'
+
 
 @dataclass
 class ReingestSourceReport:
@@ -49,6 +55,7 @@ class ReingestSourceReport:
     status: str
     detail: str | None = None
     added_chunks: int = 0
+    failure_class: str | None = None
 
 
 @dataclass
@@ -62,7 +69,24 @@ class ReingestReport:
     skipped_has_chunks: int = 0
     unrecoverable: int = 0
     errors: int = 0
+    secret_rejected: int = 0
     sources: list[ReingestSourceReport] = field(default_factory=list)
+
+
+def _failure_class(exc: Exception) -> str:
+    # Distinguish the documented scanner false-positive class from real
+    # failures; the scanner itself must not be weakened here (security).
+    if isinstance(exc, KnowledgeError) and 'secret pattern' in str(exc):
+        return FAILURE_SECRET
+    return FAILURE_OTHER
+
+
+def _add(
+    report: ReingestReport, source: KnowledgeSource, status: str, **extra: Any
+) -> None:
+    report.sources.append(
+        ReingestSourceReport(source.source_id, source.canonical_uri, status, **extra)
+    )
 
 
 def _strip_pdf_suffix(name: str) -> str:
@@ -120,10 +144,9 @@ def scan_missing_chunk_sources(store: Any) -> list[KnowledgeSource]:
 
 
 def _classify(source: KnowledgeSource, root: Path) -> tuple[Any, ...]:
-    """Return ``('unrecoverable', detail)``, ``('local', path)``, or
-    ``('fetch', name, arxiv_id, url)``. A ``file:`` URI outside ``root`` is
-    unrecoverable: re-staging elsewhere would create a new source, not heal.
-    """
+    # Returns ('unrecoverable', detail), ('local', path), or
+    # ('fetch', name, arxiv_id, url). A file: URI outside root is unrecoverable:
+    # re-staging elsewhere would create a new source, not heal the original.
     path = _path_from_file_uri(source.canonical_uri)
     if path is None:
         scheme = urllib.parse.urlsplit(source.canonical_uri).scheme
@@ -146,6 +169,12 @@ def _ingest(
     canonical_uri: str,
     metadata: dict[str, Any] | None,
 ) -> int:
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != source.digest:
+        # ingest_document_bytes dedups on (digest, canonical_uri); a re-fetched
+        # PDF can hash differently, so align the existing row's digest first to
+        # force reuse of this source_id instead of inserting a duplicate row.
+        store.save_knowledge_source(source.model_copy(update={'digest': digest}))
     doc_type = 'paper' if source.source_type == SourceType.PAPER else 'reference'
     report = ingest_document(
         store=store,
@@ -199,13 +228,19 @@ def _heal_source(
         return STATUS_WOULD_FETCH, 0
     data = context.fetch(url)
     staged = stage_raw_pdf(data, context.root, name)
-    chunks = _ingest(
-        context.store,
-        source,
-        data=data,
-        canonical_uri=staged.resolve().as_uri(),
-        metadata={'source_url': url, 'arxiv_id': arxiv_id},
-    )
+    try:
+        chunks = _ingest(
+            context.store,
+            source,
+            data=data,
+            canonical_uri=staged.resolve().as_uri(),
+            metadata={'source_url': url, 'arxiv_id': arxiv_id},
+        )
+    except BaseException:
+        # Fail-closed: a rejected ingest must not leave bytes the persisted
+        # source's canonical URI still resolves to.
+        staged.unlink(missing_ok=True)
+        raise
     return STATUS_HEALED_FETCH, chunks
 
 
@@ -243,24 +278,13 @@ def reingest_missing_chunks(
         report.considered += 1
         if _has_rag_chunks(store, source.source_id):
             report.skipped_has_chunks += 1
-            report.sources.append(
-                ReingestSourceReport(
-                    source.source_id, source.canonical_uri, STATUS_SKIPPED
-                )
-            )
+            _add(report, source, STATUS_SKIPPED)
             continue
 
         decision = _classify(source, root)
         if decision[0] == 'unrecoverable':
             report.unrecoverable += 1
-            report.sources.append(
-                ReingestSourceReport(
-                    source.source_id,
-                    source.canonical_uri,
-                    STATUS_UNRECOVERABLE,
-                    detail=decision[1],
-                )
-            )
+            _add(report, source, STATUS_UNRECOVERABLE, detail=decision[1])
             continue
 
         if limit is not None and actions >= limit:
@@ -270,18 +294,21 @@ def reingest_missing_chunks(
             status, chunks = _heal_source(source, decision, context)
         except Exception as exc:  # noqa: BLE001 - isolate per-source failures
             report.errors += 1
+            failure_class = _failure_class(exc)
+            if failure_class == FAILURE_SECRET:
+                report.secret_rejected += 1
             detail = (
                 traceback.format_exc() if diagnose else f'{type(exc).__name__}: {exc}'
             )
             if diagnose:
+                print(f'[reingest] {source.source_id}: {failure_class}', file=sys.stderr)
                 traceback.print_exc()
-            report.sources.append(
-                ReingestSourceReport(
-                    source.source_id,
-                    source.canonical_uri,
-                    STATUS_ERROR,
-                    detail=detail,
-                )
+            _add(
+                report,
+                source,
+                STATUS_ERROR,
+                detail=detail,
+                failure_class=failure_class,
             )
             continue
 
@@ -289,14 +316,7 @@ def reingest_missing_chunks(
         if status in (STATUS_HEALED_LOCAL, STATUS_HEALED_FETCH):
             report.added += 1
             report.added_chunks += chunks
-        report.sources.append(
-            ReingestSourceReport(
-                source.source_id,
-                source.canonical_uri,
-                status,
-                added_chunks=chunks,
-            )
-        )
+        _add(report, source, status, added_chunks=chunks)
 
     report.network_fetches = context.fetches
     return report
