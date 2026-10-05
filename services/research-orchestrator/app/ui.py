@@ -1,7 +1,9 @@
 """Server-rendered corpus and reports notebook for the operator UI.
 
 Operator-gated routes: ``GET /ui/`` renders a no-JavaScript, three-column
-notebook over durable orchestrator state; ``POST /ui/sources/upload`` ingests
+notebook over durable orchestrator state; ``GET /ui/artifacts.zip`` exports
+the selected run's digest-verified artifact bundle as a zip attachment;
+``POST /ui/sources/upload`` ingests
 one operator-supplied PDF from the Sources column into the corpus; and the
 zero-JS operator control forms ``POST /ui/runs``, ``POST
 /ui/runs/{run_id}/control``, and ``POST /ui/actions/{action_id}/decide``
@@ -71,6 +73,7 @@ import contextlib
 from dataclasses import dataclass, field
 import hashlib
 import html
+import json
 import logging
 from pathlib import Path, PurePosixPath
 import re
@@ -83,7 +86,12 @@ from fastapi import Depends, FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
-from .artifact_delivery import ArtifactDeliveryError, VerifiedArtifactReader
+from .artifact_delivery import (
+    ArtifactBundle,
+    ArtifactDeliveryError,
+    VerifiedArtifactReader,
+    build_run_artifact_bundle,
+)
 from .corpus_rag.pipeline import ingest_document, stage_raw_pdf
 from .citation_locator import (
     CitationClass,
@@ -1027,6 +1035,102 @@ def _render_artifact_tree(
     return f'<ul class="tree">{_render_tree_children(root, refs, selection)}</ul>'
 
 
+def _notebook_text(value: object) -> str:
+    """A notebook ``source``/``text`` field as plain text.
+
+    Notebook JSON stores multi-line fields as a list of lines; a bare string
+    is also valid in older notebooks, so both shapes are accepted.
+    """
+    if isinstance(value, list):
+        return ''.join(str(line) for line in value)
+    return '' if value is None else str(value)
+
+
+def _render_notebook_output(output: object) -> str:
+    """One code-cell output as plain text, or ``''`` when it has no text form.
+
+    Only ``text/plain`` is rendered. An output that carries binary payloads
+    (an image, most often) is replaced by a short note instead of an
+    ``<img>``/``data:`` URI: the page has no ``img-src`` and never inlines
+    embedded bytes.
+    """
+    if not isinstance(output, dict):
+        return ''
+    output_type = output.get('output_type')
+    if output_type == 'stream':
+        return _notebook_text(output.get('text'))
+    if output_type in ('execute_result', 'display_data'):
+        data = output.get('data')
+        if not isinstance(data, dict):
+            return ''
+        text = data.get('text/plain')
+        if text is not None:
+            return _notebook_text(text)
+        return '[non-text output omitted]' if data else ''
+    if output_type == 'error':
+        traceback = output.get('traceback')
+        if isinstance(traceback, list):
+            return '\n'.join(str(line) for line in traceback)
+        ename = output.get('ename') or 'error'
+        evalue = output.get('evalue') or ''
+        return f'{ename}: {evalue}'
+    return ''
+
+
+def _render_notebook_body(text: str) -> str:
+    """Render a stored ``.ipynb`` as escaped, zero-JS notebook cells.
+
+    Parsing uses the standard library only (no ``nbformat`` dependency). Every
+    cell kind, source line, and output is escaped, so a notebook is rendered
+    as inert text like any other document -- never as raw markdown, HTML, or
+    an embedded image.
+    """
+    try:
+        notebook = json.loads(text)
+    except json.JSONDecodeError:
+        return (
+            '<p class="muted">Notebook unavailable: the file is not valid '
+            'JSON.</p>'
+        )
+    cells = notebook.get('cells') if isinstance(notebook, dict) else None
+    if not isinstance(cells, list):
+        return (
+            '<p class="muted">Notebook unavailable: the file has no cell '
+            'list.</p>'
+        )
+    rendered = ['<div class="notebook">']
+    for index, cell in enumerate(cells, start=1):
+        if not isinstance(cell, dict):
+            continue
+        cell_type = cell.get('cell_type')
+        if isinstance(cell_type, str) and cell_type:
+            kind = cell_type
+        else:
+            kind = 'unknown'
+        rendered.append('<article class="notebook-cell">')
+        rendered.append(
+            f'<p class="notebook-kind muted">Cell {index} · '
+            f'{_escape(kind)}</p>'
+        )
+        rendered.append(
+            '<pre class="notebook-source">'
+            f'{_escape(_notebook_text(cell.get("source")))}</pre>'
+        )
+        if kind == 'code':
+            outputs = cell.get('outputs')
+            if isinstance(outputs, list):
+                for output in outputs:
+                    output_text = _render_notebook_output(output)
+                    if output_text:
+                        rendered.append(
+                            '<pre class="notebook-output">'
+                            f'{_escape(output_text)}</pre>'
+                        )
+        rendered.append('</article>')
+    rendered.append('</div>')
+    return ''.join(rendered)
+
+
 def _render_document_body(
     settings: Settings,
     selection: UiRequest,
@@ -1058,12 +1162,14 @@ def _render_document_body(
             'failed or the file exceeds the preview limit.</p>'
         )
     text = content.decode('utf-8', errors='replace')
-    return (
+    header = (
         f'<p><strong>Ref:</strong> <code>{_escape(ref)}</code> · '
         f'<strong>SHA-256:</strong> '
         f'<code>{_escape(_digest_prefix(artifact.sha256))}</code></p>'
-        f'<pre>{_escape(text)}</pre>'
     )
+    if ref.endswith('.ipynb'):
+        return header + _render_notebook_body(text)
+    return header + f'<pre>{_escape(text)}</pre>'
 
 
 def _pdf_viewer_url(
@@ -1230,6 +1336,12 @@ def _render_run_view(
     return (
         preview
         + '<h3>Run files</h3>'
+        + '<p><a href="'
+        + _escape(
+            '/ui/artifacts.zip?' + urlencode({'run': selection.run_id or ''})
+        )
+        + '">Download bundle</a> '
+        + '<span class="muted">(digest-verified zip)</span></p>'
         + _render_artifact_tree(refs, selection)
     )
 
@@ -1554,7 +1666,9 @@ def register_ui_routes(
     rather than imported; the UI module never reads the operator token.
     ``chat_service`` is likewise injected by the host -- a
     :class:`~app.corpus_rag.chat.CorpusChatService`, or ``None`` when the chat
-    is disabled -- and this module only calls its ``answer`` method.
+    is disabled -- and this module only calls its ``answer`` method. The
+    ``GET /ui/artifacts.zip`` export lives here too so it inherits the same
+    injected ``require_operator`` gate.
     """
 
     @app.api_route(
@@ -1585,6 +1699,58 @@ def register_ui_routes(
         return HTMLResponse(
             content=render_ui_page(engine, settings, request, chat_service),
             headers=_ui_headers(request.nonce),
+        )
+
+    @app.get('/ui/artifacts.zip')
+    def export_run_artifacts_zip(
+        run: str = Query(default=''),
+        include_source: bool = Query(default=False),
+        _: None = Depends(require_operator),
+    ) -> Response:
+        # A sync handler: FastAPI runs it in the threadpool, so hashing and
+        # zipping a run's artifacts never blocks the event loop. The bundle is
+        # built exactly as Discord's export builds it (same digest
+        # verification, same cap, same source-archive toggle); only the
+        # response shape differs.
+        nonce = secrets.token_urlsafe(16)
+        try:
+            engine.store.get_run(run)
+        except RecordNotFound:
+            return _render_ui_error(
+                'Artifact bundle unavailable',
+                'No run exists with that id.',
+                404,
+                nonce,
+            )
+        try:
+            bundle: ArtifactBundle = build_run_artifact_bundle(
+                run_id=run,
+                artifacts=engine.store.list_artifacts(run),
+                jobs=engine.store.list_jobs(run),
+                shared_mount_root=engine.settings.shared_mount_root,
+                maximum_bytes=settings.maximum_discord_artifact_bundle_bytes,
+                include_source=include_source,
+            )
+        except ArtifactDeliveryError:
+            # The exception can name artifact URIs, so the page reports only
+            # that nothing verified is currently available.
+            return _render_ui_error(
+                'Artifact bundle unavailable',
+                'No digest-verified artifacts are currently available for '
+                'this run.',
+                409,
+                nonce,
+            )
+        return Response(
+            content=bundle.content,
+            media_type='application/zip',
+            headers={
+                'Content-Disposition': (
+                    f'attachment; filename="{bundle.filename}"'
+                ),
+                'X-Content-Type-Options': 'nosniff',
+                'Referrer-Policy': 'no-referrer',
+            },
         )
 
     @app.post('/ui/chat')

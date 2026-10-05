@@ -28,7 +28,11 @@ SqliteStore engine with a fake runtime, no live cluster, and no network.
 from __future__ import annotations
 
 import html
+import io
+import json
 import re
+import shutil
+import zipfile
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -2193,3 +2197,230 @@ def test_ui_chat_requires_a_question(orchestrator_bundle) -> None:
 
     assert response.status_code == 400
     assert 'Nothing to ask' in response.text
+
+
+def _notebook_bytes(cells: list[dict]) -> bytes:
+    return json.dumps(
+        {
+            'nbformat': 4,
+            'nbformat_minor': 5,
+            'metadata': {},
+            'cells': cells,
+        }
+    ).encode()
+
+
+def test_ui_artifacts_zip_requires_operator_and_returns_zip(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='export the bundle'))
+    engine.store.save_artifact(
+        _write_report(settings, run.run_id, b'# Findings\n')
+    )
+
+    with _client(settings, engine) as client:
+        unauthenticated = client.get(
+            '/ui/artifacts.zip',
+            params={'run': run.run_id},
+        )
+        response = client.get(
+            '/ui/artifacts.zip',
+            params={'run': run.run_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert unauthenticated.status_code == 401
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('application/zip')
+    assert response.headers['content-disposition'].startswith('attachment;')
+    assert response.headers['x-content-type-options'] == 'nosniff'
+    assert response.headers['referrer-policy'] == 'no-referrer'
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        names = archive.namelist()
+    assert 'artifact-manifest.json' in names
+
+
+def test_ui_artifacts_zip_include_source_toggle(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(
+        RunCreateRequest(objective='toggle the source archive')
+    )
+    engine.store.save_artifact(
+        _write_report(settings, run.run_id, b'# Findings\n')
+    )
+    engine.store.save_artifact(
+        _write_artifact(
+            settings,
+            run.run_id,
+            'source.zip',
+            b'task archive bytes',
+            artifact_type='source.zip',
+        )
+    )
+
+    with _client(settings, engine) as client:
+        default = client.get(
+            '/ui/artifacts.zip',
+            params={'run': run.run_id},
+            headers=AUTH_HEADERS,
+        )
+        sourced = client.get(
+            '/ui/artifacts.zip',
+            params={'run': run.run_id, 'include_source': 'true'},
+            headers=AUTH_HEADERS,
+        )
+
+    assert default.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(default.content)) as archive:
+        default_names = archive.namelist()
+    assert not any(name.endswith('source.zip') for name in default_names)
+    assert sourced.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(sourced.content)) as archive:
+        sourced_names = archive.namelist()
+    assert any(name.endswith('source.zip') for name in sourced_names)
+
+
+def test_ui_artifacts_zip_unknown_run_and_empty_bundle_are_not_500(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='empty bundle'))
+    # The fake runtime seeds protocol/proposal artifacts for every run; remove
+    # their files so every recorded artifact is unavailable and nothing is
+    # deliverable.
+    shutil.rmtree(Path(settings.workspace_root) / run.run_id)
+
+    with _client(settings, engine) as client:
+        unknown = client.get(
+            '/ui/artifacts.zip',
+            params={'run': 'missing-run-id'},
+            headers=AUTH_HEADERS,
+        )
+        empty = client.get(
+            '/ui/artifacts.zip',
+            params={'run': run.run_id},
+            headers=AUTH_HEADERS,
+        )
+
+    for label, response in (('unknown', unknown), ('empty', empty)):
+        assert 400 <= response.status_code < 500, (
+            label,
+            response.status_code,
+        )
+        assert 'Artifact bundle unavailable' in response.text
+        assert '<script' not in response.text
+        assert 'Traceback' not in response.text
+
+
+def test_ui_run_view_links_the_artifact_bundle_download(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='link the bundle'))
+    engine.store.save_artifact(
+        _write_report(settings, run.run_id, b'# Findings\n')
+    )
+
+    with _client(settings, engine) as client:
+        page = client.get(
+            '/ui/',
+            params={'run': run.run_id},
+            headers=AUTH_HEADERS,
+        )
+
+    assert page.status_code == 200
+    assert f'/ui/artifacts.zip?run={run.run_id}' in page.text
+
+
+def test_ui_notebook_preview_renders_cells_and_escapes(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='render a notebook'))
+    notebook = _notebook_bytes(
+        [
+            {
+                'cell_type': 'markdown',
+                'metadata': {},
+                'source': ['# Analysis\n', '<script>alert(1)</script>\n'],
+            },
+            {
+                'cell_type': 'code',
+                'execution_count': 1,
+                'metadata': {},
+                'outputs': [
+                    {
+                        'output_type': 'stream',
+                        'name': 'stdout',
+                        'text': 'result <script>alert(2)</script>\n',
+                    }
+                ],
+                'source': 'print(1)\n',
+            },
+        ]
+    )
+    engine.store.save_artifact(
+        _write_artifact(
+            settings,
+            run.run_id,
+            'reports/analysis.ipynb',
+            notebook,
+            artifact_type='analysis-notebook',
+        )
+    )
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'run': run.run_id, 'ref': 'reports/analysis.ipynb'},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    # Cells render as escaped text, not as one dumped JSON envelope.
+    assert 'class="notebook-cell"' in response.text
+    assert 'nbformat' not in response.text
+    assert '&lt;script&gt;alert(1)&lt;/script&gt;' in response.text
+    assert '&lt;script&gt;alert(2)&lt;/script&gt;' in response.text
+    assert '<script' not in response.text
+    assert '<img' not in response.text
+    assert 'data:image' not in response.text
+
+
+def test_ui_notebook_preview_malformed_json_is_graceful(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    run = engine.create_run(RunCreateRequest(objective='break a notebook'))
+    engine.store.save_artifact(
+        _write_artifact(
+            settings,
+            run.run_id,
+            'reports/broken.ipynb',
+            b'{not valid json',
+            artifact_type='analysis-notebook',
+        )
+    )
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/',
+            params={'run': run.run_id, 'ref': 'reports/broken.ipynb'},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert 'Notebook unavailable' in response.text
+    assert '{not valid json' not in response.text
+
+
+def test_ui_csp_has_no_img_src(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.get('/ui/', headers=AUTH_HEADERS)
+
+    assert response.status_code == 200
+    csp = response.headers['content-security-policy']
+    assert 'img-src' not in csp
