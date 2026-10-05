@@ -64,6 +64,12 @@ spec:
               kubernetes.io/metadata.name: glasslab-v2
           podSelector:
             matchLabels:
+              app.kubernetes.io/name: corpus-rag-reingest
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
               app.kubernetes.io/name: corpus-gpu-embed
       ports:
         - protocol: TCP

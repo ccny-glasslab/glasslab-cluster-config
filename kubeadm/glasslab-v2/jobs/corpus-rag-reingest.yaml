@@ -1,0 +1,76 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: corpus-rag-reingest
+  namespace: glasslab-v2
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 7200
+  template:
+    metadata:
+      labels:
+        # Admitted by the glasslab-postgres-ingress allow-list; without this
+        # label the Job cannot reach Postgres on 5432.
+        app.kubernetes.io/name: corpus-rag-reingest
+    spec:
+      serviceAccountName: glasslab-gpu-runner
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: glasslab-ghcr-pull
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: corpus-rag-reingest
+          # CHICKEN/EGG: this Job runs scripts/corpus_rag/reingest_missing_chunks.py,
+          # which exists only in an image built AFTER the PR that adds the script.
+          # ffbbbf38 is the current published release and does NOT yet contain it,
+          # so this Job is intentionally NOT runnable until this pin is moved to
+          # the merge SHA once that image is published. Do not run it before then.
+          image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:ffbbbf38b61c72d4623415eab45da8a168fb3b05
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command:
+            - /bin/sh
+            - -c
+            - >
+              python /app/scripts/corpus_rag/reingest_missing_chunks.py
+              --apply
+              --raw-root /mnt/artifacts/research-orchestrator/rag/raw
+          env:
+            - name: GLASSLAB_ORCHESTRATOR_STORE_BACKEND
+              value: postgres
+            - name: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-research-orchestrator
+                  key: GLASSLAB_ORCHESTRATOR_STORE_POSTGRES_DSN
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            limits:
+              memory: 2Gi
+              cpu: "1"
+            requests:
+              memory: 512Mi
+              cpu: "250m"
+          volumeMounts:
+            - name: artifacts
+              mountPath: /mnt/artifacts
+            - name: temporary
+              mountPath: /tmp
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: glasslab-shared-artifacts
+        - name: temporary
+          emptyDir: {}
