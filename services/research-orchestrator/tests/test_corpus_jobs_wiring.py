@@ -47,9 +47,9 @@ EMBED_SCRIPT_PATH = (
 
 _PINNED_IMAGE_RE = re.compile(r'(@sha256:[0-9a-f]{64}|:[0-9a-f]{40})$')
 
-# Published release shipping backfill.py; the re-ingest script needs a newer
-# image, so its Job must be re-pinned to the merge SHA before it is runnable.
-BACKFILL_RELEASE_SHA = 'ffbbbf38b61c72d4623415eab45da8a168fb3b05'
+# The re-ingest Job pins the release that first ships
+# scripts/corpus_rag/reingest_missing_chunks.py.
+REINGEST_RELEASE_SHA = '9949549c8679a7f7d14f8f39698e0d1714254541'
 
 
 def _load(path: Path) -> list[dict[str, Any]]:
@@ -253,7 +253,7 @@ def test_corpus_rag_reingest_job_heals_missing_chunks_from_the_pvc() -> None:
     }
     assert PVC_NAME in claims
 
-    assert f':{BACKFILL_RELEASE_SHA}' in container['image'], container['image']
+    assert f':{REINGEST_RELEASE_SHA}' in container['image'], container['image']
 
 
 def test_corpus_job_pods_are_admitted_by_the_postgres_ingress_policy() -> None:
