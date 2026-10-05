@@ -199,6 +199,41 @@ DELETE FROM orchestrator_rag_documents
 DELETE FROM orchestrator_rag_corpora WHERE slug = 'live-knowledge';
 ```
 
+## Healing chunk-less sources (re-ingest)
+
+Some sources in `orchestrator_knowledge_*` can end up with zero
+`orchestrator_rag_chunks`. The arXiv sidecar skips any source whose canonical
+URI already exists, so a source whose staged raw PDF vanished from the PVC
+cannot be healed by the normal sync. Use the explicit re-ingest path:
+
+```bash
+# Dry run (default): reports statuses, writes nothing, no network.
+python services/research-orchestrator/scripts/corpus_rag/reingest_missing_chunks.py \
+    --raw-root /mnt/artifacts/research-orchestrator/rag/raw
+
+# Apply: re-ingest local file:// PDFs, or re-fetch and re-stage missing arXiv PDFs.
+python services/research-orchestrator/scripts/corpus_rag/reingest_missing_chunks.py \
+    --apply --raw-root /mnt/artifacts/research-orchestrator/rag/raw
+
+# Cluster Job (read the chicken/egg pin note in the manifest first).
+kubectl apply -f kubeadm/glasslab-v2/jobs/corpus-rag-reingest.yaml
+kubectl -n glasslab-v2 logs job/corpus-rag-reingest -f
+```
+
+Per source the run reports `healed-local`, `healed-fetch`, `would-heal-*`
+(dry run), `skipped-has-chunks`, `unrecoverable`, or `error`. A source whose
+raw PDF is still on the PVC is re-ingested from local bytes with no network; a
+missing arXiv PDF is re-downloaded from `https://arxiv.org/pdf/<id>` and
+re-staged before ingest. Sources it cannot recover (`upload://` URIs, paths
+outside the raw root, or a missing non-arXiv filename) are reported
+`unrecoverable` and never fabricated. `--diagnose` prints the traceback for
+each `error`; `--source-id` (repeatable) and `--limit` narrow a staged rollout.
+A second `--apply` adds nothing and makes no network calls.
+
+> The `corpus-rag-reingest` Job pins `ffbbbf38...`, a release that predates
+> `reingest_missing_chunks.py`. Re-pin the Job to the merge SHA once the image
+> containing the script is published; until then the Job is not runnable.
+
 ## Scanned books (OCR)
 
 The upload endpoint stays born-digital-only so a 500-page scan can never
