@@ -148,6 +148,25 @@ no script ConfigMap is required. Both Jobs run as uid/gid 10001 to match the
 orchestrator, and the raw root is shared with it so the chat/PDF viewer can
 resolve citations.
 
+The arXiv sync fails its Job (exit 1, `[ingest-arxiv] feed failure: ...`)
+instead of reporting a successful empty sync when the export API keeps
+answering 429/5xx after four backoff attempts (15 s, 30 s, 60 s, or the
+server's `Retry-After`), or returns a feed with no entries at all. A non-empty
+feed whose entries all predate the one-day window is a normal quiet day (for
+example weekends) and still succeeds. Job logs are kept only for
+`ttlSecondsAfterFinished` (2 h), so check ingestion itself when in doubt:
+
+```sql
+SELECT date(ingested_at), count(*) FROM orchestrator_knowledge_sources
+WHERE payload->'metadata'->>'arxiv_id' IS NOT NULL
+GROUP BY 1 ORDER BY 1 DESC LIMIT 7;
+```
+
+Known since 2026-10-10: `export.arxiv.org/api/query` answers HTTP 429
+"Rate exceeded" to the lab's egress (and to other networks), so no preprints
+have been ingested since 2026-10-09; arXiv's OAI-PMH endpoint
+(`oaipmh.arxiv.org`) still answers.
+
 ## Making operator-uploaded sources citable in `/ui` (backfill)
 
 The operator upload path (`POST /knowledge/sources/upload`) stores only the
