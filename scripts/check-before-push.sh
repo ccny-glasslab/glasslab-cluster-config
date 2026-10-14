@@ -73,6 +73,7 @@ run_secret_boundary_tests() {
     tests.scripts.test_resolve_runner_image \
     tests.scripts.test_model_serve_hf_home \
     tests.scripts.test_secret_permissions_preflight \
+    tests.scripts.test_checkout_permissions_preflight \
     tests.scripts.test_rollout_image_preflight \
     tests.scripts.test_rollout_sync_reexec \
     tests.scripts.test_deploy_image_override \

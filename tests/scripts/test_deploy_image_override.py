@@ -29,6 +29,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = REPO_ROOT / "scripts/deploy-glasslab-v2.sh"
 CHECKER = REPO_ROOT / "scripts/check-secret-permissions.sh"
+CHECKOUT_CHECKER = REPO_ROOT / "scripts/check-checkout-permissions.sh"
 
 # (manifest path relative to the repo root, container names sharing the image, image repository)
 SERVICE_DEPLOYMENTS = (
@@ -163,6 +164,7 @@ class DeployImageOverrideTests(unittest.TestCase):
         (fake_root / "scripts").mkdir(parents=True)
         shutil.copy2(DEPLOY, fake_root / "scripts" / DEPLOY.name)
         shutil.copy2(CHECKER, fake_root / "scripts" / CHECKER.name)
+        shutil.copy2(CHECKOUT_CHECKER, fake_root / "scripts" / CHECKOUT_CHECKER.name)
         # When: the deploy runs there.
         completed = self._run(script=fake_root / "scripts" / DEPLOY.name)
         # Then: it refuses to deploy an unpinnable image and never calls kubectl.

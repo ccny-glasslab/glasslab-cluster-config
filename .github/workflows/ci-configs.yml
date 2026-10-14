@@ -57,6 +57,7 @@ jobs:
           tests.security.test_orchestrator_network_policy
           tests.security.test_orchestrator_infra_hardening
           tests.scripts.test_secret_permissions_preflight
+          tests.scripts.test_checkout_permissions_preflight
           tests.scripts.test_rollout_image_preflight
           tests.scripts.test_rollout_sync_reexec
           tests.scripts.test_deploy_image_override

@@ -122,6 +122,21 @@ Before running it, complete the read-only
 [`rollout-freeze-preflight.md`](rollout-freeze-preflight.md) check. Never roll
 out the orchestrator while a run is non-terminal.
 
+Both `rollout-research-services.sh` and `deploy-glasslab-v2.sh` refuse to run
+when the checkout is writable beyond its owner (issue #599): any
+other-writable path, or a group-writable path through a shared group such as
+`glasslab`, including under `.git/`. They also run with `umask 022` so `--sync`
+cannot reintroduce group-writable files. If the preflight refuses, fix the
+tree as its owner and rerun:
+
+```bash
+chmod -R go-w /home/glasslab/cluster-config
+./scripts/check-checkout-permissions.sh --strict-group /home/glasslab/cluster-config
+```
+
+`ansible/playbooks/provisioner-admin.yml` applies and asserts the same
+contract.
+
 Deploy one service with `--service workflow-api` or
 `--service research-orchestrator`. Roll back with
 `--tag <previous-full-commit-sha>`.

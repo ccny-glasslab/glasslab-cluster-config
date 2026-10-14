@@ -91,6 +91,28 @@
         mode: '0755'
       when: glasslab_canonical_checkout_stat.stat.exists
 
+    # Issue #599: the checkout's group (glasslab) includes every contributor
+    # account, so no tracked manifest, script, or .git/ entry may be
+    # group/other-writable; the rollout scripts refuse such a tree.
+    - name: Remove group and other write access across the canonical checkout
+      ansible.builtin.file:
+        path: "{{ glasslab_canonical_checkout }}"
+        state: directory
+        recurse: true
+        mode: 'go-w'
+      when: glasslab_canonical_checkout_stat.stat.exists
+
+    - name: Assert the canonical checkout passes the rollout permission preflight
+      ansible.builtin.command:
+        argv:
+          - "{{ glasslab_canonical_checkout }}/scripts/check-checkout-permissions.sh"
+          - --strict-group
+          - "{{ glasslab_canonical_checkout }}"
+        # Skipped on a checkout that predates the preflight script.
+        removes: "{{ glasslab_canonical_checkout }}/scripts/check-checkout-permissions.sh"
+      changed_when: false
+      when: glasslab_canonical_checkout_stat.stat.exists
+
     - name: Find live local Secret manifests in the canonical checkout
       ansible.builtin.find:
         paths: "{{ glasslab_canonical_checkout }}/kubeadm/glasslab-v2/secrets"
