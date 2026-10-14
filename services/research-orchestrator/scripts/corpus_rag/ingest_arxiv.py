@@ -24,6 +24,7 @@ sys.path.insert(0, str(_SERVICE_DIR))
 from app.corpus_rag.arxiv import (  # noqa: E402
     ALLOWED_CATEGORIES,
     MAX_PDF_BYTES,
+    ArxivFeedError,
     ArxivQuery,
     download_pdf,
     fetch_entries,
@@ -89,7 +90,13 @@ def main(argv: list[str] | None = None) -> int:
         max_results=args.max_results,
         max_pdf_bytes=args.max_pdf_bytes,
     )
-    entries = fetch_entries(query)
+    try:
+        entries = fetch_entries(query)
+    except ArxivFeedError as exc:
+        # Throttled/empty feed: fail the Job so the CronJob status shows it
+        # instead of a "successful" sync that ingested nothing.
+        print(f'[ingest-arxiv] feed failure: {exc}', file=sys.stderr)
+        return 1
 
     from app.config import Settings
     from app.store_factory import build_store

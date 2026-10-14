@@ -297,3 +297,95 @@ def test_fetched_pdf_flows_through_ingest_document(store: SqliteStore) -> None:
     assert chunks
     assert {chunk['kind'] for chunk in chunks} == {'evidence_span', 'section_unit'}
     assert report.n_evidence_spans > 0
+
+# ------------- (e) API throttling and empty feeds (2026-10) ------------- #
+# Live evidence 2026-10-13: export.arxiv.org answered HTTP 429 "Rate exceeded"
+# (Google Frontend, no Retry-After) from the cluster and other egress points,
+# and the daily CronJob ingested nothing after 2026-10-09 while still
+# reporting success on some days.
+
+import io  # noqa: E402
+import urllib.error  # noqa: E402
+
+from app.corpus_rag.arxiv import ArxivFeedError  # noqa: E402
+
+_EMPTY_FEED = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>ArXiv Query</title></feed>
+"""
+
+
+def _http_error(code: int, headers: dict[str, str] | None = None):
+    return urllib.error.HTTPError(
+        'https://export.arxiv.org/api/query', code, 'Rate exceeded',
+        headers or {}, io.BytesIO(b'Rate exceeded.'),
+    )
+
+
+def _sequenced_urlopen(outcomes: list):
+    calls: list[str] = []
+
+    def urlopen(request, timeout: int | None = None):
+        calls.append(request.full_url)
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    return urlopen, calls
+
+
+def test_fetch_entries_retries_throttling_with_backoff() -> None:
+    query = ArxivQuery(categories=('cs.LG',), max_results=10)
+    urlopen, calls = _sequenced_urlopen([
+        _http_error(429),
+        _http_error(503, {'Retry-After': '7'}),
+        _FakeResponse(_ATOM_FEED.encode('utf-8')),
+    ])
+    sleeps: list[float] = []
+
+    entries = fetch_entries(query, urlopen=urlopen, sleep=sleeps.append)
+
+    assert len(entries) == 2
+    assert len(calls) == 3
+    # Exponential backoff, overridden by a server-supplied Retry-After.
+    assert sleeps[0] >= 3
+    assert sleeps[1] == 7
+
+
+def test_fetch_entries_fails_loudly_when_throttling_persists() -> None:
+    query = ArxivQuery(categories=('cs.LG',), max_results=10)
+    urlopen, calls = _sequenced_urlopen([_http_error(429)] * 10)
+
+    with pytest.raises(ArxivFeedError, match='HTTP 429'):
+        fetch_entries(query, urlopen=urlopen, sleep=lambda _s: None)
+    assert 1 < len(calls) <= 5
+
+
+def test_fetch_entries_does_not_retry_client_errors() -> None:
+    query = ArxivQuery(categories=('cs.LG',), max_results=10)
+    urlopen, calls = _sequenced_urlopen([_http_error(400)])
+
+    with pytest.raises(ArxivFeedError, match='HTTP 400'):
+        fetch_entries(query, urlopen=urlopen, sleep=lambda _s: None)
+    assert len(calls) == 1
+
+
+def test_fetch_entries_rejects_an_empty_feed() -> None:
+    # Allowlisted categories always have recent submissions; an empty feed
+    # is an API failure, not "nothing new", and must not look like success.
+    query = ArxivQuery(categories=('cs.LG',), max_results=10)
+    urlopen, _ = _sequenced_urlopen([_FakeResponse(_EMPTY_FEED.encode('utf-8'))])
+
+    with pytest.raises(ArxivFeedError, match='no entries'):
+        fetch_entries(query, urlopen=urlopen, sleep=lambda _s: None)
+
+
+def test_date_filtered_to_zero_is_still_not_an_error() -> None:
+    # A non-empty feed whose entries all predate the window is a legitimate
+    # quiet day (e.g. weekends), distinct from an empty API response.
+    query = ArxivQuery(
+        categories=('cs.LG',), date_from=_dt.date(2030, 1, 1), max_results=10
+    )
+    urlopen, _ = _sequenced_urlopen([_FakeResponse(_ATOM_FEED.encode('utf-8'))])
+
+    assert fetch_entries(query, urlopen=urlopen, sleep=lambda _s: None) == []
