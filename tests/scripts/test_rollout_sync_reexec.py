@@ -29,6 +29,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ROLLOUT = REPO_ROOT / "scripts/rollout-research-services.sh"
 CHECKER = REPO_ROOT / "scripts/check-secret-permissions.sh"
+CHECKOUT_CHECKER = REPO_ROOT / "scripts/check-checkout-permissions.sh"
 
 OLD_SHA = "0" * 40
 NEW_SHA = "1" * 40
@@ -118,7 +119,7 @@ class RolloutSyncReexecTests(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self.scripts = self.root / "scripts"
         self.scripts.mkdir()
-        for script in (ROLLOUT, CHECKER):
+        for script in (ROLLOUT, CHECKER, CHECKOUT_CHECKER):
             shutil.copy2(script, self.scripts / script.name)
         self.rollout = self.scripts / ROLLOUT.name
 

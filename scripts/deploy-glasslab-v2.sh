@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Anything this run creates (a --sync checkout, rendered files) must not be
+# group-writable: the canonical checkout's group includes every contributor
+# account (issue #599).
+umask 022
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST_ROOT="$ROOT_DIR/kubeadm/glasslab-v2"
@@ -124,6 +128,11 @@ need_cmd "$KUBECTL"
 # Refuse before any cluster mutation when one is not owner-only.
 printf '[deploy-glasslab-v2] checking local Secret manifest permissions\n'
 "$ROOT_DIR/scripts/check-secret-permissions.sh" "$LOCAL_SECRETS_DIR"
+
+# Every manifest and script applied below comes from this tree, so it must not
+# be writable by the shared checkout group or by others (issue #599).
+printf '[deploy-glasslab-v2] checking checkout permissions\n'
+"$ROOT_DIR/scripts/check-checkout-permissions.sh" "$ROOT_DIR"
 
 # The manifests carry placeholder/pinned image tags; deploy must use the
 # checked-out commit so a plain deploy cannot ship stale code.
