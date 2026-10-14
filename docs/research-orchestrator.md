@@ -845,6 +845,8 @@ GET  /runs/{run_id}
 GET  /runs/{run_id}/events
 GET  /runs/{run_id}/events/stream
 GET  /runs/{run_id}/artifacts
+GET  /runs/{run_id}/artifacts/manifest
+GET  /runs/{run_id}/artifacts/{artifact_id}/content
 POST /knowledge/sources
 GET  /knowledge/sources
 DELETE /knowledge/sources/{source_id}

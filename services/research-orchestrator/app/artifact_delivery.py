@@ -24,6 +24,18 @@ from .report_bundle import (
 from .schemas import ArtifactRecord, JobRecord, JobStatus
 
 
+class ArtifactUnavailableError(ArtifactDeliveryError):
+    """No regular file inside the mount backs the artifact record."""
+
+
+class ArtifactDigestMismatchError(ArtifactDeliveryError):
+    """The backing file does not hash to the recorded SHA-256."""
+
+
+class ArtifactTooLargeError(ArtifactDeliveryError):
+    """The artifact exceeds the caller's size bound."""
+
+
 @dataclass(frozen=True)
 class ArtifactBundle:
     filename: str
@@ -67,11 +79,11 @@ class VerifiedArtifactReader:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b''):
                     digest.update(chunk)
             if digest.hexdigest() != artifact.sha256:
-                raise ArtifactDeliveryError(
+                raise ArtifactDigestMismatchError(
                     f'artifact digest mismatch: {artifact.uri}'
                 )
             return resolved
-        raise ArtifactDeliveryError(
+        raise ArtifactUnavailableError(
             f'artifact content is unavailable: {artifact.uri}'
         )
 
@@ -81,10 +93,79 @@ class VerifiedArtifactReader:
         # Per-file cap before read_bytes() materializes the file; the aggregate
         # bundle limit is enforced separately in build_run_artifact_bundle.
         if size > maximum_bytes:
-            raise ArtifactDeliveryError(
+            raise ArtifactTooLargeError(
                 f'artifact exceeds delivery limit: {artifact.uri}'
             )
         return path.read_bytes()
+
+    def read_verified(
+        self, artifact: ArtifactRecord, *, maximum_bytes: int
+    ) -> bytes:
+        """Read bounded content and re-verify the digest of the exact bytes.
+
+        ``resolve`` hashes the file on disk, but the file could change before
+        it is read; serving over HTTP re-hashes what is returned so a
+        concurrent rewrite fails closed instead of shipping unverified bytes.
+        """
+        path = self.resolve(artifact)
+        with path.open('rb') as handle:
+            content = handle.read(maximum_bytes + 1)
+        if len(content) > maximum_bytes:
+            raise ArtifactTooLargeError(
+                f'artifact exceeds download limit: {artifact.uri}'
+            )
+        if sha256(content).hexdigest() != artifact.sha256:
+            raise ArtifactDigestMismatchError(
+                f'artifact digest mismatch: {artifact.uri}'
+            )
+        return content
+
+    def relative_path(self, path: Path) -> str:
+        return path.relative_to(self.root).as_posix()
+
+
+def build_run_artifact_manifest(
+    *,
+    run_id: str,
+    artifacts: list[ArtifactRecord],
+    shared_mount_root: str,
+) -> dict[str, Any]:
+    """Derived, digest-checked index of every run- and job-level artifact.
+
+    The store's ArtifactRecords stay authoritative; this only reports, per
+    record, whether a regular file inside the mount currently backs it and
+    hashes to the recorded digest. Unavailable entries are listed with a
+    reason, never dropped, so a consumer can fail closed on gaps.
+    """
+    reader = VerifiedArtifactReader(shared_mount_root)
+    entries: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        entry: dict[str, Any] = {
+            'artifact_id': artifact.artifact_id,
+            'run_id': artifact.run_id,
+            'job_id': artifact.job_id,
+            'type': artifact.type,
+            'uri': artifact.uri,
+            'sha256': artifact.sha256,
+            'created_at': artifact.created_at.isoformat(),
+            'relative_path': None,
+            'size_bytes': None,
+            'available': False,
+            'reason': None,
+        }
+        try:
+            path = reader.resolve(artifact)
+            entry['relative_path'] = reader.relative_path(path)
+            entry['size_bytes'] = path.stat().st_size
+            entry['available'] = True
+        except ArtifactDeliveryError as exc:
+            entry['reason'] = str(exc)
+        entries.append(entry)
+    return {
+        'schema_version': 'glasslab-run-artifact-manifest-v1',
+        'run_id': run_id,
+        'artifacts': entries,
+    }
 
 
 def _safe_archive_name(value: str) -> str:
