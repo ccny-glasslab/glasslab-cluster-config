@@ -163,6 +163,13 @@ class Settings(BaseSettings):
     # GLASSLAB_ORCHESTRATOR_CORPUS_RAG_STORE_PATH.
     corpus_rag_raw_root: str = '/tmp/glasslab-research-orchestrator/rag/raw'
     corpus_rag_store_path: str | None = None
+    # /health corpus_rag block (issue #683). Sources with no rag_chunks are
+    # invisible to retrieval; above this count /health flags
+    # chunkless_over_threshold and a warning is logged once per transition.
+    # 50 leaves headroom over the 29 known secret-scanner false positives
+    # (2026-10-05). /health is the liveness probe, so the aggregate is cached.
+    corpus_rag_chunkless_alert_threshold: int = Field(default=50, ge=0)
+    corpus_rag_health_cache_seconds: float = Field(default=60.0, ge=0)
     # Feature flags for the corpus UI and the optional LLM-backed RAG lane.
     # ``ui_chat_enabled`` gates the Ask the corpus pane; ``ui_pdf_enabled``
     # gates the whole /ui/pdf/** route group; ``ui_upload_enabled`` gates the

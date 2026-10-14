@@ -148,11 +148,13 @@ class TestReadyDiscordObservability:
         with TestClient(app) as client:
             body = client.get("/health").json()
             # knowledge_dense is part of the stable /health contract since
-            # the corpus-RAG advisory integration (dense readiness block).
+            # the corpus-RAG advisory integration (dense readiness block);
+            # corpus_rag reports the RAG vector index (issue #683).
             assert set(body) == {
                 "status",
                 "service",
                 "version",
                 "knowledge_dense",
+                "corpus_rag",
             }
             assert body["status"] == "ok"

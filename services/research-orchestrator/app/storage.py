@@ -2200,6 +2200,40 @@ class SqliteStore:
             for row in rows
         ]
 
+    def count_rag_index(
+        self, model_id: str, *, dims: int, revision: str = ''
+    ) -> dict[str, int | None]:
+        # Mirrors PostgresStore.count_rag_index; SQLite always has the
+        # vectors table, so vector counts are never None here.
+        query = (
+            "SELECT (SELECT count(*) FROM rag_chunks"
+            " WHERE kind = 'evidence_span') AS evidence_spans,"
+            ' (SELECT count(*) FROM knowledge_sources) AS sources,'
+            ' (SELECT count(*) FROM knowledge_sources s WHERE NOT EXISTS'
+            '  (SELECT 1 FROM rag_chunks c WHERE c.source_id = s.source_id))'
+            ' AS chunkless_sources,'
+            ' (SELECT count(*) FROM rag_chunk_vectors WHERE model_id = ?)'
+            ' AS vectors_total,'
+            ' (SELECT count(*) FROM rag_chunk_vectors WHERE model_id = ?'
+            "  AND (? = 0 OR dims = ?) AND (? = '' OR revision = ?))"
+            ' AS vectors_usable'
+        )
+        with self._connect() as connection:
+            row = connection.execute(
+                query,
+                (model_id, model_id, dims, dims, revision, revision),
+            ).fetchone()
+        return {
+            key: int(row[key] or 0)
+            for key in (
+                'evidence_spans',
+                'sources',
+                'chunkless_sources',
+                'vectors_total',
+                'vectors_usable',
+            )
+        }
+
     def upsert_knowledge_chunk_vectors(
         self, meta: ChunkVectorMeta, vec_bytes: bytes
     ) -> None:
