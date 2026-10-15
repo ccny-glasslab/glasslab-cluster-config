@@ -6,7 +6,7 @@ administration path.
 | Canonical name | Address | Hostname | Responsibility |
 | --- | --- | --- | --- |
 | Glasslab | n/a | n/a | The overall lab and project |
-| gateway | `glasslab.org` | `glasslab` | Public SSH entry point only |
+| gateway | `glasslab.org` | `glasslab` | Public SSH entry point; small Apache site on port 80 ([gateway-web.md](gateway-web.md)) |
 | provisioner | `192.168.1.44` | `glasslab-PXE-01` | PXE, Ansible, canonical repo, image builds, and `kubectl` |
 | control plane | `192.168.1.49` | `cp01` | Kubernetes API and control plane |
 | workers | lab LAN addresses | `node01` through `node05` | Kubernetes workloads |
@@ -65,8 +65,9 @@ glasslab account` when it is unavoidable.
 
 ## Operational Boundaries
 
-- The gateway terminates public SSH access. It is not the canonical repo,
-  Ansible controller, PXE host, or Kubernetes workstation.
+- The gateway terminates public SSH access. It also serves a small Apache
+  site on port 80, described in [gateway-web.md](gateway-web.md). It is not
+  the canonical repo, Ansible controller, PXE host, or Kubernetes workstation.
 - The provisioner is the canonical live checkout and cluster administration
   host. It is not publicly reachable without the gateway hop.
 - Kubernetes workers are not normal contributor login targets. Research work
