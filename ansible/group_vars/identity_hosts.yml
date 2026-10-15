@@ -5,6 +5,7 @@ glasslab_identity_managed_usernames:
   - gr66ss-glasslab
   - denic
   - tristanc
+  - shradhagodse
 
 glasslab_identity_users:
   - username: gr66ss-glasslab
@@ -52,6 +53,22 @@ glasslab_identity_users:
       - kubernetes_observer
     authorized_keys:
       - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBDiZFcFbKimUVq5WOjd13e4ElYUsBSvVSbg7tVwA0gp tristanc@glasslab
+
+  - username: shradhagodse
+    display_name: Shradha Godse
+    state: present
+    # FreightTG thesis researcher (CCNY CS/CE). Gateway only: she reaches her
+    # GPU notebook through an SSH tunnel and has no provisioner or exo shell.
+    # Adopted from a hand-made gateway account (uid 1008). Lock the password
+    # in a separate change once she has confirmed key-only login from both
+    # machines (docs/identity-management.md, steps 7-8).
+    password_locked: false
+    targets: [gateway]
+    roles:
+      - lab_contributor
+    authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDrYbEdPgP2Q3vu5CVz79df3QkmZ1bvMVhNpOl0faWfW itcs\sgodse@CEN50158T191
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID5OqFMCe4tw+y68Ds3RhIkSNMu9fbNuffFAsQisCdHh sgodse@home-pc
 
 glasslab_exo_shared_group: glasslab-exo
 glasslab_exo_shared_paths:
