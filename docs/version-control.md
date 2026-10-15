@@ -6,6 +6,7 @@ What is tracked:
 
 - Ansible inventory, variables, playbooks, docs, and helper scripts
 - Snapshots of active provisioner PXE/web/service configuration under `live-config/provisioner/`
+- Snapshots of the public gateway's Apache web config under `live-config/gateway/`
 
 What is intentionally not tracked:
 
@@ -58,3 +59,20 @@ alias, which the deny does not affect. After restoring, verify with
 
 The external SOPS secret vault is intentionally excluded from the snapshot and
 must be restored separately with `scripts/restore-glasslab-secrets.sh`.
+
+## Gateway Snapshot And Restore
+
+The gateway (`glasslab.org`) has no repo checkout, so its scripts run from a
+contributor workstation over `ssh glasslab-gateway` (override with
+`GATEWAY_SSH=<alias>`) using `sudo -n`.
+
+`scripts/snapshot-gateway-config.sh` copies
+`/etc/apache2/sites-available/000-default.conf` into `live-config/gateway/`.
+It only reads from the gateway.
+
+`scripts/restore-gateway-config.sh` installs the tracked file with a
+`.bak-<stamp>` copy of the previous one, runs `apache2ctl configtest`, puts
+the previous file back if the test fails, and reloads Apache only if it
+passes. ufw rules are recorded by hand in `live-config/gateway/README.md` and
+are not changed by either script. What the gateway serves is described in
+[gateway-web.md](gateway-web.md).
