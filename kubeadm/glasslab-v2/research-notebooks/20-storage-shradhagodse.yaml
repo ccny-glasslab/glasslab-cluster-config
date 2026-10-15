@@ -1,0 +1,40 @@
+# Persistent home directory for Shradha Godse's notebook (FreightTG thesis).
+#
+# Static NFS volume on g-nas, following storage/20-nfs-static-pv.yaml. The
+# directory must exist on the NAS and be owned by 1000:100 (the notebook
+# image's jovyan:users) before the pod starts; see README.md. The volume holds
+# her repo clone, data, checkpoints, Python environments and Git credential,
+# and is retained when the claim is deleted.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: glasslab-notebook-shradhagodse-pv
+spec:
+  capacity:
+    storage: 200Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  mountOptions:
+    - nfsvers=4.1
+  claimRef:
+    namespace: glasslab-notebooks
+    name: notebook-shradhagodse-home
+  nfs:
+    server: 192.168.1.207
+    path: /volume1/backup/glasslab-notebooks/shradhagodse
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: notebook-shradhagodse-home
+  namespace: glasslab-notebooks
+spec:
+  storageClassName: ""
+  volumeName: glasslab-notebook-shradhagodse-pv
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 200Gi

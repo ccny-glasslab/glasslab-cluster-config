@@ -1,0 +1,22 @@
+# Personal research notebooks live in their own namespace, away from the
+# glasslab-v2 platform services. Every pod here is denied all traffic by
+# default (60-network-policy.yaml) and must meet the restricted Pod Security
+# profile.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: glasslab-notebooks
+  labels:
+    glasslab.io/stack: v2
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# Notebook pods never talk to the Kubernetes API, so the account they run as
+# has no token mounted and no RBAC bindings.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: research-notebook
+  namespace: glasslab-notebooks
+automountServiceAccountToken: false
