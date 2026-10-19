@@ -9,6 +9,11 @@ Tracked files:
 - `etc/apache2/sites-available/000-default.conf` — the `*:80` site.
 - `etc/apache2/sites-available/glasslab-ssl.conf` — the `*:443` site, added
   2026-10-19. Both are enabled through symlinks in `sites-enabled/`.
+- `etc/apache2/glasslab/*.conf` — route fragments that the two sites
+  `Include` by absolute path, added 2026-10-19 17:38 for the exam JupyterHub:
+  `exam-route.conf` (included from `glasslab-ssl.conf`) and
+  `exam-route-http.conf` (included from `000-default.conf`). The snapshot
+  script copies every `*.conf` it finds in `/etc/apache2/glasslab/`.
 - `etc/letsencrypt/acme-dns-auth.py` — certbot's DNS-01 auth hook (root,
   0700 on the gateway).
 - `etc/letsencrypt/renewal/glasslab.org.conf` — certbot's renewal settings for
@@ -24,14 +29,13 @@ can `ssh glasslab-gateway`. See [docs/version-control.md](../../docs/version-con
 
 ## Firewall (ufw)
 
-ufw is not snapshotted by script. Rules as checked on 2026-10-19
+ufw is not snapshotted by script. Rules as checked on 2026-10-19 17:45
 (`sudo ufw status verbose` / `sudo ufw show added`):
 
 - Default: deny incoming, allow outgoing, routed disabled.
 - `ufw allow Apache` — 80/tcp, IPv4 and IPv6.
 - `ufw allow OpenSSH` and `ufw allow 22/tcp` — 22/tcp, IPv4 and IPv6 (the
   second rule duplicates the first).
-
 - `ufw allow 443/tcp comment "HTTPS (Apache glasslab-ssl, Lets Encrypt)"` —
   IPv4 and IPv6, since 2026-10-19 16:28 when the HTTPS site went live. Earlier
   that day it was briefly `ufw reject 443/tcp` (so HTTPS-first browsers failed

@@ -11,7 +11,7 @@ copy_file() {
   local rel="$1"
   local tmp
   tmp="$(mktemp)"
-  if ! ssh -o BatchMode=yes "$GATEWAY_SSH" "sudo -n cat /$rel" >"$tmp" 2>/dev/null; then
+  if ! ssh -n -o BatchMode=yes "$GATEWAY_SSH" "sudo -n cat /$rel" >"$tmp" 2>/dev/null; then
     rm -f "$tmp"
     printf 'Failed to read /%s from %s\n' "$rel" "$GATEWAY_SSH" >&2
     exit 1
@@ -22,6 +22,13 @@ copy_file() {
 
 copy_file etc/apache2/sites-available/000-default.conf
 copy_file etc/apache2/sites-available/glasslab-ssl.conf
+# Route fragments Include'd from the sites above (for example the exam hub).
+# Listed live so a fragment added on the gateway is picked up automatically.
+fragments="$(ssh -o BatchMode=yes "$GATEWAY_SSH" \
+  'sudo -n find /etc/apache2/glasslab -maxdepth 1 -type f -name "*.conf" -printf "%f\n" 2>/dev/null' || true)"
+while IFS= read -r name; do
+  [ -n "$name" ] && copy_file "etc/apache2/glasslab/$name"
+done <<<"$fragments"
 # certbot DNS-01 hook and renewal settings. The acme-dns credentials it reads
 # (/etc/letsencrypt/acmedns.json) and the certificate keys are never copied.
 copy_file etc/letsencrypt/acme-dns-auth.py
