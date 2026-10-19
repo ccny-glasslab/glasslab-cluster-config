@@ -17,7 +17,7 @@ they appear and the first match wins, so order matters.
 
 | Path | Behavior | Notes |
 | --- | --- | --- |
-| `/dsei102/` | Static files from `/var/www/dsei102` | DSEI 10200 offline course reference (~1 GB, ~21k files) for students taking an exam in CCNY computer labs. Added 2026-10-15. `Require ip 134.74.0.0/16 127.0.0.1 ::1`: CCNY campus addresses plus local loopback; everyone else gets 403. `/dsei102` redirects (301) to `/dsei102/`. `Options None`, `AllowOverride None`, so no directory listings and no `.htaccess`. |
+| `/dsei102/` | Static files from `/var/www/dsei102` | DSEI 10200 offline course reference (~1 GB, ~21k files) for students taking an exam in CCNY computer labs. Added 2026-10-15. `Require ip 134.74.0.0/16 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1 ::1`: CCNY's public range, the RFC 1918 private ranges, and loopback; everyone else gets 403. The private ranges were added 2026-10-19 because some campus networks reach the gateway without NAT (a laptop on `192.168.4.x` was getting 403). Private source addresses are not routable from the internet, so this is still campus-only. `/dsei102` redirects (301) to `/dsei102/`. `Options None`, `AllowOverride None`, so no directory listings and no `.htaccess`. |
 | `/` (everything else) | Reverse proxy to `http://134.74.126.109/` | The upstream returns a meta-refresh page to the CCNY Computer Science site. |
 | `/sstfront/` | Intended proxy to `http://134.74.77.69:9999/sstfront/` (plus a `wss://` rule for `/sstfront/api/kernels`) | Dead. It is listed after `ProxyPass /`, so the root proxy catches `/sstfront/` first and the upstream returns 404. The `wss://` rule would also need `mod_proxy_wstunnel`, which is not enabled. Cleanup candidate; left in place. |
 
@@ -35,8 +35,10 @@ Enabled proxy modules: `proxy`, `proxy_http`. Logs go to
 
 Apache listens on 443 because `mod_ssl` is enabled, but no HTTPS site is
 enabled (`default-ssl.conf` exists in `sites-available/` but is not linked),
-and ufw has no rule allowing 443. HTTPS to `glasslab.org` therefore does not
-connect.
+and ufw **rejects** 443/tcp (added 2026-10-19; before that it was silently
+dropped). HTTPS to `glasslab.org` is refused immediately, so browsers that try
+HTTPS first (typing `glasslab.org/dsei102`) fall back to `http://` instead of
+hanging. Give students the explicit `http://glasslab.org/dsei102/` link.
 
 ## Changing The Gateway Web Config
 

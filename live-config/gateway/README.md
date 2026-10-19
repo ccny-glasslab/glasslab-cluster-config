@@ -15,7 +15,7 @@ can `ssh glasslab-gateway`. See [docs/version-control.md](../../docs/version-con
 
 ## Firewall (ufw)
 
-ufw is not snapshotted by script. Rules as checked on 2026-10-15
+ufw is not snapshotted by script. Rules as checked on 2026-10-19
 (`sudo ufw status verbose` / `sudo ufw show added`):
 
 - Default: deny incoming, allow outgoing, routed disabled.
@@ -23,5 +23,8 @@ ufw is not snapshotted by script. Rules as checked on 2026-10-15
 - `ufw allow OpenSSH` and `ufw allow 22/tcp` — 22/tcp, IPv4 and IPv6 (the
   second rule duplicates the first).
 
-There is no rule for 443/tcp. Apache listens on 443 because `mod_ssl` is
-enabled (`ports.conf`), but no 443 site is enabled and ufw drops the traffic.
+- `ufw reject 443/tcp comment "fail fast so HTTPS-first browsers fall back to
+  http"` — IPv4 and IPv6, added 2026-10-19. Apache listens on 443 because
+  `mod_ssl` is enabled (`ports.conf`), but no 443 site is enabled. Before this
+  rule the default policy dropped 443, so browsers that try HTTPS first hung
+  instead of falling back to port 80.
