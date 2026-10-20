@@ -84,7 +84,7 @@ These are still useful operational documents:
 - `image-distribution.md`
 - `github-actions-ci-policy-2026-04.md`
 - `internal-service-exposure.md`
-- `exam-jupyterhub-on-kubernetes-plan.md` (design plan, not implemented:
+- `exam-jupyterhub-on-kubernetes-plan.md` (live since 2026-10-20 via Z2JH; as-built notes plus the target design:
   the exam JupyterHub on the cluster instead of a borrowed Docker host)
 - `secrets-and-dr.md`
 - `provisioner-dependence-inventory.md`

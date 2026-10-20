@@ -1,0 +1,155 @@
+# Exam JupyterHub on Kubernetes: Zero to JupyterHub chart 4.4.0
+# (JupyterHub 5.5.0, KubeSpawner 7.0.0, NativeAuthenticator 1.3.0), namespace
+# glasslab-exam, release "exam". Ports Mike's hub/jupyterhub_config.py; his
+# student image runs unchanged.
+#
+#   helm upgrade --install exam jupyterhub-4.4.0.tgz -n glasslab-exam -f values.yaml \
+#     [--set hub.config.NativeAuthenticator.enable_signup=true]   # only while registering
+#
+# Storage is local (the .207 NFS export rejects non-root writes):
+#   student work  hostPath /var/lib/glasslab-exam/users/<name>  (odd + examadmin on node01, even on node05)
+#   hub database  PV glasslab-exam-hub-db, hostPath /var/lib/glasslab-exam/hub on node03
+
+hub:
+  baseUrl: /exam/
+  nodeSelector: {kubernetes.io/hostname: node03}
+  db:
+    type: sqlite-pvc
+    pvc:
+      storage: 1Gi
+  concurrentSpawnLimit: 5
+  activeServerLimit: 26
+  allowNamedServers: false
+  shutdownOnLogout: false
+  config:
+    JupyterHub:
+      admin_access: false
+    Authenticator:
+      admin_users: [examadmin]
+      allowed_users: [examadmin, student01, student02, student03, student04, student05,
+        student06, student07, student08, student09, student10, student11, student12,
+        student13, student14, student15, student16, student17, student18, student19,
+        student20, student21, student22, student23, student24, student25]
+      allow_all: false
+      allow_existing_users: false
+    NativeAuthenticator:
+      enable_signup: false
+      open_signup: false
+      minimum_password_length: 16
+      allowed_failed_logins: 5
+      seconds_before_next_try: 60
+    Spawner:
+      default_url: /lab
+      disable_user_config: true
+      http_timeout: 60
+    KubeSpawner:
+      image_pull_policy: IfNotPresent
+      container_security_context:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        seccompProfile: {type: RuntimeDefault}
+  extraConfig:
+    00-exam: |
+      import re
+      import socket
+      from pathlib import Path
+      import nativeauthenticator
+
+      roster = set(c.Authenticator.allowed_users)
+      if 'examadmin' not in roster or any(not re.fullmatch(r'(student[0-9]{2}|examadmin)', u) for u in roster):
+          raise RuntimeError('Invalid roster')
+
+      class RosterAuthenticator(nativeauthenticator.NativeAuthenticator):
+          """Restrict registration as well as authentication to the roster."""
+          def validate_username(self, username):
+              return username in roster and super().validate_username(username)
+
+      c.JupyterHub.authenticator_class = RosterAuthenticator
+      c.JupyterHub.template_paths = [str(Path(nativeauthenticator.__file__).parent / 'templates')]
+
+      # Student pods get no DNS egress, so point them at the hub service by IP.
+      c.JupyterHub.hub_connect_url = 'http://%s:8081' % socket.gethostbyname('hub')
+
+      # Each student always runs on the node that holds their folder.
+      def pin_to_storage_node(spawner):
+          name = spawner.user.name
+          if name not in roster:
+              raise RuntimeError('Account is not in roster')
+          node = 'node01' if name == 'examadmin' or int(name[-2:]) % 2 else 'node05'
+          spawner.node_selector = {'kubernetes.io/hostname': node}
+
+      c.Spawner.pre_spawn_hook = pin_to_storage_node
+
+proxy:
+  service:
+    type: NodePort
+    nodePorts:
+      http: 30800
+  chp:
+    nodeSelector: {kubernetes.io/hostname: node03}
+
+singleuser:
+  image:
+    name: exam-student
+    tag: release
+  cmd: /usr/local/bin/jupyterhub-singleuser
+  defaultUrl: /lab
+  startTimeout: 120
+  uid: 1000
+  fsGid: 1000
+  cpu:
+    limit: 1
+    guarantee: 0.25
+  memory:
+    limit: 1G
+    guarantee: 512M
+  storage:
+    type: none
+    extraVolumes:
+      - name: work
+        hostPath:
+          path: /var/lib/glasslab-exam/users/{username}
+          type: Directory
+    extraVolumeMounts:
+      - name: work
+        mountPath: /home/jovyan/work
+  extraEnv:
+    OMP_NUM_THREADS: "1"
+    OPENBLAS_NUM_THREADS: "1"
+    MKL_NUM_THREADS: "1"
+    NUMEXPR_NUM_THREADS: "1"
+    JUPYTER_CONFIG_DIR: /etc/jupyter-exam
+    JUPYTERHUB_ALLOW_TOKEN_IN_URL: "0"
+  extraPodConfig:
+    automountServiceAccountToken: false
+    enableServiceLinks: false
+  cloudMetadata:
+    blockWithIptables: false
+  networkPolicy:
+    enabled: true
+    egressAllowRules:
+      cloudMetadataServer: false
+      dnsPortsCloudMetadataServer: false
+      dnsPortsKubeSystemNamespace: false
+      dnsPortsPrivateIPs: false
+      nonPrivateIPs: false
+      privateIPs: false
+
+scheduling:
+  userScheduler: {enabled: false}
+  userPlaceholder: {enabled: false}
+  podPriority: {enabled: false}
+  corePods:
+    nodeAffinity: {matchNodePurpose: ignore}
+  userPods:
+    nodeAffinity: {matchNodePurpose: ignore}
+
+prePuller:
+  hook: {enabled: false}
+  continuous: {enabled: false}
+
+cull:
+  enabled: false

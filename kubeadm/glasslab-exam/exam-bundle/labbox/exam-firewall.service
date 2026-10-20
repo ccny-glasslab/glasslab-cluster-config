@@ -1,0 +1,21 @@
+# DRAFT. /etc/systemd/system/exam-firewall.service
+# Re-applies the exam firewall whenever Docker starts or restarts, including
+# at boot. The rules live in DOCKER-USER/INPUT, which Docker does not manage,
+# but they are not persistent across reboot on their own.
+[Unit]
+Description=Exam student-container firewall
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Holds EXAM_LAN_IP (and any overridden EXAM_* values). Root-owned, 0600.
+EnvironmentFile=/etc/exam/firewall.env
+ExecStart=/opt/exam-firewall/exam-firewall.sh apply
+ExecStartPost=/opt/exam-firewall/exam-firewall-check.sh
+# No ExecStop: leave the drops in place while Docker is stopped.
+
+[Install]
+WantedBy=docker.service

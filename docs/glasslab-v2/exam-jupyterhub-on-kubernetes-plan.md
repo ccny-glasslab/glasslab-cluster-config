@@ -1,8 +1,53 @@
-# Exam JupyterHub On Kubernetes: Design Plan
+# Exam JupyterHub On Kubernetes
 
-Status: **design only, not implemented.** Nothing in this document has been
-applied to the cluster, the NAS, or the gateway. Written 2026-10-20, the day
-before the DSEI 10200 exam that runs on the single-host deployment below.
+Status: **a first version is live** for the DSEI 10200 exam (2026-10-21). It was
+built on 2026-10-20 with the faster of the two options below (Zero to JupyterHub)
+and served `https://glasslab.org/exam/` from 17:46 that day. The section
+"As built" records what is running and how it differs from this plan. The rest
+of the document is the target design for future exams and for researcher
+JupyterHubs. It was written the same day, before the build.
+
+## As built (2026-10-20)
+
+Live configuration: [`../../kubeadm/glasslab-exam/`](../../kubeadm/glasslab-exam/README.md).
+
+| Area | Live | Plan below | Why it differs |
+|---|---|---|---|
+| Packaging | Z2JH chart **4.4.0** (JupyterHub 5.5.0, KubeSpawner 7.0.0, NativeAuthenticator 1.3.0), release `exam`, Helm v3.22.0 from the provisioner | Option A: Mike's hub image + KubeSpawner, plain manifests | The exam was next day; Z2JH needs no image build, and its hub bundles the same JupyterHub and NativeAuthenticator versions as Mike's. Roster logic ported into `hub.extraConfig` |
+| Student image | Mike's `exam-student:release`, unchanged, imported into containerd on node01/03/04/05 (manifest `ddf97c44…`) | GHCR by digest | No time to publish; import is the documented break-glass path |
+| Student storage | **Local** hostPath folders: odd students + `examadmin` on node01, even on node05, `/var/lib/glasslab-exam/users/<name>` (1000:1000, 0700); a `pre_spawn_hook` pins each student to their node | NFS on `.207` | The `.207` export squashes every non-root UID: as root a pod can create and `chown` folders, but UID 1000 cannot write even into a `0777` folder, over NFSv4.1 or NFSv3. Fixing it needs the NAS export changed to "no mapping" for non-root users (§9) |
+| Hub state | Static hostPath PV `glasslab-exam-hub-db` on node03, pre-bound to the chart's `hub-db-dir` PVC | Local PV on the hub node | As planned |
+| Isolation | Chart NetworkPolicies with every `egressAllowRules` off: students reach only the hub API (8081) and the proxy's public port (8000, which the chart always allows). `hub_connect_url` is the hub Service IP, resolved at hub start, so students need no DNS | Namespace default-deny, fixed ClusterIP, VAP image pinning, PSA `restricted` | PSA `restricted` would reject the hostPath volumes; no VAP was written. The proxy port is the same login-protected site the browser reaches |
+| Exposure | NodePort `proxy-public` 30800, `externalTrafficPolicy: Cluster`; gateway `exam-route.conf` → `192.168.1.50:30800` | `Local` + gateway-only ingress rule | Every node's 30800 is reachable from the lab LAN (not from campus) |
+| PIDs | No per-pod limit | kubelet `podPidsLimit: 256` on exam nodes | Kubelet change skipped for time |
+| Fallback | node02 Docker hub still running; `exam-bundle/gateway/switch-exam-route.sh node02` on the gateway switches back | Docker host prepared from T-7 d | Same idea |
+
+Tests run on the live cluster before the gateway switch, all passed:
+
+- **Session** (`exam-bundle/tests/student-session.py`): login, spawn, JupyterLab, a kernel over
+  WebSocket running numpy/pandas/scikit-learn/matplotlib, notebook save/delete. Run as student23
+  via the NodePort, and as student22 through `https://glasslab.org/exam/` after the switch.
+- **Pod security**: UID/GID 1000, all capabilities dropped, no privilege escalation, seccomp
+  `RuntimeDefault`, no service-account token, 1 CPU / 1 GiB limits (0.25 CPU / 512 Mi requests).
+- **Isolation** (`kubeadm/glasslab-exam/netpol-probe.sh`): from a student-labelled pod, only the hub
+  API and proxy public port answer. Other students, the proxy admin API, the Kubernetes API, cluster
+  and external DNS, `glasslab-v2` Postgres, node SSH and kubelet, the provisioner, the gateway,
+  node02, the internet and `169.254.169.254` are all blocked. An unlabelled control pod reached the
+  internet, the API, DNS and the nodes, which shows the probes detect openings.
+- **Load** (Mike's workload, `exam-bundle/labbox/load-test-k8s.sh`): all 20 ready in 43.7 s
+  (≤ 120), synchronized pass slowest 15.6 s (≤ 60), staggered 12.6 s. node01 and node05 kept ≥ 85 %
+  memory available with no swap and no OOM kills. node02 alone measured 66.9 s / 28.7 s.
+
+Not done in the live version: Mike's restore and backup drills, hub-restart and node-loss drills,
+the per-pod PID limit, and a real CCNY lab browser check (pending for the morning of the exam).
+
+Build notes worth keeping:
+
+- On 2026-10-20 between about 17:05 and 17:30, GitHub, PyPI, quay.io, GHCR and the Docker Hub
+  registry were unreachable from the whole campus (the gateway too) while Google answered, and Red Hat
+  reported quay.io degraded. Pre-pull or import every image an exam needs well ahead of time.
+- The lab router's hairpin NAT loses about 1 in 15 new connections from the lab LAN to the gateway's
+  public IP. Lab-LAN clients should resolve `glasslab.org` to `192.168.1.4`.
 
 ## Why this exists
 
@@ -61,16 +106,16 @@ Non-goals for the first cluster version:
 
 ## Summary of decisions
 
-| Area | Recommendation | Main alternative |
-|---|---|---|
-| Spawner / packaging | Mike's hub image rebuilt with `jupyterhub-kubespawner` added to the hash-locked requirements (DockerSpawner removed), deployed with plain manifests under `kubeadm/glasslab-exam/` | Zero to JupyterHub chart 4.4.0 (JupyterHub 5.5.0) |
-| Namespace | New `glasslab-exam`, Pod Security Admission `restricted` | — |
-| Student storage | Static NFS PV on the `.207` NAS (dedicated export path), one RWX PVC, per-student `subPath` | Local PVs; a dynamic NFS provisioner |
-| Hub state (SQLite) | Static local PV on the hub's node. Never on NFS | Postgres `db_url` |
-| Isolation | Namespace default-deny NetworkPolicies (Calico enforces), DNS-free student pods, an admission policy pinning images | Calico `GlobalNetworkPolicy` |
-| Exposure | NodePort Service with `externalTrafficPolicy: Local`, ingress allowed only from the gateway IP, gateway Apache retargeted. A recorded exception to the internal-only rule | `hostPort`; MetalLB; internal ingress |
-| Images | Private GHCR packages by digest, pre-pulled onto exam nodes before the exam | containerd import from Mike's tarball (break-glass) |
-| Node placement | 2–3 workers labelled and tainted for the exam window, with `podPidsLimit: 256` in their kubelet config | Shared nodes, with the PID limit relaxed |
+| Area | Recommendation | Main alternative | Live (2026-10-20) |
+|---|---|---|---|
+| Spawner / packaging | Mike's hub image rebuilt with `jupyterhub-kubespawner` added to the hash-locked requirements (DockerSpawner removed), deployed with plain manifests under `kubeadm/glasslab-exam/` | Zero to JupyterHub chart 4.4.0 (JupyterHub 5.5.0) | Z2JH 4.4.0 |
+| Namespace | New `glasslab-exam`, Pod Security Admission `restricted` | — | `glasslab-exam`, no PSA label (hostPath storage) |
+| Student storage | Static NFS PV on the `.207` NAS (dedicated export path), one RWX PVC, per-student `subPath` | Local PVs; a dynamic NFS provisioner | Local hostPath on node01/node05, students pinned (NAS squashes non-root) |
+| Hub state (SQLite) | Static local PV on the hub's node. Never on NFS | Postgres `db_url` | As planned (node03) |
+| Isolation | Namespace default-deny NetworkPolicies (Calico enforces), DNS-free student pods, an admission policy pinning images | Calico `GlobalNetworkPolicy` | Chart policies, all egress allow-rules off, DNS-free; no VAP |
+| Exposure | NodePort Service with `externalTrafficPolicy: Local`, ingress allowed only from the gateway IP, gateway Apache retargeted. A recorded exception to the internal-only rule | `hostPort`; MetalLB; internal ingress | NodePort 30800, `Cluster` policy (LAN-reachable) |
+| Images | Private GHCR packages by digest, pre-pulled onto exam nodes before the exam | containerd import from Mike's tarball (break-glass) | containerd import |
+| Node placement | 2–3 workers labelled and tainted for the exam window, with `podPidsLimit: 256` in their kubelet config | Shared nodes, with the PID limit relaxed | node01 + node05 for students, node03 for hub/proxy; no taints, no PID limit |
 
 ## 1. Spawner
 
@@ -560,14 +605,18 @@ Decisions:
    ([ccny-glasslab/glasslab-cluster-config#696](https://github.com/ccny-glasslab/glasslab-cluster-config/pull/696)),
    which also admits LAN hosts.
 
-Not checked live while writing this plan (check them in Phase 0, below):
+Checked live during the 2026-10-20 build:
 
-- current per-node allocatable CPU and memory, and which workers are Ready (`archimedes` was
-  NotReady and its Node object was deleted on 2026-10-19)
-- the `.207` export's squash and UID mapping, and free capacity
-- whether `metrics-server` is installed (the load test does not depend on it)
-- Calico/Felix configuration (`defaultEndpointToHostAction`), and kube-proxy mode
-- a free fixed ClusterIP, and that the chosen NodePort is unused
+- Allocatable: node01 and node02 8 CPU / ~63 GiB, node03 and node04 4 CPU / ~31 GiB, node05
+  8 CPU / ~31 GiB, cp01 4 CPU. `archimedes` was NotReady since 2026-08-24 and its Node object was
+  deleted on 2026-10-19.
+- `.207` export: root is **not** squashed; every non-root UID is (NFSv4.1 and NFSv3 both). Decision 3
+  therefore also needs the export set to pass UIDs through, or a dedicated share that does.
+- `metrics-server` is not installed (`kubectl top` reports no Metrics API).
+- NodePort 30800 is now in use by `glasslab-exam/proxy-public`.
+
+Still not checked: Calico/Felix `defaultEndpointToHostAction` (a student pod's own-node traffic was
+not probed separately), kube-proxy mode, and NAS free capacity.
 
 ## 10. Effort estimate
 
