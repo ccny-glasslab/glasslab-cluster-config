@@ -34,6 +34,80 @@ As of 2026-03-23, the lab also has a validated NFS target:
 
 This matters because any network storage plan should be evaluated against what is already pinned, already local, and already functioning.
 
+## NAS Exports (`g-nas`, `192.168.1.207`)
+
+The NAS is a Synology DiskStation (DSM web UI `https://192.168.1.207:5001`).
+Its shares and NFS rules live in DSM, not in this repository, so this table is
+the record. Credentials are not stored here; changing a share needs a DSM
+administrator login.
+
+`showmount -e 192.168.1.207` from the provisioner, 2026-10-20:
+
+| Share | Export path | NFS clients | Used by |
+|---|---|---|---|
+| `backup` | `/volume1/backup` | `192.168.1.0/24` | `glasslab-v2` static PVs ([`20-nfs-static-pv.yaml`](../../kubeadm/glasslab-v2/storage/20-nfs-static-pv.yaml)) |
+| `glasslab-jupyter` | `/volume1/glasslab-jupyter` | `192.168.1.0/24` | JupyterHub user storage (exams, researcher hubs). Created 2026-10-20 |
+| `home1` | `/volume1/home1` | `192.168.1.0/24`, `134.74.112.15`, `134.74.146.39` | Not used by the cluster |
+
+### `glasslab-jupyter`
+
+NFS rule (DSM: Shared Folder → Edit → NFS Permissions), entered by a DSM
+administrator on 2026-10-20. The client scope is confirmed by `showmount`, and
+Read/Write and "No mapping" by the probe below; the other boxes were not read
+back from DSM:
+
+- Hostname or IP: `192.168.1.0/24`, the same scope as `backup`, so a new
+  worker needs no new rule
+- Privilege: Read/Write
+- Squash: **No mapping**
+- Security: `sys`
+- Allow connections from non-privileged ports: off
+- Allow users to access mounted subfolders: on
+- Recycle Bin and encryption: off
+- Asynchronous: not recorded; check it in DSM when the share is next opened
+
+Share root on the NAS: owner `0:0`, mode **`0755`, plain Unix permissions**.
+
+Why "No mapping": JupyterHub runs every user's server as UID 1000, and
+per-user directories are owned by `1000:1000` with mode `0700`. The NAS has to
+see the client's real UID so that ownership and mode bits mean something. With
+squashing, every user would map to one NAS account, and the users could read
+each other's directories.
+
+Why the root has plain Unix permissions: DSM creates a share with Synology
+ACLs. Over NFS those directories list as `0777`, but the ACL only grants
+DSM accounts, so a client UID that is not a DSM user (like 1000) is refused
+even `ls` on the share root. "No mapping" alone did not fix that. A root pod
+ran `chmod 0755` on the share root over NFS, which replaced the ACL with
+ordinary mode bits; directories created under it afterwards are plain Unix
+too. **Do not edit this share's permissions in DSM (Shared Folder →
+Permissions, or File Station → Properties → Permission)**: that can put the
+ACL back and lock non-root users out again. If it happens, repeat the
+`chmod 0755` from a root pod.
+
+Root is not squashed, so pods that run as root can read and change everything
+in the share. Only the JupyterHub preparation Jobs should run as root against
+it; user pods run as UID 1000 with no capabilities.
+
+Verified 2026-10-20 from `node01` with a throwaway PV
+(`nfsvers=4.1`, `Retain`, pre-bound PVC) and the `exam-student:release` image:
+
+- root: `mkdir users/_probe`, `chown 1000:1000`, `chmod 0700`
+- UID 1000: wrote, read and listed a file and created a subdirectory there;
+  `ls -ln` shows owner `1000`
+- UID 1001: list, read and write of `users/_probe` all denied
+- the probe PV, PVC, pods and directory were removed afterwards; the share
+  probe directories are gone
+
+### `backup`
+
+Its NFS rule was not changed and has not been read from DSM. From the client
+side (2026-10-20): root is not squashed; UID 1000 cannot write even in a
+directory that lists as `0777`, over NFSv4.1 and NFSv3. That matches the
+Synology ACL behaviour above rather than a squash rule, but it was not
+re-tested on `backup`. Changing modes there would affect the existing
+`glasslab-v2` PVs, so leave it as it is unless a non-root workload needs it.
+
 ## What Network Storage Can Help With
 
 Shared network storage can help Glasslab by:
