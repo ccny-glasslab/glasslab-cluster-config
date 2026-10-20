@@ -15,7 +15,7 @@ Live configuration: [`../../kubeadm/glasslab-exam/`](../../kubeadm/glasslab-exam
 |---|---|---|---|
 | Packaging | Z2JH chart **4.4.0** (JupyterHub 5.5.0, KubeSpawner 7.0.0, NativeAuthenticator 1.3.0), release `exam`, Helm v3.22.0 from the provisioner | Option A: Mike's hub image + KubeSpawner, plain manifests | The exam was next day; Z2JH needs no image build, and its hub bundles the same JupyterHub and NativeAuthenticator versions as Mike's. Roster logic ported into `hub.extraConfig` |
 | Student image | Mike's `exam-student:release`, unchanged, imported into containerd on node01/03/04/05 (manifest `ddf97c44…`) | GHCR by digest | No time to publish; import is the documented break-glass path |
-| Student storage | **Local** hostPath folders: odd students + `examadmin` on node01, even on node05, `/var/lib/glasslab-exam/users/<name>` (1000:1000, 0700); a `pre_spawn_hook` pins each student to their node | NFS on `.207` | The `.207` export squashes every non-root UID: as root a pod can create and `chown` folders, but UID 1000 cannot write even into a `0777` folder, over NFSv4.1 or NFSv3. Fixing it needs the NAS export changed to "no mapping" for non-root users (§9) |
+| Student storage | **Local** hostPath folders: odd students + `examadmin` on node01, even on node05, `/var/lib/glasslab-exam/users/<name>` (1000:1000, 0700); a `pre_spawn_hook` pins each student to their node | NFS on `.207` | On the `.207` `backup` export, as root a pod can create and `chown` folders, but UID 1000 cannot write even into a folder listed as `0777`, over NFSv4.1 or NFSv3. A dedicated share, `/volume1/glasslab-jupyter`, that UID 1000 can write to was set up after the exam went live (§2.3, §9) |
 | Hub state | Static hostPath PV `glasslab-exam-hub-db` on node03, pre-bound to the chart's `hub-db-dir` PVC | Local PV on the hub node | As planned |
 | Isolation | Chart NetworkPolicies with every `egressAllowRules` off: students reach only the hub API (8081) and the proxy's public port (8000, which the chart always allows). `hub_connect_url` is the hub Service IP, resolved at hub start, so students need no DNS | Namespace default-deny, fixed ClusterIP, VAP image pinning, PSA `restricted` | PSA `restricted` would reject the hostPath volumes; no VAP was written. The proxy port is the same login-protected site the browser reaches |
 | Exposure | NodePort `proxy-public` 30800, `externalTrafficPolicy: Cluster`; gateway `exam-route.conf` → `192.168.1.50:30800` | `Local` + gateway-only ingress rule | Every node's 30800 is reachable from the lab LAN (not from campus) |
@@ -110,7 +110,7 @@ Non-goals for the first cluster version:
 |---|---|---|---|
 | Spawner / packaging | Mike's hub image rebuilt with `jupyterhub-kubespawner` added to the hash-locked requirements (DockerSpawner removed), deployed with plain manifests under `kubeadm/glasslab-exam/` | Zero to JupyterHub chart 4.4.0 (JupyterHub 5.5.0) | Z2JH 4.4.0 |
 | Namespace | New `glasslab-exam`, Pod Security Admission `restricted` | — | `glasslab-exam`, no PSA label (hostPath storage) |
-| Student storage | Static NFS PV on the `.207` NAS (dedicated export path), one RWX PVC, per-student `subPath` | Local PVs; a dynamic NFS provisioner | Local hostPath on node01/node05, students pinned (NAS squashes non-root) |
+| Student storage | Static NFS PV on the `.207` NAS (dedicated export path), one RWX PVC, per-student `subPath` | Local PVs; a dynamic NFS provisioner | Local hostPath on node01/node05, students pinned (non-root NFS writes failed at build time) |
 | Hub state (SQLite) | Static local PV on the hub's node. Never on NFS | Postgres `db_url` | As planned (node03) |
 | Isolation | Namespace default-deny NetworkPolicies (Calico enforces), DNS-free student pods, an admission policy pinning images | Calico `GlobalNetworkPolicy` | Chart policies, all egress allow-rules off, DNS-free; no VAP |
 | Exposure | NodePort Service with `externalTrafficPolicy: Local`, ingress allowed only from the gateway IP, gateway Apache retargeted. A recorded exception to the internal-only rule | `hostPort`; MetalLB; internal ingress | NodePort 30800, `Cluster` policy (LAN-reachable) |
@@ -225,7 +225,8 @@ reviewable static PV/PVC wiring
 ### 2.2 NFS layout
 
 - Prefer a **dedicated** Synology share or export for exam data, restricted to the
-  worker IPs, over another subdirectory of `/volume1/backup`. The existing
+  worker IPs, over another subdirectory of `/volume1/backup`. It now exists:
+  `/volume1/glasslab-jupyter`, exported to `192.168.1.0/24` (2026-10-20). The existing
   `glasslab-v2` PVs point into that export, and any node that can mount the export
   root can read everything in it. Fallback if a new share is refused:
   `/volume1/backup/glasslab-exam/<exam-id>/`.
@@ -242,8 +243,12 @@ reviewable static PV/PVC wiring
 Mike's hook requires each `users/studentNN` to be a real directory owned by
 `1000:1000` with mode `0700`.
 
-- The Synology export must pass UID 1000 through unchanged ("No mapping"). Whether
-  root is squashed has to be checked (§9). The plan doesn't need root on the NAS.
+- The Synology export must pass UID 1000 through unchanged ("No mapping"), **and**
+  the share's directories must use plain Unix permissions. DSM creates shares with
+  Synology ACLs, which refuse client UIDs that aren't DSM users even though the
+  directories list as `0777`. `glasslab-jupyter`'s root was set to `0755` from a
+  root pod. Don't edit its permissions in DSM. Details:
+  [`network-storage-integration.md`](network-storage-integration.md#nas-exports-g-nas-1921681207).
 - `users/` is owned by `1000:1000`, mode `0711`. Students can't list it, and the
   non-root hub can still `lstat` children.
 - A one-shot prep Job (in the repo, UID 1000, no capabilities) creates
@@ -610,8 +615,10 @@ Checked live during the 2026-10-20 build:
 - Allocatable: node01 and node02 8 CPU / ~63 GiB, node03 and node04 4 CPU / ~31 GiB, node05
   8 CPU / ~31 GiB, cp01 4 CPU. `archimedes` was NotReady since 2026-08-24 and its Node object was
   deleted on 2026-10-19.
-- `.207` export: root is **not** squashed; every non-root UID is (NFSv4.1 and NFSv3 both). Decision 3
-  therefore also needs the export set to pass UIDs through, or a dedicated share that does.
+- `.207` `backup` export: root is **not** squashed; non-root UIDs could not write (NFSv4.1 and NFSv3
+  both). Later on 2026-10-20 the cause was traced on a new share to Synology ACLs, not only
+  the squash rule. The dedicated `glasslab-jupyter` share (No mapping, plain-Unix `0755` root)
+  passed a UID 1000 write / UID 1001 denied probe from node01. Decision 3 can use it.
 - `metrics-server` is not installed (`kubectl top` reports no Metrics API).
 - NodePort 30800 is now in use by `glasslab-exam/proxy-public`.
 

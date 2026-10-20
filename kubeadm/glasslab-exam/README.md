@@ -13,8 +13,14 @@ into `values.yaml`.
 | Accounts | the same 26 roster accounts and passwords as node02 (`/opt/exam-release/private/credentials.csv` on node02, root-only); signup closed |
 | Fallback | node02 Docker hub, still running and untouched |
 
-Why local disks: the .207 NFS export refuses writes from non-root users (even into a
-`0777` directory), and students must not run as root.
+Why local disks: on 2026-10-20 the .207 NFS export refused writes from non-root users (even
+into a directory listed as `0777`), and students must not run as root.
+
+Later the same day a dedicated share, `/volume1/glasslab-jupyter`, was created that UID 1000
+can write to ("No mapping" plus a plain-Unix `0755` share root; UID 1000/1001 probe passed).
+See the NAS exports section of
+[`network-storage-integration.md`](../../docs/glasslab-v2/network-storage-integration.md).
+This exam stays on local disks. NFS is for later exams and researcher hubs.
 
 ## Tests passed before the switch (2026-10-20)
 
