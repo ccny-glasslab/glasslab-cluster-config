@@ -39,6 +39,11 @@ Host glasslab-notebook
 If port 8888 is already in use on your computer, use another local port, such
 as `-L 8899:192.168.1.11:30888`, and use that port below.
 
+**From your lab computer** (`192.168.1.157`, on the lab network) you can skip
+the tunnel and use `http://192.168.1.11:30888` wherever this guide says
+`http://localhost:8888`. Only that address is allowed in. This connection is
+not encrypted. From any other computer, use the tunnel.
+
 ## 2. Set Up Once In JupyterLab
 
 Open `http://localhost:8888/lab` in a browser and enter your token. Use
