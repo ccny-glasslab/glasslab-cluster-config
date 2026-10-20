@@ -1,0 +1,26 @@
+# DRAFT. Use in place of compose.https.yaml when TLS ends at the gateway:
+#   docker compose -f compose.yaml -f compose.lan.yaml ...
+# Copy into the extracted release root next to compose.yaml.
+services:
+  hub:
+    # Served at https://glasslab.org/exam/ through the gateway. Command-line
+    # traits override the baked config file, so the image stays unchanged;
+    # bind_url's path sets JupyterHub's base_url.
+    command:
+      - jupyterhub
+      - -f
+      - /etc/jupyterhub/jupyterhub_config.py
+      - --JupyterHub.bind_url=http://0.0.0.0:8000/exam/
+    ports:
+      # Published on the LAN for the gateway's reverse proxy. The firewall
+      # (exam-firewall.sh) drops this port from every source but the gateway.
+      - "${EXAM_LAN_IP:?Set EXAM_LAN_IP}:8000:8000"
+    networks:
+      students:
+        # Fixed so the firewall can allow student -> hub:8081 and hub -> student:8888.
+        ipv4_address: ${EXAM_HUB_IP:-172.30.99.10}
+networks:
+  students:
+    ipam:
+      config:
+        - subnet: ${EXAM_STUDENT_SUBNET:-172.30.99.0/24}

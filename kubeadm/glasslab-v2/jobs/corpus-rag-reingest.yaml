@@ -25,12 +25,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: corpus-rag-reingest
-          # CHICKEN/EGG: this Job runs scripts/corpus_rag/reingest_missing_chunks.py,
-          # which exists only in an image built AFTER the PR that adds the script.
-          # ffbbbf38 is the current published release and does NOT yet contain it,
-          # so this Job is intentionally NOT runnable until this pin is moved to
-          # the merge SHA once that image is published. Do not run it before then.
-          image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:ffbbbf38b61c72d4623415eab45da8a168fb3b05
+          # Pinned to the release that first ships
+          # scripts/corpus_rag/reingest_missing_chunks.py (promoted 2026-10-05).
+          image: ghcr.io/ccny-glasslab/glasslab-research-orchestrator:9949549c8679a7f7d14f8f39698e0d1714254541
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command:

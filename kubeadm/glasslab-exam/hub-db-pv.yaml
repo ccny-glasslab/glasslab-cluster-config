@@ -1,0 +1,27 @@
+# Hub database for the exam JupyterHub: the cluster has no StorageClass, so this
+# PV is pre-bound to the chart's hub-db-dir PVC and lives on node03's local disk
+# (folder created owned 1000:1000, mode 0700). Retained if the release is removed.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: glasslab-exam-hub-db
+  labels:
+    glasslab.org/purpose: exam-jupyterhub
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  claimRef:
+    namespace: glasslab-exam
+    name: hub-db-dir
+  hostPath:
+    path: /var/lib/glasslab-exam/hub
+    type: Directory
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [node03]
