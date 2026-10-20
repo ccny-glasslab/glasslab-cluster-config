@@ -56,3 +56,16 @@ If a stable internal URL is needed later, put only these operator-facing service
 
 - Future placeholder ingress manifests live under `kubeadm/glasslab-v2/ingress/`.
 - The current example file is `kubeadm/glasslab-v2/ingress/10-internal-services.example.yaml`.
+
+## Exceptions
+
+### Exam JupyterHub (`glasslab-exam`)
+
+- Service `glasslab-exam/proxy-public`, `NodePort` 30800, reached through the gateway's
+  Apache route `https://glasslab.org/exam/` (campus and private ranges only, `Require ip`).
+- Live since 2026-10-20 for the DSEI 10200 exam; separate namespace, not part of the v2
+  platform. Every node's 30800 is reachable from the lab LAN (`externalTrafficPolicy: Cluster`);
+  the planned gateway-only restriction is not in place yet.
+- Remove the Service (or the whole release) after the exam window. Configuration and teardown:
+  [`../../kubeadm/glasslab-exam/README.md`](../../kubeadm/glasslab-exam/README.md); design and
+  remaining hardening: [`exam-jupyterhub-on-kubernetes-plan.md`](exam-jupyterhub-on-kubernetes-plan.md).
