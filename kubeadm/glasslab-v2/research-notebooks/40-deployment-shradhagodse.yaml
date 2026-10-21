@@ -1,0 +1,155 @@
+# Interactive GPU Jupyter server for Shradha Godse (FreightTG thesis).
+#
+# This is a deliberate exception to "GPU work goes through the orchestrator as
+# bounded Jobs": a long-running, personal notebook that a researcher drives
+# from VS Code through an SSH tunnel via the gateway. It is pinned to node02's
+# single RTX A4000. That GPU is also requested by glasslab-gpu-runner and by
+# the faiss integration test Job, so only one of them can hold it at a time;
+# README.md covers how to share it.
+#
+# No priorityClassName is set, so this pod runs at priority 0: lower than both
+# Glasslab lanes, so reviewed research workloads can preempt it. A preempted
+# notebook restarts and waits for the GPU; the home volume survives.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notebook-shradhagodse
+  namespace: glasslab-notebooks
+  labels:
+    app.kubernetes.io/name: research-notebook
+    glasslab.io/notebook-owner: shradhagodse
+spec:
+  replicas: 1
+  # One GPU and a ReadWriteOnce home: the old pod must stop before the new one
+  # starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: research-notebook
+      glasslab.io/notebook-owner: shradhagodse
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: research-notebook
+        glasslab.io/notebook-owner: shradhagodse
+    spec:
+      enableServiceLinks: false
+      serviceAccountName: research-notebook
+      automountServiceAccountToken: false
+      runtimeClassName: nvidia
+      nodeSelector:
+        glasslab.io/gpu-candidate: "true"
+        kubernetes.io/hostname: node02
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 100
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: jupyter
+          # Official Jupyter Docker Stacks PyTorch build for CUDA 12 (node02
+          # runs driver 580). The image's entrypoint starts the server; only
+          # the server options are overridden here.
+          image: quay.io/jupyter/pytorch-notebook:cuda12-2026-09-29@sha256:66870cbf4387a3bc605e022f0698f74f79ab6cd585bcc62ec866728ef6b66c7a
+          imagePullPolicy: IfNotPresent
+          args:
+            - start-notebook.py
+            - --ServerApp.ip=0.0.0.0
+            - --ServerApp.port=8888
+            # Free GPU memory held by kernels left idle for two hours, but never
+            # stop a kernel that is still running cells.
+            - --MappingKernelManager.cull_idle_timeout=7200
+            - --MappingKernelManager.cull_interval=600
+            - --MappingKernelManager.cull_busy=False
+          env:
+            # Jupyter Server reads its login token from this variable.
+            - name: JUPYTER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: notebook-shradhagodse-token
+                  key: JUPYTER_TOKEN
+                  optional: false
+          ports:
+            - containerPort: 8888
+              name: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            # The image's start hooks and package tools expect a writable
+            # container layer. Nothing written there survives a restart; work
+            # belongs in the home volume.
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "2"
+              memory: 12Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "6"
+              memory: 24Gi
+              nvidia.com/gpu: "1"
+          # /api answers without a token and only reports the server version.
+          startupProbe:
+            httpGet:
+              path: /api
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /api
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api
+              port: http
+            periodSeconds: 30
+            failureThreshold: 4
+          volumeMounts:
+            - name: home
+              mountPath: /home/jovyan
+            - name: tmp
+              mountPath: /tmp
+            # PyTorch DataLoader workers share tensors through /dev/shm, which
+            # is only 64 MiB by default.
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: home
+          persistentVolumeClaim:
+            claimName: notebook-shradhagodse-home
+        - name: tmp
+          emptyDir:
+            sizeLimit: 20Gi
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+---
+# Reachable on node02's lab address only, so the gateway can forward a
+# researcher's SSH tunnel to it. externalTrafficPolicy: Local keeps the
+# gateway's source address intact for the ingress policy and means only node02
+# answers on the port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: notebook-shradhagodse
+  namespace: glasslab-notebooks
+  labels:
+    app.kubernetes.io/name: research-notebook
+    glasslab.io/notebook-owner: shradhagodse
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: research-notebook
+    glasslab.io/notebook-owner: shradhagodse
+  ports:
+    - name: http
+      port: 8888
+      targetPort: http
+      nodePort: 30888
