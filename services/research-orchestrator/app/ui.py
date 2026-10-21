@@ -59,7 +59,8 @@ The page is escape-first: every interpolated value passes through
 filesystem paths are never emitted. Links are root-relative so the page works
 unchanged through the loopback UI proxy. The Content-Security-Policy keeps
 ``default-src 'none'`` and a per-response style nonce, and widens only
-``form-action`` to ``'self'`` (the chat and upload forms) and adds
+``form-action`` to ``'self'`` (the chat and upload forms),
+``connect-src`` to ``'self'`` (the same-origin streaming fetch), and adds
 ``frame-src 'self'`` (the viewer iframe); when viewer-origin isolation is
 configured the one configured viewer origin is appended to ``frame-src`` so
 that iframe can load from the second loopback origin. No remote origin can
@@ -1845,7 +1846,8 @@ def render_ui_page(
 def _ui_headers(nonce: str, settings: Settings) -> dict[str, str]:
     # CSP sign-off (#618, #620, #595): default-src 'none' plus per-response
     # style and script nonces. form-action 'self' is required for the form
-    # POST fallback, and frame-src 'self' is required for the cited-source PDF
+    # POST fallback, connect-src 'self' is required for the same-origin
+    # streaming fetch, and frame-src 'self' is required for the cited-source PDF
     # iframe; when viewer-origin isolation is configured the viewer origin is
     # appended to frame-src so the iframe may be served from the second
     # loopback origin. script-src is nonce-only and reuses the same nonce as
@@ -1857,6 +1859,7 @@ def _ui_headers(nonce: str, settings: Settings) -> dict[str, str]:
         'Content-Security-Policy': (
             "default-src 'none'; style-src 'nonce-" + nonce + "'; "
             "script-src 'nonce-" + nonce + "'; "
+            "connect-src 'self'; "
             "base-uri 'none'; form-action 'self'; "
             f"frame-src {frame_src}; "
             "frame-ancestors 'none'"

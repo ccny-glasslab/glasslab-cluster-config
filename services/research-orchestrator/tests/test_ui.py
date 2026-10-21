@@ -1088,9 +1088,9 @@ def test_ui_csp_sign_off_directives(orchestrator_bundle) -> None:
     """Pin the exact page CSP signed off for the corpus chat (#618, #595).
 
     ``form-action 'self'`` is required for the chat form's POST fallback, the
-    cited-source iframe needs ``frame-src 'self'``, and the one streaming
-    script needs a nonce-only ``script-src``. Every other directive stays
-    default-deny.
+    cited-source iframe needs ``frame-src 'self'``, the streaming ``fetch``
+    needs ``connect-src 'self'``, and the one streaming script needs a
+    nonce-only ``script-src``. Every other directive stays default-deny.
     """
     settings, _, _, _, engine = orchestrator_bundle
 
@@ -1106,10 +1106,13 @@ def test_ui_csp_sign_off_directives(orchestrator_bundle) -> None:
         "default-src 'none'; "
         f"style-src 'nonce-{value}'; "
         f"script-src 'nonce-{value}'; "
+        "connect-src 'self'; "
         "base-uri 'none'; form-action 'self'; "
         "frame-src 'self'; frame-ancestors 'none'"
     )
     _assert_nonce_only_script_src(csp, value)
+    connect_src = csp.split('connect-src ', 1)[1].split(';', 1)[0]
+    assert connect_src == "'self'"
 
 
 def test_ui_cited_source_iframe_uses_the_viewer_origin(
