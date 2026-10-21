@@ -33,6 +33,7 @@ rollback() {
 }
 
 restore_file etc/apache2/sites-available/000-default.conf
+restore_file etc/apache2/sites-available/glasslab-ssl.conf
 
 if ! ssh -o BatchMode=yes "$GATEWAY_SSH" 'sudo -n apache2ctl configtest'; then
   rollback
@@ -41,4 +42,4 @@ if ! ssh -o BatchMode=yes "$GATEWAY_SSH" 'sudo -n apache2ctl configtest'; then
 fi
 ssh -o BatchMode=yes "$GATEWAY_SSH" 'sudo -n systemctl reload apache2'
 printf 'Gateway configs restored from %s and Apache reloaded.\n' "$SNAPROOT"
-printf '%s\n' 'ufw rules are not managed by this script; see live-config/gateway/README.md.'
+printf '%s\n' 'ufw rules, a2ensite links and /etc/letsencrypt are not managed by this script; see live-config/gateway/README.md.'
