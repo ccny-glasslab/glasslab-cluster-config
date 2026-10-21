@@ -189,6 +189,11 @@ class Settings(BaseSettings):
     # 'lexical'/'dense'). Default off: the reranker model is not currently
     # cached in-cluster, so enabling it would trigger a first-use download.
     ui_chat_rerank_enabled: bool = False
+    # Cross-encoder lineage for the flag above. The reranker loads lazily on
+    # the first hybrid+rerank query, so these only describe which weights to
+    # load; the empty revision tracks the model repository's default branch.
+    ui_chat_rerank_model: str = 'BAAI/bge-reranker-base'
+    ui_chat_rerank_revision: str = ''
     ui_pdf_enabled: bool = True
     ui_upload_enabled: bool = True
     # Viewer-origin isolation (#620). The page and the cited-source PDF iframe

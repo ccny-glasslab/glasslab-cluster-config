@@ -150,33 +150,42 @@ class CrossEncoderReranker:
 
     sentence-transformers is imported inside the first predict call, never
     at module import. Passages are truncated to ``passage_char_budget``
-    chars (the query stays full). Instances sharing a ``model_name`` reuse
-    one loaded model via a class-level cache; :meth:`unload` drops them.
+    chars (the query stays full). Instances sharing a ``(model_name,
+    revision)`` pair reuse one loaded model via a class-level cache;
+    :meth:`unload` drops every cached model to reclaim RAM.
     """
 
     DEFAULT_MODEL_NAME = 'BAAI/bge-reranker-base'
     BATCH_SIZE = 8
 
-    _cache: ClassVar[dict[str, Any]] = {}
+    _cache: ClassVar[dict[tuple[str, str], Any]] = {}
 
     def __init__(
         self,
         model_name: str = DEFAULT_MODEL_NAME,
+        *,
+        revision: str = '',
         passage_char_budget: int = 320 * 4,
     ) -> None:
         self.model_name = model_name
+        self.revision = revision
         self.passage_char_budget = passage_char_budget
-        self.model_id = model_name
+        self.model_id = f'{model_name}@{revision}' if revision else model_name
+
+    @property
+    def cache_key(self) -> tuple[str, str]:
+        return (self.model_name, self.revision)
 
     def _load(self) -> Any:
-        model = type(self)._cache.get(self.model_name)
+        model = type(self)._cache.get(self.cache_key)
         if model is None:
             import torch
             from sentence_transformers import CrossEncoder
 
             torch.set_num_threads(min(8, os.cpu_count() or 1))
-            model = CrossEncoder(self.model_name)
-            type(self)._cache[self.model_name] = model
+            kwargs = {'revision': self.revision} if self.revision else {}
+            model = CrossEncoder(self.model_name, **kwargs)
+            type(self)._cache[self.cache_key] = model
         return model
 
     def rerank(self, query: str, texts: list[str]) -> list[float]:

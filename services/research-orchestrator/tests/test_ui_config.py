@@ -56,6 +56,8 @@ def test_ui_and_rag_flags_default() -> None:
     assert settings.ui_chat_enabled is True
     assert settings.ui_chat_retrieval_mode == 'lexical'
     assert settings.ui_chat_rerank_enabled is False
+    assert settings.ui_chat_rerank_model == 'BAAI/bge-reranker-base'
+    assert settings.ui_chat_rerank_revision == ''
     assert settings.ui_pdf_enabled is True
     assert settings.ui_upload_enabled is True
     assert settings.rag_llm_enabled is False
@@ -135,7 +137,7 @@ def test_ui_chat_form_absent_when_disabled(orchestrator_bundle) -> None:
     # The Sources-column upload form is independent of the chat flag, so the
     # assertion is scoped to the ask form rather than the whole document.
     assert 'class="ask-form"' not in response.text
-    assert 'name="q"' not in response.text
+    assert 'id="ask-question"' not in response.text
 
 
 def test_ui_chat_section_present_when_enabled(orchestrator_bundle) -> None:

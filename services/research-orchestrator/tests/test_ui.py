@@ -75,6 +75,28 @@ _ABSENT_EXCERPT = 'this excerpt appears in no context block'
 _CHAT_QUESTION = 'resampling stability small samples'
 _CHAT_CHUNK_TEXT = 'Resampling improves stability of small samples.'
 _CHAT_TITLE = 'Resampling Handbook'
+_SCRIPT_TAG_RE = re.compile(r'<script\b[^>]*>')
+
+
+def _assert_single_nonce_script(text: str) -> str:
+    """Exactly one inline script, gated by the page's per-response nonce."""
+    tags = _SCRIPT_TAG_RE.findall(text)
+    assert len(tags) == 1, tags
+    nonce = re.search(r' nonce="([^"]+)"', tags[0])
+    assert nonce is not None, tags[0]
+    assert f'<script nonce="{nonce.group(1)}">' == tags[0]
+    return nonce.group(1)
+
+
+def _assert_nonce_only_script_src(csp: str, nonce: str) -> None:
+    """script-src is only the page nonce: no external source, no unsafe-*."""
+    assert f"script-src 'nonce-{nonce}'" in csp
+    script_src = csp.split('script-src ', 1)[1].split(';', 1)[0]
+    assert script_src == f"'nonce-{nonce}'"
+    assert 'unsafe-inline' not in script_src
+    assert 'unsafe-eval' not in script_src
+    assert 'http://' not in script_src
+    assert 'https://' not in script_src
 
 
 def _require_operator_token(
@@ -338,7 +360,7 @@ def test_ui_server_selects_the_initial_sources_tab(
         response.text
     )
     assert '.tab-panel{display:none}' in response.text
-    assert '<script' not in response.text
+    _assert_single_nonce_script(response.text)
 
 
 def test_ui_narrow_layout_bounds_the_corpus_and_text_panels(
@@ -412,7 +434,7 @@ def test_ui_right_pane_renders_turns_and_viewer_tabs(
     )
     assert 'flex-direction:column;block-size:100%;overflow:hidden}' in text
     assert 'Select a run to list its agent turns.' in text
-    assert '<script' not in text
+    _assert_single_nonce_script(text)
     assert re.search(r'\sstyle="', text) is None
 
 
@@ -544,12 +566,12 @@ def test_ui_turns_panel_escapes_agent_output(orchestrator_bundle) -> None:
 
     assert response.status_code == 200
     text = response.text
-    assert '<script' not in text
+    nonce = _assert_single_nonce_script(text)
     assert '&lt;script&gt;alert(1)&lt;/script&gt;' in text
     assert re.search(r'\sstyle="', text) is None
     csp = response.headers['content-security-policy']
     assert "default-src 'none'" in csp
-    assert 'script-src' not in csp
+    _assert_nonce_only_script_src(csp, nonce)
 
 
 def test_ui_pdf_source_keeps_the_viewer_panel_fill(
@@ -757,11 +779,11 @@ def test_ui_evidence_inspector_renders_inside_sources_panel(
     assert '✓ exact' in text
 
 
-def test_ui_page_has_no_script_and_no_inline_style(
+def test_ui_page_has_one_nonce_script_and_no_inline_style(
     orchestrator_bundle,
 ) -> None:
     settings, _, _, _, engine = orchestrator_bundle
-    run = engine.create_run(RunCreateRequest(objective='stay script-free'))
+    run = engine.create_run(RunCreateRequest(objective='stream one answer'))
     engine.store.save_artifact(
         _write_report(settings, run.run_id, b'# Findings\n')
     )
@@ -775,12 +797,22 @@ def test_ui_page_has_no_script_and_no_inline_style(
 
     assert response.status_code == 200
     text = response.text
-    assert '<script' not in text
+    nonce = _assert_single_nonce_script(text)
+    _assert_nonce_only_script_src(
+        response.headers['content-security-policy'], nonce
+    )
     assert '<noscript' not in text
     # All CSS is in the nonced stylesheet: no element carries style="…" and no
     # element carries an event-handler attribute.
     assert re.search(r'\sstyle="', text) is None
     assert re.search(r'\son(click|change|load|error|focus|submit)=', text) is None
+    # The one allowed script inserts model text as text nodes only; markup
+    # sinks would let a streamed chunk become HTML.
+    assert 'innerHTML' not in text
+    assert 'outerHTML' not in text
+    assert 'insertAdjacentHTML' not in text
+    assert 'document.createTextNode' in text
+    assert 'textContent' in text
 
 
 def test_register_ui_routes_adds_exactly_one_ui_route(orchestrator_bundle) -> None:
@@ -1031,6 +1063,7 @@ def test_ui_csp_nonce_and_no_external_resources(orchestrator_bundle) -> None:
     assert "default-src 'none'" in csp
     assert "'nonce-" in csp
     assert 'unsafe-inline' not in csp
+    assert 'unsafe-eval' not in csp
     assert 'http://' not in csp
     assert 'https://' not in csp
     # Deliberate deltas: the chat form submits a same-origin GET and the
@@ -1042,22 +1075,22 @@ def test_ui_csp_nonce_and_no_external_resources(orchestrator_bundle) -> None:
     assert response.headers['x-content-type-options'] == 'nosniff'
     assert response.headers['referrer-policy'] == 'no-referrer'
 
-    # No script tag, and no external origin anywhere in the document.
-    assert '<script' not in response.text
+    # Exactly one inline script, and no external origin anywhere in the
+    # document; the script and style share the same per-response nonce.
+    nonce = _assert_single_nonce_script(response.text)
+    _assert_nonce_only_script_src(csp, nonce)
     assert 'http://' not in response.text
     assert 'https://' not in response.text
-
-    nonce = csp.split("'nonce-", 1)[1].split("'", 1)[0]
-    assert nonce
     assert f'<style nonce="{nonce}">' in response.text
 
 
 def test_ui_csp_sign_off_directives(orchestrator_bundle) -> None:
-    """Pin the exact page CSP signed off for the corpus chat (#618).
+    """Pin the exact page CSP signed off for the corpus chat (#618, #595).
 
-    The chat is a zero-JS same-origin GET form, so ``form-action 'self'`` is
-    required; the cited-source iframe needs ``frame-src 'self'``. Everything
-    else stays default-deny, and there is deliberately no ``script-src``.
+    ``form-action 'self'`` is required for the chat form's POST fallback, the
+    cited-source iframe needs ``frame-src 'self'``, the streaming ``fetch``
+    needs ``connect-src 'self'``, and the one streaming script needs a
+    nonce-only ``script-src``. Every other directive stays default-deny.
     """
     settings, _, _, _, engine = orchestrator_bundle
 
@@ -1066,10 +1099,20 @@ def test_ui_csp_sign_off_directives(orchestrator_bundle) -> None:
 
     assert response.status_code == 200
     csp = response.headers['content-security-policy']
-    assert "default-src 'none'" in csp
-    assert "form-action 'self'" in csp
-    assert "frame-src 'self'" in csp
-    assert 'script-src' not in csp
+    nonce = re.search(r"style-src 'nonce-([^']+)'", csp)
+    assert nonce is not None
+    value = nonce.group(1)
+    assert csp == (
+        "default-src 'none'; "
+        f"style-src 'nonce-{value}'; "
+        f"script-src 'nonce-{value}'; "
+        "connect-src 'self'; "
+        "base-uri 'none'; form-action 'self'; "
+        "frame-src 'self'; frame-ancestors 'none'"
+    )
+    _assert_nonce_only_script_src(csp, value)
+    connect_src = csp.split('connect-src ', 1)[1].split(';', 1)[0]
+    assert connect_src == "'self'"
 
 
 def test_ui_cited_source_iframe_uses_the_viewer_origin(
@@ -1113,7 +1156,8 @@ def test_ui_cited_source_iframe_uses_the_viewer_origin(
     csp = response.headers['content-security-policy']
     assert "frame-src 'self' http://127.0.0.1:19091;" in csp
     assert "default-src 'none'" in csp
-    assert 'script-src' not in csp
+    nonce = _assert_single_nonce_script(response.text)
+    _assert_nonce_only_script_src(csp, nonce)
 
 
 def test_ui_cited_source_iframe_stays_relative_without_a_viewer_origin(
@@ -1171,6 +1215,127 @@ def test_ui_chat_form_posts_and_persists_turns(orchestrator_bundle) -> None:
     assert 'id="latest"' in answered.text
 
 
+def _parse_sse(body: str) -> list[tuple[str, str]]:
+    """Split an SSE body into ``(event, data)`` frames."""
+    frames: list[tuple[str, str]] = []
+    for block in body.strip().split('\n\n'):
+        event = 'message'
+        data = ''
+        for line in block.splitlines():
+            if line.startswith('event:'):
+                event = line[len('event:'):].strip()
+            elif line.startswith('data:'):
+                data += line[len('data:'):].strip()
+        if data:
+            frames.append((event, data))
+    return frames
+
+
+def test_ui_chat_stream_requires_operator_token(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    _seed_chat_corpus(engine)
+    chat_service = CorpusChatService(engine.store)
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        response = client.get(
+            '/ui/chat/stream',
+            params={'q': _CHAT_QUESTION},
+        )
+
+    assert response.status_code == 401
+
+
+def test_ui_chat_stream_emits_deltas_and_a_terminal_done_frame(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    _seed_chat_corpus(engine)
+    long_answer = (
+        'Resampling improves stability of small samples by averaging across '
+        'repeated subsets. It also widens the confidence interval for very '
+        'small cohorts, so report both the estimate and its variability. [1]'
+    )
+    chat_service = CorpusChatService(
+        engine.store,
+        llm=_ScriptedLlm(
+            json.dumps(
+                {
+                    'answer': long_answer,
+                    'citations': [{'evidence_id': 'E1'}],
+                }
+            )
+        ),
+    )
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        response = client.get(
+            '/ui/chat/stream',
+            params={'q': _CHAT_QUESTION},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('text/event-stream')
+    assert response.headers['cache-control'] == 'no-cache'
+    frames = _parse_sse(response.text)
+    assert frames[0][0] == 'meta'
+    deltas = [
+        json.loads(data)['text'] for event, data in frames if event == 'delta'
+    ]
+    assert len(deltas) > 1
+    streamed = ''.join(deltas)
+    assert long_answer in streamed
+    assert 'knowledge://' not in streamed
+
+    terminal = [data for event, data in frames if event == 'done']
+    assert len(terminal) == 1
+    assert frames[-1][0] == 'done'
+    done = json.loads(terminal[0])
+    conversation_id = done['conversation_id']
+    assert conversation_id
+    assert done['redirect'] == f'/ui/?c={conversation_id}#latest'
+
+    # The turn was persisted before the first delta, so the no-JS redirect
+    # path renders the same answer.
+    with _client(settings, engine, chat_service=chat_service) as client:
+        replay = client.get(
+            '/ui/',
+            params={'c': conversation_id},
+            headers=AUTH_HEADERS,
+        )
+    assert replay.status_code == 200
+    assert long_answer.split(' [1]')[0] in replay.text
+
+
+def test_ui_chat_stream_rejects_an_empty_question(orchestrator_bundle) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+    chat_service = CorpusChatService(engine.store)
+
+    with _client(settings, engine, chat_service=chat_service) as client:
+        response = client.get(
+            '/ui/chat/stream',
+            params={'q': '   '},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 400
+
+
+def test_ui_chat_stream_is_disabled_without_a_chat_service(
+    orchestrator_bundle,
+) -> None:
+    settings, _, _, _, engine = orchestrator_bundle
+
+    with _client(settings, engine) as client:
+        response = client.get(
+            '/ui/chat/stream',
+            params={'q': _CHAT_QUESTION},
+            headers=AUTH_HEADERS,
+        )
+
+    assert response.status_code == 404
+
+
 def test_ui_chat_renders_source_title_excerpt_and_badge(
     orchestrator_bundle,
 ) -> None:
@@ -1216,7 +1381,7 @@ def test_ui_chat_inline_markers_replace_the_footnote_list(
     assert '[1]' not in text
     # The card is revealed by CSS only, and the page still carries no script.
     assert '.cite:hover .cite-card,.cite:focus-within .cite-card' in text
-    assert '<script' not in text
+    _assert_single_nonce_script(text)
 
 
 def test_ui_chat_marker_card_carries_title_badge_and_view_source(
@@ -1300,7 +1465,7 @@ def test_ui_chat_escapes_malicious_citation_title(orchestrator_bundle) -> None:
     assert '<img' not in response.text
     assert '&lt;img src=x onerror=alert(1)&gt;' in response.text
     assert re.search(r'onerror="', response.text) is None
-    assert '<script' not in response.text
+    _assert_single_nonce_script(response.text)
 
 
 def test_render_chat_answer_maps_valid_ordinals_and_keeps_invalid_literal(
@@ -1416,7 +1581,7 @@ def test_ui_chat_escapes_and_redacts_question_and_answer(
         response = _ask(client, question)
 
     assert response.status_code == 200
-    assert '<script' not in response.text
+    _assert_single_nonce_script(response.text)
     assert '&lt;script&gt;alert(1)&lt;/script&gt;' in response.text
     assert secret not in response.text
     assert '[REDACTED]' in response.text
@@ -1653,7 +1818,7 @@ def test_ui_cited_source_text_truncates_past_the_chunk_cap(
     assert (
         'Showing the first 3 extracted chunks; this source has more.' in text
     )
-    assert '<script' not in text
+    _assert_single_nonce_script(text)
 
 
 def test_ui_cited_source_text_marks_the_cited_excerpt(
@@ -1680,7 +1845,7 @@ def test_ui_cited_source_text_marks_the_cited_excerpt(
     assert '<strong>Cited excerpt</strong>' in text
     assert '<p class="excerpt-text">STABILITY OF SMALL SAMPLES</p>' in text
     assert '<mark>stability of small samples</mark>' in text
-    assert '<script' not in text
+    _assert_single_nonce_script(text)
     assert re.search(r'\sstyle="', text) is None
 
 
@@ -1727,7 +1892,7 @@ def test_ui_cited_source_text_viewer_stays_zero_js(
 
     assert response.status_code == 200
     text = response.text
-    assert '<script' not in text
+    _assert_single_nonce_script(text)
     assert '<noscript' not in text
     # All CSS is in the nonced stylesheet: no element carries style="…" and no
     # element carries an event-handler attribute.
@@ -1751,7 +1916,7 @@ def test_ui_cited_source_text_escapes_hostile_chunk_and_excerpt(
 
     assert response.status_code == 200
     text = response.text
-    assert '<script' not in text
+    _assert_single_nonce_script(text)
     # Both the callout and the marked body span carry escaped text only.
     assert (
         '<p class="excerpt-text">&lt;script&gt;alert(1)&lt;/script&gt;</p>'
@@ -1811,7 +1976,7 @@ def test_ui_sources_column_renders_zero_js_upload_form(
     assert 'name="file"' in sources
     assert 'accept="application/pdf"' in sources
     assert '.upload-form{' in text
-    assert '<script' not in text
+    _assert_single_nonce_script(text)
     assert re.search(r'\sstyle="', text) is None
 
 
@@ -2021,7 +2186,7 @@ def test_ui_renders_launch_and_gate_controls(orchestrator_bundle) -> None:
     assert 'name="objective"' in page.text
     assert f'/ui/runs/{run.run_id}/control' in page.text
     assert '/ui/actions/' in page.text and '/decide' in page.text
-    assert '<script' not in page.text
+    _assert_single_nonce_script(page.text)
     assert re.search(r'\sstyle="', page.text) is None
 
 
@@ -2460,7 +2625,7 @@ def test_ui_notebook_preview_renders_cells_and_escapes(
     assert 'nbformat' not in response.text
     assert '&lt;script&gt;alert(1)&lt;/script&gt;' in response.text
     assert '&lt;script&gt;alert(2)&lt;/script&gt;' in response.text
-    assert '<script' not in response.text
+    _assert_single_nonce_script(response.text)
     assert '<img' not in response.text
     assert 'data:image' not in response.text
 

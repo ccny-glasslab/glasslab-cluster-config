@@ -48,6 +48,7 @@ DEFAULT_TOP_K = 5
 DEFAULT_MAX_QUESTION_CHARS = 2000
 DEFAULT_RETRIEVAL_MODE: Mode = 'lexical'
 _DENSE_MODES = ('dense', 'hybrid', 'hybrid+rerank')
+_DEFAULT_RERANK_MODEL = CrossEncoderReranker.DEFAULT_MODEL_NAME
 _EXCERPT_CHARS = 240
 _INSUFFICIENT_ANSWER = (
     'No corpus evidence is available to answer that question.'
@@ -386,7 +387,14 @@ def build_corpus_chat_service(
                 )
                 embedding_provider = provider
                 if effective == 'hybrid+rerank':
-                    reranker = CrossEncoderReranker()
+                    reranker = CrossEncoderReranker(
+                        getattr(
+                            settings,
+                            'ui_chat_rerank_model',
+                            _DEFAULT_RERANK_MODEL,
+                        ),
+                        revision=getattr(settings, 'ui_chat_rerank_revision', ''),
+                    )
         except Exception:  # noqa: BLE001 - dense is additive
             vector_index = None
             embedding_provider = None

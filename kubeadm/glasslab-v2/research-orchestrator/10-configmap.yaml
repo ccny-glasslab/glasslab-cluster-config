@@ -53,7 +53,8 @@ data:
   # (knowledge_dense_pg_dsn resolves from the store DSN secret file); the code
   # default stays lexical so local/test need no dense backend. Reranking stays
   # off (ui_chat_rerank_enabled default) because its model is not cached
-  # in-cluster. Guarded by
+  # in-cluster; when it is, select hybrid+rerank, set the flag, and pin
+  # ui_chat_rerank_model/ui_chat_rerank_revision. Guarded by
   # services/research-orchestrator/tests/test_configmap_parity.py.
   GLASSLAB_ORCHESTRATOR_UI_CHAT_RETRIEVAL_MODE: hybrid
   # Viewer-origin isolation (#620). The page stays on the first loopback proxy
