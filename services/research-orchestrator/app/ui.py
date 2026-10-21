@@ -1,9 +1,10 @@
 """Server-rendered corpus and reports notebook for the operator UI.
 
 Operator-gated routes: ``GET /ui/`` renders a no-JavaScript, three-column
-notebook over durable orchestrator state; ``GET /ui/artifacts.zip`` exports
-the selected run's digest-verified artifact bundle as a zip attachment;
-``POST /ui/sources/upload`` ingests
+notebook over durable orchestrator state; ``GET /ui/chat/stream`` streams one
+grounded corpus answer as server-sent events; ``GET /ui/artifacts.zip``
+exports the selected run's digest-verified artifact bundle as a zip
+attachment; ``POST /ui/sources/upload`` ingests
 one operator-supplied PDF from the Sources column into the corpus; and the
 zero-JS operator control forms ``POST /ui/runs``, ``POST
 /ui/runs/{run_id}/control``, and ``POST /ui/actions/{action_id}/decide``
@@ -20,7 +21,8 @@ loopback UI proxy forwards ``POST``):
 * the **Ask the corpus** column holds the same-origin ``GET`` chat form and
   the answer, whose ``[n]`` citation positions render as inline superscript
   markers with a CSS-only hover/focus preview card (no end-of-answer
-  reference list, no script);
+  reference list); the nonce-gated script only adds streaming to the
+  composer, and the same form still works with JavaScript disabled;
 * the **Viewer** column is a second CSS-only tab strip (**Turns** |
   **Viewer**): Turns lists the selected run's redacted agent-turn summaries
   (agent, status, structured-output kind and summary, timestamps, and error
@@ -46,7 +48,10 @@ with ``?c=&source=&page=&excerpt=`` (keeping the thread on screen while it
 opens the source), and selecting one embeds the PDF viewer iframe for the
 cited source. Hovering or keyboard-focusing a marker reveals its
 preview card (title, verdict badge, "View source") through CSS only. The page
-itself still emits no script and no external resource.
+carries exactly one inline script (nonce-gated) that progressively enhances
+the composer into a streaming ``GET /ui/chat/stream`` consumer; with
+JavaScript disabled the native form POST still persists the turn and
+redirects to the rendered conversation. No external resource is loaded.
 
 The page is escape-first: every interpolated value passes through
 :func:`html.escape`, the document body is shown as escaped text inside
@@ -58,8 +63,10 @@ unchanged through the loopback UI proxy. The Content-Security-Policy keeps
 ``frame-src 'self'`` (the viewer iframe); when viewer-origin isolation is
 configured the one configured viewer origin is appended to ``frame-src`` so
 that iframe can load from the second loopback origin. No remote origin can
-load. There is deliberately no ``script-src`` at all, so the tabs, the file
-tree, and the citation hover cards are pure HTML and CSS.
+load. ``script-src`` is nonce-only and reuses the response's style nonce, so
+only the one inline streaming script may execute; every other directive stays
+default-deny with no ``unsafe-inline``, ``unsafe-eval``, or remote source.
+The tabs, the file tree, and the citation hover cards remain pure HTML/CSS.
 """
 
 from __future__ import annotations
@@ -70,7 +77,8 @@ from __future__ import annotations
 # the escaping, the root-relative URL scheme) without reducing what a
 # reviewer must hold.
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import AsyncIterator, Callable
 import contextlib
 from dataclasses import dataclass, field
 import hashlib
@@ -84,8 +92,14 @@ from typing import TYPE_CHECKING, Any, BinaryIO
 from urllib.parse import urlencode
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, Form, Query, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi import Depends, FastAPI, File, Form, Query, Request, UploadFile
+from fastapi.responses import (
+    HTMLResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
+from starlette.concurrency import run_in_threadpool
 from pydantic import ValidationError
 
 from .artifact_delivery import (
@@ -430,6 +444,17 @@ color:var(--bad-fg);white-space:pre-wrap;overflow-wrap:anywhere}
    scrolls away; a 303 redirect to ``#latest`` scrolls the newest turn into
    view within the column body, with no script and no inline style. */
 .chat-compose{flex:none;margin:.7rem 0 0}
+/* Progressive-enhancement streaming pane. The native form POST remains the
+   fallback; this element is empty (and hidden) until the script fills it with
+   text nodes only. */
+.chat-live{margin:1rem 0 0;padding:.9rem 1.05rem;background:var(--well);
+border:1px solid var(--line-faint);border-radius:var(--radius-sm)}
+.chat-live[hidden]{display:none}
+.chat-live-q{margin:0;font-size:.8125rem;font-weight:600}
+.chat-live-a{margin:.5rem 0 0;font-size:.875rem;line-height:1.7;
+white-space:pre-wrap;overflow-wrap:anywhere}
+.chat-live-status{margin:.5rem 0 0;font-size:.75rem;
+color:var(--text-muted)}
 /* Inline citations: a superscript ordinal marker whose preview card is a
    CSS-only hover/focus popover (no script, no inline style). The card opens
    downward, inside the chat column's scroll area, so it is not clipped by
@@ -514,6 +539,109 @@ block-size:auto;overflow:visible}
 @media (max-width:640px){body{padding:1.2rem .8rem 2.2rem}
 h1{font-size:1.2rem}.pane{padding:.95rem .95rem 1.05rem}}
 @media (prefers-reduced-motion:reduce){a,button,.cite-card{transition:none}}
+""".strip()
+
+# The page's single inline script (issue #595). CSP allows it only through the
+# per-response nonce, and it is written so model text can never become markup:
+# every streamed chunk is appended with ``createTextNode`` and every static
+# label is assigned with ``textContent``. No innerHTML/outerHTML/insertAdjacentHTML
+# appears here. With JavaScript disabled the native ``POST /ui/chat`` form
+# still persists the turn and redirects to the server-rendered conversation.
+_PAGE_SCRIPT = """
+(function () {
+  'use strict';
+  var form = document.querySelector('form.chat-compose');
+  if (!form || !window.fetch || !window.TextDecoder) { return; }
+  var input = form.querySelector('input[name="q"]');
+  var button = form.querySelector('button[type="submit"]');
+  var conversation = form.querySelector('input[name="c"]');
+  var live = document.getElementById('chat-live');
+  var questionLine = document.getElementById('chat-live-question');
+  var answerLine = document.getElementById('chat-live-answer');
+  var statusLine = document.getElementById('chat-live-status');
+  if (!input || !live || !questionLine || !answerLine || !statusLine) {
+    return;
+  }
+
+  function setStatus(text) { statusLine.textContent = text; }
+
+  function appendText(text) {
+    if (text) { answerLine.appendChild(document.createTextNode(text)); }
+  }
+
+  function handleFrame(block) {
+    var eventName = 'message';
+    var data = '';
+    block.split('\\n').forEach(function (line) {
+      if (line.indexOf('event:') === 0) {
+        eventName = line.slice(6).trim();
+      } else if (line.indexOf('data:') === 0) {
+        data += line.slice(5).trim();
+      }
+    });
+    if (!data) { return false; }
+    var payload;
+    try { payload = JSON.parse(data); } catch (err) { return false; }
+    if (eventName === 'delta') {
+      appendText(payload.text || '');
+    } else if (eventName === 'done') {
+      setStatus('Answer complete.');
+      return true;
+    } else if (eventName === 'error') {
+      setStatus(payload.message || 'The answer stream failed.');
+      return true;
+    }
+    return false;
+  }
+
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    var asked = (input.value || '').trim();
+    if (!asked) { return; }
+    var url = '/ui/chat/stream?q=' + encodeURIComponent(asked);
+    if (conversation && conversation.value) {
+      url += '&c=' + encodeURIComponent(conversation.value);
+    }
+    answerLine.textContent = '';
+    questionLine.textContent = asked;
+    live.hidden = false;
+    setStatus('Streaming answer...');
+    input.value = '';
+    button.disabled = true;
+    var controller = new AbortController();
+    fetch(url, {
+      headers: {'Accept': 'text/event-stream'},
+      credentials: 'same-origin',
+      signal: controller.signal
+    }).then(function (response) {
+      if (!response.ok || !response.body) {
+        throw new Error('stream unavailable');
+      }
+      var reader = response.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = '';
+      function pump() {
+        return reader.read().then(function (result) {
+          if (result.done) { return; }
+          buffer += decoder.decode(result.value, {stream: true});
+          var frames = buffer.split('\\n\\n');
+          buffer = frames.pop();
+          var finished = frames.some(handleFrame);
+          if (finished) { controller.abort(); return; }
+          return pump();
+        });
+      }
+      return pump();
+    }).catch(function () {
+      if (!answerLine.firstChild) {
+        setStatus(
+          'Streaming is unavailable here; submit the form again to use the ' +
+          'standard page refresh.'
+        );
+      }
+    }).then(function () { button.disabled = false; });
+  });
+}());
 """.strip()
 
 
@@ -1582,6 +1710,50 @@ def _render_chat_answer(
     return ''.join(rendered)
 
 
+# Server-sent-event frames carry JSON so a chunk can contain newlines or
+# quotes without corrupting the SSE framing. Chunks are small enough to make
+# the stream visibly incremental without turning one answer into hundreds of
+# frames.
+_CHAT_STREAM_CHUNK_CHARS = 64
+
+
+def _sse_frame(event: str, payload: dict[str, Any]) -> str:
+    return f'event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n'
+
+
+def _answer_and_persist_chat(
+    engine: ResearchOrchestrator,
+    chat_service: CorpusChatService,
+    question: str,
+    conversation_id: str,
+) -> tuple[str, ChatAnswer]:
+    """Answer one turn and persist it, shared by the POST and SSE routes.
+
+    Persisting before the first frame means the conversation survives a
+    client disconnect mid-stream, and the no-JS redirect path renders exactly
+    the same turn.
+    """
+    conversation_id = conversation_id.strip() or uuid4().hex
+    conversation = engine.store.get_ui_chat_conversation(conversation_id)
+    prior = conversation.turns if conversation is not None else []
+    history = [
+        (turn.question, ChatAnswer.model_validate(turn.answer).answer)
+        for turn in prior
+    ]
+    answer = chat_service.answer(question, history=history)
+    turn = UiChatTurn(question=question, answer=answer.model_dump(mode='json'))
+    turns = [*prior, turn]
+    updated = (
+        conversation.model_copy(
+            update={'turns': turns, 'updated_at': utc_now()}
+        )
+        if conversation is not None
+        else UiChatConversation(conversation_id=conversation_id, turns=turns)
+    )
+    engine.store.save_ui_chat_conversation(updated)
+    return conversation_id, answer
+
+
 def _render_chat_panel(
     chat_service: CorpusChatService | None,
     selection: UiRequest,
@@ -1630,7 +1802,13 @@ def _render_chat_panel(
     return (
         '<section class="pane" id="ask">'
         '<div class="column-head"><h2>Ask the corpus</h2></div>'
-        f'<div class="column-body">{body}</div>'
+        f'<div class="column-body">{body}'
+        '<div class="chat-live" id="chat-live" hidden>'
+        '<p class="chat-live-q" id="chat-live-question"></p>'
+        '<p class="chat-live-a" id="chat-live-answer" aria-live="polite"></p>'
+        '<p class="chat-live-status" id="chat-live-status" role="status"></p>'
+        '</div>'
+        '</div>'
         f'{compose}'
         '</section>'
     )
@@ -1658,25 +1836,27 @@ def render_ui_page(
         f'{_render_chat_panel(chat_service, request, engine)}'
         f'{_render_viewer_panel(engine, settings, request)}'
         '</main>'
+        f'<script nonce="{_escape(request.nonce)}">'
+        f'{_PAGE_SCRIPT}</script>'
         '</body></html>'
     )
 
 
 def _ui_headers(nonce: str, settings: Settings) -> dict[str, str]:
-    # CSP sign-off (#618, #620): default-src 'none' plus a per-response style
-    # nonce, and exactly two deliberate deltas. form-action 'self' is required
-    # for the zero-JS GET chat form ('none' blocks the submission, so the chat
-    # cannot work), and frame-src 'self' is required for the cited-source PDF
+    # CSP sign-off (#618, #620, #595): default-src 'none' plus per-response
+    # style and script nonces. form-action 'self' is required for the form
+    # POST fallback, and frame-src 'self' is required for the cited-source PDF
     # iframe; when viewer-origin isolation is configured the viewer origin is
     # appended to frame-src so the iframe may be served from the second
-    # loopback origin. Everything else stays default-deny, including script:
-    # there is no script-src at all, so a corpus-authored string can never
-    # execute.
+    # loopback origin. script-src is nonce-only and reuses the same nonce as
+    # the stylesheet, so only the one inline streaming script executes. No
+    # unsafe-inline, unsafe-eval, or remote source is ever added.
     viewer_origin = (settings.ui_pdf_viewer_origin or '').rstrip('/')
     frame_src = "'self'" if not viewer_origin else f"'self' {viewer_origin}"
     return {
         'Content-Security-Policy': (
             "default-src 'none'; style-src 'nonce-" + nonce + "'; "
+            "script-src 'nonce-" + nonce + "'; "
             "base-uri 'none'; form-action 'self'; "
             f"frame-src {frame_src}; "
             "frame-ancestors 'none'"
@@ -1820,27 +2000,86 @@ def register_ui_routes(
                 400,
                 nonce,
             )
-        conversation_id = conversation_id.strip() or uuid4().hex
-        conversation = engine.store.get_ui_chat_conversation(conversation_id)
-        prior = conversation.turns if conversation is not None else []
-        history = [
-            (turn.question, ChatAnswer.model_validate(turn.answer).answer)
-            for turn in prior
-        ]
-        answer = chat_service.answer(asked, history=history)
-        turn = UiChatTurn(question=asked, answer=answer.model_dump(mode='json'))
-        turns = [*prior, turn]
-        updated = (
-            conversation.model_copy(
-                update={'turns': turns, 'updated_at': utc_now()}
-            )
-            if conversation is not None
-            else UiChatConversation(conversation_id=conversation_id, turns=turns)
+        conversation_id, _answer = _answer_and_persist_chat(
+            engine, chat_service, asked, conversation_id
         )
-        engine.store.save_ui_chat_conversation(updated)
         return RedirectResponse(
             _page_url(c=conversation_id) + '#latest',
             status_code=303,
+        )
+
+    @app.get('/ui/chat/stream')
+    async def ui_chat_stream(
+        request: Request,
+        q: str = Query(default=''),
+        c: str = Query(default=''),
+        _: None = Depends(require_operator),
+    ) -> Response:
+        # GET is a safe method, so the loopback proxy's CSRF guard is not in
+        # play; the operator dependency still gates the route. The answer runs
+        # in the threadpool (retrieval and synthesis are synchronous), then
+        # the finished grounded text streams as small SSE deltas. There is no
+        # runtime token handle for a corpus-chat turn, so the agent runtime's
+        # ``iter_normalized_events`` token-delta path does not apply here; the
+        # computed answer is chunked instead.
+        if chat_service is None:
+            return Response(
+                'Corpus chat is not enabled on this deployment.',
+                status_code=404,
+                media_type='text/plain',
+            )
+        asked = q.strip()
+        if not asked:
+            return Response(
+                'Enter a question first.',
+                status_code=400,
+                media_type='text/plain',
+            )
+
+        async def generate() -> AsyncIterator[str]:
+            try:
+                conversation_id, answer = await run_in_threadpool(
+                    _answer_and_persist_chat,
+                    engine,
+                    chat_service,
+                    asked,
+                    c,
+                )
+            except Exception:  # noqa: BLE001 - internal detail stays hidden
+                logger.exception('ui chat stream failed')
+                yield _sse_frame(
+                    'error',
+                    {'message': 'The answer could not be produced.'},
+                )
+                yield _sse_frame('done', {'conversation_id': '', 'redirect': ''})
+                return
+            yield _sse_frame('meta', {'conversation_id': conversation_id})
+            text = redact_free_text(answer.answer)
+            for offset in range(0, len(text), _CHAT_STREAM_CHUNK_CHARS):
+                if await request.is_disconnected():
+                    return
+                yield _sse_frame(
+                    'delta',
+                    {'text': text[offset : offset + _CHAT_STREAM_CHUNK_CHARS]},
+                )
+                await asyncio.sleep(0)
+            yield _sse_frame(
+                'done',
+                {
+                    'conversation_id': conversation_id,
+                    'redirect': _page_url(c=conversation_id) + '#latest',
+                    'insufficient': answer.insufficient,
+                },
+            )
+
+        return StreamingResponse(
+            generate(),
+            media_type='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no',
+                'X-Content-Type-Options': 'nosniff',
+            },
         )
 
     @app.post('/ui/sources/upload')
