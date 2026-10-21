@@ -11,8 +11,9 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from uuid import uuid4
 
 import numpy as np
@@ -380,6 +381,108 @@ class _RaisingReranker:
 
     def rerank(self, query: str, texts: list[str]) -> list[float]:
         raise RuntimeError('reranker backend exploded')
+
+
+def test_hybrid_mode_never_calls_the_configured_reranker(mismatch_store) -> None:
+    """Rerank stays opt-in: a plain hybrid query must not touch the model."""
+    ns = mismatch_store
+    question = 'cohesive groups unknown geometry'
+    plain = HybridRetriever(
+        ns.store,
+        vector_index=_vector_index(ns.store),
+        embedding_provider=_FixedQueryEmbedding(),
+        model_id=MODEL_ID,
+    ).retrieve(question, options=RetrievalOptions(mode='hybrid'))
+
+    configured = HybridRetriever(
+        ns.store,
+        vector_index=_vector_index(ns.store),
+        embedding_provider=_FixedQueryEmbedding(),
+        reranker=_RaisingReranker(),
+        model_id=MODEL_ID,
+    ).retrieve(question, options=RetrievalOptions(mode='hybrid'))
+
+    assert [h.chunk.chunk_id for h in configured.hits] == [
+        h.chunk.chunk_id for h in plain.hits
+    ]
+    assert all(hit.rerank_score is None for hit in configured.hits)
+    assert configured.timings['rerank'] == 0.0
+
+
+def test_hybrid_rerank_citations_stay_grounded_in_admitted_hits(mismatch_store) -> None:
+    """Reranking reorders evidence; it must never invent or detach citations."""
+    ns = mismatch_store
+    question = 'cohesive groups unknown geometry'
+    result = HybridRetriever(
+        ns.store,
+        vector_index=_vector_index(ns.store),
+        embedding_provider=_FixedQueryEmbedding(),
+        reranker=OfflineReranker(),
+        model_id=MODEL_ID,
+    ).retrieve(question, options=RetrievalOptions(mode='hybrid+rerank'))
+
+    assert result.hits
+    assert [citation.chunk_id for citation in result.citations] == [
+        hit.chunk.chunk_id for hit in result.hits
+    ]
+    stored = {
+        row['chunk_id']: RagChunkRecord.model_validate(row)
+        for row in ns.store.get_rag_chunks(
+            [hit.chunk.chunk_id for hit in result.hits]
+        )
+    }
+    for hit, citation in zip(result.hits, result.citations, strict=True):
+        anchored = stored[hit.chunk.chunk_id]
+        assert citation.source_id == anchored.source_id
+        assert citation.page_start == anchored.page_start
+        assert citation.page_end == anchored.page_end
+        assert citation.quote == anchored.text[:240]
+        assert hit.chunk.text == anchored.text
+
+
+def test_cross_encoder_reranker_is_lazy_and_caches_by_revision(monkeypatch) -> None:
+    """Construction must not import torch; loading is keyed by model lineage."""
+    retrieval_module = sys.modules['app.corpus_rag.retrieval']
+    built: list[tuple[str, dict[str, str]]] = []
+
+    class _FakeCrossEncoder:
+        def __init__(self, model_name: str, **kwargs: str) -> None:
+            built.append((model_name, kwargs))
+
+        def predict(self, pairs, batch_size):
+            return [0.25 for _ in pairs]
+
+    fake_torch = ModuleType('torch')
+    setattr(fake_torch, 'set_num_threads', lambda threads: None)
+    fake_sentence_transformers = ModuleType('sentence_transformers')
+    setattr(fake_sentence_transformers, 'CrossEncoder', _FakeCrossEncoder)
+    monkeypatch.setitem(sys.modules, 'torch', fake_torch)
+    monkeypatch.setitem(
+        sys.modules, 'sentence_transformers', fake_sentence_transformers
+    )
+    CrossEncoderReranker = retrieval_module.CrossEncoderReranker
+    CrossEncoderReranker.unload()
+    try:
+        pinned = CrossEncoderReranker('cross-encoder/pinned', revision='rev1')
+        assert built == [], 'construction must not load the model'
+        assert pinned.model_id == 'cross-encoder/pinned@rev1'
+
+        assert pinned.rerank('query', ['first', 'second']) == [0.25, 0.25]
+        assert built == [('cross-encoder/pinned', {'revision': 'rev1'})]
+
+        pinned.rerank('query', ['third'])
+        assert len(built) == 1, 'same lineage must reuse the cached model'
+
+        CrossEncoderReranker(
+            'cross-encoder/pinned', revision='rev2'
+        ).rerank('query', ['first'])
+        assert built[-1] == ('cross-encoder/pinned', {'revision': 'rev2'})
+        assert len(CrossEncoderReranker._cache) == 2
+
+        CrossEncoderReranker.unload()
+        assert CrossEncoderReranker._cache == {}
+    finally:
+        CrossEncoderReranker.unload()
 
 
 def test_reranker_failure_falls_back_to_fused_order(mismatch_store) -> None:

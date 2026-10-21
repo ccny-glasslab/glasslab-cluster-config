@@ -56,6 +56,8 @@ def test_ui_and_rag_flags_default() -> None:
     assert settings.ui_chat_enabled is True
     assert settings.ui_chat_retrieval_mode == 'lexical'
     assert settings.ui_chat_rerank_enabled is False
+    assert settings.ui_chat_rerank_model == 'BAAI/bge-reranker-base'
+    assert settings.ui_chat_rerank_revision == ''
     assert settings.ui_pdf_enabled is True
     assert settings.ui_upload_enabled is True
     assert settings.rag_llm_enabled is False

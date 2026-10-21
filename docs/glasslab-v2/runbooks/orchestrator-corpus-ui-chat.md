@@ -186,7 +186,8 @@ synthesis prompt (the last few exchanges, under a token budget) so follow-up
 questions keep their context. A conversation is keyed by `conversation_id` and
 stored durably, so `GET /ui/?c=<id>` replays it. Retrieval is
 configurable: `lexical` (the default) needs no embedding backend, `dense` uses
-the vector channel only, and `hybrid` fuses lexical and dense with RRF.
+the vector channel only, `hybrid` fuses lexical and dense with RRF, and
+`hybrid+rerank` optionally reorders the fused head with a cross-encoder.
 Synthesis is extractive by default: the answer quotes the top retrieved
 passages and renders each one as a citation. Dense and hybrid additionally
 require the dense index to be built first (see
@@ -259,6 +260,27 @@ defaults to `lexical`, so leaving the key unset preserves today's behavior. A
 deployment that selects `dense`/`hybrid` before the vectors exist degrades to
 lexical rather than returning no evidence.
 
+### Cross-encoder reranking
+
+`hybrid+rerank` keeps the hybrid candidate set and reorders its head with a
+cross-encoder, so it inherits the dense-index prerequisite above. Reranking is
+opt-in twice: the effective mode must be hybrid, and
+`GLASSLAB_ORCHESTRATOR_UI_CHAT_RERANK_ENABLED` must be `true`. With the flag
+off, a configured `hybrid+rerank` degrades to plain `hybrid`, and a configured
+reranker is never constructed.
+
+The deployment stays on `hybrid` with the flag off because the reranker
+weights are not cached in-cluster; enabling them would trigger a first-use
+download. When they are cached, pin the lineage with
+`GLASSLAB_ORCHESTRATOR_UI_CHAT_RERANK_MODEL` and
+`GLASSLAB_ORCHESTRATOR_UI_CHAT_RERANK_REVISION` (empty revision means the
+model repository's default branch). The model loads lazily on the first
+reranked query and is cached per `(model, revision)`; a reranker failure falls
+back to the fused order, so a chat answer never fails on the model.
+
+Reranking only changes ordering: citations are still built from the final
+admitted hits, so every emitted citation resolves to a stored chunk.
+
 ### GPU embed Job
 
 At full corpus scale the CPU embed Job takes hours. `corpus-rag-embed-gpu.yaml`
@@ -321,7 +343,10 @@ All orchestrator settings use the `GLASSLAB_ORCHESTRATOR_` prefix unless noted.
 | `GLASSLAB_ORCHESTRATOR_CORPUS_RAG_RAW_ROOT` | `/tmp/glasslab-research-orchestrator/rag/raw` (code); the deployment ConfigMap overrides it to `/mnt/artifacts/research-orchestrator/rag/raw` | Directory holding the raw corpus PDFs. |
 | `GLASSLAB_ORCHESTRATOR_CORPUS_RAG_STORE_PATH` | unset | Optional explicit corpus-RAG store path. Leave it unset in production, where the Postgres `orchestrator_rag_*` tables hold the corpus; set it only to relocate the store to an explicit on-disk path. |
 | `GLASSLAB_ORCHESTRATOR_UI_CHAT_ENABLED` | `true` | Gates the chat pane. When `false`, `/ui/` still renders but carries no Ask the corpus section. |
-| `GLASSLAB_ORCHESTRATOR_UI_CHAT_RETRIEVAL_MODE` | `lexical` | Chat retrieval mode: `lexical`, `dense`, or `hybrid`. Non-lexical modes require the dense index to be built (`scripts/corpus_rag/embed_rag_chunks.py`) and degrade to lexical when the backend or index is unavailable. |
+| `GLASSLAB_ORCHESTRATOR_UI_CHAT_RETRIEVAL_MODE` | `lexical` | Chat retrieval mode: `lexical`, `dense`, `hybrid`, or `hybrid+rerank`. Non-lexical modes require the dense index to be built (`scripts/corpus_rag/embed_rag_chunks.py`) and degrade to lexical when the backend or index is unavailable. `hybrid+rerank` additionally requires the rerank flag. |
+| `GLASSLAB_ORCHESTRATOR_UI_CHAT_RERANK_ENABLED` | `false` | Opts a hybrid mode into cross-encoder reranking. Off by default because the model is not cached in-cluster. |
+| `GLASSLAB_ORCHESTRATOR_UI_CHAT_RERANK_MODEL` | `BAAI/bge-reranker-base` | Cross-encoder model id loaded lazily for `hybrid+rerank`. |
+| `GLASSLAB_ORCHESTRATOR_UI_CHAT_RERANK_REVISION` | empty | Optional pinned HuggingFace revision for the reranker model. |
 | `GLASSLAB_ORCHESTRATOR_UI_PDF_ENABLED` | `true` | Gates the viewer routes. When `false`, no `/ui/pdf/**` route is registered, so every such path returns `404`. |
 | `GLASSLAB_ORCHESTRATOR_UI_ORIGIN` | unset (code); `http://127.0.0.1:19090` in the deployment | Origin of the operator page. When set, the viewer CSP `frame-ancestors` admits it so the page can frame the viewer on the second origin. |
 | `GLASSLAB_ORCHESTRATOR_UI_PDF_VIEWER_ORIGIN` | unset (code); `http://127.0.0.1:19091` in the deployment | Origin the cited-source viewer iframe is served from. When set, the iframe `src` is absolute and the page CSP `frame-src` admits it; unset keeps the relative single-origin iframe. |
