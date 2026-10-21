@@ -135,7 +135,7 @@ def test_ui_chat_form_absent_when_disabled(orchestrator_bundle) -> None:
     # The Sources-column upload form is independent of the chat flag, so the
     # assertion is scoped to the ask form rather than the whole document.
     assert 'class="ask-form"' not in response.text
-    assert 'name="q"' not in response.text
+    assert 'id="ask-question"' not in response.text
 
 
 def test_ui_chat_section_present_when_enabled(orchestrator_bundle) -> None:
