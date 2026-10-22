@@ -864,6 +864,19 @@ Deployment requires `X-Glasslab-Operator-Token` on every endpoint except
 `/health` and `/ready`. Reads, events, artifacts, SSE, and the task/dataset/
 knowledge listing endpoints are gated too, because the documented contributor
 port-forward exposes the service beyond its cluster network (issue #369).
+
+`/health` also reports corpus-RAG dense readiness in a `corpus_rag` block
+(issue #683), next to the legacy `knowledge_dense` block: the configured
+embedding `model_id`/`revision`/`dims`, `indexed_vectors` (current-lineage rows
+in the RAG vector table), `evidence_spans` and `unindexed_evidence_spans`, and
+`chunkless_sources` (knowledge sources with no RAG chunks, invisible to every
+retrieval mode). `chunkless_over_threshold` turns true above
+`GLASSLAB_ORCHESTRATOR_CORPUS_RAG_CHUNKLESS_ALERT_THRESHOLD` (default 50) and a
+warning is logged once on that transition; heal with the corpus-rag-reingest
+Job. Because `/health` is the liveness probe, the block is cached for
+`GLASSLAB_ORCHESTRATOR_CORPUS_RAG_HEALTH_CACHE_SECONDS` (default 60) and a
+store failure degrades it to `available: false` rather than failing the probe.
+
 Free-form read payloads (event payloads, action arguments, artifact metadata,
 run task/seed state) are redacted before the response is built. Local
 development leaves this check disabled unless
