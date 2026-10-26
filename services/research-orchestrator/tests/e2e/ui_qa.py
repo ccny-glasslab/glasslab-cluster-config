@@ -579,3 +579,14 @@ def assert_only_streaming_script(page) -> None:
     assert 'chat/stream' in scripts.first.inner_text(), (
         'the one inline script must be the streaming composer'
     )
+
+
+def submit_native(page, form) -> None:
+    """POST the composer form without the #595 streaming script.
+
+    ``HTMLFormElement.submit`` does not dispatch a ``submit`` event, so the
+    script's listener cannot intercept it: this is exactly the no-JS path
+    (``POST /ui/chat`` -> 303 -> ``/ui/?c=<conversation>#latest``).
+    """
+    with page.expect_navigation(wait_until='domcontentloaded'):
+        form.evaluate('form => HTMLFormElement.prototype.submit.call(form)')

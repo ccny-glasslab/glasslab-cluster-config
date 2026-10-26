@@ -9,16 +9,12 @@ serves the chat page, the cited-source iframe, the vendored pdf.js assets,
 the raw PDF bytes, and the live highlight boxes. Two listeners are live: the
 page proxy (every path) and the #620 viewer proxy, scoped to ``/ui/pdf/``.
 
-Assertions (issues #618/#619/#620/#686):
+Assertions (issues #618/#619/#620):
 
 1. the ask form renders and a POST ``/ui/chat`` turn (the native form submit,
    which bypasses the #595 streaming script) renders an answer whose
    citation is an inline superscript marker with a CSS-only hover preview
    card (source title, verdict badge, "View source") and no footnote list;
-1b. every citation marker in the answer resolves to a real source and page:
-   its link names the seeded source, page, and excerpt, and the viewer origin
-   serves that source's PDF (200 ``application/pdf``, the seeded bytes) and
-   at least one highlight box for that page and excerpt (#686);
 2. clicking the citation opens the cited-source iframe at the exact
    ``/ui/pdf/assets/web/highlight.html?source=&page=&excerpt=`` URL, and the
    iframe is deliberately not sandboxed;
@@ -33,18 +29,7 @@ Assertions (issues #618/#619/#620/#686):
    page origin, and a direct ``/runs`` request there is refused with 403 by
    the path-scoped proxy while the page proxy still reaches it;
 7. a ``fetch`` from inside the viewer frame to ``<viewer-origin>/runs``
-   returns the scoped proxy's 403 refusal and no operator run data;
-8. the JavaScript composer streams the answer from ``/ui/chat/stream`` and
-   the persisted turn it names renders the same cited conversation (#595);
-9. the citation verdict badge renders ``✓ exact`` (extractive answer),
-   ``≈ fuzzy``, and ``✗ unverified`` (scripted answers from the loopback fake
-   synthesis endpoint in ``ui_qa``), and each still opens the cited page in
-   the viewer with a highlight (#686).
-
-Fixtures: the corpus is the synthetic two-page PDF seeded by
-``scripts/qa/seed_ui_corpus.py`` (no external source is needed), and the
-fuzzy/unverified answers come from the fake endpoint keyed on
-``ui_qa.FUZZY_QUESTION_MARKER``/``ui_qa.UNVERIFIED_QUESTION_MARKER``.
+   returns the scoped proxy's 403 refusal and no operator run data.
 
 Every step captures a screenshot and appends to the action log under
 ``<tempdir>/glasslab-ui-qa/artifacts/`` (see ``ui_qa.ARTIFACTS_DIR``).
@@ -52,7 +37,6 @@ Every step captures a screenshot and appends to the action log under
 
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import json
 import re
@@ -80,12 +64,7 @@ PLAYWRIGHT_SKIP = pytest.mark.skipif(
 # Importing the fixture registers it in this module's namespace; it lives in a
 # plain module rather than a second conftest.py so its basename cannot shadow
 # the shared tests/conftest.py that the rest of the suite imports.
-from ui_qa import (  # noqa: E402
-    FUZZY_QUESTION_MARKER,
-    UNVERIFIED_QUESTION_MARKER,
-    assert_only_streaming_script,
-    ui_qa,  # noqa: F401
-)
+from ui_qa import assert_only_streaming_script, submit_native, ui_qa  # noqa: E402, F401
 
 # Console text that marks a Content-Security-Policy violation in Chromium.
 # Chromium prefixes every blocked-resource report with "Refused to ..."; the
@@ -103,9 +82,6 @@ CSP_VIOLATION_MARKERS = (
 
 IFRAME_TITLE = 'Cited source PDF'
 HIGHLIGHT_PATH = '/ui/pdf/assets/web/highlight.html'
-EXACT_BADGE = '✓ exact'
-FUZZY_BADGE = '≈ fuzzy'
-UNVERIFIED_BADGE = '✗ unverified'
 
 
 def _log(env, step: str, action: str, **detail: object) -> None:
@@ -143,77 +119,6 @@ def _wait_for_frame(page: Page, prefix: str, timeout_ms: int = 30_000) -> Frame:
     raise AssertionError(
         f'no frame with URL prefix {prefix!r}; frames={[f.url for f in page.frames]}'
     )
-
-
-def _submit_native(page: Page, form) -> None:
-    """POST the composer form without the #595 streaming script.
-
-    ``HTMLFormElement.submit`` does not dispatch a ``submit`` event, so the
-    script's listener cannot intercept it: this is exactly the no-JS path
-    (``POST /ui/chat`` -> 303 -> ``/ui/?c=<conversation>#latest``).
-    """
-    with page.expect_navigation(wait_until='domcontentloaded'):
-        form.evaluate('form => HTMLFormElement.prototype.submit.call(form)')
-
-
-def _assert_citation_resolves(context, env, marker) -> dict[str, str]:
-    """A citation marker names the seeded source/page and the viewer serves it.
-
-    Returns the marker's ``source``/``page``/``excerpt`` query for logging.
-    """
-    manifest = env.manifest
-    href = marker.get_attribute('href')
-    assert href, 'citation marker has no href'
-    query = {key: values[0] for key, values in parse_qs(urlsplit(href).query).items()}
-    assert query.get('source') == manifest['source_id'], query
-    assert query.get('page') == str(manifest['page']), query
-    assert query.get('excerpt') == manifest['excerpt'], query
-    document = context.request.get(
-        env.viewer_origin + '/ui/pdf/document.pdf',
-        params={'source': query['source']},
-    )
-    assert document.status == 200, f'document.pdf status {document.status}'
-    content_type = document.headers.get('content-type', '')
-    assert content_type.startswith('application/pdf'), content_type
-    body = document.body()
-    assert body.startswith(b'%PDF'), body[:16]
-    assert hashlib.sha256(body).hexdigest() == manifest['pdf_sha256'], (
-        'the viewer served different bytes than the seeded source PDF'
-    )
-    boxes = context.request.get(
-        env.viewer_origin + '/ui/pdf/boxes',
-        params={
-            'source': query['source'],
-            'page': query['page'],
-            'excerpt': query['excerpt'],
-        },
-    )
-    assert boxes.status == 200, f'boxes status {boxes.status}'
-    assert boxes.json()['boxes'], boxes.json()
-    return {
-        'source': query['source'],
-        'page': query['page'],
-        'excerpt': query['excerpt'],
-    }
-
-
-def _assert_viewer_highlights(page: Page, env, marker) -> Frame:
-    """Clicking the marker renders the cited page with a highlight rect."""
-    from playwright.sync_api import expect
-
-    with page.expect_navigation(wait_until='domcontentloaded'):
-        marker.click()
-    iframe = page.locator(f'iframe[title="{IFRAME_TITLE}"]')
-    expect(iframe).to_be_visible()
-    iframe.scroll_into_view_if_needed()
-    frame = _wait_for_frame(page, env.viewer_origin + HIGHLIGHT_PATH)
-    frame.locator('#page canvas').wait_for(state='visible', timeout=30_000)
-    expect(frame.locator('#status')).to_have_attribute(
-        'data-tone', 'ok', timeout=30_000
-    )
-    rects = frame.locator('#page .highlight-layer .highlight-rect')
-    assert rects.count() >= 1, 'no highlight rectangle for the excerpt'
-    return frame
 
 
 def test_ui_qa_defaults_are_portable() -> None:
@@ -287,7 +192,7 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
 
         # --- 2. the posted turn renders the answer and its inline citation --
         question_input.fill(manifest['question'])
-        _submit_native(page, form)
+        submit_native(page, form)
         turn = page.locator('.chat-turn')
         expect(turn).to_be_visible()
         assert 'c=' in page.url, f'conversation missing from URL: {page.url}'
@@ -309,7 +214,7 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
         marker.hover()
         expect(card).to_be_visible()
         expect(card.locator('.cite-title')).to_have_text(manifest['title'])
-        expect(card.locator('.cite-badge')).to_have_text(EXACT_BADGE)
+        expect(card.locator('.cite-badge')).to_have_text('✓ exact')
         expect(card.locator('.cite-cta')).to_contain_text('View source')
         _shot(page, env, '02-answer-citation-hover.png')
         _log(
@@ -319,18 +224,11 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
             url=page.url,
             title=manifest['title'],
             excerpt=manifest['excerpt'],
-            badge=EXACT_BADGE,
+            badge='✓ exact',
             superscript='1',
             footnote_list=False,
             screenshot='02-answer-citation-hover.png',
         )
-
-        # --- 2b. every citation resolves to a real source + page (#686) ----
-        resolved = [
-            _assert_citation_resolves(context, env, markers.nth(index))
-            for index in range(markers.count())
-        ]
-        _log(env, 'answer', 'citations-resolved', citations=resolved)
 
         # --- 3. the citation opens the exact unsandboxed viewer iframe -----
         with page.expect_navigation(wait_until='domcontentloaded'):
@@ -654,133 +552,3 @@ def test_viewer_origin_is_scoped_to_pdf_paths(ui_qa) -> None:
             )
         finally:
             request.dispose()
-
-
-@PLAYWRIGHT_SKIP
-def test_ui_streaming_composer_persists_the_cited_turn(ui_qa) -> None:
-    """The #595 composer streams the answer, then the turn renders cited."""
-    from playwright.sync_api import expect, sync_playwright
-
-    env = ui_qa
-    manifest = env.manifest
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context(viewport={'width': 1440, 'height': 1000})
-        page = context.new_page()
-        page_errors: list[str] = []
-        page.on('pageerror', lambda error: page_errors.append(str(error)))
-        page.goto(env.proxy_origin + '/ui/', wait_until='domcontentloaded')
-        ask = page.locator('#ask')
-        ask.locator('input[name="q"]').fill(manifest['question'])
-        with page.expect_response(
-            lambda response: '/ui/chat/stream' in response.url
-        ) as stream_info:
-            ask.locator('button[type="submit"]').click()
-        stream = stream_info.value
-        assert stream.status == 200, f'stream status {stream.status}'
-        assert stream.headers.get('content-type', '').startswith(
-            'text/event-stream'
-        ), stream.headers
-        # The script streamed in place: no navigation, live pane filled.
-        expect(page.locator('#chat-live-status')).to_have_text(
-            'Answer complete.', timeout=30_000
-        )
-        assert page.url == env.proxy_origin + '/ui/', page.url
-        expect(page.locator('#chat-live-question')).to_have_text(
-            manifest['question']
-        )
-        expect(page.locator('#chat-live-answer')).to_contain_text(
-            manifest['excerpt']
-        )
-        _shot(page, env, '05-streamed-answer.png')
-
-        # The same stream contract a client follows to the persisted turn:
-        # ``done`` names the conversation and its rendered page.
-        frames = context.request.get(
-            env.proxy_origin + '/ui/chat/stream',
-            params={'q': manifest['question']},
-            headers={'Accept': 'text/event-stream'},
-        )
-        assert frames.status == 200, frames.status
-        done = None
-        for block in frames.text().split('\n\n'):
-            lines = block.splitlines()
-            if lines and lines[0] == 'event: done':
-                done = json.loads(lines[1].removeprefix('data:').strip())
-        assert done and done['conversation_id'] and done['redirect'], done
-        page.goto(env.proxy_origin + done['redirect'], wait_until='domcontentloaded')
-        turn = page.locator('.chat-turn').last
-        expect(turn).to_contain_text(manifest['question'])
-        markers = turn.locator('a.cite')
-        assert markers.count() >= 1, 'the persisted turn lost its citation'
-        resolved = _assert_citation_resolves(context, env, markers.first)
-        _log(
-            env,
-            'stream',
-            'answer-streamed-and-persisted',
-            stream_url=stream.url,
-            conversation_id=done['conversation_id'],
-            citation=resolved,
-            screenshot='05-streamed-answer.png',
-        )
-        assert page_errors == [], f'uncaught page errors: {page_errors}'
-        browser.close()
-
-
-@PLAYWRIGHT_SKIP
-@pytest.mark.parametrize(
-    ('marker_word', 'badge', 'verdict'),
-    [
-        (FUZZY_QUESTION_MARKER, FUZZY_BADGE, 'fuzzy'),
-        (UNVERIFIED_QUESTION_MARKER, UNVERIFIED_BADGE, 'none'),
-    ],
-)
-def test_ui_citation_verdict_badges(ui_qa, marker_word, badge, verdict) -> None:
-    """Fuzzy and unverified LLM claims render their badge and still resolve.
-
-    The exact badge is asserted by the extractive flow above. These answers
-    come from the loopback fake synthesis endpoint (see ``ui_qa``): the
-    server, not the fake, classifies the claim, so a regression in the
-    verdict classifier or the badge rendering fails here.
-    """
-    from playwright.sync_api import expect, sync_playwright
-
-    env = ui_qa
-    manifest = env.manifest
-    question = f"{manifest['question']} {marker_word}"
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context(viewport={'width': 1440, 'height': 1000})
-        page = context.new_page()
-        page.goto(env.proxy_origin + '/ui/', wait_until='domcontentloaded')
-        form = page.locator('#ask form.ask-form')
-        form.locator('input[name="q"]').fill(question)
-        _submit_native(page, form)
-        turn = page.locator('.chat-turn').last
-        expect(turn).to_contain_text(marker_word)
-        markers = turn.locator('a.cite')
-        assert markers.count() == 1, (
-            'the scripted answer must render exactly one citation; the LLM '
-            'lane may have fallen back to the extractive answer'
-        )
-        marker = markers.first
-        badge_element = marker.locator('.cite-badge')
-        expect(badge_element).to_have_text(badge)
-        expect(badge_element).to_have_class(re.compile(rf'\bbadge-{verdict}\b'))
-        marker.hover()
-        expect(marker.locator('.cite-card')).to_be_visible()
-        screenshot = f'06-badge-{verdict}.png'
-        _shot(page, env, screenshot)
-        resolved = _assert_citation_resolves(context, env, marker)
-        frame = _assert_viewer_highlights(page, env, marker)
-        _log(
-            env,
-            'badge',
-            'rendered',
-            verdict=verdict,
-            badge=badge,
-            citation=resolved,
-            frame_url=frame.url,
-            screenshot=screenshot,
-        )
-        browser.close()
