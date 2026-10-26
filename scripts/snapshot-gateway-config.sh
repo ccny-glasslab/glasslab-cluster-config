@@ -21,6 +21,11 @@ copy_file() {
 }
 
 copy_file etc/apache2/sites-available/000-default.conf
+copy_file etc/apache2/sites-available/glasslab-ssl.conf
+# certbot DNS-01 hook and renewal settings. The acme-dns credentials it reads
+# (/etc/letsencrypt/acmedns.json) and the certificate keys are never copied.
+copy_file etc/letsencrypt/acme-dns-auth.py
+copy_file etc/letsencrypt/renewal/glasslab.org.conf
 
 printf 'Snapshot updated under %s\n' "$SNAPROOT"
 printf '%s\n' 'Firewall rules are recorded by hand in live-config/gateway/README.md; compare with `sudo ufw status verbose` on the gateway.'
