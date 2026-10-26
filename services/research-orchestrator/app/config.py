@@ -247,6 +247,11 @@ class Settings(BaseSettings):
     maximum_dataset_upload_bytes: int = 2 * 1024 * 1024 * 1024
     maximum_discord_dataset_upload_bytes: int = 100 * 1024 * 1024
     maximum_discord_artifact_bundle_bytes: int = 24 * 1024 * 1024
+    # Per-artifact cap for the operator content download (issue #585); the
+    # whole payload is held in memory so its digest is verified before send.
+    maximum_artifact_download_bytes: int = Field(
+        default=256 * 1024 * 1024, gt=0
+    )
     benchmark_dataset_catalog_path: str = (
         '/tmp/glasslab-research-orchestrator/datasets/catalog.json'
     )

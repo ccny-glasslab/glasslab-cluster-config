@@ -42,7 +42,14 @@ from fastapi import (
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import SecretStr
 
-from .artifact_delivery import ArtifactDeliveryError, VerifiedArtifactReader
+from .artifact_delivery import (
+    ArtifactDeliveryError,
+    ArtifactDigestMismatchError,
+    ArtifactTooLargeError,
+    ArtifactUnavailableError,
+    VerifiedArtifactReader,
+    build_run_artifact_manifest,
+)
 from .cluster import FakeClusterExecutor, WorkflowApiClusterExecutor
 from .config import SERVICE_ROOT, Settings, get_settings, read_secret_file
 from .contract_candidates import ContractCandidateManager
@@ -1712,6 +1719,72 @@ def create_app(
             )
         except Exception as exc:
             raise map_error(exc) from exc
+
+    @app.get('/runs/{run_id}/artifacts/manifest')
+    def get_artifact_manifest(
+        run_id: str,
+        _: None = Depends(require_operator),
+    ) -> dict[str, Any]:
+        # Derived index (issue #585): every ArtifactRecord with its
+        # mount-relative path, size, and current digest verification.
+        try:
+            engine.store.get_run(run_id)
+            artifacts = engine.store.list_artifacts(run_id)
+        except Exception as exc:
+            raise map_error(exc) from exc
+        return build_run_artifact_manifest(
+            run_id=run_id,
+            artifacts=artifacts,
+            shared_mount_root=settings.shared_mount_root,
+        )
+
+    @app.get('/runs/{run_id}/artifacts/{artifact_id}/content')
+    def get_artifact_content(
+        run_id: str,
+        artifact_id: str,
+        _: None = Depends(require_operator),
+    ) -> Response:
+        # Only an artifact recorded for THIS run is servable; the bytes are
+        # mount-confined and their digest re-verified before they are sent.
+        try:
+            engine.store.get_run(run_id)
+            artifacts = engine.store.list_artifacts(run_id)
+        except Exception as exc:
+            raise map_error(exc) from exc
+        artifact = next(
+            (item for item in artifacts if item.artifact_id == artifact_id),
+            None,
+        )
+        if artifact is None:
+            raise HTTPException(status_code=404, detail='artifact not found')
+        try:
+            content = VerifiedArtifactReader(
+                settings.shared_mount_root
+            ).read_verified(
+                artifact,
+                maximum_bytes=settings.maximum_artifact_download_bytes,
+            )
+        except ArtifactUnavailableError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ArtifactDigestMismatchError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ArtifactTooLargeError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except ArtifactDeliveryError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        filename = PurePosixPath(artifact.uri).name or 'artifact'
+        safe_filename = re.sub(r'[^A-Za-z0-9._-]', '_', filename)
+        return Response(
+            content=content,
+            media_type='application/octet-stream',
+            headers={
+                'Content-Disposition': (
+                    f'attachment; filename="{safe_filename}"'
+                ),
+                'X-Glasslab-Artifact-Sha256': artifact.sha256,
+                'X-Glasslab-Artifact-Id': artifact.artifact_id,
+            },
+        )
 
     @app.get('/runs/{run_id}/turns', response_model=TurnListResponse)
     def get_turns(
