@@ -49,12 +49,16 @@ def _sha256_of(path: Path) -> str:
 def stage_raw_pdf(data: bytes, raw_root: Path, name: str) -> Path:
     """Atomically persist ``data`` as ``<raw_root>/<name>.pdf``.
 
-    ``name`` must be a single, safe filename component: a manifest id or
-    source label that carries a path separator or a ``..`` component would
-    otherwise escape the configured raw root. The bytes are written to a
-    temporary sibling and ``os.replace``d into place so a crash mid-write
-    never leaves a truncated PDF the ingester would later trust.
+    A trailing ``.pdf`` on ``name`` is stripped first, so a caller that passes
+    an already-suffixed filename cannot create a ``.pdf.pdf`` duplicate.
+    ``name`` must otherwise be a single, safe filename component: a manifest id
+    or source label that carries a path separator or a ``..`` component would
+    escape the configured raw root. The bytes are written to a temporary
+    sibling and ``os.replace``d into place so a crash mid-write never leaves a
+    truncated PDF the ingester would later trust.
     """
+    if name.lower().endswith('.pdf'):
+        name = name[:-4]
     if (
         not name
         or name in {'.', '..'}
