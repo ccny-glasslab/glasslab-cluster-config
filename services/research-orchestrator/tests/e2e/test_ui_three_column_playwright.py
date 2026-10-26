@@ -18,8 +18,9 @@ Assertions:
    renders its digest-verified text preview;
 3. selecting the seeded textbook renders the PDF viewer iframe inside the
    Viewer column and lands on the Corpus sources tab;
-4. the page carries no ``<script>`` element, no inline ``style`` attribute,
-   and produces no CSP-violation console error and no page error;
+4. the page carries only the #595 streaming composer script (no other
+   ``<script>`` element), no inline ``style`` attribute, and produces no
+   CSP-violation console error and no page error;
 5. at a narrow width (1024x768) a corpus table with the live corpus's order
    of magnitude of rows still scrolls inside the Sources column instead of
    stretching the document to tens of thousands of pixels.
@@ -54,7 +55,7 @@ PLAYWRIGHT_SKIP = pytest.mark.skipif(
 # Importing the fixture registers it in this module's namespace; it lives in a
 # plain module rather than a second conftest.py so its basename cannot shadow
 # the shared tests/conftest.py that the rest of the suite imports.
-from ui_qa import ui_qa  # noqa: F401
+from ui_qa import assert_only_streaming_script, ui_qa  # noqa: E402, F401
 
 CSP_VIOLATION_MARKERS = (
     'refused to load',
@@ -177,8 +178,9 @@ def test_ui_three_column_notebook_and_viewer(ui_qa) -> None:
         # Each column body owns the scrolling, not the document.
         for scroller in ('#sources .tab-panels', '#ask .column-body'):
             assert _overflow_y(page, scroller) == 'auto', scroller
-        # Zero script and zero inline style: the tabs are pure CSS.
-        assert page.locator('script').count() == 0
+        # Only the streaming composer script and zero inline style: the tabs
+        # are pure CSS.
+        assert_only_streaming_script(page)
         assert page.locator('[style]').count() == 0
         expect(page.locator('#panel-runs')).to_be_visible()
         expect(page.locator('#panel-corpus')).to_be_hidden()
@@ -272,7 +274,7 @@ def test_ui_three_column_notebook_and_viewer(ui_qa) -> None:
         canvas.wait_for(state='visible', timeout=30_000)
         status = frame.locator('#status')
         expect(status).to_have_attribute('data-tone', 'ok', timeout=30_000)
-        assert page.locator('script').count() == 0
+        assert_only_streaming_script(page)
         assert page.locator('[style]').count() == 0
         _shot(page, env, 'ui-3col-pdf.png')
         _log(
@@ -348,7 +350,7 @@ def test_ui_notebook_stacks_below_1100px(ui_qa) -> None:
         assert _overflow_y(page, '#viewer .column-body') == 'visible'
         expect(page.locator('#panel-runs')).to_be_visible()
         expect(page.locator('.ask-form input[name="q"]')).to_be_visible()
-        assert page.locator('script').count() == 0
+        assert_only_streaming_script(page)
         _shot(page, env, 'ui-3col-mobile.png')
         _log(
             env,
@@ -390,7 +392,7 @@ def test_ui_narrow_corpus_tab_stays_bounded(ui_qa) -> None:
         # The QA seed carries one source, so clone its row up to the live
         # corpus's order of magnitude to make the panel content overflow the
         # 65vh cap. This is test instrumentation in the browser, not app
-        # markup: the page itself stays script-free.
+        # markup: the page carries only its streaming composer script.
         row_count = page.evaluate(
             """count => {
                 const body = document.querySelector(
@@ -428,7 +430,7 @@ def test_ui_narrow_corpus_tab_stays_bounded(ui_qa) -> None:
         )
         assert panel['scrollHeight'] > panel['clientHeight'], panel
         assert panel['clientHeight'] <= 0.65 * viewport_height + 2, panel
-        assert page.locator('script').count() == 0
+        assert_only_streaming_script(page)
         assert page.locator('[style]').count() == 0
         _shot(page, env, 'ui-3col-narrow-corpus.png')
         _log(
