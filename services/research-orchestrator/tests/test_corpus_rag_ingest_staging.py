@@ -273,3 +273,30 @@ def test_stage_raw_pdf_accepts_safe_names(tmp_path: Path, name: str) -> None:
     staged = pipeline.stage_raw_pdf(b'%PDF-1.4\n%%EOF\n', tmp_path, name)
     assert staged.name == f'{name}.pdf'
     assert staged.read_bytes().startswith(b'%PDF')
+
+
+def test_ingest_arxiv_exits_nonzero_on_feed_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A throttled or empty arXiv feed must fail the CronJob, not report a
+    # successful sync that ingested nothing (2026-10 live regression).
+    monkeypatch.syspath_prepend(str(CORPUS_SCRIPT_DIR))
+    import ingest_arxiv
+
+    from app.corpus_rag.arxiv import ArxivFeedError
+
+    def throttled(query):
+        raise ArxivFeedError('arXiv API answered HTTP 429 after 4 attempt(s)')
+
+    monkeypatch.setattr(ingest_arxiv, 'fetch_entries', throttled)
+    monkeypatch.setenv('GLASSLAB_ORCHESTRATOR_STORE_BACKEND', 'sqlite')
+    monkeypatch.setenv(
+        'GLASSLAB_ORCHESTRATOR_CORPUS_RAG_STORE_PATH', str(tmp_path / 'a.db')
+    )
+
+    assert ingest_arxiv.main(['--days', '1']) == 1
+    err = capsys.readouterr().err
+    assert '[ingest-arxiv] feed failure' in err
+    assert 'HTTP 429' in err
