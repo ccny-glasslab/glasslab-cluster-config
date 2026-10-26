@@ -275,6 +275,29 @@ def test_stage_raw_pdf_accepts_safe_names(tmp_path: Path, name: str) -> None:
     assert staged.read_bytes().startswith(b'%PDF')
 
 
+@pytest.mark.parametrize(
+    ('name', 'expected'),
+    [
+        ('paper.pdf', 'paper.pdf'),
+        ('PAPER.PDF', 'PAPER.pdf'),
+        ('2401.00001v1.pdf', '2401.00001v1.pdf'),
+    ],
+)
+def test_stage_raw_pdf_does_not_double_suffix(
+    tmp_path: Path, name: str, expected: str
+) -> None:
+    raw_root = tmp_path / 'raw'
+    staged = pipeline.stage_raw_pdf(b'%PDF-1.4\n%%EOF\n', raw_root, name)
+
+    assert staged.name == expected
+    assert not (raw_root / f'{expected}.pdf').exists()
+
+
+def test_stage_raw_pdf_rejects_a_bare_pdf_suffix(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        pipeline.stage_raw_pdf(b'%PDF-1.4\n', tmp_path, '.pdf')
+
+
 def test_ingest_arxiv_exits_nonzero_on_feed_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
