@@ -205,6 +205,48 @@ def open_rag_vector_index(
     return NumpyVectorIndex(entries=entries, source_of=source_of)
 
 
+def rag_dense_readiness(
+    store: Any,
+    *,
+    model_id: str,
+    dims: int,
+    revision: str,
+    chunkless_threshold: int,
+) -> dict[str, Any]:
+    """Corpus-RAG dense readiness for ``/health`` (issue #683).
+
+    Reads aggregate counts only, so the probe stays cheap at corpus scale.
+    ``chunkless_over_threshold`` flags a regression of the #622 heal: sources
+    with no rag_chunks are invisible to every retrieval mode.
+    """
+    counts = store.count_rag_index(model_id, dims=dims, revision=revision)
+    usable = counts['vectors_usable']
+    total = counts['vectors_total']
+    spans = counts['evidence_spans'] or 0
+    chunkless = counts['chunkless_sources'] or 0
+    reason = ''
+    if usable is None:
+        reason = 'rag vector table unavailable (pgvector missing)'
+    elif usable == 0:
+        reason = f'no usable rag vectors for model {model_id!r}'
+    elif total is not None and total > usable:
+        reason = f'{total - usable} row(s) ignored for dimension/revision mismatch'
+    return {
+        'available': bool(usable),
+        'reason': reason,
+        'model_id': model_id,
+        'revision': revision,
+        'dims': dims,
+        'indexed_vectors': usable or 0,
+        'evidence_spans': spans,
+        'unindexed_evidence_spans': max(spans - (usable or 0), 0),
+        'sources': counts['sources'] or 0,
+        'chunkless_sources': chunkless,
+        'chunkless_threshold': chunkless_threshold,
+        'chunkless_over_threshold': chunkless > chunkless_threshold,
+    }
+
+
 def rag_dense_ready(store: Any, provider: Any) -> bool:
     """True when the store holds at least one vector for the provider lineage.
 

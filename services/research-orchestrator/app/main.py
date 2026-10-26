@@ -23,6 +23,8 @@ import logging
 from pathlib import Path, PurePosixPath
 import re
 import secrets
+import threading
+import time
 from typing import Any, AsyncIterator, assert_never
 
 import httpx
@@ -828,6 +830,81 @@ def sse_frame(event: EventRecord) -> str:
     )
 
 
+class CorpusRagHealth:
+    """Cached corpus-RAG readiness block for ``/health`` (issue #683).
+
+    ``/health`` backs the liveness probe, so the store aggregate runs at most
+    once per ``corpus_rag_health_cache_seconds`` and any failure degrades to
+    ``available: False`` instead of failing the probe. The chunk-less warning
+    is logged on the transition into the over-threshold state, not on every
+    probe.
+    """
+
+    def __init__(
+        self,
+        store: Any,
+        settings: Settings,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._store = store
+        self._settings = settings
+        self._clock = clock
+        self._cached: dict[str, object] | None = None
+        self._cached_at = 0.0
+        self._over_threshold = False
+        self._lock = threading.Lock()
+
+    def _dims(self) -> int:
+        # The provider declares dims eagerly without loading the model; an
+        # unknown model reports 0, which the count treats as unfiltered.
+        try:
+            from .knowledge_dense import create_embedding_provider
+
+            provider = create_embedding_provider(
+                self._settings.knowledge_embedding_model,
+                revision=self._settings.knowledge_embedding_revision,
+            )
+            return int(getattr(provider, 'dims', 0) or 0)
+        except Exception:  # noqa: BLE001 - diagnostics never fail /health
+            return 0
+
+    def _compute(self) -> dict[str, object]:
+        from .corpus_rag.dense import rag_dense_readiness
+
+        try:
+            block: dict[str, object] = rag_dense_readiness(
+                self._store,
+                model_id=self._settings.knowledge_embedding_model,
+                dims=self._dims(),
+                revision=self._settings.knowledge_embedding_revision,
+                chunkless_threshold=(
+                    self._settings.corpus_rag_chunkless_alert_threshold
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - diagnostics never fail /health
+            return {'available': False, 'reason': str(exc)}
+        over = bool(block['chunkless_over_threshold'])
+        if over and not self._over_threshold:
+            logger.warning(
+                'corpus-rag chunk-less sources %s exceed threshold %s;'
+                ' run the corpus-rag-reingest heal (issue #622)',
+                block['chunkless_sources'],
+                block['chunkless_threshold'],
+            )
+        self._over_threshold = over
+        return block
+
+    def snapshot(self) -> dict[str, object]:
+        with self._lock:
+            now = self._clock()
+            ttl = self._settings.corpus_rag_health_cache_seconds
+            if self._cached is None or now - self._cached_at >= ttl:
+                self._cached = self._compute()
+                self._cached_at = now
+            return self._cached
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -841,6 +918,7 @@ def create_app(
     # (issue #597).
     enable_shared_group_write()
     engine = engine or build_engine(settings)
+    corpus_rag_health = CorpusRagHealth(getattr(engine, 'store', None), settings)
     discord_adapter = getattr(engine, 'discord', None)
     discord_rest_circuit = (
         discord_adapter.circuit
@@ -1026,6 +1104,7 @@ def create_app(
             'service': settings.app_name,
             'version': settings.app_version,
             'knowledge_dense': knowledge_dense,
+            'corpus_rag': corpus_rag_health.snapshot(),
         }
 
     @app.get('/ready')

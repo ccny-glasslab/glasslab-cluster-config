@@ -157,6 +157,8 @@ class ResearchStore(Protocol):
     def list_rag_chunk_vectors(
         self, model_id: str | None = None,
     ) -> list[tuple[ChunkVectorMeta, bytes]]: ...
+    def count_rag_index(self, model_id: str, *, dims: int,
+                        revision: str = '') -> dict[str, int | None]: ...
 
     # Production dense-retrieval surface. Vectors attach to the EXISTING
     # knowledge_chunks identity — there is no secondary chunk namespace.
