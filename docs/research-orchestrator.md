@@ -192,6 +192,31 @@ in the database and reconstructed after an orchestrator restart. Active turns
 have an explicit abort path. Runtime event names are normalized before they are
 persisted.
 
+### Split Runtime Storage Requirement
+
+The deployed pod runs the agent runtime in a separate `opencode` sidecar
+(issue #597): the `orchestrator` container is uid/gid `10001`, the sidecar is
+uid `10002` with primary gid `10001`, and both mount the `glasslab-shared-artifacts`
+NFS PersistentVolume (`192.168.1.207:/volume1/backup/glasslab-v2/shared-artifacts`,
+NFSv4.1, `sec=sys`). The in-tree NFS volume does not apply `fsGroup`, so
+cross-container writes rely on plain POSIX group permissions:
+
+- Both processes set `umask 0002` at startup
+  (`app/process_permissions.enable_shared_group_write`), so per-run
+  directories and files are created `0775`/`0664` for gid `10001`.
+- The NAS export **must pass numeric uid/gid through unchanged**: no
+  `all_squash`/"map all users" and no `root_squash` remapping of these ids
+  onto a different anonymous id. If the export squashes, the sidecar's files
+  land under another owner and agent worktree writes fail at runtime.
+
+Verified 2026-10-13 (issue #612): from the live pod, the sidecar (uid 10002)
+created a file and a directory inside an orchestrator-created setgid `2775`
+directory; NFS recorded them as `10002:10001` and the orchestrator read and
+removed them. Re-check after any NAS export or PV change with the same probe:
+create a group-writable directory from the `orchestrator` container, write
+into it from the `opencode` container, then confirm ownership with
+`stat -c '%u:%g'` and clean up.
+
 The current deployment configuration uses split model serving:
 
 ```text
@@ -845,6 +870,8 @@ GET  /runs/{run_id}
 GET  /runs/{run_id}/events
 GET  /runs/{run_id}/events/stream
 GET  /runs/{run_id}/artifacts
+GET  /runs/{run_id}/artifacts/manifest
+GET  /runs/{run_id}/artifacts/{artifact_id}/content
 POST /knowledge/sources
 GET  /knowledge/sources
 DELETE /knowledge/sources/{source_id}
@@ -864,6 +891,19 @@ Deployment requires `X-Glasslab-Operator-Token` on every endpoint except
 `/health` and `/ready`. Reads, events, artifacts, SSE, and the task/dataset/
 knowledge listing endpoints are gated too, because the documented contributor
 port-forward exposes the service beyond its cluster network (issue #369).
+
+`/health` also reports corpus-RAG dense readiness in a `corpus_rag` block
+(issue #683), next to the legacy `knowledge_dense` block: the configured
+embedding `model_id`/`revision`/`dims`, `indexed_vectors` (current-lineage rows
+in the RAG vector table), `evidence_spans` and `unindexed_evidence_spans`, and
+`chunkless_sources` (knowledge sources with no RAG chunks, invisible to every
+retrieval mode). `chunkless_over_threshold` turns true above
+`GLASSLAB_ORCHESTRATOR_CORPUS_RAG_CHUNKLESS_ALERT_THRESHOLD` (default 50) and a
+warning is logged once on that transition; heal with the corpus-rag-reingest
+Job. Because `/health` is the liveness probe, the block is cached for
+`GLASSLAB_ORCHESTRATOR_CORPUS_RAG_HEALTH_CACHE_SECONDS` (default 60) and a
+store failure degrades it to `available: false` rather than failing the probe.
+
 Free-form read payloads (event payloads, action arguments, artifact metadata,
 run task/seed state) are redacted before the response is built. Local
 development leaves this check disabled unless

@@ -915,6 +915,40 @@ class PostgresStore:
             for r in rows
         ]
 
+    def count_rag_index(self, model_id: str, *, dims: int, revision: str = '') -> dict[str, int | None]:
+        # /health readiness probe (#683): aggregate counts only, never vector
+        # blobs. An unresolved dims/revision (0/'') is not filtered on,
+        # matching corpus_rag.dense.rag_dense_ready. Chunk-less sources use
+        # the reingest healer's definition (no rag_chunks of any kind).
+        query = (
+            "SELECT (SELECT count(*) FROM orchestrator_rag_chunks WHERE kind = 'evidence_span') AS evidence_spans,"
+            ' (SELECT count(*) FROM orchestrator_knowledge_sources) AS sources,'
+            ' (SELECT count(*) FROM orchestrator_knowledge_sources s WHERE NOT EXISTS'
+            '  (SELECT 1 FROM orchestrator_rag_chunks c WHERE c.source_id = s.source_id)) AS chunkless_sources,'
+            " to_regclass('orchestrator_rag_chunk_vectors') IS NOT NULL AS has_vectors"
+        )
+        vectors_query = (
+            'SELECT count(*) AS total,'
+            ' count(*) FILTER (WHERE (%s = 0 OR dims = %s) AND (%s = \'\' OR revision = %s)) AS usable'
+            ' FROM orchestrator_rag_chunk_vectors WHERE model_id = %s'
+        )
+        with self._connect() as conn:
+            row = conn.execute(query).fetchone()
+            counts: dict[str, int | None] = {
+                'evidence_spans': int(row['evidence_spans'] or 0),
+                'sources': int(row['sources'] or 0),
+                'chunkless_sources': int(row['chunkless_sources'] or 0),
+                'vectors_total': None,
+                'vectors_usable': None,
+            }
+            # Without pgvector the vectors table is never created; report
+            # None rather than 0 so "no table" stays distinct from "empty".
+            if row['has_vectors']:
+                vrow = conn.execute(vectors_query, (dims, dims, revision, revision, model_id)).fetchone()
+                counts['vectors_total'] = int(vrow['total'] or 0)
+                counts['vectors_usable'] = int(vrow['usable'] or 0)
+        return counts
+
     def upsert_knowledge_chunk_vectors(self, meta: ChunkVectorMeta, vec_bytes: bytes) -> None:
         # The store owns both representations: canonical vector bytes plus
         # the halfvec column HNSW search reads. The bytes are opaque

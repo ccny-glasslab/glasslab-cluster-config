@@ -114,6 +114,29 @@ configured Discord bundle-size ceiling. Every ZIP contains
 `artifact-manifest.json` with the original URI, digest, job ID, and archive
 path for each delivered file.
 
+Outside Discord (issue #585), fetch results from a workstation through the
+port-forwarded read API with the operator token:
+
+```bash
+export GLASSLAB_OPERATOR_TOKEN=<operator-token>
+python services/research-orchestrator/scripts/fetch-run-artifacts.py \
+  <run_id> --output ./run-<run_id> [--include-jobs]
+```
+
+It writes the latest `report.md`, report PDF/DOCX, every `comparison` JSON, and
+`protocol/program.md` (plus per-job `evaluation.json`, `metrics.json`, and
+`reports/` with `--include-jobs`) under their mount-relative paths, alongside
+the fetched `artifact-manifest.json`. Each file's SHA-256 is checked against
+the run's artifact record before it is written. The script exits non-zero
+without writing anything when a selected artifact is unavailable or tampered,
+or the run has no report or protocol. The underlying routes are
+`GET /runs/{run_id}/artifacts/manifest` (every run- and job-level artifact with
+its mount-relative path, size, digest, and current availability) and
+`GET /runs/{run_id}/artifacts/{artifact_id}/content` (mount-confined,
+digest-verified on the served bytes, capped by
+`GLASSLAB_ORCHESTRATOR_MAXIMUM_ARTIFACT_DOWNLOAD_BYTES`, default 256 MiB;
+404 unavailable or not in this run, 409 digest mismatch, 413 over the cap).
+
 After a successful job, the orchestrator also derives `analysis.ipynb` from
 digest-verified `metrics.json` and `tables/*.csv` files. The notebook embeds
 those inputs and supplies generic pandas/matplotlib inspection and plotting
@@ -243,6 +266,8 @@ GET /runs/{run_id}
 GET /runs/{run_id}/events
 GET /runs/{run_id}/events/stream
 GET /runs/{run_id}/artifacts
+GET /runs/{run_id}/artifacts/manifest
+GET /runs/{run_id}/artifacts/{artifact_id}/content
 GET /runs/{run_id}/turns
 GET /task-bundles
 GET /task-bundles/{task_id}

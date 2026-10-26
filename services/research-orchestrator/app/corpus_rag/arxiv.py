@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -23,6 +25,13 @@ ALLOWED_PDF_HOSTS = frozenset({'arxiv.org', 'export.arxiv.org', 'www.arxiv.org'}
 MAX_PDF_BYTES = 20 * 1024 * 1024  # 20 MiB per preprint
 _DOWNLOAD_TIMEOUT_SECONDS = 90
 _RETRIES = 2
+# arXiv asks API clients to wait >= 3 s between calls. Throttling (429) and
+# transient 5xx answers are retried with exponential backoff from that floor,
+# honoring a numeric Retry-After when the edge sends one.
+_FEED_ATTEMPTS = 4
+_FEED_BACKOFF_SECONDS = 15.0
+_FEED_MAX_BACKOFF_SECONDS = 120.0
+_RETRYABLE_FEED_STATUS = frozenset({429, 500, 502, 503, 504})
 _API_ENDPOINT = 'https://export.arxiv.org/api/query'
 _ATOM_NS = 'http://www.w3.org/2005/Atom'
 _ARXIV_NS = 'http://arxiv.org/schemas/atom'
@@ -30,6 +39,10 @@ _USER_AGENT = 'GlasslabResearchPrototype/0.1'
 _HTTPS_DEFAULT_PORT = 443
 
 Urlopen = Callable[..., Any]
+
+
+class ArxivFeedError(RuntimeError):
+    """The arXiv API did not return a usable feed (fail the sync loudly)."""
 
 
 class PdfTooLargeError(ValueError):
@@ -133,10 +146,46 @@ def _parse_entry(node: ET.Element) -> ArxivEntry:
     )
 
 
+def _retry_after_seconds(error: urllib.error.HTTPError) -> float | None:
+    value = (error.headers or {}).get('Retry-After')
+    try:
+        return float(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def _read_feed(
+    request: urllib.request.Request,
+    *,
+    urlopen: Urlopen,
+    sleep: Callable[[float], None],
+) -> bytes:
+    for attempt in range(_FEED_ATTEMPTS):
+        try:
+            with urlopen(request, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            retryable = exc.code in _RETRYABLE_FEED_STATUS
+            if not retryable or attempt == _FEED_ATTEMPTS - 1:
+                raise ArxivFeedError(
+                    f'arXiv API answered HTTP {exc.code} after '
+                    f'{attempt + 1} attempt(s): {exc.reason}'
+                ) from exc
+            delay = _retry_after_seconds(exc)
+            if delay is None:
+                delay = min(
+                    _FEED_BACKOFF_SECONDS * 2**attempt,
+                    _FEED_MAX_BACKOFF_SECONDS,
+                )
+            sleep(delay)
+    raise AssertionError('unreachable')
+
+
 def fetch_entries(
     query: ArxivQuery,
     *,
     urlopen: Urlopen | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> list[ArxivEntry]:
     """Query the arXiv API and parse the Atom response into entries.
 
@@ -144,19 +193,30 @@ def fetch_entries(
     the date window is enforced deterministically regardless of API sort
     behavior. ``urlopen`` is injectable for tests; it must behave like
     ``urllib.request.urlopen`` (context manager, ``.read``, ``.headers``).
+
+    Throttling and transient server errors are retried with backoff; a
+    persistent failure, or a feed with no entries at all, raises
+    ``ArxivFeedError``. Allowlisted categories always have recent
+    submissions, so an empty raw feed is an API failure and must never be
+    reported as a successful "nothing new" sync. A non-empty feed whose
+    entries all predate ``date_from`` is a legitimate quiet window.
     """
     if urlopen is None:
         urlopen = urllib.request.urlopen
     request = urllib.request.Request(
         query.query_url(), headers={'User-Agent': _USER_AGENT}
     )
-    with urlopen(request, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as response:
-        payload = response.read()
+    payload = _read_feed(request, urlopen=urlopen, sleep=sleep)
     root = ET.fromstring(payload)
     entries = [
         _parse_entry(node)
         for node in root.findall(f'{{{_ATOM_NS}}}entry')
     ]
+    if not entries:
+        raise ArxivFeedError(
+            'arXiv API returned a feed with no entries for '
+            + ', '.join(query.categories)
+        )
     if query.date_from is not None:
         entries = [entry for entry in entries if entry.published >= query.date_from]
     return entries

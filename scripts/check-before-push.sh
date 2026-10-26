@@ -73,6 +73,7 @@ run_secret_boundary_tests() {
     tests.scripts.test_resolve_runner_image \
     tests.scripts.test_model_serve_hf_home \
     tests.scripts.test_secret_permissions_preflight \
+    tests.scripts.test_checkout_permissions_preflight \
     tests.scripts.test_rollout_image_preflight \
     tests.scripts.test_rollout_sync_reexec \
     tests.scripts.test_deploy_image_override \
@@ -83,6 +84,7 @@ run_secret_boundary_tests() {
     tests.security.test_orchestrator_infra_hardening \
     tests.security.test_orchestrator_secret_isolation \
     tests.security.test_internal_service_auth_manifests \
+    tests.security.test_research_notebook_manifests \
     services/research-orchestrator/tests/scripts/test_orchestrator_ui_proxy.py \
     -v
 }

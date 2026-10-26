@@ -39,6 +39,8 @@ GATED_GET_PATHS = [
     '/runs/missing-run/events',
     '/runs/missing-run/events/stream',
     '/runs/missing-run/artifacts',
+    '/runs/missing-run/artifacts/manifest',
+    '/runs/missing-run/artifacts/missing-artifact/content',
     '/runs/missing-run/turns',
     '/runs/missing-run/context-packets',
     '/actions/missing-action',

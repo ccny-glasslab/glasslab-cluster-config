@@ -26,6 +26,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECKER = REPO_ROOT / "scripts/check-secret-permissions.sh"
+CHECKOUT_CHECKER = REPO_ROOT / "scripts/check-checkout-permissions.sh"
 DEPLOY = REPO_ROOT / "scripts/deploy-glasslab-v2.sh"
 ROLLOUT = REPO_ROOT / "scripts/rollout-research-services.sh"
 SENTINEL = "postgresql://fixture:preflight-sentinel@db.invalid/app"
@@ -193,7 +194,7 @@ class RolloutScriptPreflightTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         (self.root / "scripts").mkdir()
-        for script in (ROLLOUT, CHECKER):
+        for script in (ROLLOUT, CHECKER, CHECKOUT_CHECKER):
             shutil.copy2(script, self.root / "scripts" / script.name)
         self.rollout = self.root / "scripts" / ROLLOUT.name
         manifests = self.root / "kubeadm" / "glasslab-v2" / "research-orchestrator"

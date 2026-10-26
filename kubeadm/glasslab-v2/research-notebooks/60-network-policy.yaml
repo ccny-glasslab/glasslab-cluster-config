@@ -1,0 +1,85 @@
+# Default-deny for the whole notebooks namespace: no pod accepts or opens any
+# connection unless a policy below allows it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: glasslab-notebooks
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Ingress: the Jupyter port, from two addresses only.
+#
+#   * 192.168.1.4/32 is the gateway's lab-network address. Researchers reach
+#     their notebook with an SSH tunnel through the gateway, which then
+#     connects to node02's NodePort. externalTrafficPolicy: Local on the
+#     Service keeps this source address intact.
+#   * 192.168.1.11/32 is node02, for the kubelet's httpGet probes, which
+#     originate from the node hosting the pod. If the notebook leaves node02,
+#     update this CIDR or the probes fail.
+#
+# Nothing else on the lab network, and no other pod, can connect.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: research-notebook-ingress
+  namespace: glasslab-notebooks
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: research-notebook
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 192.168.1.4/32
+        - ipBlock:
+            cidr: 192.168.1.11/32
+      ports:
+        - protocol: TCP
+          port: 8888
+---
+# Egress: DNS, and HTTPS to the internet only (GitHub over HTTPS, PyPI, conda,
+# Hugging Face). Private ranges (the lab LAN, pod network, and service network)
+# and the CCNY campus range 134.74.0.0/16 are excluded, so a notebook cannot
+# reach Postgres, MinIO, workflow-api, the exo hosts, the gateway, or any other
+# lab or campus machine.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: research-notebook-egress
+  namespace: glasslab-notebooks
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: research-notebook
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 134.74.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
