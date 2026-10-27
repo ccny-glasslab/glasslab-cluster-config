@@ -1,0 +1,57 @@
+name: Dependency Audit
+
+# Daily check of pinned dependencies against published advisories (OSV/GHSA).
+# Dependabot opens the update PRs; this job fails loudly when something already
+# pinned is known-vulnerable so it is not left waiting on a cooldown or review.
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  pull_request:
+    branches: [main, testing]
+    paths:
+      - "services/**/requirements*.txt"
+      - "services/research-orchestrator/agent-tools/**"
+      - ".github/workflows/dependency-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  agent-tools:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Audit agent CLI lockfile
+        working-directory: services/research-orchestrator/agent-tools
+        run: npm audit --omit=dev --audit-level=moderate
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+
+      - name: Install pip-audit
+        run: python -m pip install pip-audit==2.10.1
+
+      - name: Audit service requirements
+        run: |
+          status=0
+          for req in services/*/requirements*.txt; do
+            echo "::group::${req}"
+            pip-audit --progress-spinner off -r "${req}" || status=1
+            echo "::endgroup::"
+          done
+          exit "${status}"

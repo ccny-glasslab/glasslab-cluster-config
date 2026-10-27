@@ -1,0 +1,186 @@
+---
+# Keep agent CLIs (OpenCode, ...) current on the lab Macs.
+#
+# Each Mac's Homebrew prefix is owned by a different account, and brew refuses
+# to run as root, so every brew call runs as the prefix owner. The playbook:
+#   1. migrates hand-installed npm-global copies to the Homebrew formula
+#      (brew installs are not exposed to the npm `/global/upgrade` package
+#      injection class, GHSA-632h-h47v-g4x4),
+#   2. installs or upgrades each formula now,
+#   3. installs a daily LaunchDaemon that runs `brew upgrade` for the same list,
+#   4. asserts the installed versions meet the security floors.
+# Running opencode processes keep the binary they started with; they pick up
+# the new version on their next start.
+- name: Maintain agent tooling on lab Macs
+  hosts: "{{ darwin_agent_tools_target_group | default('exo_macs') }}"
+  gather_facts: true
+  serial: 1
+  become: true
+  vars:
+    homebrew_prefix: /opt/homebrew
+    darwin_agent_tool_formulae:
+      - opencode
+    # npm-global packages that shadow a formula's binary; removed so the
+    # Homebrew-managed copy owns /opt/homebrew/bin.
+    darwin_agent_tool_npm_globals_to_remove:
+      - "@opencode/cli"
+      - opencode-ai
+    darwin_agent_tool_min_versions:
+      opencode: "1.18.22"
+    agent_tools_upgrade_label: com.glasslab.agent-tools-upgrade
+    agent_tools_upgrade_hour: 4
+    agent_tools_upgrade_minute: 30
+  tasks:
+    - name: Require macOS
+      ansible.builtin.assert:
+        that: ansible_facts.os_family == 'Darwin'
+        fail_msg: This playbook only manages Apple-silicon lab Macs.
+
+    - name: Inspect the Homebrew prefix
+      ansible.builtin.stat:
+        path: "{{ homebrew_prefix }}/bin/brew"
+      register: brew_stat
+
+    - name: Require Homebrew
+      ansible.builtin.assert:
+        that: brew_stat.stat.exists
+        fail_msg: "Homebrew is not installed at {{ homebrew_prefix }}."
+
+    - name: Record the Homebrew owner
+      ansible.builtin.set_fact:
+        brew_owner: "{{ brew_stat.stat.pw_name }}"
+        brew_owner_home: "/Users/{{ brew_stat.stat.pw_name }}"
+
+    - name: List npm-global packages
+      ansible.builtin.command:
+        argv: [sudo, -u, "{{ brew_owner }}", -H, /usr/bin/env, "PATH={{ homebrew_prefix }}/bin:/usr/bin:/bin", "{{ homebrew_prefix }}/bin/npm", ls, -g, --depth=0, --json]
+      register: npm_globals
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Remove npm-global copies that shadow Homebrew formulae
+      ansible.builtin.command:
+        argv: [sudo, -u, "{{ brew_owner }}", -H, /usr/bin/env, "PATH={{ homebrew_prefix }}/bin:/usr/bin:/bin", "{{ homebrew_prefix }}/bin/npm", uninstall, -g, "{{ item }}"]
+      loop: "{{ darwin_agent_tool_npm_globals_to_remove }}"
+      when:
+        - npm_globals.rc == 0
+        - item in ((npm_globals.stdout | default('{}') | from_json).dependencies | default({}))
+
+    - name: Install agent tool formulae
+      ansible.builtin.command:
+        argv: [sudo, -u, "{{ brew_owner }}", -H, "{{ homebrew_prefix }}/bin/brew", install, --formula, "{{ item }}"]
+      environment:
+        HOMEBREW_NO_AUTO_UPDATE: "1"
+        HOMEBREW_NO_ENV_HINTS: "1"
+      loop: "{{ darwin_agent_tool_formulae }}"
+      register: brew_install
+      changed_when: "'already installed' not in (brew_install.stderr + brew_install.stdout)"
+
+    - name: Install the upgrade script
+      ansible.builtin.copy:
+        dest: /usr/local/libexec/glasslab-agent-tools-upgrade
+        owner: root
+        group: wheel
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Managed by ansible/playbooks/maintain-darwin-agent-tools.yml
+          set -euo pipefail
+          export PATH="{{ homebrew_prefix }}/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          export HOMEBREW_NO_ENV_HINTS=1
+          echo "[$(date -u +%FT%TZ)] agent-tools upgrade start"
+          brew update --quiet
+          brew upgrade --formula {{ darwin_agent_tool_formulae | join(' ') }}
+          brew list --versions {{ darwin_agent_tool_formulae | join(' ') }}
+          echo "[$(date -u +%FT%TZ)] agent-tools upgrade done"
+
+    - name: Ensure the upgrade log directory exists
+      ansible.builtin.file:
+        path: "{{ brew_owner_home }}/Library/Logs"
+        state: directory
+        owner: "{{ brew_owner }}"
+        mode: '0755'
+
+    - name: Install the daily upgrade LaunchDaemon
+      ansible.builtin.copy:
+        dest: "/Library/LaunchDaemons/{{ agent_tools_upgrade_label }}.plist"
+        owner: root
+        group: wheel
+        mode: '0644'
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+            <dict>
+              <key>Label</key><string>{{ agent_tools_upgrade_label }}</string>
+              <key>ProgramArguments</key>
+              <array>
+                <string>/usr/local/libexec/glasslab-agent-tools-upgrade</string>
+              </array>
+              <key>UserName</key><string>{{ brew_owner }}</string>
+              <key>EnvironmentVariables</key>
+              <dict>
+                <key>HOME</key><string>{{ brew_owner_home }}</string>
+              </dict>
+              <key>StartCalendarInterval</key>
+              <dict>
+                <key>Hour</key><integer>{{ agent_tools_upgrade_hour }}</integer>
+                <key>Minute</key><integer>{{ agent_tools_upgrade_minute }}</integer>
+              </dict>
+              <key>ProcessType</key><string>Background</string>
+              <key>LowPriorityIO</key><true/>
+              <key>StandardOutPath</key><string>{{ brew_owner_home }}/Library/Logs/glasslab-agent-tools-upgrade.log</string>
+              <key>StandardErrorPath</key><string>{{ brew_owner_home }}/Library/Logs/glasslab-agent-tools-upgrade.log</string>
+            </dict>
+          </plist>
+      register: upgrade_plist
+
+    - name: Check whether the LaunchDaemon is loaded
+      ansible.builtin.command:
+        argv: [launchctl, print, "system/{{ agent_tools_upgrade_label }}"]
+      register: upgrade_daemon_state
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Unload the previous LaunchDaemon definition
+      ansible.builtin.command:
+        argv: [launchctl, bootout, "system/{{ agent_tools_upgrade_label }}"]
+      when:
+        - upgrade_plist.changed
+        - upgrade_daemon_state.rc == 0
+
+    - name: Load the LaunchDaemon
+      ansible.builtin.command:
+        argv: [launchctl, bootstrap, system, "/Library/LaunchDaemons/{{ agent_tools_upgrade_label }}.plist"]
+      when: upgrade_plist.changed or upgrade_daemon_state.rc != 0
+
+    - name: Run the upgrade now
+      ansible.builtin.command:
+        argv: [sudo, -u, "{{ brew_owner }}", -H, /usr/local/libexec/glasslab-agent-tools-upgrade]
+      register: upgrade_now
+      changed_when: "'Upgrading' in upgrade_now.stdout"
+
+    - name: Read installed versions
+      ansible.builtin.command:
+        argv: [sudo, -u, "{{ brew_owner }}", -H, "{{ homebrew_prefix }}/bin/brew", list, --versions, "{{ item }}"]
+      loop: "{{ darwin_agent_tool_formulae }}"
+      register: installed_versions
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Enforce security version floors
+      ansible.builtin.assert:
+        that: >-
+          item.stdout.split() | length > 1 and
+          (item.stdout.split()[-1] is version(darwin_agent_tool_min_versions[item.item], '>='))
+        fail_msg: "{{ item.item }} is {{ item.stdout }}; the floor is {{ darwin_agent_tool_min_versions[item.item] }}."
+        success_msg: "{{ item.stdout }}"
+      loop: "{{ installed_versions.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - not ansible_check_mode
+        - item.item in darwin_agent_tool_min_versions

@@ -1,6 +1,5 @@
 FROM python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534
 
-ARG OPENCODE_VERSION=1.18.14
 # Hermes is the opt-in rollback runtime. Pin an immutable commit on the
 # default branch: the current bootstrap requires the repo's pm/ tooling,
 # which no release tag carries, so a branch/tag pin breaks the build.
@@ -16,10 +15,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# OpenCode is pinned (with integrity hashes) by agent-tools/package-lock.json so
+# Dependabot can keep it current; it installs outside npm's global prefix and
+# is exposed at the /usr/local/bin/opencode path the sidecar validates.
+COPY services/research-orchestrator/agent-tools/package.json services/research-orchestrator/agent-tools/package-lock.json /opt/glasslab-agent-tools/
 COPY services/research-orchestrator/vendor/install-hermes.sh /tmp/install-hermes.sh
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git nodejs npm ca-certificates curl xz-utils libatomic1 \
-    && npm install --global "opencode-ai@${OPENCODE_VERSION}" \
+    && npm ci --prefix /opt/glasslab-agent-tools --omit=dev --no-audit --no-fund \
+    && ln -s /opt/glasslab-agent-tools/node_modules/.bin/opencode /usr/local/bin/opencode \
+    && /usr/local/bin/opencode --version \
     && echo "${HERMES_INSTALL_SHA256}  /tmp/install-hermes.sh" | sha256sum -c - \
     # The orchestrator does not use Hermes' browser tooling; the pinned
     # bootstrap supports --skip-browser. It no longer carries the npm-workspace
