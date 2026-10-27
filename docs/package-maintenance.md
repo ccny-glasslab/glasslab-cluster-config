@@ -38,8 +38,43 @@ What the playbook does:
 Operational note:
 
 - the playbook uses `serial: 1` so nodes are updated one at a time
-- it does not reboot hosts automatically
-- if a kernel or core library update sets `/var/run/reboot-required`, schedule a controlled reboot afterward
+- it does not reboot hosts itself; kured handles worker reboots (below)
+- unattended upgrades do not autoremove packages, and `pigz` is kept installed:
+  an autoremove of `pigz` on 2026-10-27 left the running containerd unable to
+  unpack any image (`fork/exec /usr/bin/unpigz`) until it restarted
+
+## Automatic worker reboots (kured)
+
+`kubeadm/kured.yaml` runs kured on the worker nodes (not `cp01`). When
+`/var/run/reboot-required` exists, kured drains the node, reboots it, waits
+for it to come back, and uncordons it.
+
+- window: 08:00-09:30 UTC daily (04:00-05:30 EDT / 03:00-04:30 EST)
+- one node at a time; the lock never expires, so a node that fails to come
+  back stops all further reboots until someone clears it
+- no reboot without a successful drain (`--force-reboot=false`)
+- any running JupyterHub student server (`component=singleuser-server`)
+  blocks all reboots
+- exam image-keeper pods are skipped by the drain and restart in place
+- pinned stateful pods (postgres and minio on node01, nats on node05, exam
+  hub on node03) are down for a few minutes while their node reboots
+
+Apply from the canonical checkout:
+
+```bash
+kubectl apply -f /home/glasslab/cluster-config/kubeadm/kured.yaml
+```
+
+Pause all reboots (for example before an exam that starts before 09:30 UTC)
+and resume:
+
+```bash
+kubectl -n kube-system annotate ds kured weave.works/kured-node-lock='{"nodeID":"manual"}'
+kubectl -n kube-system annotate ds kured weave.works/kured-node-lock-
+```
+
+Not covered by kured, so reboot these by hand after a kernel update: `cp01`,
+the provisioner, and the gateway (which serves `glasslab.org` and `/exam`).
 
 ## Agent tooling and dependency updates
 
