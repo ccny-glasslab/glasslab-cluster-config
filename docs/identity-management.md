@@ -57,7 +57,8 @@ Roles only take effect where they make sense. For example,
 The `kubernetes_observer` role creates a personal client certificate and
 `~/.kube/config` on the provisioner. It grants `get`, `list`, and `watch` for
 pods, logs, events, jobs, workload controllers, services, and persistent volume
-claims in `glasslab-v2` and `glasslab-agents`.
+claims in `glasslab-v2`. (`glasslab-agents` was listed until 2026-10-27; that
+namespace no longer exists, and binding into it made the playbook fail.)
 
 It does not grant access to secrets, pod exec or attach, job creation, node
 resources, RBAC, or cluster mutation. Contributors submit GPU work through the
@@ -71,7 +72,6 @@ From the provisioner, an observer can use:
 kubectl get jobs
 kubectl get pods
 kubectl logs <pod>
-kubectl config use-context glasslab-agents
 kubectl auth can-i --list
 ```
 

@@ -80,3 +80,5 @@ jobs:
           ansible-inventory -i inventory/hosts.yml --graph
           ansible-playbook -i inventory/hosts.yml \
             playbooks/manage-lab-identities.yml --syntax-check
+          ansible-playbook -i inventory/hosts.yml \
+            playbooks/maintain-darwin-agent-tools.yml --syntax-check

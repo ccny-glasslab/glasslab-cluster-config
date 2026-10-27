@@ -6,6 +6,7 @@ glasslab_identity_managed_usernames:
   - denic
   - tristanc
   - shradhagodse
+  - mgrossberg
 
 glasslab_identity_users:
   - username: gr66ss-glasslab
@@ -21,6 +22,7 @@ glasslab_identity_users:
       - infrastructure_admin
     authorized_keys:
       - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMnJx725BnCLWPiaHr1S1xpTCgjb30uVKRUVDSA3k6YX gr66ss-glasslab
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPEoJqi9YEfIF/DG7YIIKGazr2SBAAORdNP7n0x7hDcQ gr66ss-glasslab replacement 2026-08-22
 
   - username: denic
     display_name: Denise Cakoni
@@ -53,6 +55,7 @@ glasslab_identity_users:
       - kubernetes_observer
     authorized_keys:
       - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBDiZFcFbKimUVq5WOjd13e4ElYUsBSvVSbg7tVwA0gp tristanc@glasslab
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGW8PIu9QL9NzE+WVHGS4z6tfZJ1pwYrAGa0GobGafLY tristanchong.3255@gmail.com
 
   - username: shradhagodse
     display_name: Shradha Godse
@@ -70,6 +73,21 @@ glasslab_identity_users:
       - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDrYbEdPgP2Q3vu5CVz79df3QkmZ1bvMVhNpOl0faWfW itcs\sgodse@CEN50158T191
       - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID5OqFMCe4tw+y68Ds3RhIkSNMu9fbNuffFAsQisCdHh sgodse@home-pc
 
+  - username: mgrossberg
+    display_name: Michael Grossberg
+    state: present
+    # CCNY faculty. Runs the course exam JupyterHub (namespace glasslab-exam):
+    # imports student images and swaps rosters, which today needs sudo kubectl
+    # and helm on the provisioner. Narrow this to a glasslab-exam-only role
+    # once one exists. New account, key-only from the start.
+    password_locked: true
+    targets: [gateway, provisioner]
+    roles:
+      - lab_contributor
+      - infrastructure_admin
+    authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMp1Wd8qYpgpJhdLbYgxBDJdlk8v+vsLSlj+9ATBQFSz michaeldg@macbook
+
 glasslab_exo_shared_group: glasslab-exo
 glasslab_exo_shared_paths:
   - /Users/glasslab/exo-clean
@@ -77,6 +95,5 @@ glasslab_exo_shared_paths:
 glasslab_kubernetes_admin_kubeconfig: /home/glasslab/.kube/config
 glasslab_kubernetes_observer_namespaces:
   - glasslab-v2
-  - glasslab-agents
 glasslab_kubernetes_client_certificate_seconds: 31536000
 glasslab_kubernetes_client_renew_before_seconds: 2592000

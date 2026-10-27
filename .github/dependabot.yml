@@ -1,0 +1,66 @@
+# Keep every pinned dependency current. Update PRs target `testing` (the
+# integration branch); promotion to `main` stays a reviewed step. A short
+# cooldown keeps brand-new releases out for a couple of days as a guard against
+# hijacked-package supply-chain attacks.
+version: 2
+updates:
+  # Agent CLIs baked into the research-orchestrator image (OpenCode).
+  - package-ecosystem: npm
+    directory: /services/research-orchestrator/agent-tools
+    target-branch: testing
+    schedule:
+      interval: daily
+    cooldown:
+      default-days: 2
+    labels: [dependencies, agent-tooling]
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: pip
+    directories:
+      - /services/*
+    target-branch: testing
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 10
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+    labels: [dependencies]
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Base images (digest-pinned FROM lines).
+  - package-ecosystem: docker
+    directories:
+      - /services/*
+    target-branch: testing
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+    groups:
+      base-images:
+        patterns: ["*"]
+    labels: [dependencies]
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: testing
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: [dependencies]
+    commit-message:
+      prefix: "chore(ci)"
