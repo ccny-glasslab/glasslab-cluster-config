@@ -3,5 +3,5 @@ uvicorn[standard]==0.34.0
 pydantic-settings==2.8.1
 kubernetes==31.0.0
 minio==7.2.16
-pypdf==5.4.0
+pypdf==6.21.2
 psycopg[binary]==3.2.9
