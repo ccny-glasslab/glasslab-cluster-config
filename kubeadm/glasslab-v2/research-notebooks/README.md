@@ -83,19 +83,21 @@ K() { sudo -n env KUBECONFIG=/home/glasslab/.kube/config kubectl "$@"; }
 ```
 
 1. Create the home directory on g-nas, owned by the image's `jovyan:users`
-   (1000:100). The provisioner is inside the `/volume1/backup` export:
+   (1000:100). Use the **`glasslab-jupyter`** export: the older `backup`
+   export carries a Synology ACL that refuses UID 1000 even after
+   `chown 1000:100` + `chmod 700` (verified 2026-10-27).
 
    ```bash
-   sudo mkdir -p /mnt/gnas-backup
-   sudo mount -t nfs -o nfsvers=4.1 192.168.1.207:/volume1/backup /mnt/gnas-backup
-   sudo mkdir -p /mnt/gnas-backup/glasslab-notebooks/shradhagodse
-   sudo chown 1000:100 /mnt/gnas-backup/glasslab-notebooks/shradhagodse
-   sudo chmod 700 /mnt/gnas-backup/glasslab-notebooks/shradhagodse
-   sudo umount /mnt/gnas-backup
+   sudo mkdir -p /mnt/gnas-jupyter
+   sudo mount -t nfs -o nfsvers=4.1 192.168.1.207:/volume1/glasslab-jupyter /mnt/gnas-jupyter
+   sudo mkdir -p /mnt/gnas-jupyter/notebooks/shradhagodse
+   sudo chown 1000:100 /mnt/gnas-jupyter/notebooks/shradhagodse
+   sudo chmod 700 /mnt/gnas-jupyter/notebooks/shradhagodse
+   sudo umount /mnt/gnas-jupyter
    ```
 
-   If `chown` is refused because the export squashes root, set the owner from
-   the Synology DSM instead.
+   `glasslab-jupyter`'s root is plain Unix mode, not a DSM ACL, so UID 1000 can
+   write. Do not edit that share's permissions in DSM (it can restore the ACL).
 
 2. Apply the namespace, storage, and network policy:
 

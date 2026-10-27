@@ -23,7 +23,11 @@ spec:
     name: notebook-shradhagodse-home
   nfs:
     server: 192.168.1.207
-    path: /volume1/backup/glasslab-notebooks/shradhagodse
+    # The `glasslab-jupyter` share, not `backup`: the `backup` export carries a
+    # Synology ACL that refuses UID 1000 even after chown/chmod (verified
+    # 2026-10-27). `glasslab-jupyter` uses plain Unix mode and lets UID 1000
+    # write.
+    path: /volume1/glasslab-jupyter/notebooks/shradhagodse
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
