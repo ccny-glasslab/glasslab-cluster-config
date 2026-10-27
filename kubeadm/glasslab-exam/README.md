@@ -8,10 +8,10 @@ into `values.yaml`.
 | Piece | Where |
 |---|---|
 | Hub + proxy pods | node03 (hub DB: PV `glasslab-exam-hub-db`, hostPath `/var/lib/glasslab-exam/hub`) |
-| Student pods + files | odd students and `examadmin` on **node01**, even on **node05**; files in `/var/lib/glasslab-exam/users/<name>` on that node, mounted as `~/work` |
-| Student image | imported into containerd on node01, node03, node04, node05 (`docker.io/library/exam-student:release`, manifest `ddf97c44…`) |
-| Accounts | the same 26 roster accounts and passwords as node02 (`/opt/exam-release/private/credentials.csv` on node02, root-only); signup closed |
-| Fallback | node02 Docker hub, still running and untouched |
+| Student pods + files | names ending in an odd number on **node01**, even on **node05**; files in `/var/lib/glasslab-exam/users/<name>` on that node, mounted as `~/work` |
+| Student image | since 2026-10-27 `exam-student:csci1910` (CSCI1910F26 midterm: `release` + CPU PyTorch 2.11.0 + Part C notebooks + 94 datasets, config `sha256:53177a8b…`), imported into containerd on node01, node03, node04, node05 and held by `image-keeper-node01`/`-node05` pods (`~/exam-k8s/csci1910/image-keeper.yaml` on the provisioner) |
+| Accounts | 23-account CSCI1910 roster, `michael.grossberg77` is hub admin. Student names stay out of this public repo: the real `allowed_users` list is only in the live `~gr66ss-glasslab/exam-k8s/values.yaml`, and passwords only in `exam-k8s/private/` (0700), on the provisioner; signup closed |
+| Fallback | node02 has rejoined the cluster (2026-10-26); there is no Docker fallback any more |
 
 Why local disks: on 2026-10-20 the .207 NFS export refused writes from non-root users (even
 into a directory listed as `0777`), and students must not run as root.
@@ -47,8 +47,8 @@ $K -n glasslab-exam logs deploy/hub --tail=50
 $K -n glasslab-exam delete pod jupyter-student07   # force-stop one student's server (files stay)
 ```
 
-Password resets: log in as `examadmin` at `https://glasslab.org/exam/hub/authorize` (NativeAuthenticator)
-or the change-password page. Spares: student21–25.
+Password resets: log in as the hub admin (`michael.grossberg77`) at `https://glasslab.org/exam/hub/authorize` (NativeAuthenticator)
+or the change-password page. Spares: student01–05.
 
 **Switch back to node02** (gateway): `sudo bash ~/switch-exam-route.sh node02` (source: `exam-bundle/gateway/switch-exam-route.sh`). Switching to
 Kubernetes again: `... k8s`. Each switch backs up the route file, configtests and reloads.
@@ -67,6 +67,27 @@ Re-apply the chart (from `~/exam-k8s` on the provisioner):
 - `node03:30800` (and every node's 30800) is reachable from the whole lab LAN, not only the gateway.
 - Hub database and student files live on single nodes (node03; node01/node05). If one dies mid-exam,
   its students lose access until it returns, the same exposure node02 had.
+
+## Switching to another course's image and roster
+
+[`tools/switch-course.sh`](tools/switch-course.sh) is what switched the hub from the DSEI exam to
+the CSCI1910 midterm on 2026-10-27 in about four minutes. It runs on the provisioner from
+`~/exam-k8s` and needs no node SSH:
+
+1. imports the image tar into containerd on node01/03/04/05 through short-lived privileged pods
+   (`nsenter -t 1 -m -- ctr -n k8s.io images import -`) and checks the image ID on each node;
+2. creates the new students' folders (and moves old student01–05 folders aside);
+3. re-pins the image-keeper pods to the new tag (node05 garbage-collected the image under disk
+   pressure on 2026-10-20);
+4. `helm upgrade` with signup open, `tools/roster-sync-admin.py` (signs up or resets every
+   roster account, logging in as the hub admin), `helm upgrade` with signup closed;
+5. `tools/verify-logins.py` for every account.
+
+Before running it, edit the provisioner's `~/exam-k8s/values.yaml` (`allowed_users`, `admin_users`,
+`singleuser.image.tag`; never commit real student names) and the image name/ID at the top of the script, and put the roster
+(`username,password`, no header) in `private/`. Then run `tools/student-session.py` as one odd
+and one even student. With `delete_invalid_users: true`, accounts that leave the roster are removed
+from the hub database on restart; their folders stay on disk.
 
 ## After the exam
 
