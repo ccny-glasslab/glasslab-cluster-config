@@ -14,6 +14,7 @@ NOTEBOOK_ROOT = REPOSITORY_ROOT / "kubeadm" / "glasslab-v2" / "research-notebook
 NAMESPACE = "glasslab-notebooks"
 GATEWAY_LAN = "192.168.1.4/32"
 NODE02 = "192.168.1.11/32"
+SHRADHAGODSE_LAB_PC = "192.168.1.157/32"
 
 
 def documents(path: Path) -> list[dict]:
@@ -108,13 +109,17 @@ class ResearchNotebookManifestTests(unittest.TestCase):
         self.assertNotIn("ingress", deny["spec"])
         self.assertNotIn("egress", deny["spec"])
 
-    def test_only_the_gateway_and_node02_reach_the_jupyter_port(self) -> None:
+    def test_only_the_gateway_node02_and_the_owner_pc_reach_the_jupyter_port(self) -> None:
         ingress = policy("research-notebook-ingress")["spec"]["ingress"]
         self.assertEqual(len(ingress), 1)
         self.assertEqual(ingress[0]["ports"], [{"protocol": "TCP", "port": 8888}])
         self.assertEqual(
             ingress[0]["from"],
-            [{"ipBlock": {"cidr": GATEWAY_LAN}}, {"ipBlock": {"cidr": NODE02}}],
+            [
+                {"ipBlock": {"cidr": GATEWAY_LAN}},
+                {"ipBlock": {"cidr": NODE02}},
+                {"ipBlock": {"cidr": SHRADHAGODSE_LAB_PC}},
+            ],
         )
 
     def test_services_preserve_the_gateway_source_address(self) -> None:

@@ -21,7 +21,7 @@ they appear and the first match wins, so order matters.
 | --- | --- | --- |
 | `/dsei102/` | Static files from `/var/www/dsei102` | DSEI 10200 offline course reference (~1 GB, ~21k files) for students taking an exam in CCNY computer labs. Added 2026-10-15. `Require ip 134.74.0.0/16 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1 ::1`: CCNY's public range, the RFC 1918 private ranges, and loopback; everyone else gets 403. The private ranges were added 2026-10-19 because some campus networks reach the gateway without NAT (a laptop on `192.168.4.x` was getting 403). Private source addresses are not routable from the internet, so this is still campus-only. `/dsei102` redirects (301) to `/dsei102/`. `Options None`, `AllowOverride None`, so no directory listings and no `.htaccess`. |
 | `/exam`, `/exam/...` | 301 to `https://glasslab.org/exam...` | Added 2026-10-19 17:38 from `/etc/apache2/glasslab/exam-route-http.conf` (`ProxyPass /exam !` plus a `RedirectMatch`). The exam hub is HTTPS-only; see [Exam JupyterHub](#exam-jupyterhub-exam). |
-| `/` (everything else) | Static landing page from `/var/www/html` (`index.html` with a centered `glasslab_log.gif`) | Since 2026-10-19. Before that, `/` was reverse-proxied to `http://134.74.126.109/`, which returned a meta-refresh to the CCNY Computer Science site; those `ProxyPass /` lines are now commented out. The landing-page files are not tracked here. |
+| `/` (everything else) | Static landing page from `/var/www/html`: the animated GLASS Lab title (Lottie) | Since 2026-10-27; see [Landing page](#landing-page). From 2026-10-19 it was an `index.html` with a centered `glasslab_log.gif`. Before that, `/` was reverse-proxied to `http://134.74.126.109/`, which returned a meta-refresh to the CCNY Computer Science site; those `ProxyPass /` lines are now commented out. |
 | `/sstfront/` | 404 | Disabled 2026-10-19 (commented out). It was a proxy to Jupyter at `http://134.74.77.69:9999/sstfront/`, always shadowed by the old root proxy, and would have become publicly reachable once that was removed. Re-enable only deliberately. |
 
 If the root proxy is ever re-enabled, the `ProxyPass /dsei102 !` exclusion
@@ -90,6 +90,66 @@ validation is delegated:
 If the acme-dns registration is lost, register a new one
 (`curl -s -X POST https://auth.acme-dns.io/register` into `acmedns.json`, root
 0600), then point both CNAMEs in Squarespace at the new `fulldomain`.
+
+## Landing Page
+
+`/` on both ports is a static page in `/var/www/html`. Its tracked source is
+[`live-config/gateway/var/www/html/`](../live-config/gateway/var/www/html/):
+
+- `index.html`: full-window dark page that plays the GLASS Lab
+  (Geometry, Learning, And Statistical Science) title animation in a loop,
+  with a Pause/Play button. Visitors whose system asks for reduced motion get
+  a still frame of the finished title instead, and can press Play.
+- `glasslab.json`: the Lottie animation (1920x1080, 30 fps, 12 s loop). Its
+  layers use Lottie expressions, so it needs the full `lottie.min.js` build,
+  not the `_light` one.
+- `lottie.min.js`: lottie-web 5.12.2, vendored so the page does not depend on
+  a CDN being reachable from the lab. Its sha512 matches the cdnjs SRI
+  (`sha512-jEnuDt6jfecCjthQAJ+ed0MTVA++5ZKmlUcmDGBv2vUI/REn6FuIdixLNnQT+vKusE2hhTk2is3cFvv5wA+Sgg==`).
+
+Publish with `scripts/deploy-gateway-landing.sh` from a workstation that can
+`ssh glasslab-gateway`. It writes only those three files, backs up the ones
+it replaces to `/var/backups/glasslab-landing-<stamp>/` on the gateway, and
+does not reload Apache. Other content in `/var/www/html` is not tracked here
+and is left alone: the per-course exam pages (`*F26mt.html` and their
+directories) and the previous `glasslab_log.gif`, which nothing links to any
+more. To roll back, copy the backed-up files into `/var/www/html`.
+
+### Off-campus reachability
+
+Checked 2026-10-27 from internet vantage points (check-host.net nodes in
+Brazil, Israel, Portugal, Singapore, Canada, Spain and Moldova):
+
+- `http://glasslab.org/` (port 80) returns 200 from everywhere tested. The
+  landing page is reachable off campus over plain HTTP.
+- `https://glasslab.org/` (port 443) fails: the TCP connection is reset
+  before TLS completes, as recorded on 2026-10-19. This is the CCNY border,
+  not the gateway (ufw allows 443).
+- SSH (22) is open from the internet.
+
+Most browsers try HTTPS first when a user types `glasslab.org` and fall back
+to `http://` when that fails, so the page normally still loads, marked "Not
+secure". Browsers in HTTPS-only mode, and links written as `https://`, fail
+off campus.
+
+Options for HTTPS off campus, in order of preference:
+
+1. **Ask CCNY IT to allow inbound TCP 443 to `134.74.146.39`** at the border,
+   the same treatment ports 80 and 22 already get. Nothing else changes: the
+   certificate, the vhost and ufw are already in place, and `/dsei102/` and
+   `/exam/` keep their campus-only `Require ip` rules. While they are at it,
+   ask why Let's Encrypt's HTTP-01 validation to port 80 is reset (see
+   above); fixing that is optional since DNS-01 works.
+2. **Another port (e.g. 8443)**: not recommended. It needs the same border
+   exception from IT, and visitors would have to type the port.
+3. **Host the landing page elsewhere** (for example GitHub Pages on
+   `www.glasslab.org`, leaving the apex A record, SSH and the campus-only
+   routes on the gateway): needs only a DNS change in Squarespace. Use this
+   if IT declines.
+4. **A tunnel (e.g. Cloudflare Tunnel)**: not recommended. It needs the zone
+   moved to Cloudflare, a proxied apex no longer carries SSH, and tunnelled
+   requests arrive from loopback, which the `/dsei102/` rule allows, so the
+   campus-only routes would have to be reworked first.
 
 ## Exam JupyterHub (`/exam/`)
 

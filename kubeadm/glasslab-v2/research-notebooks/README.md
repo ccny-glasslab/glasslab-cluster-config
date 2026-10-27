@@ -17,6 +17,9 @@ researcher's VS Code
   -> notebook pod (glasslab-notebooks namespace, RTX A4000)
 ```
 
+`shradhagodse` can also connect directly from her lab-network computer
+(`192.168.1.157`) to `http://192.168.1.11:30888`, without the tunnel.
+
 ## Current Notebooks
 
 | Owner | Purpose | Node / GPU | NodePort | Home volume |
@@ -30,16 +33,20 @@ researcher's VS Code
 - `20-storage-<owner>.yaml`: static NFS PV and PVC for the owner's home
 - `30-secret.example.yaml`: documentation-only schema for the login token
 - `40-deployment-<owner>.yaml`: the Jupyter Deployment and its NodePort Service
-- `60-network-policy.yaml`: default-deny, plus ingress from the gateway and
-  the node, and DNS plus internet HTTPS egress
+- `60-network-policy.yaml`: default-deny, plus ingress from the gateway, the
+  node, and allowlisted researcher lab computers, and DNS plus internet HTTPS
+  egress
 
 ## What A Notebook Can And Cannot Do
 
 - It runs as UID 1000 with no Linux capabilities, no privilege escalation, and
   no Kubernetes ServiceAccount token.
-- It accepts connections on 8888 only from the gateway (`192.168.1.4`) and
-  from node02 itself (kubelet probes). Every other lab machine and pod is
-  refused.
+- It accepts connections on 8888 only from the gateway (`192.168.1.4`),
+  from node02 itself (kubelet probes), and from `shradhagodse`'s lab computer
+  (`192.168.1.157`). Every other lab machine and pod is refused. That direct
+  path is plain HTTP on the lab LAN, so the token crosses the LAN unencrypted;
+  the tunnel does not have that exposure. `192.168.1.157` has no router
+  reservation yet, so reserve it before relying on the allowlist.
 - It can resolve DNS and open HTTPS (443) connections to the internet: GitHub,
   PyPI, conda, Hugging Face. It cannot reach the lab LAN, the CCNY campus
   range, the pod network, or the service network, so Postgres, MinIO,
@@ -83,19 +90,21 @@ K() { sudo -n env KUBECONFIG=/home/glasslab/.kube/config kubectl "$@"; }
 ```
 
 1. Create the home directory on g-nas, owned by the image's `jovyan:users`
-   (1000:100). The provisioner is inside the `/volume1/backup` export:
+   (1000:100). Use the **`glasslab-jupyter`** export: the older `backup`
+   export carries a Synology ACL that refuses UID 1000 even after
+   `chown 1000:100` + `chmod 700` (verified 2026-10-27).
 
    ```bash
-   sudo mkdir -p /mnt/gnas-backup
-   sudo mount -t nfs -o nfsvers=4.1 192.168.1.207:/volume1/backup /mnt/gnas-backup
-   sudo mkdir -p /mnt/gnas-backup/glasslab-notebooks/shradhagodse
-   sudo chown 1000:100 /mnt/gnas-backup/glasslab-notebooks/shradhagodse
-   sudo chmod 700 /mnt/gnas-backup/glasslab-notebooks/shradhagodse
-   sudo umount /mnt/gnas-backup
+   sudo mkdir -p /mnt/gnas-jupyter
+   sudo mount -t nfs -o nfsvers=4.1 192.168.1.207:/volume1/glasslab-jupyter /mnt/gnas-jupyter
+   sudo mkdir -p /mnt/gnas-jupyter/notebooks/shradhagodse
+   sudo chown 1000:100 /mnt/gnas-jupyter/notebooks/shradhagodse
+   sudo chmod 700 /mnt/gnas-jupyter/notebooks/shradhagodse
+   sudo umount /mnt/gnas-jupyter
    ```
 
-   If `chown` is refused because the export squashes root, set the owner from
-   the Synology DSM instead.
+   `glasslab-jupyter`'s root is plain Unix mode, not a DSM ACL, so UID 1000 can
+   write. Do not edit that share's permissions in DSM (it can restore the ACL).
 
 2. Apply the namespace, storage, and network policy:
 
