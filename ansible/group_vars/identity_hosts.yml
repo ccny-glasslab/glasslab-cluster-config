@@ -95,6 +95,5 @@ glasslab_exo_shared_paths:
 glasslab_kubernetes_admin_kubeconfig: /home/glasslab/.kube/config
 glasslab_kubernetes_observer_namespaces:
   - glasslab-v2
-  - glasslab-agents
 glasslab_kubernetes_client_certificate_seconds: 31536000
 glasslab_kubernetes_client_renew_before_seconds: 2592000
