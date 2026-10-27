@@ -40,3 +40,28 @@ Operational note:
 - the playbook uses `serial: 1` so nodes are updated one at a time
 - it does not reboot hosts automatically
 - if a kernel or core library update sets `/var/run/reboot-required`, schedule a controlled reboot afterward
+
+## Agent tooling and dependency updates
+
+Agent CLIs must not drift behind security fixes.
+
+Lab Macs (`exo_macs`): `ansible/playbooks/maintain-darwin-agent-tools.yml`
+moves OpenCode to the Homebrew formula (removing hand-installed npm-global
+copies), installs the `com.glasslab.agent-tools-upgrade` LaunchDaemon that runs
+`brew upgrade` for the managed formulae daily at 04:30, and asserts the
+security version floors. Add a Mac to `exo_macs` to cover it.
+
+```bash
+scripts/maintain-darwin-agent-tools.sh --check --diff
+scripts/maintain-darwin-agent-tools.sh
+```
+
+Upgrade log: `~<brew owner>/Library/Logs/glasslab-agent-tools-upgrade.log`.
+
+Cluster images: `.github/dependabot.yml` opens update PRs into `testing` for
+the OpenCode lockfile (`services/research-orchestrator/agent-tools/`), service
+Python requirements, digest-pinned base images, and GitHub Actions, with a
+short cooldown against freshly published releases.
+`.github/workflows/dependency-audit.yml` audits the pinned set against
+published advisories daily. Updated images still reach the cluster only through
+the normal promotion to `main` and rollout runbook.
