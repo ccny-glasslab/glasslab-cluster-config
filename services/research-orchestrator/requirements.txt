@@ -1,15 +1,15 @@
-fastapi==0.115.12
+fastapi==0.162.0
 discord.py==2.7.1
 httpx==0.28.1
-pydantic-settings==2.8.1
-PyYAML==6.0.2
-python-multipart==0.0.20
-psycopg[binary]==3.2.9
-uvicorn[standard]==0.34.0
+pydantic-settings==2.16.1
+PyYAML==6.0.3
+python-multipart==0.0.32
+psycopg[binary]==3.3.6
+uvicorn[standard]==0.54.0
 # Import-time dependencies of the dense-retrieval surface (corpus-RAG method
 # advisory). The production image ships them unconditionally, so the unit-test
 # lane that validates the production import surface installs exactly this
 # file. torch/sentence-transformers stay in requirements-dense.txt because
 # they are imported lazily (model weights are a runtime concern).
-numpy==2.2.6
+numpy==2.5.4
 PyMuPDF==1.28.2

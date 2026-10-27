@@ -6,13 +6,13 @@
 #
 # Pins captured from the rag-prototype venv:
 #   /home/gr66ss/.venvs/rag-prototype/bin/pip freeze
-torch==2.13.0+cpu
-sentence-transformers==6.0.0
-transformers==5.15.1
+torch==2.14.1+cpu
+sentence-transformers==6.2.0
+transformers==5.20.2
 PyMuPDF==1.28.2
-psycopg==3.2.9
-psycopg-binary==3.2.9
-numpy==2.0.1
-tokenizers==0.22.2
+psycopg==3.3.6
+psycopg-binary==3.3.6
+numpy==2.5.4
+tokenizers==0.23.3
 safetensors==0.8.0
 huggingface_hub==1.28.0
