@@ -22,6 +22,7 @@ glasslab_identity_users:
       - infrastructure_admin
     authorized_keys:
       - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMnJx725BnCLWPiaHr1S1xpTCgjb30uVKRUVDSA3k6YX gr66ss-glasslab
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPEoJqi9YEfIF/DG7YIIKGazr2SBAAORdNP7n0x7hDcQ gr66ss-glasslab replacement 2026-08-22
 
   - username: denic
     display_name: Denise Cakoni
@@ -54,6 +55,7 @@ glasslab_identity_users:
       - kubernetes_observer
     authorized_keys:
       - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBDiZFcFbKimUVq5WOjd13e4ElYUsBSvVSbg7tVwA0gp tristanc@glasslab
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGW8PIu9QL9NzE+WVHGS4z6tfZJ1pwYrAGa0GobGafLY tristanchong.3255@gmail.com
 
   - username: shradhagodse
     display_name: Shradha Godse
@@ -93,6 +95,5 @@ glasslab_exo_shared_paths:
 glasslab_kubernetes_admin_kubeconfig: /home/glasslab/.kube/config
 glasslab_kubernetes_observer_namespaces:
   - glasslab-v2
-  - glasslab-agents
 glasslab_kubernetes_client_certificate_seconds: 31536000
 glasslab_kubernetes_client_renew_before_seconds: 2592000
