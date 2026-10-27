@@ -6,6 +6,7 @@
 #
 # Pins captured from the rag-prototype venv:
 #   /home/gr66ss/.venvs/rag-prototype/bin/pip freeze
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.13.0+cpu
 sentence-transformers==6.0.0
 transformers==5.15.1

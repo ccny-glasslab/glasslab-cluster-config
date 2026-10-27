@@ -84,7 +84,11 @@ jobs:
             else
               status=1
               cat audit.txt
-              echo "::warning title=pip-audit::${req} has known advisories; see the run summary"
+              if grep -q "known vulnerabilit" audit.txt; then
+                echo "::warning title=pip-audit::${req} has known advisories; see the run summary"
+              else
+                echo "::warning title=pip-audit::${req} could not be audited; see the job log"
+              fi
               {
                 echo "#### ${req}"
                 echo '```'

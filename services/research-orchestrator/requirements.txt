@@ -1,9 +1,9 @@
-fastapi==0.115.12
+fastapi==0.162.0
 discord.py==2.7.1
 httpx==0.28.1
 pydantic-settings==2.8.1
 PyYAML==6.0.2
-python-multipart==0.0.20
+python-multipart==0.0.32
 psycopg[binary]==3.2.9
 uvicorn[standard]==0.34.0
 # Import-time dependencies of the dense-retrieval surface (corpus-RAG method
