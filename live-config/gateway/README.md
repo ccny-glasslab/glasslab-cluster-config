@@ -16,6 +16,10 @@ Tracked files:
   script copies every `*.conf` it finds in `/etc/apache2/glasslab/`.
 - `etc/letsencrypt/acme-dns-auth.py` — certbot's DNS-01 auth hook (root,
   0700 on the gateway).
+- `var/www/html/` — the landing page (`index.html`, `glasslab.json`,
+  vendored `lottie.min.js`), published with
+  `scripts/deploy-gateway-landing.sh`. Other files in the live web root are
+  not tracked. See [docs/gateway-web.md](../../docs/gateway-web.md#landing-page).
 - `etc/letsencrypt/renewal/glasslab.org.conf` — certbot's renewal settings for
   the `glasslab.org` certificate. It is written by certbot and kept for
   reference; the restore script does not push it.

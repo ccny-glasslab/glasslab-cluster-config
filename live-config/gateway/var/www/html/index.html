@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GLASS Lab</title>
+<meta name="description" content="GLASS Lab: Geometry, Learning, And Statistical Science Lab.">
+<style>
+  html, body { margin: 0; height: 100%; background: #060a14; color: #8aa0c8; font: 14px ui-monospace, Menlo, monospace; }
+  #wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 12px; }
+  #anim { width: min(96vw, calc(92vh * 1920 / 1080)); aspect-ratio: 1920 / 1080; }
+  button { background: #14203c; color: #cfe0ff; border: 1px solid #2a3b6e; border-radius: 6px; padding: 6px 14px; font: inherit; cursor: pointer; }
+  noscript p { margin: 0; text-align: center; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="anim" role="img" aria-label="GLASS Lab"></div>
+  <div><button id="pp" type="button" hidden>Pause</button></div>
+  <noscript><p>GLASS Lab</p></noscript>
+</div>
+<!-- lottie-web 5.12.2, vendored from cdnjs (sha512 matches the cdnjs SRI). -->
+<script src="lottie.min.js"></script>
+<script>
+  // Visitors who ask for reduced motion get a still frame with the full title.
+  const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const anim = lottie.loadAnimation({
+    container: document.getElementById('anim'),
+    renderer: 'svg', loop: !still, autoplay: !still, path: 'glasslab.json'
+  });
+  const pp = document.getElementById('pp');
+  if (still) {
+    anim.addEventListener('DOMLoaded', () => anim.goToAndStop(300, true));
+    pp.textContent = 'Play';
+  }
+  pp.hidden = false;
+  pp.onclick = () => {
+    if (anim.isPaused) { anim.play(); pp.textContent = 'Pause'; }
+    else { anim.pause(); pp.textContent = 'Play'; }
+  };
+</script>
+</body>
+</html>
