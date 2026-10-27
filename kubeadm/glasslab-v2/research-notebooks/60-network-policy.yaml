@@ -11,7 +11,7 @@ spec:
     - Ingress
     - Egress
 ---
-# Ingress: the Jupyter port, from two addresses only.
+# Ingress: the Jupyter port, from three addresses only.
 #
 #   * 192.168.1.4/32 is the gateway's lab-network address. Researchers reach
 #     their notebook with an SSH tunnel through the gateway, which then
@@ -20,6 +20,10 @@ spec:
 #   * 192.168.1.11/32 is node02, for the kubelet's httpGet probes, which
 #     originate from the node hosting the pod. If the notebook leaves node02,
 #     update this CIDR or the probes fail.
+#   * 192.168.1.157/32 is shradhagodse's lab-network computer, which connects
+#     to the NodePort directly, without the gateway tunnel. It has no router
+#     reservation yet (docs/router-reservations.md); until it does, another
+#     device can be given this address. The notebook token still applies.
 #
 # Nothing else on the lab network, and no other pod, can connect.
 apiVersion: networking.k8s.io/v1
@@ -39,6 +43,8 @@ spec:
             cidr: 192.168.1.4/32
         - ipBlock:
             cidr: 192.168.1.11/32
+        - ipBlock:
+            cidr: 192.168.1.157/32
       ports:
         - protocol: TCP
           port: 8888
