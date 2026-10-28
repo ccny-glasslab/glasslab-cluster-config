@@ -36,6 +36,10 @@ spec:
     spec:
       enableServiceLinks: false
       serviceAccountName: research-notebook
+      # The lab image is a private GHCR package; copy this secret from
+      # glasslab-v2 (README, Deploy step 3).
+      imagePullSecrets:
+        - name: glasslab-ghcr-pull
       automountServiceAccountToken: false
       runtimeClassName: nvidia
       nodeSelector:
@@ -49,10 +53,13 @@ spec:
           type: RuntimeDefault
       containers:
         - name: jupyter
-          # Official Jupyter Docker Stacks PyTorch build for CUDA 12 (node02
-          # runs driver 580). The image's entrypoint starts the server; only
-          # the server options are overridden here.
-          image: quay.io/jupyter/pytorch-notebook:cuda12-2026-09-29@sha256:66870cbf4387a3bc605e022f0698f74f79ab6cd585bcc62ec866728ef6b66c7a
+          # The lab notebook image (services/research-notebook): the Docker
+          # Stacks PyTorch CUDA 12 build (node02 runs driver 580) plus browser
+          # VS Code, TensorBoard, and the GPU dashboard. Pinned to the digest
+          # the Publish Research Notebook Image run reported. The image's
+          # entrypoint starts the server; only the server options are
+          # overridden here.
+          image: ghcr.io/ccny-glasslab/glasslab-research-notebook:05ee7bd77bab630601eb5f18307afff569866991@sha256:30b6be73d78e8e7dbe611463c6f07ada4efd42782682ed213ed116ef11b4932b
           imagePullPolicy: IfNotPresent
           args:
             - start-notebook.py
