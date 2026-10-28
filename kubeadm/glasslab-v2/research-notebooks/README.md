@@ -24,7 +24,7 @@ researcher's VS Code
 
 | Owner | Purpose | Node / GPU | NodePort | Home volume |
 | --- | --- | --- | --- | --- |
-| `shradhagodse` | FreightTG thesis (`ccny-glasslab/freighttg`) | `node02` RTX A4000 | 30888 | g-nas `/volume1/backup/glasslab-notebooks/shradhagodse`, 200Gi |
+| `shradhagodse` | FreightTG thesis (`ccny-glasslab/freighttg`) | `node02` RTX A4000 | 30888 | g-nas `/volume1/glasslab-jupyter/notebooks/shradhagodse`, 200Gi |
 
 ## Files
 
@@ -55,6 +55,39 @@ researcher's VS Code
   their home volume. The lab issues no GitHub token.
 - Its priority is 0, lower than both Glasslab priority classes, so reviewed
   research workloads can preempt it.
+
+## Browser Tools
+
+Notebooks run the lab's own image, `ghcr.io/ccny-glasslab/glasslab-research-notebook`,
+built from [`services/research-notebook/Dockerfile`](../../../services/research-notebook/Dockerfile)
+on top of the pinned Docker Stacks PyTorch CUDA 12 image. It adds:
+
+| Tool | Where | Package |
+| --- | --- | --- |
+| VS Code in the browser | `/vscode/` | code-server 4.140.0 via `jupyter-vscode-proxy` |
+| TensorBoard (logs in `~/logs`) | `/tensorboard/` | `tensorboard`, `jupyter-tensorboard-proxy` |
+| GPU dashboard | JupyterLab **GPU Dashboards** sidebar | `jupyterlab-nvdashboard` |
+| CPU and memory meter | JupyterLab status bar | `jupyter-resource-usage` |
+| Git panel | JupyterLab left sidebar | `jupyterlab-git` (from the base image) |
+
+All of it is behind Jupyter's token login; no port or Service changes.
+code-server runs with its own auth turned off, on a mode-0600 Unix socket that
+only the `/vscode/` proxy reaches, and keeps its settings and extensions under
+`~/.local/share/code-server` in the home volume. The code-server tarball is
+checked against a pinned sha256, and the Python packages are installed against
+the base image's own versions as constraints, so the build never upgrades
+JupyterLab, Jupyter Server, or PyTorch. The build fails if any extension does
+not load.
+
+Merging a Dockerfile change to `main` runs **Publish Research Notebook Image**,
+which pushes `glasslab-research-notebook:<full-commit-sha>` and prints its
+digest in the run summary. Pin that `<sha>@<digest>` in
+`40-deployment-<owner>.yaml` in a follow-up change, then apply it. The package
+is private, so the namespace needs its own copy of the `glasslab-ghcr-pull`
+secret (Deploy step 3).
+
+RStudio is not included: it needs R and the root-installed `rstudio-server`
+package, a larger addition to this image.
 
 ## Prerequisites
 
@@ -123,9 +156,19 @@ K() { sudo -n env KUBECONFIG=/home/glasslab/.kube/config kubectl "$@"; }
      --from-literal=JUPYTER_TOKEN="$(openssl rand -hex 32)"
    ```
 
+   Copy the GHCR pull secret from `glasslab-v2`, since the notebook image is a
+   private package. Only the credential is copied, never printed:
+
+   ```bash
+   K -n glasslab-v2 get secret glasslab-ghcr-pull -o json \
+     | jq '{apiVersion, kind, type, data, metadata: {name: .metadata.name, namespace: "glasslab-notebooks"}}' \
+     | K apply -f -
+   ```
+
 4. Apply the notebook and wait for it:
 
    ```bash
+   K apply -f 35-configmap-tools.yaml
    K apply -f 40-deployment-shradhagodse.yaml
    K -n glasslab-notebooks rollout status deploy/notebook-shradhagodse --timeout=15m
    K -n glasslab-notebooks exec deploy/notebook-shradhagodse -- \
