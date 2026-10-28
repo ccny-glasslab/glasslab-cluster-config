@@ -102,6 +102,10 @@ installed on your computer:
   `http://localhost:8888/vscode/` through the tunnel. Your settings and
   extensions are kept in your home folder. Open the `~/freighttg` folder to
   work on the project; its terminal runs on the lab machine, with the GPU.
+- **RStudio:** `.../rstudio/`, running R 4.5 on the lab machine with your
+  home folder as its working directory. Install R packages from the RStudio
+  console with `install.packages()`; they go to your home folder and are kept.
+  JupyterLab also has an **R 4.5** notebook kernel.
 - **TensorBoard:** `.../tensorboard/`. It shows the runs under `~/logs`, so
   point your `SummaryWriter` (or `tensorboard` callback) at `~/logs/<run name>`.
 - **GPU dashboard:** in JupyterLab, the **GPU Dashboards** button in the left

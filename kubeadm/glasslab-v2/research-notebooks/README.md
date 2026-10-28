@@ -66,18 +66,23 @@ on top of the pinned Docker Stacks PyTorch CUDA 12 image. It adds:
 | --- | --- | --- |
 | VS Code in the browser | `/vscode/` | code-server 4.140.0 via `jupyter-vscode-proxy` |
 | TensorBoard (logs in `~/logs`) | `/tensorboard/` | `tensorboard`, `jupyter-tensorboard-proxy` |
+| RStudio | `/rstudio/` | RStudio Server 2026.10.0 via `jupyter-rsession-proxy` |
+| R kernel ("R 4.5") | JupyterLab launcher | R 4.5.3 and IRkernel in the separate conda env `/opt/conda/envs/r` |
 | GPU dashboard | JupyterLab **GPU Dashboards** sidebar | `jupyterlab-nvdashboard` |
 | CPU and memory meter | JupyterLab status bar | `jupyter-resource-usage` |
 | Git panel | JupyterLab left sidebar | `jupyterlab-git` (from the base image) |
 
 All of it is behind Jupyter's token login; no port or Service changes.
-code-server runs with its own auth turned off, on a mode-0600 Unix socket that
-only the `/vscode/` proxy reaches, and keeps its settings and extensions under
-`~/.local/share/code-server` in the home volume. The code-server tarball is
-checked against a pinned sha256, and the Python packages are installed against
-the base image's own versions as constraints, so the build never upgrades
-JupyterLab, Jupyter Server, or PyTorch. The build fails if any extension does
-not load.
+code-server and RStudio run with their own auth turned off, each on a Unix
+socket that only its Jupyter proxy path reaches, and start only when someone
+opens them. code-server keeps its settings and extensions under
+`~/.local/share/code-server`; RStudio keeps its state under
+`~/.local/share/rstudio`, both in the home volume. The code-server tarball and
+the RStudio Server `.deb` are checked against pinned sha256s. Python packages
+are installed against the base image's own versions as constraints, and R lives
+in its own conda environment, so the build never moves JupyterLab, Jupyter
+Server, or PyTorch; the last build step fails if any base Python package
+changed, or if any extension or the R kernel does not load.
 
 Merging a Dockerfile change to `main` runs **Publish Research Notebook Image**,
 which pushes `glasslab-research-notebook:<full-commit-sha>` and prints its
@@ -85,9 +90,6 @@ digest in the run summary. Pin that `<sha>@<digest>` in
 `40-deployment-<owner>.yaml` in a follow-up change, then apply it. The package
 is private, so the namespace needs its own copy of the `glasslab-ghcr-pull`
 secret (Deploy step 3).
-
-RStudio is not included: it needs R and the root-installed `rstudio-server`
-package, a larger addition to this image.
 
 ## Prerequisites
 
