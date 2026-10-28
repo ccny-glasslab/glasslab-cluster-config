@@ -1,0 +1,70 @@
+name: Publish Research Notebook Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/research-notebook/**"
+      - ".github/workflows/research-notebook-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: research-notebook-image
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      # The CUDA PyTorch base image is several gigabytes compressed, more than
+      # the hosted runner's free disk leaves room for once it is unpacked and
+      # exported. Remove preinstalled toolchains this build never uses.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # No GitHub Actions layer cache: the base layers alone exceed its 10 GB
+      # limit and would evict the control-service caches.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
+        with:
+          context: services/research-notebook
+          file: services/research-notebook/Dockerfile
+          push: true
+          tags: ghcr.io/ccny-glasslab/glasslab-research-notebook:${{ github.sha }}
+          build-args: |
+            GLASSLAB_GIT_SHA=${{ github.sha }}
+            GLASSLAB_BUILD_SOURCE=github:${{ github.run_id }}
+          provenance: mode=max
+
+      - name: Record published image
+        run: |
+          {
+            echo "### Research notebook image"
+            echo
+            echo "- Tag: \`ghcr.io/ccny-glasslab/glasslab-research-notebook:${{ github.sha }}\`"
+            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "- Pin in \`kubeadm/glasslab-v2/research-notebooks/40-deployment-*.yaml\` as \`...:<sha>@<digest>\`."
+          } >> "$GITHUB_STEP_SUMMARY"
