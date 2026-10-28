@@ -55,11 +55,11 @@ spec:
         - name: jupyter
           # The lab notebook image (services/research-notebook): the Docker
           # Stacks PyTorch CUDA 12 build (node02 runs driver 580) plus browser
-          # VS Code, TensorBoard, and the GPU dashboard. Pinned to the digest
-          # the Publish Research Notebook Image run reported. The image's
-          # entrypoint starts the server; only the server options are
+          # VS Code, TensorBoard, RStudio, and the GPU dashboard. Pinned to the
+          # digest the Publish Research Notebook Image run reported. The
+          # image's entrypoint starts the server; only the server options are
           # overridden here.
-          image: ghcr.io/ccny-glasslab/glasslab-research-notebook:05ee7bd77bab630601eb5f18307afff569866991@sha256:30b6be73d78e8e7dbe611463c6f07ada4efd42782682ed213ed116ef11b4932b
+          image: ghcr.io/ccny-glasslab/glasslab-research-notebook:2d6693b307bbe555f180893c22a3230a32b6d1a0@sha256:70bad3d843bef6d157f0d4baa71c38f82626991f24362d2c60cc54641e6ac47a
           imagePullPolicy: IfNotPresent
           args:
             - start-notebook.py
