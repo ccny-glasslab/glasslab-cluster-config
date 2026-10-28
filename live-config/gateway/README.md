@@ -24,7 +24,14 @@ Tracked files:
   the `glasslab.org` certificate. It is written by certbot and kept for
   reference; the restore script does not push it.
 
-Never tracked: `/etc/letsencrypt/acmedns.json` (acme-dns credentials) and the
+- `usr/local/sbin/glasslab-allow-ssh` and `etc/sudoers.d/91-glasslab-allow-ssh`
+  — the helper that adds an address to sshd's TCP-wrappers allowlist, and its
+  sudoers grant. Installed by hand from this directory; the restore script does
+  not push them. See
+  [docs/gateway-ssh-allowlist.md](../../docs/gateway-ssh-allowlist.md).
+
+Never tracked: `/etc/hosts.allow` (it lists contributors' home addresses),
+`/etc/letsencrypt/acmedns.json` (acme-dns credentials) and the
 certificate and keys under `/etc/letsencrypt/live` and `archive`.
 
 Refresh with `scripts/snapshot-gateway-config.sh` and push back with
