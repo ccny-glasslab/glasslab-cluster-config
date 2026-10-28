@@ -133,6 +133,11 @@ ls -l /etc/ssh/ssh_host_*
 cat /etc/hosts.allow /etc/hosts.deny
 ```
 
+A user refused by the TCP-wrappers allowlist sees `kex_exchange_identification:
+read: Connection reset` before authenticating, and sshd logs `refused connect
+from <address>`. Add the address with `glasslab-allow-ssh`, as described in
+[gateway-ssh-allowlist.md](gateway-ssh-allowlist.md).
+
 What to look for:
 
 - `Missing privilege separation directory: /run/sshd`, or `ls` reports that

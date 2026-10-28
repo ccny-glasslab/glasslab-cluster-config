@@ -1,0 +1,6 @@
+# Lets gr66ss-glasslab add one validated address to the sshd allowlist without
+# a password, through glasslab-allow-ssh only. The helper validates its own
+# arguments. Install with:
+#   sudo install -o root -g root -m 0440 91-glasslab-allow-ssh /etc/sudoers.d/
+# after `sudo visudo -cf 91-glasslab-allow-ssh` passes.
+gr66ss-glasslab ALL=(root) NOPASSWD: /usr/local/sbin/glasslab-allow-ssh

@@ -1,0 +1,104 @@
+#!/bin/bash
+# glasslab-allow-ssh: allow one IPv4 address through the gateway's sshd
+# TCP-wrappers allowlist (/etc/hosts.allow; /etc/hosts.deny is ALL: ALL).
+#
+#   sudo glasslab-allow-ssh <ipv4> <comment>
+#   sudo glasslab-allow-ssh --ssh-command "<ipv4> <comment>"   (forced-command key)
+#
+# It only ever appends two lines, a comment and `sshd: <ipv4>`, after
+# validating both inputs, refusing duplicates, and backing up the file. The
+# comment goes on its own line because hosts_access(5) has no trailing
+# comments: words after the address would be read as more client patterns,
+# and a word such as ALL would allow everyone.
+#
+# Installed on the gateway as /usr/local/sbin/glasslab-allow-ssh (root, 0755).
+# See docs/gateway-ssh-allowlist.md.
+set -euo pipefail
+umask 022
+
+readonly PROG=glasslab-allow-ssh
+HOSTS_ALLOW=/etc/hosts.allow
+LOCK=/run/lock/glasslab-allow-ssh.lock
+SYSLOG=1
+
+usage() {
+  printf 'usage: %s <ipv4> <comment>\n       %s --ssh-command "<ipv4> <comment>"\n' "$PROG" "$PROG" >&2
+  exit 2
+}
+
+die() {
+  printf '%s: %s\n' "$PROG" "$1" >&2
+  exit "${2:-1}"
+}
+
+# Test hook: a non-root caller may point the script at a scratch file.
+if [[ ${1:-} == --hosts-file ]]; then
+  [[ $EUID -ne 0 ]] || die "--hosts-file is only for tests and is refused as root"
+  [[ $# -ge 2 ]] || usage
+  HOSTS_ALLOW="$2"
+  LOCK="$2.lock"
+  SYSLOG=0
+  shift 2
+fi
+
+# Forced-command mode: the whole request arrives as one string, from
+# SSH_ORIGINAL_COMMAND. It is matched in full before it is split, so nothing
+# outside the two allowed fields can get through.
+if [[ ${1:-} == --ssh-command ]]; then
+  [[ $# -eq 2 ]] || usage
+  request="$2"
+  [[ $request =~ ^([0-9.]{7,15})\ ([A-Za-z0-9][A-Za-z0-9\ ._,/()-]{0,79})$ ]] \
+    || die "request must be '<ipv4> <comment>'" 2
+  set -- "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+fi
+
+[[ $# -eq 2 ]] || usage
+ip="$1"
+comment="$2"
+
+octet='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+[[ $ip =~ ^$octet\.$octet\.$octet\.$octet$ ]] \
+  || die "not a plain dotted-quad IPv4 address: $ip" 2
+first="${ip%%.*}"
+if (( first == 0 || first == 127 || first >= 224 )); then
+  die "refusing reserved, loopback, or multicast address: $ip" 2
+fi
+
+[[ $comment =~ ^[A-Za-z0-9][A-Za-z0-9\ ._,/()-]{0,79}$ ]] \
+  || die "comment must be 1-80 characters of letters, digits, space, and . _ , / ( ) -, starting with a letter or digit" 2
+
+[[ -f $HOSTS_ALLOW && ! -L $HOSTS_ALLOW ]] || die "$HOSTS_ALLOW is missing or a symlink"
+
+exec 9>"$LOCK"
+flock -w 10 9 || die "another $PROG is running"
+
+escaped_ip="${ip//./\\.}"
+if grep -Eq "^[[:space:]]*sshd[[:space:]]*:([^#]*[[:space:],])?${escaped_ip}([[:space:],#]|$)" "$HOSTS_ALLOW"; then
+  die "$ip is already allowed for sshd in $HOSTS_ALLOW; nothing changed" 3
+fi
+
+stamp="$(date +%Y%m%dT%H%M%S)"
+today="$(date +%F)"
+backup="$HOSTS_ALLOW.bak-$stamp-$PROG"
+cp -p -- "$HOSTS_ALLOW" "$backup"
+
+tmp="$(mktemp "$HOSTS_ALLOW.tmp.XXXXXX")"
+trap 'rm -f -- "$tmp"' EXIT
+cat -- "$HOSTS_ALLOW" >"$tmp"
+# Never glue the new entry onto an unterminated last line.
+if [[ -s $tmp && $(tail -c 1 -- "$tmp" | od -An -c | tr -d ' ') != '\n' ]]; then
+  printf '\n' >>"$tmp"
+fi
+by="${SUDO_USER:-$(id -un)}"
+printf '# %s, added %s by %s via %s\nsshd: %s\n' "$comment" "$today" "$by" "$PROG" "$ip" >>"$tmp"
+chmod --reference="$HOSTS_ALLOW" -- "$tmp"
+if [[ $EUID -eq 0 ]]; then
+  chown --reference="$HOSTS_ALLOW" -- "$tmp"
+fi
+mv -f -- "$tmp" "$HOSTS_ALLOW"
+trap - EXIT
+
+if (( SYSLOG )); then
+  logger -t "$PROG" -p auth.notice "allowed sshd from $ip ($comment) for $by; backup $backup"
+fi
+printf 'Allowed sshd from %s. Backup: %s\n' "$ip" "$backup"
