@@ -128,6 +128,37 @@ class ResearchNotebookManifestTests(unittest.TestCase):
                 self.assertEqual(service["spec"]["type"], "NodePort")
                 self.assertEqual(service["spec"]["externalTrafficPolicy"], "Local")
 
+    def test_notebooks_run_the_digest_pinned_lab_image(self) -> None:
+        for deployment in by_kind("Deployment"):
+            spec = deployment["spec"]["template"]["spec"]
+            (container,) = spec["containers"]
+            with self.subTest(deployment=deployment["metadata"]["name"]):
+                self.assertRegex(
+                    container["image"],
+                    r"^ghcr\.io/ccny-glasslab/glasslab-research-notebook:[0-9a-f]{40}@sha256:[0-9a-f]{64}$",
+                )
+                self.assertEqual(spec["imagePullSecrets"], [{"name": "glasslab-ghcr-pull"}])
+
+    def test_lab_image_keeps_vscode_behind_the_jupyter_proxy(self) -> None:
+        dockerfile = (REPOSITORY_ROOT / "services" / "research-notebook" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertRegex(dockerfile, r"(?m)^FROM quay\.io/jupyter/pytorch-notebook:\S+@sha256:[0-9a-f]{64}$")
+        self.assertRegex(dockerfile, r"(?m)^ARG CODE_SERVER_SHA256=[0-9a-f]{64}$")
+        self.assertIn("sha256sum --check", dockerfile)
+        # code-server runs with --auth none, so it must listen on a private
+        # socket that only Jupyter's token-checked /vscode/ proxy reaches.
+        self.assertIn("JUPYTER_VSCODE_PROXY_USE_SOCKET=true", dockerfile)
+        self.assertRegex(dockerfile, r"(?m)^USER \$\{NB_UID\}$")
+        self.assertNotRegex(dockerfile.split("USER ${NB_UID}")[-1], r"(?m)^USER ")
+        for deployment in by_kind("Deployment"):
+            (container,) = deployment["spec"]["template"]["spec"]["containers"]
+            with self.subTest(deployment=deployment["metadata"]["name"]):
+                self.assertEqual([port["containerPort"] for port in container["ports"]], [8888])
+        for service in by_kind("Service"):
+            with self.subTest(service=service["metadata"]["name"]):
+                self.assertEqual([port["port"] for port in service["spec"]["ports"]], [8888])
+
     def test_egress_is_dns_and_internet_https_only(self) -> None:
         egress = policy("research-notebook-egress")["spec"]["egress"]
         self.assertEqual(len(egress), 2)
