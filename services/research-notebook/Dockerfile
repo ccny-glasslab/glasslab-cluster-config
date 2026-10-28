@@ -2,8 +2,9 @@
 #
 # The official Jupyter Docker Stacks PyTorch CUDA 12 image, plus browser tools
 # behind Jupyter's token login: VS Code (code-server) at /vscode/, TensorBoard
-# at /tensorboard/, the NVIDIA GPU dashboard, a CPU/memory meter, and the Git
-# panel (which the base image already ships). Everything is pinned.
+# at /tensorboard/, RStudio at /rstudio/ with an R kernel for JupyterLab, the
+# NVIDIA GPU dashboard, a CPU/memory meter, and the Git panel (which the base
+# image already ships). Everything is pinned.
 FROM quay.io/jupyter/pytorch-notebook:cuda12-2026-09-29@sha256:66870cbf4387a3bc605e022f0698f74f79ab6cd585bcc62ec866728ef6b66c7a
 
 ARG GLASSLAB_GIT_SHA=unknown
@@ -14,7 +15,21 @@ ARG GLASSLAB_BUILD_SOURCE=local
 ARG CODE_SERVER_VERSION=4.140.0
 ARG CODE_SERVER_SHA256=864c5d01c808ade57e4d12c708717be7a187219fded60428f263b9e2da9f6b48
 
+# RStudio Server's .deb and the sha256 Posit publishes for it in
+# https://cdn.posit.co/downloads.json, which lists this jammy build for Ubuntu
+# 26.04, the base image's release (also verified against a download).
+ARG RSTUDIO_VERSION=2026.10.0-233
+ARG RSTUDIO_SHA256=54ff3b4187a1f2b82f004b16e54caea3b81e8a397025111323c6a3d5869bf80e
+
+# R lives in its own conda environment so installing it can never move the
+# base environment's Python packages.
+ARG R_ENV=/opt/conda/envs/r
+
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Record the base environment's Python packages; the last build step fails if
+# any of them changed.
+RUN pip list --format=freeze | sort > /tmp/base-python-packages.txt
 
 USER root
 RUN curl -fsSL --retry 3 -o /tmp/code-server.tar.gz \
@@ -27,7 +42,32 @@ RUN curl -fsSL --retry 3 -o /tmp/code-server.tar.gz \
     && HOME=/tmp/code-server-check code-server --version \
     && rm -rf /tmp/code-server-check
 
+# rserver and rsession only; jupyter-rsession-proxy starts them as the
+# notebook user on demand, so no service runs at boot. rserver.conf points
+# rsession at the separate R environment.
+RUN curl -fsSL --retry 3 -o /tmp/rstudio-server.deb \
+        "https://download2.rstudio.org/server/jammy/amd64/rstudio-server-${RSTUDIO_VERSION}-amd64.deb" \
+    && echo "${RSTUDIO_SHA256}  /tmp/rstudio-server.deb" | sha256sum --check - \
+    && apt-get update --yes \
+    && apt-get install --yes --no-install-recommends /tmp/rstudio-server.deb \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/rstudio-server.deb \
+    && printf 'rsession-which-r=%s/bin/R\nrsession-ld-library-path=%s/lib\n' "${R_ENV}" "${R_ENV}" \
+        > /etc/rstudio/rserver.conf \
+    && /usr/lib/rstudio-server/bin/rserver --help > /dev/null
+
 USER ${NB_UID}
+
+RUN mamba create --yes --prefix "${R_ENV}" r-base=4.5.3 r-irkernel=1.3.2 \
+    && mamba clean --all -f -y \
+    && "${R_ENV}/bin/R" --slave -e 'IRkernel::installspec(user = FALSE, sys_prefix = TRUE, displayname = "R 4.5")' \
+    && printf 'R_LIBS_USER=${HOME}/R/library/%%v\n' >> "${R_ENV}/lib/R/etc/Renviron.site" \
+    && printf '%s\n' \
+        '# Install packages into the home volume, not the container layer.' \
+        'local({ lib <- Sys.getenv("R_LIBS_USER"); dir.create(lib, recursive = TRUE, showWarnings = FALSE); .libPaths(c(lib, .libPaths())) })' \
+        >> "${R_ENV}/lib/R/etc/Rprofile.site" \
+    && fix-permissions "${CONDA_DIR}" \
+    && fix-permissions "/home/${NB_USER}"
 
 # Resolve against the image's own package versions as constraints, so these
 # additions never upgrade JupyterLab, Jupyter Server, or PyTorch. The image's
@@ -40,6 +80,7 @@ RUN pip list --format=freeze > /tmp/base-constraints.txt \
         tensorboard==2.21.0 \
         jupyterlab-nvdashboard==0.15.0 \
         jupyter-resource-usage==1.3.0 \
+        jupyter-rsession-proxy==2.5.1 \
     && rm /tmp/base-constraints.txt \
     && fix-permissions "${CONDA_DIR}" \
     && fix-permissions "/home/${NB_USER}"
@@ -54,9 +95,16 @@ RUN jupyter server extension list 2>&1 | tee /tmp/server-extensions.txt \
     && for extension in @jupyterhub/jupyter-server-proxy @jupyterlab/git @jupyter-server/resource-usage jupyterlab-nvdashboard; do \
          grep -q "${extension} .*enabled.*OK" /tmp/lab-extensions.txt || { echo "missing lab extension ${extension}" >&2; exit 1; }; \
        done \
-    && python -c "import jupyter_vscode_proxy, jupyter_tensorboard_proxy" \
+    && python -c "import jupyter_vscode_proxy, jupyter_tensorboard_proxy, jupyter_rsession_proxy" \
     && command -v tensorboard \
-    && rm /tmp/server-extensions.txt /tmp/lab-extensions.txt
+    && jupyter kernelspec list | grep -E '^ +ir +' \
+    && HOME=/tmp/r-check "${R_ENV}/bin/R" --slave -e 'stopifnot(getRversion() == "4.5.3", startsWith(.libPaths()[1], "/tmp/r-check/R/library/4.5"))' \
+    && rm -rf /tmp/r-check \
+    && rm /tmp/server-extensions.txt /tmp/lab-extensions.txt \
+    && pip list --format=freeze | sort > /tmp/final-python-packages.txt \
+    && changed="$(comm -23 /tmp/base-python-packages.txt /tmp/final-python-packages.txt)" \
+    && { [[ -z "${changed}" ]] || { echo "base Python packages changed: ${changed}" >&2; exit 1; }; } \
+    && rm /tmp/base-python-packages.txt /tmp/final-python-packages.txt
 
 # code-server runs with its own auth turned off, so it listens on a mode-0600
 # Unix socket that only Jupyter's token-checked /vscode/ proxy reaches. Its

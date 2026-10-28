@@ -149,6 +149,11 @@ class ResearchNotebookManifestTests(unittest.TestCase):
         # code-server runs with --auth none, so it must listen on a private
         # socket that only Jupyter's token-checked /vscode/ proxy reaches.
         self.assertIn("JUPYTER_VSCODE_PROXY_USE_SOCKET=true", dockerfile)
+        # RStudio also runs with --auth-none; jupyter-rsession-proxy uses a
+        # Unix socket unless JUPYTER_RSESSION_PROXY_USE_SOCKET turns it off.
+        self.assertNotIn("JUPYTER_RSESSION_PROXY_USE_SOCKET", dockerfile)
+        self.assertRegex(dockerfile, r"(?m)^ARG RSTUDIO_SHA256=[0-9a-f]{64}$")
+        self.assertEqual(dockerfile.count("sha256sum --check"), 2)
         self.assertRegex(dockerfile, r"(?m)^USER \$\{NB_UID\}$")
         self.assertNotRegex(dockerfile.split("USER ${NB_UID}")[-1], r"(?m)^USER ")
         for deployment in by_kind("Deployment"):
