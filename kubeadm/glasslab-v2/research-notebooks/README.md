@@ -109,9 +109,10 @@ package, a larger addition to this image.
    If the runner holds the GPU, the notebook stays `Pending` until someone
    decides which workload gets it. Scaling the runner to zero is a separate,
    explicit decision; this directory does not make it.
-3. **The image is pullable on node02.** The pinned
-   `quay.io/jupyter/pytorch-notebook` image is several gigabytes. Pull it
-   ahead of time if node02 cannot reach quay.io at deploy time.
+3. **The image is pullable on node02.** The lab notebook image is a private
+   GHCR package of about 16 GB unpacked, so the namespace needs the
+   `glasslab-ghcr-pull` secret (Deploy step 3), and the first pull on a node
+   takes several minutes.
 
 ## Deploy A Notebook
 

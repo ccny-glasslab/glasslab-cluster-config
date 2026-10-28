@@ -93,6 +93,25 @@ browser. Large files are faster to download directly in the terminal, for
 example from a Google Drive or Dropbox share link, into
 `~/freighttg/data/_external/`. Never commit data to Git.
 
+## Tools In The Browser
+
+After you log in with your token, these open in a browser tab, with no VS Code
+installed on your computer:
+
+- **VS Code:** `http://192.168.1.11:30888/vscode/` from your lab computer, or
+  `http://localhost:8888/vscode/` through the tunnel. Your settings and
+  extensions are kept in your home folder. Open the `~/freighttg` folder to
+  work on the project; its terminal runs on the lab machine, with the GPU.
+- **TensorBoard:** `.../tensorboard/`. It shows the runs under `~/logs`, so
+  point your `SummaryWriter` (or `tensorboard` callback) at `~/logs/<run name>`.
+- **GPU dashboard:** in JupyterLab, the **GPU Dashboards** button in the left
+  sidebar opens live GPU use and memory charts.
+- **CPU and memory:** shown in JupyterLab's bottom status bar.
+- **Git:** the Git panel in JupyterLab's left sidebar commits, pulls, and pushes
+  with the credential you set up above.
+
+If one is missing, ask an administrator.
+
 ## 3. Connect VS Code
 
 1. Open a notebook in VS Code.
