@@ -3,6 +3,6 @@
   "private": true,
   "description": "Pinned agent CLIs baked into the research-orchestrator image. Dependabot keeps this current.",
   "dependencies": {
-    "opencode-ai": "1.19.4"
+    "opencode-ai": "1.19.5"
   }
 }
