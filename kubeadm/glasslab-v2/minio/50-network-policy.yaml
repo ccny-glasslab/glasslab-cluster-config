@@ -23,6 +23,19 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: glasslab-gpu-runner
+        # ROBOJAN Bob (kubeadm/robojan) and its one-shot bucket/user provisioner.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: robojan
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: robojan-bob
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: robojan-bob-provisioner
       ports:
         - protocol: TCP
           port: 9000

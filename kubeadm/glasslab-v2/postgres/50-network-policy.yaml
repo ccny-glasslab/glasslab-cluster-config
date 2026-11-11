@@ -71,6 +71,19 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: corpus-gpu-embed
+        # ROBOJAN Bob (kubeadm/robojan) and its one-shot database provisioner.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: robojan
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: robojan-bob
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: robojan-bob-provisioner
       ports:
         - protocol: TCP
           port: 5432
