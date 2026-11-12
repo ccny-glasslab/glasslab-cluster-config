@@ -4,7 +4,7 @@ metadata:
   name: robojan-bob-provision-minio
   namespace: glasslab-v2
   labels:
-    app.kubernetes.io/name: robojan-bob-provisioner
+    app.kubernetes.io/name: robojan-bob-minio-provisioner
     app.kubernetes.io/component: minio
 spec:
   # One-shot, idempotent IAM convergence, modelled on
@@ -16,7 +16,7 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: robojan-bob-provisioner
+        app.kubernetes.io/name: robojan-bob-minio-provisioner
         app.kubernetes.io/component: minio
     spec:
       restartPolicy: Never

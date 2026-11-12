@@ -23,6 +23,14 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: glasslab-gpu-runner
+        # The workflow-api scoped-user provisioner must reach MinIO to create
+        # and rotate its user; without this peer the one-shot Job cannot run.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: glasslab-v2
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: glasslab-minio-provisioner
         # ROBOJAN Bob (kubeadm/robojan) and its one-shot bucket/user provisioner.
         - namespaceSelector:
             matchLabels:
@@ -35,7 +43,7 @@ spec:
               kubernetes.io/metadata.name: glasslab-v2
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: robojan-bob-provisioner
+              app.kubernetes.io/name: robojan-bob-minio-provisioner
       ports:
         - protocol: TCP
           port: 9000

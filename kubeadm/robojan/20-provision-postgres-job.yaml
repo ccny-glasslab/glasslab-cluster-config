@@ -4,7 +4,7 @@ metadata:
   name: robojan-bob-provision-postgres
   namespace: glasslab-v2
   labels:
-    app.kubernetes.io/name: robojan-bob-provisioner
+    app.kubernetes.io/name: robojan-bob-postgres-provisioner
     app.kubernetes.io/component: postgres
 spec:
   # One-shot, idempotent: creates the robojan_bob role and database if missing
@@ -16,7 +16,7 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: robojan-bob-provisioner
+        app.kubernetes.io/name: robojan-bob-postgres-provisioner
         app.kubernetes.io/component: postgres
     spec:
       restartPolicy: Never

@@ -6,8 +6,10 @@ metadata:
 data:
   # Bob's object-store identity: list, read, and create objects in
   # robojan-originals only. No DeleteObject, so originals cannot be removed or
-  # replaced through Bob's credential (report §8: originals are immutable; Bob
-  # also refuses to overwrite an existing key). Never widen it to "*".
+  # overwritten through Bob's credential (report §8: originals are immutable;
+  # Bob also refuses to overwrite an existing key). AbortMultipartUpload lets Bob
+  # clean up its own incomplete uploads without granting deletion of complete
+  # objects. Never widen it to "*".
   robojan-bob-originals.json: |
     {
       "Version": "2012-10-17",
@@ -19,7 +21,7 @@ data:
         },
         {
           "Effect": "Allow",
-          "Action": ["s3:GetObject", "s3:PutObject"],
+          "Action": ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"],
           "Resource": ["arn:aws:s3:::robojan-originals/*"]
         }
       ]

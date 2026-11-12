@@ -8,8 +8,8 @@ user). It does not touch the research orchestrator or workflow-api.
 
 `scripts/deploy-glasslab-v2.sh` does not apply this directory. Apply it by
 hand from the provisioner, as below. The only shared files it changes are the
-Postgres and MinIO ingress policies, which admit Bob's pods and the one-shot
-provisioner Jobs.
+Postgres and MinIO ingress policies, which admit Bob's pods, the one-shot
+provisioner Jobs, and the existing workflow-api scoped-user provisioner.
 
 ## Layout
 
@@ -18,7 +18,7 @@ provisioner Jobs.
 | `00-namespace.yaml` | — | `robojan`, Pod Security `restricted` |
 | `10-secret.example.yaml` | both | Secret contracts (documentation only) |
 | `20-provision-postgres-job.yaml` | glasslab-v2 | Creates role and database `robojan_bob` |
-| `30-minio-policy.yaml` | glasslab-v2 | Bucket policy: read and create in `robojan-originals`, no delete |
+| `30-minio-policy.yaml` | glasslab-v2 | Bucket policy: read, create, and abort incomplete uploads in `robojan-originals`, no delete |
 | `35-provision-minio-job.yaml` | glasslab-v2 | Creates the versioned bucket and Bob's scoped user |
 | `40-bob-deployment.yaml` | robojan | Bob Deployment and ClusterIP Service on 8080 |
 | `50-network-policy.yaml` | robojan | Bob accepts traffic only from the `robojan` namespace |
@@ -41,11 +41,16 @@ export KUBECONFIG=/home/glasslab/.kube/config
    kubectl apply -f kubeadm/glasslab-v2/minio/50-network-policy.yaml
    ```
 
-2. Create the four Secrets in `10-secret.example.yaml` through the SOPS
-   operator boundary ([Restore Glasslab v2 secrets](../../docs/glasslab-v2/runbooks/restore-v2-secrets.md)).
-   Generate a fresh random database password and MinIO secret key; never
-   paste, echo, or commit them. Copy `glasslab-ghcr-pull` from `glasslab-v2`
-   into `robojan`.
+2. Create the four Secrets described in `10-secret.example.yaml`. Until SOPS
+   enrollment completes, use local non-committed manifests under
+   `kubeadm/glasslab-v2/secrets/` (see
+   [Deploy Glasslab v2](../../docs/glasslab-v2/runbooks/deploy-v2.md) step 3)
+   and add them to the external vault for
+   [restore](../../docs/glasslab-v2/runbooks/restore-v2-secrets.md) once the
+   operator CLI is available. Generate a fresh random database password and
+   MinIO secret key; never paste, echo, or commit them. Create the pull secret
+   in `robojan` with
+   `GHCR_TOKEN="$(gh auth token)" ./scripts/create-ghcr-pull-secret.sh --namespace robojan`.
 
 3. Provision the database and the bucket, and check the logs:
 
@@ -60,7 +65,8 @@ export KUBECONFIG=/home/glasslab/.kube/config
    ```
 
 4. Pin Bob's image to the robojan `main` commit that CI built
-   (`ghcr.io/ccny-glasslab/robojan-bob:<40-hex sha>`), then apply:
+   (`ghcr.io/ccny-glasslab/robojan-bob:<40-hex sha>`) in a committed change,
+   then apply it from the clean canonical checkout:
 
    ```bash
    kubectl apply -f kubeadm/robojan/40-bob-deployment.yaml

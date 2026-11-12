@@ -83,7 +83,7 @@ spec:
               kubernetes.io/metadata.name: glasslab-v2
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: robojan-bob-provisioner
+              app.kubernetes.io/name: robojan-bob-postgres-provisioner
       ports:
         - protocol: TCP
           port: 5432
