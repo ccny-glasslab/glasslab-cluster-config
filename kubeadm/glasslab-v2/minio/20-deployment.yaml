@@ -13,9 +13,13 @@ spec:
       labels:
         app.kubernetes.io/name: glasslab-minio
     spec:
+      imagePullSecrets:
+        - name: glasslab-ghcr-pull
       containers:
         - name: minio
-          image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+          # MinIO's registries reject anonymous pulls; this is the release that
+          # was already running, mirrored into GHCR. See mirror/README.md.
+          image: ghcr.io/ccny-glasslab/minio-mirror@sha256:acc08df7821500b6fae33d8eabe6dd0fbf9927d819ec5069de1d097ba4b643db
           imagePullPolicy: IfNotPresent
           args:
             - server
