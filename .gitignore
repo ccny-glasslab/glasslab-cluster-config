@@ -27,3 +27,4 @@ services/task-fabric/*.egg-info/
 .glasslab-secrets.env
 glasslab-secrets/
 *.sops.yaml
+!/.sops.yaml
