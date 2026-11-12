@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: robojan-bob
+  namespace: robojan
+  labels:
+    app.kubernetes.io/name: robojan-bob
+    app.kubernetes.io/part-of: robojan
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: robojan-bob
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: robojan-bob
+        app.kubernetes.io/part-of: robojan
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: node05
+      # Bob never calls the Kubernetes API.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: glasslab-ghcr-pull
+      containers:
+        - name: bob
+          # Built by ccny-glasslab/robojan CI on push to main; the tag is that
+          # main commit's full SHA. Bump it in a committed change to upgrade.
+          image: ghcr.io/ccny-glasslab/robojan-bob:563844424950422af0baa944e6a07bf26cb2941a
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: BOB_STORE
+              value: s3
+            - name: BOB_S3_ENDPOINT
+              value: glasslab-minio.glasslab-v2.svc.cluster.local:9000
+            - name: BOB_S3_BUCKET
+              value: robojan-originals
+            - name: BOB_S3_SECURE
+              value: "false"
+            - name: BOB_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: robojan-bob
+                  key: BOB_DATABASE_URL
+            - name: BOB_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: robojan-bob
+                  key: BOB_S3_ACCESS_KEY
+            - name: BOB_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: robojan-bob
+                  key: BOB_S3_SECRET_KEY
+            - name: BOB_API_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: robojan-bob
+                  key: BOB_API_TOKENS
+          ports:
+            - containerPort: 8080
+              name: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # Multipart uploads spool here before Bob hashes and stores them.
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: robojan-bob
+  namespace: robojan
+  labels:
+    app.kubernetes.io/name: robojan-bob
+spec:
+  selector:
+    app.kubernetes.io/name: robojan-bob
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

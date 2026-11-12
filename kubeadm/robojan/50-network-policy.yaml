@@ -1,0 +1,21 @@
+# Bob accepts traffic only from pods in the robojan namespace (Roz and Janet
+# at M1). Operators reach it with kubectl port-forward, which NetworkPolicy
+# does not filter. Postgres and MinIO in glasslab-v2 admit Bob through their
+# own ingress policies (glasslab-v2/postgres and glasslab-v2/minio).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: robojan-bob-ingress
+  namespace: robojan
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: robojan-bob
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080

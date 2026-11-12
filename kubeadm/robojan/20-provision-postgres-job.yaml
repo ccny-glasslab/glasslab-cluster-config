@@ -1,0 +1,98 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: robojan-bob-provision-postgres
+  namespace: glasslab-v2
+  labels:
+    app.kubernetes.io/name: robojan-bob-postgres-provisioner
+    app.kubernetes.io/component: postgres
+spec:
+  # One-shot, idempotent: creates the robojan_bob role and database if missing
+  # and sets the role's password from robojan-bob-postgres. Re-run it
+  # (delete + apply) to rotate that password. Bob creates its own schema and
+  # tables on start-up; this Job grants nothing outside the robojan_bob database.
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: robojan-bob-postgres-provisioner
+        app.kubernetes.io/component: postgres
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: psql
+          # Same digest as postgres/30-statefulset.yaml, used only for psql.
+          image: pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          # Admin credentials arrive as PG* environment values and Bob's
+          # password is read with \getenv, so no password appears in argv.
+          args:
+            - |
+              set -eu
+              attempt=0
+              until pg_isready -q; do
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 60 ]; then
+                  echo "Postgres did not become ready within the timeout" >&2
+                  exit 1
+                fi
+                sleep 5
+              done
+              psql -v ON_ERROR_STOP=1 <<'SQL'
+              \getenv bob_password BOB_DB_PASSWORD
+              SELECT 'CREATE ROLE robojan_bob LOGIN'
+                WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'robojan_bob') \gexec
+              ALTER ROLE robojan_bob WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'bob_password';
+              SELECT 'CREATE DATABASE robojan_bob OWNER robojan_bob ENCODING ''UTF8'' TEMPLATE template0'
+                WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'robojan_bob') \gexec
+              REVOKE ALL ON DATABASE robojan_bob FROM PUBLIC;
+              GRANT CONNECT, CREATE, TEMPORARY ON DATABASE robojan_bob TO robojan_bob;
+              SQL
+              echo "provisioned role and database robojan_bob"
+          env:
+            - name: HOME
+              value: /tmp
+            - name: PGHOST
+              value: glasslab-postgres.glasslab-v2.svc.cluster.local
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-v2-postgres
+                  key: POSTGRES_DB
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-v2-postgres
+                  key: POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: glasslab-v2-postgres
+                  key: POSTGRES_PASSWORD
+            - name: BOB_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: robojan-bob-postgres
+                  key: BOB_DB_PASSWORD
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
