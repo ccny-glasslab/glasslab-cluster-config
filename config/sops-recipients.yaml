@@ -1,0 +1,14 @@
+version: 1
+operators:
+  - username: gr66ss-glasslab
+    fingerprint: "C05392E771EE2B4FE3D6E2051D946C08FB7D2E9E"
+    state: active
+  - username: denic
+    fingerprint: null
+    state: pending
+  - username: tristanc
+    fingerprint: null
+    state: pending
+recovery:
+  fingerprint: "A511E1953BE465664E5735941FB6D086201A0A82"
+  storage: offline
