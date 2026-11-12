@@ -55,6 +55,13 @@ def inventory_path(vault: Path) -> Path:
     return vault / "inventory.yaml"
 
 
+def sops_config_args() -> list[str]:
+    policy = policy_path()
+    if not policy.is_file():
+        raise SecretError(f"SOPS policy is missing: {policy}")
+    return ["--config", str(policy)]
+
+
 def require_no_xtrace() -> None:
     if "xtrace" in os.environ.get("SHELLOPTS", "").split(":"):
         raise SecretError("shell tracing is enabled (set +x before running)")
@@ -221,7 +228,7 @@ def command_list(args: argparse.Namespace) -> int:
 def command_edit(args: argparse.Namespace) -> int:
     record, path = resolve_secret(args.name)
     print(f"editing {record.name} ({record.target}) in sops", file=sys.stderr)
-    return subprocess.call(["sops", "edit", str(path)], shell=False)
+    return subprocess.call(["sops", "edit", str(path), *sops_config_args()], shell=False)
 
 
 def command_create(args: argparse.Namespace) -> int:
@@ -237,7 +244,7 @@ def command_create(args: argparse.Namespace) -> int:
     os.chmod(path.parent, 0o700)
     encrypted = subprocess.run(
         ["sops", "--encrypt", "--input-type", "yaml", "--output-type", "yaml",
-         "--filename-override", str(path)],
+         "--filename-override", str(path), *sops_config_args()],
         input=plaintext, capture_output=True, check=False,
     )
     if encrypted.returncode != 0:
@@ -297,7 +304,8 @@ def command_updatekeys(args: argparse.Namespace) -> int:
     changed = 0
     for record in load_inventory(inventory_path(vault_dir())):
         _, path = resolve_secret(record.name)
-        result = subprocess.run(["sops", "updatekeys", "--yes", str(path)], capture_output=True, text=True, check=False)
+        result = subprocess.run(["sops", "updatekeys", "--yes", str(path), *sops_config_args()],
+                                capture_output=True, text=True, check=False)
         if result.returncode != 0:
             raise SecretError(f"sops updatekeys failed for {record.name}: {result.stderr.strip()[:300]}")
         changed += 1

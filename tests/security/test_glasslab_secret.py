@@ -162,10 +162,12 @@ class ToolTests(unittest.TestCase):
         self.bin = self.base / "bin"
         self.bin.mkdir()
         self.recorded_argv = self.base / "argv.txt"
+        self.sops_argv = self.base / "sops-argv.txt"
         self.recorded_stdin = self.base / "stdin.txt"
         self.secret_doc = self.base / "document.yaml"
         self.secret_doc.write_text(SECRET_DOCUMENT, encoding="utf-8")
-        write_tool(self.bin, "sops", '''case "${1:-}" in
+        write_tool(self.bin, "sops", '''printf "%s\\n" "$*" >> "$FAKE_SOPS_ARGV"
+case "${1:-}" in
   --version) echo "sops 3.13.3 (latest)";;
   --decrypt) cat "$FAKE_SECRET_DOC";;
   --encrypt) printf 'apiVersion: v1\\nkind: Secret\\ndata:\\n  TOKEN: ENC[AES256_GCM,data:abc]\\n';;
@@ -183,6 +185,7 @@ esac
             "FAKE_SECRET_DOC": str(self.secret_doc),
             "FAKE_KUBECTL_ARGV": str(self.recorded_argv),
             "FAKE_KUBECTL_STDIN": str(self.recorded_stdin),
+            "FAKE_SOPS_ARGV": str(self.sops_argv),
             "XDG_RUNTIME_DIR": str(self.base),
         }
 
@@ -252,6 +255,25 @@ esac
         self.assertIn("ENC[", written)
         self.assertNotIn("super-secret-value", written)
         self.assertEqual(stat.S_IMODE(self.fixture.document.stat().st_mode), 0o600)
+
+    def test_create_passes_the_repository_policy_to_sops(self):
+        plaintext = self.base / "plain.yaml"
+        plaintext.write_text(SECRET_DOCUMENT, encoding="utf-8")
+        code, _, errors = self.run_cli(["create", "workflow-api", "--from", str(plaintext), "--force"])
+        self.assertEqual(code, 0, errors)
+        recorded = self.sops_argv.read_text(encoding="utf-8")
+        self.assertIn("--config", recorded)
+        self.assertIn(str(self.policy), recorded)
+
+    def test_create_requires_a_policy(self):
+        plaintext = self.base / "plain.yaml"
+        plaintext.write_text(SECRET_DOCUMENT, encoding="utf-8")
+        self.policy.unlink()
+        before = self.fixture.document.read_text(encoding="utf-8")
+        code, _, errors = self.run_cli(["create", "workflow-api", "--from", str(plaintext), "--force"])
+        self.assertEqual(code, 2)
+        self.assertIn("policy is missing", errors)
+        self.assertEqual(self.fixture.document.read_text(encoding="utf-8"), before)
 
     def test_create_refuses_unencrypted_output(self):
         plaintext = self.base / "plain.yaml"
