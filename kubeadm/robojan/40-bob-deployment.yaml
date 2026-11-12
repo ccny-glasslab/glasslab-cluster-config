@@ -31,7 +31,7 @@ spec:
         - name: bob
           # Built by ccny-glasslab/robojan CI on push to main; the tag is that
           # main commit's full SHA. Bump it in a committed change to upgrade.
-          image: ghcr.io/ccny-glasslab/robojan-bob:563844424950422af0baa944e6a07bf26cb2941a
+          image: ghcr.io/ccny-glasslab/robojan-bob:4061dc923c13ed5337985a4af99af9ee1cc9ecbd
           imagePullPolicy: IfNotPresent
           env:
             - name: BOB_STORE
@@ -42,6 +42,12 @@ spec:
               value: robojan-originals
             - name: BOB_S3_SECURE
               value: "false"
+            - name: BOB_EMBEDDINGS_URL
+              value: http://192.168.1.17:11434/v1
+            - name: BOB_EMBEDDINGS_MODEL
+              value: qwen3-embedding:8b
+            - name: BOB_EMBEDDINGS_DIMENSIONS
+              value: "4096"
             - name: BOB_DATABASE_URL
               valueFrom:
                 secretKeyRef:

@@ -53,6 +53,10 @@ spec:
                 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'robojan_bob') \gexec
               REVOKE ALL ON DATABASE robojan_bob FROM PUBLIC;
               GRANT CONNECT, CREATE, TEMPORARY ON DATABASE robojan_bob TO robojan_bob;
+              -- Bob's vector index needs pgvector. Extensions require the
+              -- database owner, so create it here rather than in Bob's role.
+              \connect robojan_bob
+              CREATE EXTENSION IF NOT EXISTS vector;
               SQL
               echo "provisioned role and database robojan_bob"
           env:
