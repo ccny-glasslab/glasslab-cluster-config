@@ -174,7 +174,7 @@ OVERRIDES: dict[str, Override] = dict(
                 expected='hybrid',
             ),
         ),
-        # --- live split-model routing (code default None) ---
+        # --- rollback MLX routes, read only when provider_id=exo ---
         _live_route(_P + 'AGENT_MODEL_NAME', 'deepseek-v4.1-flash'),
         _live_route(
             _P + 'AGENT_MODEL_PROVIDER_ID', 'opencode-go'

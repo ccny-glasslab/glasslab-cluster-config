@@ -8,7 +8,8 @@
 #   * DNS from kube-system (CoreDNS) — required for every cluster name;
 #   * the in-namespace data services the orchestrator talks to (Postgres,
 #     MinIO, NATS, rabbitmq) and workflow-api on 8080;
-#   * the local exo model endpoints (.17/.18) on 52417;
+#   * the local exo model endpoints (.17/.18) on 52417, rollback only (the
+#     MLX servers are stopped);
 #   * TCP 443 — the documented residual for the approved-repo init clone,
 #     HuggingFace model/embedding downloads, and any hosted model provider.
 #

@@ -27,30 +27,40 @@ Three distinct layers of truth, in decreasing authority:
   (`GLASSLAB_ORCHESTRATOR_STORE_BACKEND=postgres`). SQLite remains the local,
   test, and import-migration backend.
 
-## Model Serving (exo retired — verified 2026-09-09)
+## Model Serving (exo stopped — verified 2026-11-12)
 
-The exo cluster is retired. Each Mac runs one full model locally, behind a
-serializing guard. **Both servers are launchd-managed** (`KeepAlive`) via
-`scripts/model-serve/install-model-serve.sh` (applied on `.18`; `.17`
-migration deferred until the active rehearsal pauses).
+The exo/mlx model servers are **stopped on both Macs**. They were started by
+hand (not launchd) and were killed with `sudo kill` on 2026-11-12 after
+`netstat` showed no established connections to 52416/52417. `launchctl list`
+on either host shows only `com.glasslab.ollama`; the `model_guard.py` proxy is
+not running.
 
-| Host | Model | mlx port | guard port | cache |
-|---|---|---|---|---|
-| `192.168.1.17` | `mlx-community/Qwen3-Coder-Next-4bit` | 52416 | 52417 | `--prompt-cache-size 8` |
-| `192.168.1.18` | `mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit` | 52416 | 52417 | `--prompt-cache-size 8` |
+The active agent provider is **hosted OpenCode Go** (`deepseek-v4.1-flash`),
+not exo. The MLX base URLs in
+`kubeadm/glasslab-v2/research-orchestrator/10-configmap.yaml` are kept only for
+a deliberate rollback (`GLASSLAB_ORCHESTRATOR_AGENT_MODEL_PROVIDER_ID=exo`).
+Nothing in the current deployment reads them.
 
-- `model_guard.py` on :52417 is a single-worker serializing proxy
-  (64 MB body cap, 503+retry-5s when busy). The orchestrator and rehearsal
-  harness talk only to the guard.
-- Servers use a durable `HF_HOME=/Users/glasslab/.cache/huggingface` (never
-  the ephemeral `/private/tmp`, which macOS clears); the installer's
-  completeness preflight blocks a missing/partial snapshot. `HF_HUB_OFFLINE=1`
-  is opt-in (`--offline` / `GLASSLAB_MODEL_HF_OFFLINE=1`); the default allows
-  re-downloading the 42 GB weights.
-- **Cold start is slow**: after a reload the first request can take ~2 min
-  (weights page in from SSD); warm requests are ~10s.
-- `.17` (64 GB RAM) is tight: ~48 GB wired to the Coder model, ~13 GB working
-  pool. `.18` is comfortable (~70% free).
+Rollback hardware, if it is ever needed again:
+
+| Host | Model | mlx port | cache |
+|---|---|---|---|
+| `192.168.1.17` | `mlx-community/Qwen3-Coder-Next-4bit` | 52416 | `--prompt-cache-size 8` |
+| `192.168.1.18` | `mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit` | 52416 | `--prompt-cache-size 8` |
+
+The servers were last started with, as the `glasslab` user:
+
+```bash
+/Users/glasslab/exo/.venv/bin/mlx_lm.server \
+  --model /Users/glasslab/.cache/huggingface/hub/models--mlx-community--<model>/snapshots/<sha> \
+  --port 52416 --host 0.0.0.0 --decode-concurrency 1 --prompt-concurrency 1 --prompt-cache-size 8
+```
+
+`scripts/model-serve/install-model-serve.sh` is the launchd installer; it is
+**not** applied on either host today, so a reboot leaves the servers down.
+`.17` is now also running the Ollama embedding service (`qwen3-embedding:8b`)
+for ROBOJAN, which was competing with the 45 GB Coder model for memory; with
+exo stopped the Mac has its full 64 GB for embeddings.
 
 ## Live Infrastructure Facts
 
