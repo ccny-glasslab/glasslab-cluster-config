@@ -11,6 +11,11 @@ spec:
   # glasslab-v2/minio/45-provision-scoped-users-job.yaml. Creates the
   # robojan-originals bucket with versioning, the bucket-scoped policy, and
   # Bob's scoped user. Re-run (delete + apply) to rotate the user's secret.
+  #
+  # Blocked: quay.io/minio/mc no longer serves anonymous pulls and no other
+  # registry publishes the image (#768). Until it is repinned or mirrored, this
+  # Job stays ImagePullBackOff; kubeadm/robojan/README.md documents the
+  # pod-exec provisioning path used for the first rollout.
   backoffLimit: 3
   ttlSecondsAfterFinished: 3600
   template:
