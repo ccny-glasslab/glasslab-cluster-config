@@ -22,11 +22,15 @@ STATES = {"active", "pending"}
 FINGERPRINT = re.compile(r"[0-9A-F]{40}")
 
 
-@unittest.skipUnless(RECIPIENTS.is_file() and POLICY.is_file(), "SOPS enrollment is not committed yet")
+@unittest.skipUnless(RECIPIENTS.is_file(), "SOPS enrollment is not committed yet")
 class SopsPolicyTests(unittest.TestCase):
     def setUp(self):
         self.recipients = yaml.safe_load(RECIPIENTS.read_text(encoding="utf-8"))
         self.policy = yaml.safe_load(POLICY.read_text(encoding="utf-8"))
+
+    def test_policy_file_is_committed(self):
+        self.assertTrue(POLICY.is_file(),
+                        ".sops.yaml is missing: check that the vault ignore rule negates it")
 
     def active_fingerprints(self) -> set[str]:
         return {item["fingerprint"] for item in self.recipients["operators"] if item["state"] == "active"}
