@@ -264,6 +264,9 @@ esac
         recorded = self.sops_argv.read_text(encoding="utf-8")
         self.assertIn("--config", recorded)
         self.assertIn(str(self.policy), recorded)
+        self.assertIn("plaintext.yaml", recorded, "sops needs a real file, not stdin")
+        leftovers = [path for path in self.base.iterdir() if path.name.startswith("glasslab-secret-")]
+        self.assertEqual(leftovers, [])
 
     def test_create_makes_a_document_that_does_not_exist_yet(self):
         plaintext = self.base / "plain.yaml"

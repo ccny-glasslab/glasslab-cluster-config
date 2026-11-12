@@ -137,8 +137,8 @@ def check_mode(path: Path, expected: int, kind: str) -> None:
 
 
 def run(argv: list[str], *, input_bytes: bytes | None = None, check: bool = True,
-        stdout=None) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, input=input_bytes, stdout=stdout, check=check, shell=False)
+        stdout=None, cwd: str | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, input=input_bytes, stdout=stdout, check=check, shell=False, cwd=cwd)
 
 
 def sops_version() -> str:
@@ -159,7 +159,7 @@ def decrypt_to_private_file(source: Path, temp_dir: str) -> Path:
     target = Path(temp_dir) / "secret.yaml"
     descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "wb") as handle:
-        run(["sops", "--decrypt", str(source)], stdout=handle)
+        run(["sops", "--decrypt", str(source)], stdout=handle, cwd=temp_dir)
     os.chmod(target, 0o600)
     return target
 
@@ -234,7 +234,8 @@ def command_list(args: argparse.Namespace) -> int:
 def command_edit(args: argparse.Namespace) -> int:
     record, path = resolve_secret(args.name)
     print(f"editing {record.name} ({record.target}) in sops", file=sys.stderr)
-    return subprocess.call(["sops", "edit", str(path), *sops_config_args()], shell=False)
+    return subprocess.call(["sops", "edit", str(path), *sops_config_args()], shell=False,
+                           cwd=str(path.parent))
 
 
 def command_create(args: argparse.Namespace) -> int:
@@ -248,11 +249,16 @@ def command_create(args: argparse.Namespace) -> int:
     plaintext = source.read_bytes()
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
-    encrypted = subprocess.run(
-        ["sops", "--encrypt", "--input-type", "yaml", "--output-type", "yaml",
-         "--filename-override", str(path), *sops_config_args()],
-        input=plaintext, capture_output=True, check=False,
-    )
+    with private_tempdir() as temp:
+        staged = Path(temp) / "plaintext.yaml"
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(plaintext)
+        encrypted = subprocess.run(
+            ["sops", "--encrypt", "--input-type", "yaml", "--output-type", "yaml",
+             "--filename-override", str(path), *sops_config_args(), str(staged)],
+            capture_output=True, check=False, cwd=temp,
+        )
     if encrypted.returncode != 0:
         raise SecretError(f"sops refused to encrypt {record.name}: {encrypted.stderr.decode(errors='replace')[:300]}")
     if b"ENC[" not in encrypted.stdout:
@@ -311,7 +317,7 @@ def command_updatekeys(args: argparse.Namespace) -> int:
     for record in load_inventory(inventory_path(vault_dir())):
         _, path = resolve_secret(record.name)
         result = subprocess.run(["sops", "updatekeys", "--yes", str(path), *sops_config_args()],
-                                capture_output=True, text=True, check=False)
+                                capture_output=True, text=True, check=False, cwd=str(path.parent))
         if result.returncode != 0:
             raise SecretError(f"sops updatekeys failed for {record.name}: {result.stderr.strip()[:300]}")
         changed += 1
