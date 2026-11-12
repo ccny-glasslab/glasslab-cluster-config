@@ -81,6 +81,19 @@ export KUBECONFIG=/home/glasslab/.kube/config
 
    Bob creates its schema on start-up and refuses a non-UTF8 database.
 
+## Vector search
+
+Bob embeds each passage through the lab's Ollama service on the exo Mac
+`192.168.1.17:11434` (`qwen3-embedding:8b`, 4096 dimensions). It runs as the
+`com.glasslab.ollama` launch daemon and listens on the lab network without
+authentication, like the exo endpoint. `POST /search` takes
+`mode: keyword | vector | hybrid`; keyword is the default, so Bob keeps working
+when the Mac is down.
+
+The Postgres provisioning Job creates the `vector` extension in `robojan_bob`
+and must be re-run before a Bob image that uses it starts. The index has no
+HNSW index because pgvector caps `hnsw` at 2000 dimensions.
+
 ## Using Bob
 
 Bob has no ingress at M1. From a contributor workstation:
