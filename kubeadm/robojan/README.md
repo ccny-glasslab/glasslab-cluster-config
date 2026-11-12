@@ -64,9 +64,9 @@ export KUBECONFIG=/home/glasslab/.kube/config
    kubectl -n glasslab-v2 logs job/robojan-bob-provision-minio
    ```
 
-4. Pin Bob's image to the robojan `main` commit that CI built
-   (`ghcr.io/ccny-glasslab/robojan-bob:<40-hex sha>`) in a committed change,
-   then apply it from the clean canonical checkout:
+4. Bob's image is pinned to a robojan `main` commit that CI built
+   (`ghcr.io/ccny-glasslab/robojan-bob:<40-hex sha>`). To upgrade, bump that
+   tag in a committed change. Apply from the clean canonical checkout:
 
    ```bash
    kubectl apply -f kubeadm/robojan/40-bob-deployment.yaml

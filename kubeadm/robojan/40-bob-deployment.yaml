@@ -29,9 +29,9 @@ spec:
         - name: glasslab-ghcr-pull
       containers:
         - name: bob
-          # Built by ccny-glasslab/robojan CI on push to main. Replace the
-          # pending marker with that commit's full SHA when rolling out.
-          image: ghcr.io/ccny-glasslab/robojan-bob:pending-ci-build
+          # Built by ccny-glasslab/robojan CI on push to main; the tag is that
+          # main commit's full SHA. Bump it in a committed change to upgrade.
+          image: ghcr.io/ccny-glasslab/robojan-bob:563844424950422af0baa944e6a07bf26cb2941a
           imagePullPolicy: IfNotPresent
           env:
             - name: BOB_STORE
