@@ -21,3 +21,9 @@ kubeadm/glasslab-v2/gpu-runner/40-secret.local.yaml
 kubeadm/glasslab-v2/research-notebooks/*.local.yaml
 services/task-fabric/build/
 services/task-fabric/*.egg-info/
+
+# External SOPS vault material must never enter Git.
+.glasslab-secrets
+.glasslab-secrets.env
+glasslab-secrets/
+*.sops.yaml

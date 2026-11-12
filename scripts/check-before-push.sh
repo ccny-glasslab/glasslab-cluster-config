@@ -67,6 +67,8 @@ run_secret_boundary_tests() {
   python3 -m unittest \
     tests.security.test_secret_process_boundaries \
     tests.security.test_secret_backup_restore \
+    tests.security.test_glasslab_secret \
+    tests.security.test_sops_policy \
     tests.security.test_lab_security_agent \
     tests.scripts.test_exo_launchd \
     tests.scripts.test_glasslab_opencode \
