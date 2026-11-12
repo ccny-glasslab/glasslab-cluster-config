@@ -265,6 +265,15 @@ esac
         self.assertIn("--config", recorded)
         self.assertIn(str(self.policy), recorded)
 
+    def test_create_makes_a_document_that_does_not_exist_yet(self):
+        plaintext = self.base / "plain.yaml"
+        plaintext.write_text(SECRET_DOCUMENT, encoding="utf-8")
+        self.fixture.document.unlink()
+        code, _, errors = self.run_cli(["create", "workflow-api", "--from", str(plaintext)])
+        self.assertEqual(code, 0, errors)
+        self.assertTrue(self.fixture.document.is_file())
+        self.assertIn("ENC[", self.fixture.document.read_text(encoding="utf-8"))
+
     def test_create_requires_a_policy(self):
         plaintext = self.base / "plain.yaml"
         plaintext.write_text(SECRET_DOCUMENT, encoding="utf-8")

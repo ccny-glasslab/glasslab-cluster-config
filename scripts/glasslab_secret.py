@@ -111,17 +111,23 @@ def load_inventory(path: Path) -> list[SecretRecord]:
     return records
 
 
-def resolve_secret(name: str, vault: Path | None = None) -> tuple[SecretRecord, Path]:
+def resolve_record(name: str, vault: Path | None = None) -> tuple[SecretRecord, Path]:
+    """Resolve an inventory record and its document path, which may not exist yet."""
     vault = vault or vault_dir()
     for record in load_inventory(inventory_path(vault)):
         if record.name == name:
             path = (vault / record.relative_path).resolve()
             if not path.is_relative_to(vault.resolve()):
                 raise SecretError(f"{name}: relative_path escapes the vault")
-            if not path.is_file():
-                raise SecretError(f"{name}: missing document {record.relative_path}")
             return record, path
     raise SecretError(f"unknown secret {name!r}; see {inventory_path(vault)}")
+
+
+def resolve_secret(name: str, vault: Path | None = None) -> tuple[SecretRecord, Path]:
+    record, path = resolve_record(name, vault)
+    if not path.is_file():
+        raise SecretError(f"{name}: missing document {record.relative_path}")
+    return record, path
 
 
 def check_mode(path: Path, expected: int, kind: str) -> None:
@@ -232,7 +238,7 @@ def command_edit(args: argparse.Namespace) -> int:
 
 
 def command_create(args: argparse.Namespace) -> int:
-    record, path = resolve_secret(args.name)
+    record, path = resolve_record(args.name)
     source = Path(args.source)
     if not source.is_file():
         raise SecretError(f"plaintext manifest not found: {source}")
