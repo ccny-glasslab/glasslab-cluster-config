@@ -22,13 +22,16 @@ spec:
       # The provisioner only talks to MinIO over HTTP; it never calls the
       # Kubernetes API, so it must not carry a ServiceAccount token.
       automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: glasslab-ghcr-pull
       securityContext:
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: mc
-          # minio/mc, digest-pinned (RELEASE.2025-08-13T08-35-41Z).
-          image: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+          # MinIO's registry rejects anonymous pulls; this mirrors the release
+          # that was already in use. See mirror/README.md.
+          image: ghcr.io/ccny-glasslab/minio-mirror@sha256:f95c54518ddcc0f1e01763e3e26add98af501f0faf87e5da6686229569ff6ee9
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-c"]
           # Credentials are exported as MC_HOST_<alias> environment values and

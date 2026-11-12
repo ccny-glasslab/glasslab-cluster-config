@@ -52,28 +52,22 @@ export KUBECONFIG=/home/glasslab/.kube/config
    in `robojan` with
    `GHCR_TOKEN="$(gh auth token)" ./scripts/create-ghcr-pull-secret.sh --namespace robojan`.
 
-3. Provision the database and the bucket.
-
-   The database Job runs normally:
+3. Provision the database and the bucket, and check the logs:
 
    ```bash
    kubectl apply -f kubeadm/robojan/20-provision-postgres-job.yaml
+   kubectl apply -f kubeadm/robojan/30-minio-policy.yaml
+   kubectl apply -f kubeadm/robojan/35-provision-minio-job.yaml
    kubectl -n glasslab-v2 wait --for=condition=complete --timeout=300s \
-     job/robojan-bob-provision-postgres
+     job/robojan-bob-provision-postgres job/robojan-bob-provision-minio
    kubectl -n glasslab-v2 logs job/robojan-bob-provision-postgres
+   kubectl -n glasslab-v2 logs job/robojan-bob-provision-minio
    ```
 
-   **The bucket Job cannot run today (#768).** `quay.io/minio/mc` now rejects
-   anonymous pulls, and the image is not published on Docker Hub, so
-   `35-provision-minio-job.yaml` stays `ImagePullBackOff`. The first rollout
-   on 2026-11-12 provisioned the bucket, versioning, policy, and scoped user
-   through the running `glasslab-minio` pod instead, which carries
-   `/usr/bin/mc` at the same release; the scoped credential was then verified
-   to list and write but not delete. Do the same until a pullable mirror
-   exists: apply `30-minio-policy.yaml`, run the `mc` commands in a shell
-   inside the MinIO pod with the root credentials already in its environment,
-   and read the new user's keys from the `robojan-bob-minio` Secret without
-   putting them in argv. Record the commands you used in the rollout issue.
+   Both Jobs pull from GHCR with `glasslab-ghcr-pull`. MinIO's own registries
+   no longer serve anonymous pulls, so the mc image is the mirrored release
+   described in
+   [the MinIO mirror](../../glasslab-v2/minio/mirror/README.md).
 
 4. Bob's image is pinned to a robojan `main` commit that CI built
    (`ghcr.io/ccny-glasslab/robojan-bob:<40-hex sha>`). To upgrade, bump that
