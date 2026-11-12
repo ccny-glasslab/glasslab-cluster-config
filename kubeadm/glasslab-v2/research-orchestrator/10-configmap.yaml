@@ -107,7 +107,8 @@ data:
   # OpenCode is the selected runtime. All agents run on the hosted OpenCode Go
   # subscription (deepseek-v4.1-flash); auth is linked from the mounted
   # glasslab-opencode-auth secret via OPENCODE_AUTH_JSON_PATH. The local MLX
-  # base URLs below are retained only for the Hermes rollback backend.
+  # base URLs below are retained only for a deliberate `exo` rollback: the MLX
+  # servers are stopped (2026-11-12), and no current path reads these URLs.
   GLASSLAB_ORCHESTRATOR_AGENT_MODEL_PROVIDER_ID: opencode-go
   GLASSLAB_ORCHESTRATOR_OPENCODE_AUTH_JSON_PATH: /etc/opencode-auth/auth.json
   # Shared fallback for any agent without a per-agent override.
