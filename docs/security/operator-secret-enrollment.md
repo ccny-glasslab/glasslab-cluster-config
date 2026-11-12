@@ -43,21 +43,23 @@ characters out loud. Never send the private key, a key export, or a passphrase.
 ## 3. Commit the public policy
 
 The policy owner adds every fingerprint to `config/sops-recipients.yaml` (shape
-in `sops-recipients.example.yaml`) and writes `.sops.yaml`:
+in `sops-recipients.example.yaml`) and writes `.sops.yaml`. An operator who has
+not created a key yet is recorded with `state: pending` and no fingerprint;
+they are not a document recipient until they enroll. The 2026-11-12 enrollment
+has `gr66ss-glasslab` active with the offline recovery key, and `denic` and
+`tristanc` pending:
 
 ```yaml
 creation_rules:
   - path_regex: '.*\.sops\.yaml$'
-    pgp:
-      - <gr66ss-glasslab fingerprint>
-      - <denic fingerprint>
-      - <tristanc fingerprint>
-      - <offline recovery fingerprint>
+    pgp: "<active operator fingerprints>,<offline recovery fingerprint>"
 ```
 
-Open a PR. `tests/security/test_sops_policy.py` enforces three active
-operators, one offline recovery recipient, unique real fingerprints, and a
-rule that matches every vault document.
+Open a PR. `tests/security/test_sops_policy.py` enforces the three named
+operators, at least one active, real and unique fingerprints for active
+operators and recovery, no fingerprint for pending operators, and a rule that
+matches every vault document. When a pending operator enrolls, add their
+fingerprint, flip `state` to `active`, and run `glasslab-secret updatekeys`.
 
 ## 4. Create the vault
 

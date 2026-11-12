@@ -1,8 +1,8 @@
-"""Policy checks that activate when SOPS enrollment is committed.
+"""Policy checks for the committed SOPS enrollment.
 
-Until config/sops-recipients.yaml and .sops.yaml exist these tests skip: the
-repository must not carry illustrative fingerprints, and the tooling fails
-closed without a policy.
+A pending operator has created no key yet and is not a document recipient;
+every active operator and the offline recovery key must be. The tooling fails
+closed without a policy, so these tests activate as soon as it exists.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ RECIPIENTS = REPOSITORY_ROOT / "config" / "sops-recipients.yaml"
 POLICY = REPOSITORY_ROOT / ".sops.yaml"
 GITIGNORE = REPOSITORY_ROOT / ".gitignore"
 OPERATORS = {"gr66ss-glasslab", "denic", "tristanc"}
+STATES = {"active", "pending"}
 FINGERPRINT = re.compile(r"[0-9A-F]{40}")
 
 
@@ -27,14 +28,31 @@ class SopsPolicyTests(unittest.TestCase):
         self.recipients = yaml.safe_load(RECIPIENTS.read_text(encoding="utf-8"))
         self.policy = yaml.safe_load(POLICY.read_text(encoding="utf-8"))
 
-    def test_three_active_operators(self):
+    def active_fingerprints(self) -> set[str]:
+        return {item["fingerprint"] for item in self.recipients["operators"] if item["state"] == "active"}
+
+    def test_the_three_named_operators_are_recorded(self):
         operators = self.recipients["operators"]
         self.assertEqual({item["username"] for item in operators}, OPERATORS)
-        self.assertTrue(all(item["state"] == "active" for item in operators))
+        self.assertTrue({item["state"] for item in operators} <= STATES)
 
-    def test_fingerprints_are_real_and_unique(self):
-        items = list(self.recipients["operators"]) + [self.recipients["recovery"]]
-        fingerprints = [item["fingerprint"] for item in items]
+    def test_at_least_one_operator_is_active(self):
+        self.assertTrue(self.active_fingerprints())
+
+    def test_active_operators_have_real_fingerprints(self):
+        for item in self.recipients["operators"]:
+            if item["state"] != "active":
+                continue
+            self.assertRegex(item["fingerprint"], FINGERPRINT)
+
+    def test_pending_operators_have_no_fingerprint(self):
+        for item in self.recipients["operators"]:
+            if item["state"] == "pending":
+                self.assertIn(item.get("fingerprint"), (None, ""))
+
+    def test_fingerprints_are_unique_and_not_placeholders(self):
+        active = [item["fingerprint"] for item in self.recipients["operators"] if item["state"] == "active"]
+        fingerprints = active + [self.recipients["recovery"]["fingerprint"]]
         for fingerprint in fingerprints:
             self.assertRegex(fingerprint, FINGERPRINT)
         self.assertEqual(len(set(fingerprints)), len(fingerprints))
@@ -43,12 +61,11 @@ class SopsPolicyTests(unittest.TestCase):
     def test_recovery_key_is_offline(self):
         self.assertEqual(self.recipients["recovery"]["storage"], "offline")
 
-    def test_policy_lists_every_recipient_for_vault_documents(self):
+    def test_policy_lists_every_active_recipient(self):
         rules = self.policy["creation_rules"]
         matches = [rule for rule in rules if re.fullmatch(rule["path_regex"], "vault/example.sops.yaml")]
         self.assertEqual(len(matches), 1)
-        expected = {item["fingerprint"] for item in self.recipients["operators"]}
-        expected.add(self.recipients["recovery"]["fingerprint"])
+        expected = self.active_fingerprints() | {self.recipients["recovery"]["fingerprint"]}
         pgp = matches[0]["pgp"]
         listed = set(pgp.split(",")) if isinstance(pgp, str) else set(pgp)
         self.assertEqual({value.strip() for value in listed}, expected)
