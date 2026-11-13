@@ -31,7 +31,7 @@ spec:
         - name: bob
           # Built by ccny-glasslab/robojan CI on push to main; the tag is that
           # main commit's full SHA. Bump it in a committed change to upgrade.
-          image: ghcr.io/ccny-glasslab/robojan-bob:ca3b5a3ebbcceb893b8f0df116437413c0b93776
+          image: ghcr.io/ccny-glasslab/robojan-bob:c89be401ad371c0038fb90e64e767362d6725b6a
           imagePullPolicy: IfNotPresent
           env:
             - name: BOB_STORE
