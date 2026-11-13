@@ -95,12 +95,14 @@ spec:
               mountPath: /tmp
           # 3 GiB: PDF extraction holds the whole file and its text in memory;
           # a 120 MB scanned PDF OOMKilled the 1 GiB limit on 2026-11-12.
+          # Two cores: pypdf over the 90-120 MB scanned PDFs in the first
+          # corpus halved the load time when the limit went from 1 to 2.
           resources:
             requests:
-              cpu: 100m
+              cpu: 250m
               memory: 512Mi
             limits:
-              cpu: "1"
+              cpu: "2"
               memory: 3Gi
           readinessProbe:
             httpGet:
