@@ -94,6 +94,11 @@ The Postgres provisioning Job creates the `vector` extension in `robojan_bob`
 and must be re-run before a Bob image that uses it starts. The index has no
 HNSW index because pgvector caps `hnsw` at 2000 dimensions.
 
+Reranking uses `bge-reranker-v2-m3` (Q8, 568M) through llama.cpp on the same
+Mac at `192.168.1.17:11435` (launch daemon `com.glasslab.rerank`, 811 MB). Bob
+re-sorts the top 50 fused candidates; if the service is down, results keep
+their fused order and the run records a `partial` error.
+
 ## Using Bob
 
 Bob has no ingress at M1. From a contributor workstation:
