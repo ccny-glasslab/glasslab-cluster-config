@@ -31,7 +31,7 @@ spec:
         - name: bob
           # Built by ccny-glasslab/robojan CI on push to main; the tag is that
           # main commit's full SHA. Bump it in a committed change to upgrade.
-          image: ghcr.io/ccny-glasslab/robojan-bob:74e56d85844deca718ac3c6b2ba737ec5cac1a9a
+          image: ghcr.io/ccny-glasslab/robojan-bob:7bd6649259ace682d7024301e3d35cf15a447725
           imagePullPolicy: IfNotPresent
           env:
             - name: BOB_STORE
@@ -48,6 +48,12 @@ spec:
               value: qwen3-embedding:8b
             - name: BOB_EMBEDDINGS_DIMENSIONS
               value: "4096"
+            - name: BOB_RERANK_URL
+              value: http://192.168.1.17:11435
+            - name: BOB_RERANK_MODEL
+              value: bge-reranker-v2-m3
+            - name: BOB_RERANK_CANDIDATES
+              value: "50"
             - name: BOB_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -83,13 +89,15 @@ spec:
             # Multipart uploads spool here before Bob hashes and stores them.
             - name: tmp
               mountPath: /tmp
+          # 3 GiB: PDF extraction holds the whole file and its text in memory;
+          # a 120 MB scanned PDF OOMKilled the 1 GiB limit on 2026-11-12.
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
+              memory: 512Mi
             limits:
               cpu: "1"
-              memory: 1Gi
+              memory: 3Gi
           readinessProbe:
             httpGet:
               path: /healthz
