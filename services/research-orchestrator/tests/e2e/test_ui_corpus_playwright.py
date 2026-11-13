@@ -11,7 +11,8 @@ page proxy (every path) and the #620 viewer proxy, scoped to ``/ui/pdf/``.
 
 Assertions (issues #618/#619/#620):
 
-1. the ask form renders and a POST ``/ui/chat`` turn renders an answer whose
+1. the ask form renders and a POST ``/ui/chat`` turn (the native form submit,
+   which bypasses the #595 streaming script) renders an answer whose
    citation is an inline superscript marker with a CSS-only hover preview
    card (source title, verdict badge, "View source") and no footnote list;
 2. clicking the citation opens the cited-source iframe at the exact
@@ -63,7 +64,7 @@ PLAYWRIGHT_SKIP = pytest.mark.skipif(
 # Importing the fixture registers it in this module's namespace; it lives in a
 # plain module rather than a second conftest.py so its basename cannot shadow
 # the shared tests/conftest.py that the rest of the suite imports.
-from ui_qa import ui_qa  # noqa: F401
+from ui_qa import assert_only_streaming_script, submit_native, ui_qa  # noqa: E402, F401
 
 # Console text that marks a Content-Security-Policy violation in Chromium.
 # Chromium prefixes every blocked-resource report with "Refused to ..."; the
@@ -130,7 +131,13 @@ def test_ui_qa_defaults_are_portable() -> None:
         ('DEFAULT_SCRATCH_ROOT', DEFAULT_SCRATCH_ROOT),
     ):
         resolved = default.resolve()
-        assert '/home/' not in str(resolved), f'{name} is user-specific: {resolved}'
+        # A TMPDIR under a home directory is legitimate (small /tmp
+        # partitions); only a home path the temp dir does not explain is a
+        # hard-coded, user-specific default.
+        if '/home/' not in str(temp_root):
+            assert '/home/' not in str(resolved), (
+                f'{name} is user-specific: {resolved}'
+            )
         assert resolved.is_relative_to(temp_root), (
             f'{name}={resolved} is not under the temp dir {temp_root}'
         )
@@ -185,8 +192,7 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
 
         # --- 2. the posted turn renders the answer and its inline citation --
         question_input.fill(manifest['question'])
-        with page.expect_navigation(wait_until='domcontentloaded'):
-            ask.locator('button[type="submit"]').click()
+        submit_native(page, form)
         turn = page.locator('.chat-turn')
         expect(turn).to_be_visible()
         assert 'c=' in page.url, f'conversation missing from URL: {page.url}'
@@ -200,7 +206,7 @@ def test_ui_corpus_chat_and_pdf_viewer_through_proxy(ui_qa) -> None:
         assert turn.locator('ul.chat-citations').count() == 0, (
             'the end-of-answer footnote list must be gone'
         )
-        assert page.locator('script').count() == 0, 'the page must be script-free'
+        assert_only_streaming_script(page)
         marker = markers.first
         expect(marker.locator('sup')).to_have_text('1')
         card = marker.locator('.cite-card')
