@@ -54,6 +54,10 @@ spec:
               value: bge-reranker-v2-m3
             - name: BOB_RERANK_CANDIDATES
               value: "50"
+            # Exact cosine scan over the vector table; 5 s default timed out
+            # while a corpus load shared the pod's single CPU.
+            - name: BOB_SEARCH_TIMEOUT_MS
+              value: "15000"
             - name: BOB_DATABASE_URL
               valueFrom:
                 secretKeyRef:
