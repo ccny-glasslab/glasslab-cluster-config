@@ -17,8 +17,9 @@ spec:
         app.kubernetes.io/name: robojan-bob
         app.kubernetes.io/part-of: robojan
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: node05
+      # Bob keeps no state on the node: Postgres and MinIO are external and
+      # only /tmp is local. The first rollout pinned node05, which went offline
+      # on 2026-11-14 and left Bob Pending for two days; any worker can run it.
       # Bob never calls the Kubernetes API.
       automountServiceAccountToken: false
       securityContext:
