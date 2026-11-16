@@ -70,7 +70,7 @@ LEGACY_IMAGE_ALLOWLIST = {
 # first merge of a service no real 40-hex tag exists. A manifest for one of
 # these images must say so with PENDING_BUILD_TAG rather than guess a SHA or
 # fall back to the all-zero sentinel. The allowlist is by exact image name,
-# so the marker is tolerated for these five images and no other reference.
+# so the marker is tolerated for these listed images and no other reference.
 PENDING_BUILD_TAG = 'pending-ci-build'
 PENDING_BUILD_IMAGES = {
     'ghcr.io/ccny-glasslab/glasslab-assessment-agent',
@@ -78,6 +78,7 @@ PENDING_BUILD_IMAGES = {
     'ghcr.io/ccny-glasslab/glasslab-intake-agent',
     'ghcr.io/ccny-glasslab/glasslab-interpretation-agent',
     'ghcr.io/ccny-glasslab/glasslab-schedule-worker',
+    'ghcr.io/ccny-glasslab/robojan-portal',
 }
 
 # Dockerfiles whose ``FROM`` base is intentionally selected at build time from
