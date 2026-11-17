@@ -21,6 +21,7 @@ provisioner Jobs, and the existing workflow-api scoped-user provisioner.
 | `30-minio-policy.yaml` | glasslab-v2 | Bucket policy: read, create, and abort incomplete uploads in `robojan-originals`, no delete |
 | `35-provision-minio-job.yaml` | glasslab-v2 | Creates the versioned bucket and Bob's scoped user |
 | `40-bob-deployment.yaml` | robojan | Bob Deployment and ClusterIP Service on 8080 |
+| `45-bob-migrate-job.yaml` | robojan | One-shot `python -m bob migrate` before a Bob rollout |
 | `50-network-policy.yaml` | robojan | Bob accepts traffic only from the `robojan` namespace |
 | `60-portal-deployment.yaml` | robojan | Portal ConfigMap, Deployment, and NodePort Service on 30090 |
 | `70-portal-network-policy.yaml` | robojan | Portal ingress from the lab LAN; egress to Bob, DNS, and Google OAuth |
@@ -108,13 +109,12 @@ with Google, searches Bob, and opens originals; Bob's bearer token stays in the
 portal's Secret and the browser holds only a signed session cookie. Apache
 serves it at `https://glasslab.org/robojan/`.
 
-### Build and pin the image
+### Bump the pinned images
 
-1. Merge the portal change in `ccny-glasslab/robojan` to `main`. CI builds
-   `ghcr.io/ccny-glasslab/robojan-portal:<main commit sha>`.
-2. Replace `pending-ci-build` in `60-portal-deployment.yaml` with that full
-   SHA in a committed change. The pending tag is allowed only while the first
-   image does not exist (`scripts/validate-configs.py`).
+CI builds `ghcr.io/ccny-glasslab/robojan-bob:<main commit sha>` and
+`ghcr.io/ccny-glasslab/robojan-portal:<main commit sha>` on every push to
+`main`. Bump both tags in `40-bob-deployment.yaml` and
+`60-portal-deployment.yaml` to that SHA in a committed change.
 
 ### Create the portal Secret
 
@@ -141,9 +141,24 @@ kubectl -n robojan apply -f kubeadm/robojan/60-portal-deployment.yaml
 kubectl -n robojan rollout restart deploy/robojan-portal
 ```
 
+### Migrate Bob
+
+Migrations are out of band. Apply the one-shot Job and wait for it before
+rolling the Bob Deployment:
+
+```bash
+kubectl apply -f kubeadm/robojan/45-bob-migrate-job.yaml
+kubectl -n robojan wait --for=condition=complete --timeout=300s job/robojan-bob-migrate
+```
+
+Jobs are immutable. Delete the completed Job before a later migration:
+`kubectl -n robojan delete job robojan-bob-migrate`.
+
 ### Apply and route
 
 ```bash
+kubectl apply -f kubeadm/robojan/40-bob-deployment.yaml
+kubectl -n robojan rollout status deploy/robojan-bob
 kubectl apply -f kubeadm/robojan/60-portal-deployment.yaml
 kubectl apply -f kubeadm/robojan/70-portal-network-policy.yaml
 kubectl -n robojan rollout status deploy/robojan-portal

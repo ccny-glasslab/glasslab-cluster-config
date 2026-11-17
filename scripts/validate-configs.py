@@ -78,7 +78,6 @@ PENDING_BUILD_IMAGES = {
     'ghcr.io/ccny-glasslab/glasslab-intake-agent',
     'ghcr.io/ccny-glasslab/glasslab-interpretation-agent',
     'ghcr.io/ccny-glasslab/glasslab-schedule-worker',
-    'ghcr.io/ccny-glasslab/robojan-portal',
 }
 
 # Dockerfiles whose ``FROM`` base is intentionally selected at build time from

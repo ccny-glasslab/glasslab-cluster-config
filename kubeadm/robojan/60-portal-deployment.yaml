@@ -43,11 +43,9 @@ spec:
         - name: glasslab-ghcr-pull
       containers:
         - name: portal
-          # Built by ccny-glasslab/robojan CI on push to main. Until the first
-          # portal image exists, the tag is PENDING_BUILD_TAG and
-          # scripts/validate-configs.py knows this image. Replace it with that
-          # main commit's full SHA in a committed change.
-          image: ghcr.io/ccny-glasslab/robojan-portal:pending-ci-build
+          # Built by ccny-glasslab/robojan CI on push to main; the tag is that
+          # main commit's full SHA. Bump it in a committed change.
+          image: ghcr.io/ccny-glasslab/robojan-portal:5244e2bf9c7e1478156134aa6f6c6380f349e286
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
