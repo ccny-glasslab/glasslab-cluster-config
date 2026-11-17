@@ -133,9 +133,9 @@ sign-in is not configured.
 
 ### Set the whitelist
 
-`robojan-portal-config` ships with empty `PORTAL_ALLOWED_EMAILS` and
-`PORTAL_ALLOWED_DOMAINS`, which denies everyone. Set exact addresses and/or
-domains (for example `ccny.cuny.edu`), then:
+`robojan-portal-config` ships with `PORTAL_ALLOWED_DOMAINS: ccny.cuny.edu`
+and no exact addresses. Add exact addresses or change the domain to narrow
+access, then:
 
 ```bash
 kubectl -n robojan apply -f kubeadm/robojan/60-portal-deployment.yaml

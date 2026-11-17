@@ -7,12 +7,11 @@ metadata:
     app.kubernetes.io/name: robojan-portal
     app.kubernetes.io/part-of: robojan
 data:
-  # At least one of these must name the people allowed to sign in. An empty
-  # list denies everyone, so a fresh rollout is closed until an operator sets
-  # the policy. Emails are exact addresses; domains admit every Google account
-  # the domain has verified (for example ccny.cuny.edu).
+  # Emails are exact addresses; domains admit every verified Google account in
+  # the domain. The shipped policy is the CCNY domain; add exact addresses or
+  # narrow the domain when the portal is limited to specific people.
   PORTAL_ALLOWED_EMAILS: ""
-  PORTAL_ALLOWED_DOMAINS: ""
+  PORTAL_ALLOWED_DOMAINS: "ccny.cuny.edu"
 ---
 apiVersion: apps/v1
 kind: Deployment
