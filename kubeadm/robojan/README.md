@@ -133,9 +133,11 @@ sign-in is not configured.
 
 ### Set the whitelist
 
-`robojan-portal-config` ships with `PORTAL_ALLOWED_DOMAINS: ccny.cuny.edu`
-and no exact addresses. Add exact addresses or change the domain to narrow
-access, then:
+`robojan-portal-config` ships with `PORTAL_ALLOWED_DOMAINS: ccny.cuny.edu` and
+one exact CUNY login address. CUNY Google identities may be
+`@login.cuny.edu` even when the person has an `@ccny.cuny.edu` alias; add the
+exact address Google returns. Add more exact addresses or change the domain to
+narrow access, then:
 
 ```bash
 kubectl -n robojan apply -f kubeadm/robojan/60-portal-deployment.yaml
