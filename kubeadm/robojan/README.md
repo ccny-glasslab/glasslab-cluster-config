@@ -134,10 +134,11 @@ sign-in is not configured.
 ### Set the whitelist
 
 `robojan-portal-config` ships with `PORTAL_ALLOWED_DOMAINS: ccny.cuny.edu` and
-one exact CUNY login address. CUNY Google identities may be
-`@login.cuny.edu` even when the person has an `@ccny.cuny.edu` alias; add the
-exact address Google returns. Add more exact addresses or change the domain to
-narrow access, then:
+two exact addresses: the operator's personal Gmail and a CUNY login address.
+CUNY's `login.cuny.edu` identity is Microsoft, not Google, so it will not
+authenticate through this Google OAuth client; the personal Gmail is the
+working sign-in. Add exact personal Gmail or Google Workspace addresses. Do not
+add `gmail.com` as a domain unless every Gmail user should have access. Then:
 
 ```bash
 kubectl -n robojan apply -f kubeadm/robojan/60-portal-deployment.yaml
