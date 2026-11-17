@@ -1,0 +1,7 @@
+# Every vault document is encrypted to every active operator and the offline
+# recovery key. Recipients and their state live in config/sops-recipients.yaml.
+# Pending operators are added here and to the documents with `sops updatekeys`
+# when they publish a fingerprint.
+creation_rules:
+  - path_regex: '.*\.sops\.yaml$'
+    pgp: "C05392E771EE2B4FE3D6E2051D946C08FB7D2E9E,A511E1953BE465664E5735941FB6D086201A0A82"
