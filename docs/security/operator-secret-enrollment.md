@@ -87,10 +87,12 @@ Import every operator's **public** key into the keyring used for encryption:
 gpg --import < operator-public-key.asc   # one per operator, public halves only
 ```
 
-Allow each operator to read (not modify) the encrypted documents without
-changing their mode bits: `setfacl -R -m u:<user>:rX` on the vault directory
-and files. The backup and restore helpers check mode bits only, so ACLs do not
-weaken the archive boundary.
+Keep the live vault directory at `0700` and its files at `0600`. Do not add
+ACLs to the live vault: a named-user ACL sets the ACL mask, changes the group
+mode bits, and the `doctor`/backup boundary rejects the vault. For the canary,
+give each operator a private copy of the encrypted canary document (ciphertext
+is not secret), or a restored backup in their own `0700` vault, and decrypt it
+in their own account.
 
 ## 5. Encrypt a document
 
@@ -115,16 +117,18 @@ enters argv.
 ## 6. Canary and recovery gate
 
 Create a canary document with a random non-secret marker, encrypt it to all
-four recipients, and have each online operator run:
+four recipients, and give each online operator a private copy of the encrypted
+canary file. They decrypt it in their own account:
 
 ```bash
-GLASSLAB_SECRET_VAULT=/path/to/vault ./scripts/glasslab-secret get canary MARKER
+sops --config /home/glasslab/cluster-config/.sops.yaml -d /path/to/canary.sops.yaml
 ```
 
-Record operator, date, host, fingerprint suffix, and pass/fail only. Then move
-the recovery key to offline media, delete it from every online keyring, and
-prove it in an isolated GPG home. Do not rotate a shared credential until at
-least two operators and the recovery key pass.
+Record operator, date, host, fingerprint suffix, and pass/fail only; never the
+marker. The live vault stays `0700` and is not made readable to operators. Then
+prove the recovery key in an isolated GPG home with a copy of the canary, and
+delete the recovery private key from every online keyring. Do not rotate a
+shared credential until at least two operators and the recovery key pass.
 
 ## 7. Routine operations
 
@@ -144,10 +148,11 @@ value except for an explicit `get`.
 ## 8. ROBOJAN's four secrets
 
 `kubeadm/robojan/10-secret.example.yaml` lists them. Encrypt each under the
-vault as `robojan-bob`, `robojan-bob-postgres`, `robojan-bob-minio`, and the
-GHCR pull secret. The GHCR pull secret is a copy of `glasslab-v2`'s
-`glasslab-ghcr-pull`, so it can be encrypted from a `kubectl get secret`
-export held only in a private file.
+vault as `robojan-bob`, `robojan-bob-postgres`, `robojan-bob-minio`, the GHCR
+pull secret, and `robojan-portal` (the search portal's session key and Bob
+token; update the vault copy after adding the Google OAuth client). The GHCR
+pull secret is a copy of `glasslab-v2`'s `glasslab-ghcr-pull`, so it can be
+encrypted from a `kubectl get secret` export held only in a private file.
 
 Until this completes, the four secrets exist only in the cluster and in the
 local `0600` manifest on the provisioner. That is the gap this procedure
