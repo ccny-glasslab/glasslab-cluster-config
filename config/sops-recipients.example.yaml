@@ -1,0 +1,17 @@
+# Shape of config/sops-recipients.yaml. The live file is created during
+# enrollment with real 40-hex fingerprints and committed together with
+# .sops.yaml; this example is never read by the tooling.
+version: 1
+operators:
+  - username: gr66ss-glasslab
+    fingerprint: "0000000000000000000000000000000000000000"
+    state: active
+  - username: denic
+    fingerprint: "0000000000000000000000000000000000000000"
+    state: active
+  - username: tristanc
+    fingerprint: "0000000000000000000000000000000000000000"
+    state: active
+recovery:
+  fingerprint: "0000000000000000000000000000000000000000"
+  storage: offline
