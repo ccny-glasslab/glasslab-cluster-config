@@ -25,6 +25,7 @@ provisioner Jobs, and the existing workflow-api scoped-user provisioner.
 | `50-network-policy.yaml` | robojan | Bob accepts traffic only from the `robojan` namespace |
 | `60-portal-deployment.yaml` | robojan | Portal ConfigMap, Deployment, and NodePort Service on 30090 |
 | `70-portal-network-policy.yaml` | robojan | Portal ingress from the lab LAN; egress to Bob, DNS, and Google OAuth |
+| `80-bob-retention-cronjob.yaml` | robojan | Monthly `python -m bob retain` with the default 365/90/365-day windows |
 
 ## First rollout (M1)
 
