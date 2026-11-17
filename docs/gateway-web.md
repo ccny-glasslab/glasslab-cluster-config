@@ -53,8 +53,8 @@ rejected by ufw, and those browsers failed unless the user typed `http://`.
   fallback, and off-campus clients can only use port 80 (below).
 - `/exam/` is proxied to the exam JupyterHub; see
   [Exam JupyterHub](#exam-jupyterhub-exam).
-- `/robojan/` is proxied to the ROBOJAN search portal's NodePort on cp01
-  (`192.168.1.49:30090`), with the same campus `Require ip` list. Apache
+- `/robojan/` is proxied to the ROBOJAN search portal's NodePort on node04
+  (`192.168.1.51:30090`), with the same campus `Require ip` list. Apache
   strips the prefix; the app builds its links with `PORTAL_ROOT_PATH=/robojan`.
   Tracked in `live-config/gateway/etc/apache2/glasslab/robojan-route.conf`;
   add the `Include` to `glasslab-ssl.conf` when the portal is deployed.
