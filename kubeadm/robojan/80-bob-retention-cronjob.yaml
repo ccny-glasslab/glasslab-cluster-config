@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: robojan-bob-retention
+  namespace: robojan
+  labels:
+    app.kubernetes.io/name: robojan-bob-retention
+    app.kubernetes.io/part-of: robojan
+spec:
+  schedule: "17 3 1 * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: robojan-bob
+            app.kubernetes.io/component: retention
+            app.kubernetes.io/part-of: robojan
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          imagePullSecrets:
+            - name: glasslab-ghcr-pull
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: retain
+              image: ghcr.io/ccny-glasslab/robojan-bob:5244e2bf9c7e1478156134aa6f6c6380f349e286
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "bob", "retain"]
+              envFrom:
+                - secretRef:
+                    name: robojan-bob
+              # The pod carries the robojan-bob label so the shared Postgres
+              # ingress policy admits it. A failing readiness probe keeps the
+              # Service from routing to a process that does not listen on 8080.
+              readinessProbe:
+                exec:
+                  command: ["python", "-c", "raise SystemExit(1)"]
+                periodSeconds: 5
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 10001
+                runAsGroup: 10001
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi

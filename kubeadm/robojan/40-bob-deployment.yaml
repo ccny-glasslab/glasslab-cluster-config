@@ -17,8 +17,9 @@ spec:
         app.kubernetes.io/name: robojan-bob
         app.kubernetes.io/part-of: robojan
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: node05
+      # Bob keeps no state on the node: Postgres and MinIO are external and
+      # only /tmp is local. The first rollout pinned node05, which went offline
+      # on 2026-11-14 and left Bob Pending for two days; any worker can run it.
       # Bob never calls the Kubernetes API.
       automountServiceAccountToken: false
       securityContext:
@@ -31,7 +32,7 @@ spec:
         - name: bob
           # Built by ccny-glasslab/robojan CI on push to main; the tag is that
           # main commit's full SHA. Bump it in a committed change to upgrade.
-          image: ghcr.io/ccny-glasslab/robojan-bob:bdbbb360405822fca87d8345766540f63b704d3a
+          image: ghcr.io/ccny-glasslab/robojan-bob:5244e2bf9c7e1478156134aa6f6c6380f349e286
           imagePullPolicy: IfNotPresent
           env:
             - name: BOB_STORE

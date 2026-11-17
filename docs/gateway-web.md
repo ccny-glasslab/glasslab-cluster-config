@@ -21,6 +21,7 @@ they appear and the first match wins, so order matters.
 | --- | --- | --- |
 | `/dsei102/` | Static files from `/var/www/dsei102` | DSEI 10200 offline course reference (~1 GB, ~21k files) for students taking an exam in CCNY computer labs. Added 2026-10-15. `Require ip 134.74.0.0/16 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1 ::1`: CCNY's public range, the RFC 1918 private ranges, and loopback; everyone else gets 403. The private ranges were added 2026-10-19 because some campus networks reach the gateway without NAT (a laptop on `192.168.4.x` was getting 403). Private source addresses are not routable from the internet, so this is still campus-only. `/dsei102` redirects (301) to `/dsei102/`. `Options None`, `AllowOverride None`, so no directory listings and no `.htaccess`. |
 | `/exam`, `/exam/...` | 301 to `https://glasslab.org/exam...` | Added 2026-10-19 17:38 from `/etc/apache2/glasslab/exam-route-http.conf` (`ProxyPass /exam !` plus a `RedirectMatch`). The exam hub is HTTPS-only; see [Exam JupyterHub](#exam-jupyterhub-exam). |
+| `/robojan`, `/robojan/...` | 301 to `https://glasslab.org/robojan...` | Tracked in `live-config/gateway/etc/apache2/glasslab/robojan-route-http.conf`. The portal needs HTTPS for its Google OAuth redirect, so plain HTTP redirects. Add the `Include` to `000-default.conf` when the portal is deployed; see [ROBOJAN](../kubeadm/robojan/README.md). |
 | `/` (everything else) | Static landing page from `/var/www/html`: the animated GLASS Lab title (Lottie) | Since 2026-10-27; see [Landing page](#landing-page). From 2026-10-19 it was an `index.html` with a centered `glasslab_log.gif`. Before that, `/` was reverse-proxied to `http://134.74.126.109/`, which returned a meta-refresh to the CCNY Computer Science site; those `ProxyPass /` lines are now commented out. |
 | `/sstfront/` | 404 | Disabled 2026-10-19 (commented out). It was a proxy to Jupyter at `http://134.74.77.69:9999/sstfront/`, always shadowed by the old root proxy, and would have become publicly reachable once that was removed. Re-enable only deliberately. |
 
@@ -52,6 +53,11 @@ rejected by ufw, and those browsers failed unless the user typed `http://`.
   fallback, and off-campus clients can only use port 80 (below).
 - `/exam/` is proxied to the exam JupyterHub; see
   [Exam JupyterHub](#exam-jupyterhub-exam).
+- `/robojan/` is proxied to the ROBOJAN search portal's NodePort on node04
+  (`192.168.1.51:30090`), with the same campus `Require ip` list. Apache
+  strips the prefix; the app builds its links with `PORTAL_ROOT_PATH=/robojan`.
+  Tracked in `live-config/gateway/etc/apache2/glasslab/robojan-route.conf`;
+  add the `Include` to `glasslab-ssl.conf` when the portal is deployed.
 - `default-ssl.conf` (the Ubuntu sample) is still present and not enabled.
 
 Reachability, checked 2026-10-19:

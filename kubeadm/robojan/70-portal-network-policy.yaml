@@ -1,0 +1,44 @@
+# The portal is reachable only through the gateway's /robojan/ route, which
+# connects to the NodePort from the lab LAN. It calls Bob in this namespace and
+# Google's OAuth endpoints over 443. 443 is deliberately open to any
+# destination because Google rotates those addresses; Bob's own ingress policy
+# still limits what the portal can reach inside the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: robojan-portal
+  namespace: robojan
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: robojan-portal
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 192.168.1.0/24
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: robojan-bob
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 443
