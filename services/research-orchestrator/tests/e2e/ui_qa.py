@@ -10,6 +10,13 @@ with ``GLASSLAB_ORCHESTRATOR_UI_ORIGIN``/``GLASSLAB_ORCHESTRATOR_UI_PDF_VIEWER_O
 so the page frames the viewer from the second origin. Everything is torn
 down and a teardown receipt is written.
 
+A loopback fake OpenAI-compatible synthesis endpoint is also started (#686)
+so the chat's LLM lane can be driven deterministically: a question carrying
+:data:`FUZZY_QUESTION_MARKER` or :data:`UNVERIFIED_QUESTION_MARKER` gets a
+scripted answer whose claim classifies as ``fuzzy`` or ``none``; every other
+question gets an HTTP 503, so the chat falls back to its extractive answer
+(the ``exact`` path the other tests assert). Nothing leaves the loopback.
+
 The browser test runs under the Playwright venv; the app server runs under an
 interpreter that can import the service dependencies. ``GLASSLAB_QA_APP_PYTHON``
 overrides the auto-detection (the Playwright venv itself is tried first, then
@@ -24,6 +31,7 @@ nothing is written to the repository.
 from __future__ import annotations
 
 import dataclasses
+import http.server
 import importlib.util
 import json
 import os
@@ -47,6 +55,24 @@ SEED_SCRIPT = SERVICE_ROOT / 'scripts' / 'qa' / 'seed_ui_corpus.py'
 OPERATOR_TOKEN = 'qa-operator-token-618-619'
 TOKEN_ENV = 'GLASSLAB_ORCHESTRATOR_OPERATOR_API_TOKEN'
 
+# The fake synthesis endpoint's credential. The app reads the key from an
+# OpenCode auth file (entry ``opencode-go``) and only sends it to the fake.
+FAKE_LLM_KEY = 'qa-fake-llm-key-686'
+# Question markers that select a scripted LLM answer (#686). The seeded chunk
+# leads with "Resampling improves stability of small samples."; the fuzzy
+# claim shares its 36-character normalized prefix but is not verbatim, and
+# the unverified claim shares nothing with it.
+FUZZY_QUESTION_MARKER = 'qa-fuzzy-verdict'
+UNVERIFIED_QUESTION_MARKER = 'qa-unverified-verdict'
+FAKE_LLM_ANSWERS = {
+    FUZZY_QUESTION_MARKER: (
+        'Resampling improves stability of small samples in every regime [1].'
+    ),
+    UNVERIFIED_QUESTION_MARKER: (
+        'Cross-validation folds were never described by this handbook [1].'
+    ),
+}
+
 DEFAULT_ARTIFACTS_DIR = Path(tempfile.gettempdir()) / 'glasslab-ui-qa' / 'artifacts'
 DEFAULT_SCRATCH_ROOT = Path(tempfile.gettempdir()) / 'glasslab-ui-qa' / 'run'
 
@@ -61,6 +87,7 @@ _ARTIFACT_FILES = (
     'action-log.jsonl',
     'action-log.md',
     'console-log.jsonl',
+    'fake-llm-requests.jsonl',
     'seed-manifest.json',
     'server-env.json',
     'teardown.txt',
@@ -85,9 +112,12 @@ class UiQaEnvironment:
     proxy_thread: threading.Thread
     viewer_proxy_server: object
     viewer_proxy_thread: threading.Thread
+    fake_llm_server: http.server.ThreadingHTTPServer
+    fake_llm_thread: threading.Thread
     app_port: int
     proxy_port: int
     viewer_proxy_port: int
+    fake_llm_port: int
 
 
 def _app_python() -> str:
@@ -143,6 +173,75 @@ def _wait_for_http(
     raise RuntimeError(f'{url} did not become ready: {last_error!r}')
 
 
+def _fake_llm_handler(log_path: Path) -> type[http.server.BaseHTTPRequestHandler]:
+    """A ``POST /chat/completions`` handler serving the scripted answers."""
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - http.server API
+            length = int(self.headers.get('Content-Length') or 0)
+            body = json.loads(self.rfile.read(length) or b'{}')
+            user = next(
+                (
+                    message.get('content', '')
+                    for message in body.get('messages', [])
+                    if message.get('role') == 'user'
+                ),
+                '',
+            )
+            question = next(
+                (
+                    line.removeprefix('Question: ')
+                    for line in user.splitlines()
+                    if line.startswith('Question: ')
+                ),
+                '',
+            )
+            marker = next(
+                (key for key in FAKE_LLM_ANSWERS if key in question), None
+            )
+            authorized = (
+                self.headers.get('Authorization') == f'Bearer {FAKE_LLM_KEY}'
+            )
+            with log_path.open('a', encoding='utf-8') as fh:
+                fh.write(
+                    json.dumps(
+                        {
+                            'path': self.path,
+                            'question': question,
+                            'marker': marker,
+                            'authorized': authorized,
+                        },
+                        sort_keys=True,
+                    )
+                    + '\n'
+                )
+            if self.path != '/chat/completions' or not authorized or not marker:
+                # The chat treats any provider failure as "fall back to the
+                # extractive answer", which keeps unmarked questions exact.
+                self.send_response(503)
+                self.end_headers()
+                return
+            content = json.dumps(
+                {
+                    'answer': FAKE_LLM_ANSWERS[marker],
+                    'citations': [{'evidence_id': 'E1'}],
+                }
+            )
+            payload = json.dumps(
+                {'choices': [{'message': {'role': 'assistant', 'content': content}}]}
+            ).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            return
+
+    return Handler
+
+
 def _load_proxy_module():
     spec = importlib.util.spec_from_file_location(
         'glasslab_orchestrator_ui_proxy_qa', PROXY_PATH
@@ -163,12 +262,15 @@ def _server_env(
     *,
     ui_origin: str,
     viewer_origin: str,
+    fake_llm_origin: str,
+    opencode_auth_path: Path,
 ) -> dict[str, str]:
     """The app environment: sqlite store, seeded DB, auth on, scratch roots.
 
     ``ui_origin``/``viewer_origin`` are the two loopback proxy origins. The
     app emits an absolute viewer iframe URL on the second origin and admits
-    the first in the viewer's ``frame-ancestors`` (#620).
+    the first in the viewer's ``frame-ancestors`` (#620). The LLM lane points
+    at the loopback fake synthesis endpoint (#686).
     """
     return {
         **os.environ,
@@ -183,7 +285,11 @@ def _server_env(
         'GLASSLAB_ORCHESTRATOR_CLUSTER_EXECUTION_MODE': 'fake',
         'GLASSLAB_ORCHESTRATOR_UI_CHAT_ENABLED': 'true',
         'GLASSLAB_ORCHESTRATOR_UI_PDF_ENABLED': 'true',
-        'GLASSLAB_ORCHESTRATOR_RAG_LLM_ENABLED': 'false',
+        'GLASSLAB_ORCHESTRATOR_RAG_LLM_ENABLED': 'true',
+        'GLASSLAB_ORCHESTRATOR_RAG_LLM_BASE_URL': fake_llm_origin,
+        'GLASSLAB_ORCHESTRATOR_RAG_LLM_MODEL': 'qa-fake-model',
+        'GLASSLAB_ORCHESTRATOR_RAG_LLM_TIMEOUT_SECONDS': '10',
+        'GLASSLAB_ORCHESTRATOR_OPENCODE_AUTH_JSON_PATH': str(opencode_auth_path),
         'GLASSLAB_ORCHESTRATOR_DISCORD_ENABLED': 'false',
         'GLASSLAB_ORCHESTRATOR_WORKSPACE_ROOT': str(scratch / 'runs'),
         'GLASSLAB_ORCHESTRATOR_ARTIFACT_ROOT': str(scratch / 'artifacts'),
@@ -316,12 +422,29 @@ def ui_qa() -> UiQaEnvironment:
     viewer_proxy_port = int(viewer_proxy_server.server_address[1])
     viewer_origin = f'http://127.0.0.1:{viewer_proxy_port}'
 
+    fake_llm_server = http.server.ThreadingHTTPServer(
+        ('127.0.0.1', 0),
+        _fake_llm_handler(artifacts_dir / 'fake-llm-requests.jsonl'),
+    )
+    fake_llm_port = int(fake_llm_server.server_address[1])
+    fake_llm_origin = f'http://127.0.0.1:{fake_llm_port}'
+    fake_llm_thread = threading.Thread(
+        target=fake_llm_server.serve_forever, daemon=True
+    )
+    fake_llm_thread.start()
+    opencode_auth_path = scratch / 'opencode-auth.json'
+    opencode_auth_path.write_text(
+        json.dumps({'opencode-go': {'type': 'api', 'key': FAKE_LLM_KEY}})
+    )
+
     env = _server_env(
         scratch,
         db_path,
         raw_root,
         ui_origin=proxy_origin,
         viewer_origin=viewer_origin,
+        fake_llm_origin=fake_llm_origin,
+        opencode_auth_path=opencode_auth_path,
     )
     (artifacts_dir / 'server-env.json').write_text(
         json.dumps(
@@ -365,6 +488,8 @@ def ui_qa() -> UiQaEnvironment:
         log_file.close()
         proxy_server.server_close()
         viewer_proxy_server.server_close()
+        fake_llm_server.shutdown()
+        fake_llm_server.server_close()
         raise RuntimeError(
             f'app server failed to start; log:\n{log_path.read_text()}'
         )
@@ -393,9 +518,12 @@ def ui_qa() -> UiQaEnvironment:
         proxy_thread=proxy_thread,
         viewer_proxy_server=viewer_proxy_server,
         viewer_proxy_thread=viewer_proxy_thread,
+        fake_llm_server=fake_llm_server,
+        fake_llm_thread=fake_llm_thread,
         app_port=app_port,
         proxy_port=proxy_port,
         viewer_proxy_port=viewer_proxy_port,
+        fake_llm_port=fake_llm_port,
     )
     _ACTIVE_ENVIRONMENT = environment
     try:
@@ -408,6 +536,9 @@ def ui_qa() -> UiQaEnvironment:
         viewer_proxy_server.shutdown()
         viewer_proxy_server.server_close()
         viewer_proxy_thread.join(timeout=5)
+        fake_llm_server.shutdown()
+        fake_llm_server.server_close()
+        fake_llm_thread.join(timeout=5)
         app_process.terminate()
         try:
             app_process.wait(timeout=15)
@@ -426,7 +557,36 @@ def ui_qa() -> UiQaEnvironment:
             f'app_port_closed={_port_closed(app_port)}',
             f'proxy_port_closed={_port_closed(proxy_port)}',
             f'viewer_proxy_port_closed={_port_closed(viewer_proxy_port)}',
+            f'fake_llm_port={fake_llm_port} '
+            f'fake_llm_thread_alive={fake_llm_thread.is_alive()}',
+            f'fake_llm_port_closed={_port_closed(fake_llm_port)}',
             f'uvicorn_log={log_path}',
         ]
         (artifacts_dir / 'teardown.txt').write_text('\n'.join(receipt) + '\n')
         print('\n[ui_qa teardown]\n' + '\n'.join(receipt))
+
+
+def assert_only_streaming_script(page) -> None:
+    """The page carries exactly one inline script: the #595 streaming one.
+
+    The composer is progressively enhanced into a ``GET /ui/chat/stream``
+    consumer by a single nonce-gated inline script; no other script element
+    and no external script source may appear.
+    """
+    scripts = page.locator('script')
+    assert scripts.count() == 1, f'expected one inline script, got {scripts.count()}'
+    assert scripts.first.get_attribute('src') is None, 'the script must be inline'
+    assert 'chat/stream' in scripts.first.inner_text(), (
+        'the one inline script must be the streaming composer'
+    )
+
+
+def submit_native(page, form) -> None:
+    """POST the composer form without the #595 streaming script.
+
+    ``HTMLFormElement.submit`` does not dispatch a ``submit`` event, so the
+    script's listener cannot intercept it: this is exactly the no-JS path
+    (``POST /ui/chat`` -> 303 -> ``/ui/?c=<conversation>#latest``).
+    """
+    with page.expect_navigation(wait_until='domcontentloaded'):
+        form.evaluate('form => HTMLFormElement.prototype.submit.call(form)')
