@@ -3,7 +3,7 @@
 Glasslab is being simplified around one primary learning-task path:
 
 ```text
-OpenCode -> exo -> repo-owned scripts -> workflow-api -> Kubernetes Job
+OpenCode -> repo-owned scripts -> workflow-api -> Kubernetes Job
 ```
 
 Contributions should either strengthen that path or clearly label themselves as

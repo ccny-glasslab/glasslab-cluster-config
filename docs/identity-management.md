@@ -1,7 +1,7 @@
 # Identity Management
 
 Glasslab uses Ansible-managed local accounts. This is deliberately smaller
-than LDAP: three current contributors and four identity-bearing machines do
+than LDAP: the current contributor set and four identity-bearing machines do
 not justify a directory service, its availability dependency, or another
 credential store.
 
@@ -12,8 +12,6 @@ personal SSH key
 public gateway (glasslab.org)
        |
        +--> provisioner (.44): Git, scoped kubectl, optional Docker
-       |
-       +--> exo17 / exo18: personal shell, shared exo worktree
 
 Kubernetes workers: no personal shell accounts
 Kubernetes API: separate RBAC boundary
@@ -34,7 +32,7 @@ The inventory defines these identity scopes:
 | --- | --- | --- |
 | `gateway` | `glasslab.org` | Public SSH entry only |
 | `provisioner` | `192.168.1.44` | Repo, Ansible, builds, and cluster operations |
-| `exo` | `192.168.1.17`, `192.168.1.18` | Distributed model-serving development |
+| `exo` (legacy) | `192.168.1.17`, `192.168.1.18` | Legacy Mac access only; do not assign to new accounts |
 
 The Kubernetes nodes are intentionally excluded. Interactive access to them
 continues through the provisioner's `clusteradmin` automation identity.
@@ -44,13 +42,17 @@ continues through the provisioner's `clusteradmin` automation identity.
 | Role | Effect |
 | --- | --- |
 | `lab_contributor` | Personal gateway login and provisioner `glasslab` group |
-| `exo_contributor` | Personal exo login and `glasslab-exo` shared-worktree group |
+| `exo_contributor` (legacy) | Legacy Mac login and shared-worktree group; do not assign to new accounts |
 | `container_builder` | Provisioner `docker` group; this is root-equivalent |
 | `kubernetes_observer` | Personal `.44` kubeconfig with read-only workload access in approved namespaces |
 | `infrastructure_admin` | `sudo` plus an audited passwordless sudoers entry |
 
 Roles only take effect where they make sense. For example,
 `container_builder` does not add a group on the gateway or Macs.
+
+The `exo` target and `exo_contributor` role are legacy. The exo model-serving
+stack is retired; do not assign them to new accounts. Existing entries remain
+only for access to the `.17`/`.18` Macs.
 
 ## Kubernetes Contributor Access
 
@@ -94,7 +96,7 @@ the normal contributor login.
 
 Run identity changes from the canonical checkout on the provisioner. Connect
 with agent forwarding so Ansible can use the operator's personal key for the
-gateway and exo hosts.
+gateway and legacy Mac hosts.
 
 ```bash
 ssh glasslab-provisioner
@@ -106,15 +108,16 @@ cd /home/glasslab/cluster-config
 The play runs one host at a time. It sets the exact approved SSH keys and role
 groups, enforces each account's staged password-lock setting, validates sudoers
 and sshd configuration, manages provisioner Kubernetes observer credentials,
-and keeps exo shared files group-writable. A second `check` run should report no
-changes except where a platform tool cannot report idempotence.
+and keeps legacy Mac shared files group-writable. A second `check` run should
+report no changes except where a platform tool cannot report idempotence.
 
 ## Add Or Change A Contributor
 
 1. Obtain the contributor's SSH public key through an authenticated channel.
 2. Add a unique user record to `glasslab_identity_users` and its username to
    `glasslab_identity_managed_usernames`.
-3. Assign only required targets and roles.
+3. Assign only required targets and roles. Do not add the legacy `exo` target
+   or `exo_contributor` role to a new account.
 4. Run the check command, review the diff, then apply.
 5. Initially set `password_locked: false` when adopting an account that
    already uses password authentication.

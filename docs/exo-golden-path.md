@@ -1,8 +1,13 @@
 # exo Golden Path
 
+> **RETIRED (2026-11-12):** exo model serving is stopped. This runbook is
+> historical; see `HANDOFF.md` and
+> [`docs/glasslab-v2/current/README.md`](glasslab-v2/current/README.md) for the
+> current per-host MLX setup.
+
 Last updated: 2026-08-06
 
-This is the current two-node exo, Thunderbolt RDMA, Qwen, and OpenCode path.
+This was the two-node exo, Thunderbolt RDMA, Qwen, and OpenCode path.
 The older `.21` and `.19` topology is retired from this runbook.
 
 ## Topology

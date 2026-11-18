@@ -1,6 +1,10 @@
 # Local Model Command Surface
 
-Status: current target surface
+> **STALE (exo retired 2026-11-12):** the exo endpoint and topology below are
+> historical. See `HANDOFF.md` and `docs/glasslab-v2/current/README.md` for the
+> current provider; the OpenCode launcher usage remains useful.
+
+Status: historical target surface (exo-era)
 
 Date: 2026-07-23
 

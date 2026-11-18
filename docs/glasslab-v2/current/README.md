@@ -30,10 +30,10 @@ historical path that got the repo here.
 
 ## Model Serving
 
-Exo is retired (verified 2026-09-09). Each Mac serves one full model behind a
-serializing guard at `:52417` (`.17` = `mlx-community/Qwen3-Coder-Next-4bit`,
-`.18` = `mlx-community/Qwen3-Next-80B-A3B-Thinking-4bit`). See `HANDOFF.md`
-("Model Serving") and `scripts/model-serve/README.md`.
+Exo is retired (verified 2026-11-12). The active agent provider is
+`opencode-go` with `deepseek-v4.1-flash`. `.17` runs the Ollama embedding
+service for ROBOJAN; `.18` still runs a per-host `mlx_lm.server` as a rollback
+path. See `HANDOFF.md` ("Model Serving") and `scripts/model-serve/README.md`.
 
 `../local-model-command-surface.md` predates the retirement: it still documents
 the exo OpenAI-compatible endpoint and the `glasslab-exo17` SSH target. Treat its
