@@ -26,6 +26,7 @@ provisioner Jobs, and the existing workflow-api scoped-user provisioner.
 | `60-portal-deployment.yaml` | robojan | Portal ConfigMap, Deployment, and NodePort Service on 30090 |
 | `70-portal-network-policy.yaml` | robojan | Portal ingress from the lab LAN; egress to Bob, DNS, and Google OAuth |
 | `80-bob-retention-cronjob.yaml` | robojan | Monthly `python -m bob retain` with the default 365/90/365-day windows |
+| `85-thumbnail-prewarm-job.yaml` | robojan | One-off render of every PDF's first-page thumbnail into the object store |
 
 ## First rollout (M1)
 
@@ -185,6 +186,23 @@ The health check is `200`; the page is `303` to `/robojan/auth/login` once
 sign-in is configured, or `503` while it is not. Off-campus clients cannot
 reach 443 until CCNY's border permits it, so sign-in is campus-only today (see
 `docs/gateway-web.md`).
+
+## Thumbnails
+
+The portal shows a cached first-page PDF thumbnail. New PDFs render on first
+view; the one-off `85-thumbnail-prewarm-job.yaml` renders every existing PDF
+into `thumbnails/` in the originals bucket. Run it after a corpus load, or when
+you want the cache warm:
+
+```bash
+kubectl apply -f kubeadm/robojan/85-thumbnail-prewarm-job.yaml
+kubectl -n robojan wait --for=condition=complete --timeout=1800s job/robojan-thumbnail-prewarm
+kubectl -n robojan logs job/robojan-thumbnail-prewarm --tail=5
+kubectl -n robojan delete job robojan-thumbnail-prewarm
+```
+
+The Job skips cached pages by key. Delete it before rerunning; non-PDFs get a
+document placeholder in the portal.
 
 ## Using Bob
 

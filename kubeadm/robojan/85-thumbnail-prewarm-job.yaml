@@ -1,0 +1,120 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: robojan-thumbnail-prewarm
+  namespace: robojan
+data:
+  prewarm.py: |
+    import psycopg
+    from bob.config import Settings
+    from bob.db import make_pool
+    from bob.service import Bob
+    from bob.storage import LocalStore, S3Store
+
+    settings = Settings.from_env()
+    store = (
+        S3Store(settings.s3_endpoint, settings.s3_access_key, settings.s3_secret_key,
+                settings.s3_bucket, settings.s3_secure)
+        if settings.store == "s3"
+        else LocalStore(settings.local_store_dir)
+    )
+    pool = make_pool(settings.dsn)
+    bob = Bob(pool, store, settings.default_collection_id,
+              settings.search_result_limit, settings.search_timeout_ms)
+    with psycopg.connect(settings.dsn) as conn:
+        ids = [str(row[0]) for row in conn.execute(
+            "SELECT artifact_id FROM bob.artifacts WHERE media_type = 'application/pdf' "
+            "ORDER BY artifact_id"
+        )]
+    print("pdfs", len(ids), flush=True)
+    ok = failed = 0
+    for artifact_id in ids:
+        try:
+            found = bob.thumbnail(artifact_id)
+        except Exception as error:
+            failed += 1
+            print("fail", artifact_id, type(error).__name__, str(error)[:120], flush=True)
+        else:
+            if found is None:
+                failed += 1
+                print("none", artifact_id, flush=True)
+            else:
+                ok += 1
+                print("ok", artifact_id, len(found[0]), flush=True)
+    print("summary", {"pdfs": len(ids), "ok": ok, "failed": failed}, flush=True)
+    pool.close()
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: robojan-thumbnail-prewarm
+  namespace: robojan
+  labels:
+    app.kubernetes.io/name: robojan-thumbnail-prewarm
+    app.kubernetes.io/part-of: robojan
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: robojan-bob
+        app.kubernetes.io/component: thumbnail-prewarm
+        app.kubernetes.io/part-of: robojan
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: glasslab-ghcr-pull
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: prewarm
+          image: ghcr.io/ccny-glasslab/robojan-bob:d7a92cd6671f3ce02afb5a66b8206a64b7fe8549
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/scripts/prewarm.py"]
+          envFrom:
+            - secretRef:
+                name: robojan-bob
+          env:
+            - name: BOB_STORE
+              value: s3
+            - name: BOB_S3_ENDPOINT
+              value: glasslab-minio.glasslab-v2.svc.cluster.local:9000
+            - name: BOB_S3_BUCKET
+              value: robojan-originals
+            - name: BOB_S3_SECURE
+              value: "false"
+          readinessProbe:
+            exec:
+              command: ["python", "-c", "raise SystemExit(1)"]
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: scripts
+          configMap:
+            name: robojan-thumbnail-prewarm
+        - name: tmp
+          emptyDir:
+            sizeLimit: 512Mi
