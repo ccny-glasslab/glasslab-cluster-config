@@ -36,19 +36,10 @@ Host glasslab-provisioner
   # Signed research links open at http://127.0.0.1:18080 while this session is
   # open (the provisioner keeps the persistent forward; see below).
   LocalForward 18080 127.0.0.1:18080
-
-Host glasslab-exo17
-  HostName 192.168.1.17
-  User <same-personal-user>
-  IdentityFile ~/.ssh/<personal-key>
-  ProxyJump glasslab-gateway
-
-Host glasslab-exo18
-  HostName 192.168.1.18
-  User <same-personal-user>
-  IdentityFile ~/.ssh/<personal-key>
-  ProxyJump glasslab-gateway
 ```
+
+The `.17`/`.18` Macs are legacy model hosts with separate access. They are not
+part of standard contributor onboarding.
 
 Public keys should be installed on both hosts. Password reuse between the
 gateway and provisioner is not the account synchronization mechanism.
@@ -166,7 +157,7 @@ short-lived `GITHUB_TOKEN`.
 
 ## Provisioning Accounts
 
-Gateway, provisioner, and exo personal accounts are managed from one committed
+Gateway and provisioner personal accounts are managed from one committed
 identity ledger. See [Identity Management](identity-management.md) for the
 role model, revocation procedure, and recovery boundary.
 

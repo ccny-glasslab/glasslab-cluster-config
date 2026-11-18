@@ -74,10 +74,11 @@ The responsibilities are deliberately separate:
 - **Discord** is an interface and transcript projection, not authoritative
   memory or state.
 
-Both agents run through the OpenCode agent runtime against the exo
-OpenAI-compatible endpoint configured for the shared Qwen model. Their
-workspaces and runtime data are isolated per run and agent. Hermes remains
-available only as an explicit opt-in rollback backend, selected by setting
+Both agents run through the OpenCode agent runtime with the active
+`opencode-go` provider and `deepseek-v4.1-flash` model. The per-Mac MLX base
+URLs remain only as a deliberate rollback path. Their workspaces and runtime
+data are isolated per run and agent. Hermes remains available only as an
+explicit opt-in rollback backend, selected by setting
 `GLASSLAB_ORCHESTRATOR_AGENT_RUNTIME_BACKEND` to `hermes`; the live
 orchestrator configmap selects `opencode` (verified 2026-09-02).
 

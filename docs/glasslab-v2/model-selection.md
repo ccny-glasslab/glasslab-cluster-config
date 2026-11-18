@@ -1,5 +1,9 @@
 # Model Selection on the exo Pair
 
+> **STALE (exo retired 2026-11-12):** exo no longer serves models. See
+> `HANDOFF.md` and `docs/glasslab-v2/current/README.md` for the current
+> per-host MLX setup. The sizing notes below are historical.
+
 Last verified: 2026-09-02
 
 How to choose models for the 2x64 GB exo pair (192.168.1.17:52415) and what the

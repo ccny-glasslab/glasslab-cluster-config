@@ -88,6 +88,9 @@ glasslab_identity_users:
     authorized_keys:
       - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMp1Wd8qYpgpJhdLbYgxBDJdlk8v+vsLSlj+9ATBQFSz michaeldg@macbook
 
+# Legacy: the exo model-serving stack is retired. Do not add the `exo` target
+# or `exo_contributor` role to new accounts. Existing entries remain only for
+# access to the .17/.18 Macs.
 glasslab_exo_shared_group: glasslab-exo
 glasslab_exo_shared_paths:
   - /Users/glasslab/exo-clean
