@@ -7,6 +7,7 @@ glasslab_identity_managed_usernames:
   - tristanc
   - shradhagodse
   - mgrossberg
+  - sahafkhan
 
 glasslab_identity_users:
   - username: gr66ss-glasslab
@@ -87,6 +88,18 @@ glasslab_identity_users:
       - infrastructure_admin
     authorized_keys:
       - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMp1Wd8qYpgpJhdLbYgxBDJdlk8v+vsLSlj+9ATBQFSz michaeldg@macbook
+
+  - username: sahafkhan
+    display_name: Sahaf Khan
+    state: present
+    # New student researcher. Key-only from the start; no Docker or sudo.
+    password_locked: true
+    targets: [gateway, provisioner]
+    roles:
+      - lab_contributor
+      - kubernetes_observer
+    authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAki6hPU6uQxnftZAp2dYVC6V6YHWJecxiFiUdaExNPm sahafkhan@Sahafs-MacBook-Air.local
 
 glasslab_exo_shared_group: glasslab-exo
 glasslab_exo_shared_paths:
