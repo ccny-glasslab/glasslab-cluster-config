@@ -135,7 +135,8 @@ sign-in is not configured.
 ### Set the whitelist
 
 `robojan-portal-config` ships with `PORTAL_ALLOWED_DOMAINS: ccny.cuny.edu` and
-two exact addresses: the operator's personal Gmail and a CUNY login address.
+four exact addresses: the operator's personal Gmail, a CUNY login address,
+and the PI's CCNY and personal Gmail addresses.
 CUNY's `login.cuny.edu` identity is Microsoft, not Google, so it will not
 authenticate through this Google OAuth client; the personal Gmail is the
 working sign-in. Add exact personal Gmail or Google Workspace addresses. Do not

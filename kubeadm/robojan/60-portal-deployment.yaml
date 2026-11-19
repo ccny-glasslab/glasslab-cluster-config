@@ -10,7 +10,7 @@ data:
   # Emails are exact addresses; domains admit every verified Google account in
   # the domain. The shipped policy is the CCNY domain; add exact addresses or
   # narrow the domain when the portal is limited to specific people.
-  PORTAL_ALLOWED_EMAILS: "tyler.laboekleint40@login.cuny.edu,tyleralk@gmail.com"
+  PORTAL_ALLOWED_EMAILS: "tyler.laboekleint40@login.cuny.edu,tyleralk@gmail.com,mgrossberg@ccny.cuny.edu,michaeldg@gmail.com"
   PORTAL_ALLOWED_DOMAINS: "ccny.cuny.edu"
 ---
 apiVersion: apps/v1
