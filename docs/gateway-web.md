@@ -138,6 +138,8 @@ to `http://` when that fails, so the page normally still loads, marked "Not
 secure". Browsers in HTTPS-only mode, and links written as `https://`, fail
 off campus.
 
+**Update 2026-11-22:** `glasslab.org` is being moved behind an Azure edge relay and the exam hub to `exam.glasslab.org`; see [gateway-azure-edge.md](gateway-azure-edge.md). The options below were the earlier analysis.
+
 Options for HTTPS off campus, in order of preference:
 
 1. **Ask CCNY IT to allow inbound TCP 443 to `134.74.146.39`** at the border,

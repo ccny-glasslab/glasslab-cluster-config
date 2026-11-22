@@ -22,6 +22,14 @@ copy_file() {
 
 copy_file etc/apache2/sites-available/000-default.conf
 copy_file etc/apache2/sites-available/glasslab-ssl.conf
+# Azure edge relay (docs/gateway-azure-edge.md): the tunnel-only site for
+# glasslab.org and the campus-only exam.glasslab.org site. Optional, so the
+# snapshot still works on a gateway where they are not installed.
+for site in glasslab-edge.conf exam-glasslab.conf; do
+  if ssh -n -o BatchMode=yes "$GATEWAY_SSH" "sudo -n test -f /etc/apache2/sites-available/$site"; then
+    copy_file "etc/apache2/sites-available/$site"
+  fi
+done
 # Route fragments Include'd from the sites above (for example the exam hub).
 # Listed live so a fragment added on the gateway is picked up automatically.
 fragments="$(ssh -o BatchMode=yes "$GATEWAY_SSH" \
@@ -33,6 +41,9 @@ done <<<"$fragments"
 # (/etc/letsencrypt/acmedns.json) and the certificate keys are never copied.
 copy_file etc/letsencrypt/acme-dns-auth.py
 copy_file etc/letsencrypt/renewal/glasslab.org.conf
+if ssh -n -o BatchMode=yes "$GATEWAY_SSH" 'sudo -n test -f /etc/letsencrypt/renewal/exam.glasslab.org.conf'; then
+  copy_file etc/letsencrypt/renewal/exam.glasslab.org.conf
+fi
 
 printf 'Snapshot updated under %s\n' "$SNAPROOT"
 printf '%s\n' 'Firewall rules are recorded by hand in live-config/gateway/README.md; compare with `sudo ufw status verbose` on the gateway.'

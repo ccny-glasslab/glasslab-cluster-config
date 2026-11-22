@@ -24,7 +24,7 @@ Each contributor should define local SSH aliases equivalent to:
 
 ```sshconfig
 Host glasslab-gateway
-  HostName glasslab.org
+  HostName ssh.glasslab.org
   User <personal-user>
   IdentityFile ~/.ssh/<personal-key>
 

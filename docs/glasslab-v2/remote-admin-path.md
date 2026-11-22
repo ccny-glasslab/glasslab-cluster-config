@@ -25,7 +25,7 @@ That preserves the current trust model while reducing the practical friction of 
 The currently working remote path is:
 
 - home client
-- `gr66ss-glasslab@glasslab.org` (`glasslab-gateway`)
+- `gr66ss-glasslab@ssh.glasslab.org` (`glasslab-gateway`)
 - `gr66ss-glasslab@192.168.1.44` (`glasslab-provisioner`)
 
 From `.44`, the operator can then reach:

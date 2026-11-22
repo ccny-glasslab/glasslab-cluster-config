@@ -89,7 +89,7 @@ forces the helper, whatever command the client sends:
    cat >> ~/.ssh/config <<'EOF'
 
    Host glasslab-gateway-allowlist
-     HostName glasslab.org
+     HostName ssh.glasslab.org
      User gr66ss-glasslab
      IdentityFile ~/.ssh/id_ed25519_glasslab_allowlist
      IdentitiesOnly yes
