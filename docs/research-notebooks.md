@@ -8,7 +8,7 @@ disk between sessions. Administrators deploy and run notebooks from
 
 You need:
 
-- your Glasslab gateway login (for example `shradhagodse@glasslab.org`) with
+- your Glasslab gateway login (for example `shradhagodse@ssh.glasslab.org`) with
   your SSH key
 - the notebook token an administrator sent you privately
 - VS Code with the **Jupyter** extension
@@ -20,7 +20,7 @@ The notebook is not on the internet. You reach it through the gateway with an
 SSH tunnel. In a terminal (PowerShell on Windows, Terminal on a Mac):
 
 ```bash
-ssh -N -L 8888:192.168.1.11:30888 shradhagodse@glasslab.org
+ssh -N -L 8888:192.168.1.11:30888 shradhagodse@ssh.glasslab.org
 ```
 
 The command prints nothing and keeps running. Leave that window open while you
@@ -31,7 +31,7 @@ To shorten it, add this to `~/.ssh/config` (on Windows,
 
 ```text
 Host glasslab-notebook
-  HostName glasslab.org
+  HostName ssh.glasslab.org
   User shradhagodse
   LocalForward 8888 192.168.1.11:30888
 ```

@@ -11,7 +11,7 @@ narrow network path.
 
 ```text
 researcher's VS Code
-  -> ssh -L 8888:192.168.1.11:30888 <user>@glasslab.org   (personal gateway login)
+  -> ssh -L 8888:192.168.1.11:30888 <user>@ssh.glasslab.org   (personal gateway login)
   -> gateway 192.168.1.4
   -> node02 NodePort 30888
   -> notebook pod (glasslab-notebooks namespace, RTX A4000)

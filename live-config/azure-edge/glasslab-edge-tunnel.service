@@ -1,0 +1,22 @@
+# /etc/systemd/system/glasslab-edge-tunnel.service on the glasslab.org gateway.
+# Holds a reverse SSH tunnel open to the Azure edge VM over its port 22 (the
+# only port Azure lets in by default; the first WireGuard design needed UDP
+# 51820, which was never opened). On the VM, user edgetunnel may only listen
+# on 127.0.0.1:10443 and 127.0.0.1:10080 (authorized_keys: restrict,
+# port-forwarding, permitlisten=..., command=nologin). HAProxy on the VM
+# connects there; the gateway end lands on 100.64.77.1, the address the
+# glasslab-edge Apache site binds (it lives on the wg-glasslab interface,
+# which must stay up even though no WireGuard peer answers).
+# Key: /root/.ssh/glasslab_edge_tunnel (root-only, never copied).
+[Unit]
+Description=Reverse SSH tunnel to the Azure edge VM for glasslab.org (docs/gateway-azure-edge.md)
+After=network-online.target wg-quick@wg-glasslab.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ssh -N -T -i /root/.ssh/glasslab_edge_tunnel -o IdentitiesOnly=yes -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts_edge -R 127.0.0.1:10443:100.64.77.1:443 -R 127.0.0.1:10080:100.64.77.1:80 edgetunnel@20.55.75.236
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
