@@ -133,6 +133,14 @@ Brazil, Israel, Portugal, Singapore, Canada, Spain and Moldova):
   not the gateway (ufw allows 443).
 - SSH (22) is open from the internet.
 
+Rechecked 2026-11-27, after CCNY opened outbound TCP 443 from the lab:
+
+- Outbound HTTPS from the gateway works (`curl https://github.com` returns
+  200 from the gateway).
+- Inbound 443 is unchanged: `https://glasslab.org/`, `https://www.glasslab.org/`
+  and `/exam/` are still reset before TLS from a residential (Verizon Fios)
+  connection. Port 80 still returns 200. The options below still apply.
+
 Most browsers try HTTPS first when a user types `glasslab.org` and fall back
 to `http://` when that fails, so the page normally still loads, marked "Not
 secure". Browsers in HTTPS-only mode, and links written as `https://`, fail
